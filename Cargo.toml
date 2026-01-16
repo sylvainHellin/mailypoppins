@@ -1,0 +1,23 @@
+[package]
+name = "email"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool for sending emails from Markdown drafts with YAML frontmatter"
+authors = ["Sylvain Hellin"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+lettre = { version = "0.11", features = ["smtp-transport", "tokio1-native-tls", "builder"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+gray_matter = "0.2"
+pulldown-cmark = "0.9"
+dotenvy = "0.15"
+anyhow = "1.0"
+chrono = "0.4"
+walkdir = "2.4"
+colored = "2.1"
+tokio = { version = "1", features = ["full"] }
+shellexpand = "3.1"
+toml = "0.8"
+mime_guess = "2"
