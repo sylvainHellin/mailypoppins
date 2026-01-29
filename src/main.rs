@@ -8,6 +8,7 @@ use lettre::{
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
+use mailparse::{parse_mail, MailHeaderMap};
 use pulldown_cmark::{html, Options, Parser as MdParser};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -128,6 +129,39 @@ enum Commands {
         /// Name for the new draft file
         name: String,
     },
+    /// Fetch emails from IMAP server
+    Fetch {
+        /// Filter by sender address
+        #[arg(long)]
+        from: Option<String>,
+        /// Filter by recipient address
+        #[arg(long)]
+        to: Option<String>,
+        /// Filter by CC address
+        #[arg(long)]
+        cc: Option<String>,
+        /// Subject contains
+        #[arg(long)]
+        subject: Option<String>,
+        /// Body contains
+        #[arg(long)]
+        body: Option<String>,
+        /// Emails since date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+        /// Emails before date (YYYY-MM-DD)
+        #[arg(long)]
+        before: Option<String>,
+        /// Max results (default: 10)
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+        /// Show full body instead of preview
+        #[arg(long)]
+        full: bool,
+        /// Mailbox name (default: INBOX)
+        #[arg(long, default_value = "INBOX")]
+        mailbox: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,6 +216,563 @@ struct SmtpConfig {
     username: String,
     password: String,
     default_from: String,
+}
+
+struct ImapConfig {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+}
+
+impl ImapConfig {
+    fn from_env(path_hint: Option<&Path>) -> Result<Self> {
+        load_env_from_path(path_hint);
+
+        Ok(Self {
+            host: std::env::var("IMAP_HOST").context("IMAP_HOST not set in environment")?,
+            port: std::env::var("IMAP_PORT")
+                .unwrap_or_else(|_| "993".to_string())
+                .parse()
+                .context("Invalid IMAP_PORT")?,
+            username: std::env::var("IMAP_USERNAME")
+                .or_else(|_| std::env::var("SMTP_USERNAME"))
+                .context("Neither IMAP_USERNAME nor SMTP_USERNAME set")?,
+            password: std::env::var("IMAP_PASSWORD")
+                .or_else(|_| std::env::var("SMTP_PASSWORD"))
+                .context("Neither IMAP_PASSWORD nor SMTP_PASSWORD set")?,
+        })
+    }
+}
+
+struct FetchCriteria {
+    from: Option<String>,
+    to: Option<String>,
+    cc: Option<String>,
+    subject: Option<String>,
+    body: Option<String>,
+    since: Option<String>,
+    before: Option<String>,
+}
+
+struct FetchedEmail {
+    from: String,
+    to: String,
+    cc: Option<String>,
+    subject: String,
+    date: String,
+    body_text: String,
+    has_attachments: bool,
+    message_id: Option<String>,
+}
+
+fn build_imap_search_query(criteria: &FetchCriteria) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref from) = criteria.from {
+        parts.push(format!("FROM \"{}\"", from));
+    }
+    if let Some(ref to) = criteria.to {
+        parts.push(format!("TO \"{}\"", to));
+    }
+    if let Some(ref cc) = criteria.cc {
+        parts.push(format!("CC \"{}\"", cc));
+    }
+    if let Some(ref subject) = criteria.subject {
+        parts.push(format!("SUBJECT \"{}\"", subject));
+    }
+    if let Some(ref body) = criteria.body {
+        parts.push(format!("BODY \"{}\"", body));
+    }
+    if let Some(ref since) = criteria.since {
+        // IMAP expects dates as DD-Mon-YYYY
+        if let Some(imap_date) = parse_date_to_imap(since) {
+            parts.push(format!("SINCE {}", imap_date));
+        }
+    }
+    if let Some(ref before) = criteria.before {
+        if let Some(imap_date) = parse_date_to_imap(before) {
+            parts.push(format!("BEFORE {}", imap_date));
+        }
+    }
+
+    if parts.is_empty() {
+        "ALL".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn parse_date_to_imap(date_str: &str) -> Option<String> {
+    // Parse YYYY-MM-DD and convert to DD-Mon-YYYY
+    let parts: Vec<&str> = date_str.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year = parts[0];
+    let month = match parts[1] {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return None,
+    };
+    let day: u32 = parts[2].parse().ok()?;
+    Some(format!("{}-{}-{}", day, month, year))
+}
+
+fn extract_body_text(parsed: &mailparse::ParsedMail) -> String {
+    // If this part is text/plain, return it
+    if parsed.ctype.mimetype == "text/plain" {
+        return parsed.get_body().unwrap_or_default();
+    }
+
+    // Search subparts for text/plain first, then text/html
+    let mut html_body = None;
+    for sub in &parsed.subparts {
+        let result = extract_body_text(sub);
+        if !result.is_empty() {
+            if sub.ctype.mimetype == "text/plain"
+                || (sub.ctype.mimetype.starts_with("multipart/") && !result.is_empty())
+            {
+                return result;
+            }
+            if sub.ctype.mimetype == "text/html" {
+                html_body = Some(result);
+            }
+        }
+    }
+
+    // Fall back to HTML body if no plain text found
+    if let Some(html) = html_body {
+        return strip_html_tags(&html);
+    }
+
+    // If this is text/html at top level
+    if parsed.ctype.mimetype == "text/html" {
+        return strip_html_tags(&parsed.get_body().unwrap_or_default());
+    }
+
+    String::new()
+}
+
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut in_style = false;
+    let mut in_script = false;
+
+    let lower = html.to_lowercase();
+    let chars: Vec<char> = html.chars().collect();
+    let lower_chars: Vec<char> = lower.chars().collect();
+
+    let mut i = 0;
+    while i < chars.len() {
+        if !in_tag && starts_with_at(&lower_chars, i, "<style") {
+            in_style = true;
+            in_tag = true;
+        } else if !in_tag && starts_with_at(&lower_chars, i, "<script") {
+            in_script = true;
+            in_tag = true;
+        } else if in_style && starts_with_at(&lower_chars, i, "</style") {
+            in_style = false;
+            in_tag = true;
+        } else if in_script && starts_with_at(&lower_chars, i, "</script") {
+            in_script = false;
+            in_tag = true;
+        } else if chars[i] == '<' {
+            // Insert newline for block elements
+            if starts_with_at(&lower_chars, i, "<br")
+                || starts_with_at(&lower_chars, i, "<p")
+                || starts_with_at(&lower_chars, i, "<div")
+                || starts_with_at(&lower_chars, i, "<tr")
+                || starts_with_at(&lower_chars, i, "<li")
+            {
+                result.push('\n');
+            }
+            in_tag = true;
+        } else if chars[i] == '>' {
+            in_tag = false;
+        } else if !in_tag && !in_style && !in_script {
+            result.push(chars[i]);
+        }
+        i += 1;
+    }
+
+    // Decode common HTML entities
+    let result = result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&#160;", " ");
+
+    // Decode numeric entities like &#43; -> +
+    let mut decoded = String::with_capacity(result.len());
+    let mut chars_iter = result.chars().peekable();
+    while let Some(ch) = chars_iter.next() {
+        if ch == '&' && chars_iter.peek() == Some(&'#') {
+            let mut entity = String::from("&#");
+            chars_iter.next(); // consume '#'
+            while let Some(&c) = chars_iter.peek() {
+                if c == ';' {
+                    chars_iter.next();
+                    break;
+                }
+                entity.push(c);
+                chars_iter.next();
+            }
+            let num_str = &entity[2..];
+            if let Ok(code) = num_str.parse::<u32>() {
+                if let Some(decoded_char) = char::from_u32(code) {
+                    decoded.push(decoded_char);
+                    continue;
+                }
+            }
+            decoded.push_str(&entity);
+            decoded.push(';');
+        } else {
+            decoded.push(ch);
+        }
+    }
+    let result = decoded;
+
+    // Collapse excessive whitespace: multiple blank lines -> max 2 newlines
+    let mut cleaned = String::with_capacity(result.len());
+    let mut consecutive_newlines = 0;
+    for ch in result.chars() {
+        if ch == '\n' {
+            consecutive_newlines += 1;
+            if consecutive_newlines <= 2 {
+                cleaned.push(ch);
+            }
+        } else {
+            consecutive_newlines = 0;
+            cleaned.push(ch);
+        }
+    }
+
+    cleaned.trim().to_string()
+}
+
+fn starts_with_at(chars: &[char], pos: usize, needle: &str) -> bool {
+    let needle_chars: Vec<char> = needle.chars().collect();
+    if pos + needle_chars.len() > chars.len() {
+        return false;
+    }
+    for (j, nc) in needle_chars.iter().enumerate() {
+        if chars[pos + j] != *nc {
+            return false;
+        }
+    }
+    true
+}
+
+fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
+    for sub in &parsed.subparts {
+        let disposition = sub.get_content_disposition();
+        if disposition.disposition == mailparse::DispositionType::Attachment {
+            return true;
+        }
+        if has_attachments(sub) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fetch_emails(
+    imap_config: &ImapConfig,
+    criteria: &FetchCriteria,
+    mailbox: &str,
+    limit: usize,
+) -> Result<Vec<FetchedEmail>> {
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    session
+        .select(mailbox)
+        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+
+    let query = build_imap_search_query(criteria);
+    let uids = session
+        .uid_search(&query)
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        session.logout().ok();
+        return Ok(Vec::new());
+    }
+
+    // Take the last N UIDs (most recent)
+    let mut uid_list: Vec<u32> = uids.into_iter().collect();
+    uid_list.sort();
+    let selected_uids: Vec<u32> = uid_list.into_iter().rev().take(limit).collect();
+
+    let uid_set = selected_uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let fetched = session
+        .uid_fetch(&uid_set, "RFC822")
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
+
+    let mut emails = Vec::new();
+
+    for msg in fetched.iter() {
+        let body_raw = msg.body().unwrap_or_default();
+        let parsed = match parse_mail(body_raw) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let headers = &parsed.headers;
+        let from = headers
+            .get_first_value("From")
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let to = headers
+            .get_first_value("To")
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let cc = headers.get_first_value("Cc");
+        let subject = headers
+            .get_first_value("Subject")
+            .unwrap_or_else(|| "(no subject)".to_string());
+        let date = headers
+            .get_first_value("Date")
+            .unwrap_or_else(|| "(unknown date)".to_string());
+
+        let message_id = headers.get_first_value("Message-ID")
+            .or_else(|| headers.get_first_value("Message-Id"));
+        let body_text = extract_body_text(&parsed);
+        let attachments = has_attachments(&parsed);
+
+        emails.push(FetchedEmail {
+            from,
+            to,
+            cc,
+            subject,
+            date,
+            body_text,
+            has_attachments: attachments,
+            message_id,
+        });
+    }
+
+    session.logout().ok();
+    Ok(emails)
+}
+
+fn slugify_subject(subject: &str) -> String {
+    let slug: String = subject
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else if c == ' ' { '-' } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("");
+    // Collapse consecutive hyphens
+    let mut result = String::new();
+    let mut prev_hyphen = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            prev_hyphen = false;
+            result.push(c);
+        }
+    }
+    let result = result.trim_matches('-').to_string();
+    if result.len() > 60 {
+        // Truncate at word boundary
+        let truncated = &result[..60];
+        truncated.trim_end_matches('-').to_string()
+    } else {
+        result
+    }
+}
+
+fn parse_email_date_prefix(date_str: &str) -> String {
+    // Try parsing common email date formats to extract YYYY-MM-DD
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(date_str) {
+        return dt.format("%Y-%m-%d").to_string();
+    }
+    // Fallback: use today's date
+    Utc::now().format("%Y-%m-%d").to_string()
+}
+
+fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usize, usize)> {
+    fs::create_dir_all(inbox_dir)?;
+
+    // Collect existing message IDs from inbox
+    let mut existing_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in WalkDir::new(inbox_dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            if let Ok(content) = fs::read_to_string(path) {
+                // Extract message_id from YAML frontmatter
+                let mut in_frontmatter = false;
+                for line in content.lines() {
+                    if line == "---" {
+                        if !in_frontmatter {
+                            in_frontmatter = true;
+                            continue;
+                        } else {
+                            break; // end of frontmatter
+                        }
+                    }
+                    if in_frontmatter && line.starts_with("message_id:") {
+                        let id = line.trim_start_matches("message_id:").trim().trim_matches('"');
+                        if !id.is_empty() {
+                            existing_ids.insert(id.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut saved = 0;
+    let mut skipped = 0;
+
+    for email in emails {
+        // Skip duplicates by message_id
+        if let Some(ref mid) = email.message_id {
+            if existing_ids.contains(mid) {
+                skipped += 1;
+                continue;
+            }
+        }
+
+        let date_prefix = parse_email_date_prefix(&email.date);
+        let subject_slug = slugify_subject(&email.subject);
+        let filename = if subject_slug.is_empty() {
+            format!("{}_email.md", date_prefix)
+        } else {
+            format!("{}_{}.md", date_prefix, subject_slug)
+        };
+
+        let mut dest = inbox_dir.join(&filename);
+        // Avoid overwriting if filename collides
+        if dest.exists() {
+            let mut counter = 1;
+            loop {
+                let name = if subject_slug.is_empty() {
+                    format!("{}_email-{}.md", date_prefix, counter)
+                } else {
+                    format!("{}_{}-{}.md", date_prefix, subject_slug, counter)
+                };
+                dest = inbox_dir.join(&name);
+                if !dest.exists() {
+                    break;
+                }
+                counter += 1;
+            }
+        }
+
+        // Build frontmatter
+        let fetched_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut frontmatter = String::from("---\n");
+        frontmatter.push_str(&format!("from: \"{}\"\n", email.from.replace('"', "\\\"")));
+        frontmatter.push_str(&format!("to: \"{}\"\n", email.to.replace('"', "\\\"")));
+        if let Some(ref cc) = email.cc {
+            frontmatter.push_str(&format!("cc: \"{}\"\n", cc.replace('"', "\\\"")));
+        }
+        frontmatter.push_str(&format!("subject: \"{}\"\n", email.subject.replace('"', "\\\"")));
+        frontmatter.push_str(&format!("date: \"{}\"\n", email.date.replace('"', "\\\"")));
+        if let Some(ref mid) = email.message_id {
+            frontmatter.push_str(&format!("message_id: \"{}\"\n", mid.replace('"', "\\\"")));
+        }
+        frontmatter.push_str("status: inbox\n");
+        frontmatter.push_str(&format!("has_attachments: {}\n", email.has_attachments));
+        frontmatter.push_str(&format!("fetched_at: \"{}\"\n", fetched_at));
+        frontmatter.push_str("---\n\n");
+
+        let content = format!("{}{}", frontmatter, email.body_text);
+        fs::write(&dest, content)?;
+
+        // Track the new message_id to prevent duplicates within the same batch
+        if let Some(ref mid) = email.message_id {
+            existing_ids.insert(mid.clone());
+        }
+
+        saved += 1;
+    }
+
+    Ok((saved, skipped))
+}
+
+fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
+    if emails.is_empty() {
+        println!("No emails found matching the criteria.");
+        return;
+    }
+
+    println!(
+        "\n{} ({} result{})\n",
+        "Fetched Emails".bold().cyan(),
+        emails.len(),
+        if emails.len() == 1 { "" } else { "s" }
+    );
+
+    for (i, email) in emails.iter().enumerate() {
+        println!("{}", "─".repeat(60));
+        println!("{}: {}", "From".bold(), email.from);
+        println!("{}: {}", "To".bold(), email.to);
+        if let Some(ref cc) = email.cc {
+            println!("{}: {}", "Cc".bold(), cc);
+        }
+        println!("{}: {}", "Subject".bold(), email.subject);
+        println!("{}: {}", "Date".bold(), email.date);
+        if email.has_attachments {
+            println!("{}", "[has attachments]".yellow());
+        }
+
+        println!();
+        if full_body {
+            println!("{}", email.body_text);
+        } else {
+            let preview: String = email.body_text.chars().take(300).collect();
+            println!("{}", preview);
+            if email.body_text.len() > 300 {
+                println!("{}", "...".dimmed());
+            }
+        }
+
+        if i < emails.len() - 1 {
+            println!();
+        }
+    }
+    println!("{}", "─".repeat(60));
 }
 
 /// Load email config from config.toml
@@ -743,6 +1334,7 @@ async fn main() -> Result<()> {
         Some(Commands::Validate { path }) => Some(path.clone()),
         Some(Commands::MarkApproved { file }) => Some(file.clone()),
         Some(Commands::New { name }) => Some(PathBuf::from(name)),
+        Some(Commands::Fetch { .. }) => None,
         None => cli.file.clone(),
     };
 
@@ -1012,6 +1604,75 @@ attachments: []
 
             fs::write(&path, skeleton)?;
             println!("{} Created new draft: {}", "✓".green(), path.display());
+        }
+
+        Some(Commands::Fetch {
+            from,
+            to,
+            cc,
+            subject,
+            body,
+            since,
+            before,
+            limit,
+            full,
+            mailbox,
+        }) => {
+            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let criteria = FetchCriteria {
+                from,
+                to,
+                cc,
+                subject,
+                body,
+                since,
+                before,
+            };
+
+            let emails = tokio::task::spawn_blocking(move || {
+                fetch_emails(&imap_config, &criteria, &mailbox, limit)
+            })
+            .await??;
+
+            display_fetched_emails(&emails, full);
+
+            // Save to inbox if INBOX_DIR is configured
+            let inbox_dir: Option<PathBuf> = std::env::var("INBOX_DIR").ok().map(|s| {
+                let s = s.trim_matches('"').trim_matches('\'');
+                PathBuf::from(shellexpand::tilde(s).into_owned())
+            });
+
+            if let Some(ref inbox_dir) = inbox_dir {
+                if !emails.is_empty() {
+                    match save_fetched_emails(&emails, inbox_dir) {
+                        Ok((saved, skipped)) => {
+                            if saved > 0 {
+                                println!(
+                                    "\n{} Saved {} email(s) to {}",
+                                    "✓".green(),
+                                    saved,
+                                    inbox_dir.display()
+                                );
+                            }
+                            if skipped > 0 {
+                                println!(
+                                    "{} Skipped {} duplicate(s)",
+                                    "ℹ".blue(),
+                                    skipped
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("{} Failed to save emails: {}", "✗".red(), e);
+                        }
+                    }
+                }
+            } else if !emails.is_empty() {
+                println!(
+                    "\n{} Set INBOX_DIR in .env to automatically save fetched emails.",
+                    "ℹ".blue()
+                );
+            }
         }
 
         None => {

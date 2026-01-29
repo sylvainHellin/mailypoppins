@@ -26,7 +26,21 @@ SMTP_PASSWORD=your-password
 DEFAULT_FROM=your.name@tum.de
 DRAFTS_DIR="~/path/to/email/drafts"  # Optional
 SENT_DIR="~/path/to/email/sent"      # Optional: where to move sent emails
+INBOX_DIR="~/path/to/email/inbox"    # Optional: where to save fetched emails
 ```
+
+### IMAP Configuration (`.env`)
+
+For the `fetch` command, add IMAP settings:
+
+```bash
+IMAP_HOST=xmail.mwn.de          # Required
+IMAP_PORT=993                    # Default: 993 (SSL/TLS)
+IMAP_USERNAME=your-tum-id        # Falls back to SMTP_USERNAME
+IMAP_PASSWORD=your-password      # Falls back to SMTP_PASSWORD
+```
+
+For TUM, the IMAP server is `xmail.mwn.de:993` with SSL/TLS, using TUM-Kennung + password (same as SMTP).
 
 **Important**: If paths contain spaces, wrap them in quotes:
 ```bash
@@ -194,6 +208,42 @@ Sends all emails with `status: approved` in the directory:
 3. Sends each one sequentially
 4. Reports success/failure count
 
+### Fetch Emails (IMAP)
+
+```bash
+email fetch                                          # Latest 10 from INBOX
+email fetch --from boss@company.com --since 2025-01-01
+email fetch --subject "quarterly" --limit 5 --full
+email fetch --mailbox "Sent"
+```
+
+Connects to an IMAP server and searches emails by criteria. Options:
+
+| Option | Description |
+|--------|-------------|
+| `--from <addr>` | Filter by sender |
+| `--to <addr>` | Filter by recipient |
+| `--cc <addr>` | Filter by CC |
+| `--subject <text>` | Subject contains |
+| `--body <text>` | Body contains |
+| `--since <YYYY-MM-DD>` | Emails since date |
+| `--before <YYYY-MM-DD>` | Emails before date |
+| `-n, --limit <N>` | Max results (default: 10) |
+| `--full` | Show full body (default: 300-char preview) |
+| `--mailbox <name>` | Mailbox name (default: INBOX) |
+
+Requires IMAP configuration in `.env` (see above).
+
+**Inbox saving:** If `INBOX_DIR` is set in `.env`, fetched emails are automatically saved as `.md` files with YAML frontmatter (matching the draft/sent format). Files are named `YYYY-MM-DD_<subject-slug>.md`. Duplicate emails (by `Message-ID`) are skipped on subsequent fetches.
+
+### Create New Draft
+
+```bash
+email new draft-name
+```
+
+Creates a new `.md` file with empty YAML frontmatter template.
+
 ## Status Workflow
 
 ```
@@ -298,8 +348,89 @@ Check the `to:` field has a valid email format.
 ### "Signature file not found"
 Check that the path in `config.toml` is correct. Paths are relative to the config.toml location.
 
+### "IMAP_HOST not set in environment"
+Add `IMAP_HOST` to your `.env` file. For TUM, use `xmail.mwn.de`.
+
+### "IMAP login failed"
+Check your IMAP credentials. If `IMAP_USERNAME`/`IMAP_PASSWORD` are not set, they fall back to `SMTP_USERNAME`/`SMTP_PASSWORD`.
+
 ### Emails don't have signature
 - Check `include_signature = true` in `config.toml`
 - Check `[signatures] default = "name"` is set
 - Verify signature file exists at the specified path
 - Use `--signature <name>` to explicitly specify one
+
+## Building & Releasing
+
+### Building from Source
+
+```bash
+# Build for your current architecture
+cargo build --release
+
+# Binary will be at target/release/email
+```
+
+### Cross-compiling for macOS
+
+To build for both Apple Silicon and Intel Macs:
+
+```bash
+# Add Intel target (if on Apple Silicon)
+rustup target add x86_64-apple-darwin
+
+# Or add Apple Silicon target (if on Intel)
+rustup target add aarch64-apple-darwin
+
+# Build for both architectures
+cargo build --release                              # Native
+cargo build --release --target x86_64-apple-darwin # Intel
+cargo build --release --target aarch64-apple-darwin # Apple Silicon
+```
+
+### Creating a Release
+
+1. **Prepare release artifacts:**
+
+```bash
+mkdir -p release
+
+# Copy binaries (adjust paths based on your architecture)
+cp target/release/email release/email-darwin-arm64
+cp target/x86_64-apple-darwin/release/email release/email-darwin-x86_64
+
+# Create compressed archives
+cd release
+tar -czvf email-v0.1.0-darwin-arm64.tar.gz email-darwin-arm64
+tar -czvf email-v0.1.0-darwin-x86_64.tar.gz email-darwin-x86_64
+
+# Generate checksums
+shasum -a 256 *.tar.gz > SHA256SUMS.txt
+```
+
+2. **Commit your changes** (but not the release artifacts):
+
+```bash
+# Make sure release/ and target/ are in .gitignore
+git add .
+git commit -m "Prepare for v0.1.0 release"
+git push
+```
+
+3. **Create GitHub release:**
+
+```bash
+# Install GitHub CLI if needed
+brew install gh
+gh auth login
+
+# Create release with assets
+gh release create v0.1.0 \
+  release/email-v0.1.0-darwin-arm64.tar.gz \
+  release/email-v0.1.0-darwin-x86_64.tar.gz \
+  release/SHA256SUMS.txt \
+  --title "v0.1.0" \
+  --notes "Initial release"
+```
+
+The `gh release create` command will automatically create and push the git tag.
