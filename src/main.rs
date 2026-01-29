@@ -341,6 +341,10 @@ fn parse_date_to_imap(date_str: &str) -> Option<String> {
     Some(format!("{}-{}-{}", day, month, year))
 }
 
+fn html_to_plain(html: &str) -> String {
+    html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string())
+}
+
 fn extract_body_text(parsed: &mailparse::ParsedMail) -> String {
     // If this part is text/plain, return it
     if parsed.ctype.mimetype == "text/plain" {
@@ -365,129 +369,15 @@ fn extract_body_text(parsed: &mailparse::ParsedMail) -> String {
 
     // Fall back to HTML body if no plain text found
     if let Some(html) = html_body {
-        return strip_html_tags(&html);
+        return html_to_plain(&html);
     }
 
     // If this is text/html at top level
     if parsed.ctype.mimetype == "text/html" {
-        return strip_html_tags(&parsed.get_body().unwrap_or_default());
+        return html_to_plain(&parsed.get_body().unwrap_or_default());
     }
 
     String::new()
-}
-
-fn strip_html_tags(html: &str) -> String {
-    let mut result = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut in_style = false;
-    let mut in_script = false;
-
-    let lower = html.to_lowercase();
-    let chars: Vec<char> = html.chars().collect();
-    let lower_chars: Vec<char> = lower.chars().collect();
-
-    let mut i = 0;
-    while i < chars.len() {
-        if !in_tag && starts_with_at(&lower_chars, i, "<style") {
-            in_style = true;
-            in_tag = true;
-        } else if !in_tag && starts_with_at(&lower_chars, i, "<script") {
-            in_script = true;
-            in_tag = true;
-        } else if in_style && starts_with_at(&lower_chars, i, "</style") {
-            in_style = false;
-            in_tag = true;
-        } else if in_script && starts_with_at(&lower_chars, i, "</script") {
-            in_script = false;
-            in_tag = true;
-        } else if chars[i] == '<' {
-            // Insert newline for block elements
-            if starts_with_at(&lower_chars, i, "<br")
-                || starts_with_at(&lower_chars, i, "<p")
-                || starts_with_at(&lower_chars, i, "<div")
-                || starts_with_at(&lower_chars, i, "<tr")
-                || starts_with_at(&lower_chars, i, "<li")
-            {
-                result.push('\n');
-            }
-            in_tag = true;
-        } else if chars[i] == '>' {
-            in_tag = false;
-        } else if !in_tag && !in_style && !in_script {
-            result.push(chars[i]);
-        }
-        i += 1;
-    }
-
-    // Decode common HTML entities
-    let result = result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ")
-        .replace("&#160;", " ");
-
-    // Decode numeric entities like &#43; -> +
-    let mut decoded = String::with_capacity(result.len());
-    let mut chars_iter = result.chars().peekable();
-    while let Some(ch) = chars_iter.next() {
-        if ch == '&' && chars_iter.peek() == Some(&'#') {
-            let mut entity = String::from("&#");
-            chars_iter.next(); // consume '#'
-            while let Some(&c) = chars_iter.peek() {
-                if c == ';' {
-                    chars_iter.next();
-                    break;
-                }
-                entity.push(c);
-                chars_iter.next();
-            }
-            let num_str = &entity[2..];
-            if let Ok(code) = num_str.parse::<u32>() {
-                if let Some(decoded_char) = char::from_u32(code) {
-                    decoded.push(decoded_char);
-                    continue;
-                }
-            }
-            decoded.push_str(&entity);
-            decoded.push(';');
-        } else {
-            decoded.push(ch);
-        }
-    }
-    let result = decoded;
-
-    // Collapse excessive whitespace: multiple blank lines -> max 2 newlines
-    let mut cleaned = String::with_capacity(result.len());
-    let mut consecutive_newlines = 0;
-    for ch in result.chars() {
-        if ch == '\n' {
-            consecutive_newlines += 1;
-            if consecutive_newlines <= 2 {
-                cleaned.push(ch);
-            }
-        } else {
-            consecutive_newlines = 0;
-            cleaned.push(ch);
-        }
-    }
-
-    cleaned.trim().to_string()
-}
-
-fn starts_with_at(chars: &[char], pos: usize, needle: &str) -> bool {
-    let needle_chars: Vec<char> = needle.chars().collect();
-    if pos + needle_chars.len() > chars.len() {
-        return false;
-    }
-    for (j, nc) in needle_chars.iter().enumerate() {
-        if chars[pos + j] != *nc {
-            return false;
-        }
-    }
-    true
 }
 
 fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
@@ -788,13 +678,21 @@ fn create_reply_draft(
         format!("Re: {}", inbox.subject)
     };
 
+    // Clean up quoted body: convert HTML remnants to plain text if needed
+    let clean_body = if original_body.contains('<') && original_body.contains('>') {
+        html_to_plain(original_body)
+    } else {
+        original_body.to_string()
+    };
+
     // Build quoted body with attribution
     let attribution = format!(
         "On {}, {} wrote:",
         inbox.date.as_deref().unwrap_or("(unknown date)"),
         inbox.from
     );
-    let quoted_body: String = original_body
+    let quoted_body: String = clean_body
+        .trim()
         .lines()
         .map(|line| format!("> {}", line))
         .collect::<Vec<_>>()
@@ -815,8 +713,13 @@ fn create_reply_draft(
     fm.push_str("status: draft\n");
     fm.push_str("---\n");
 
-    // Compose full content
-    let full_content = format!("{}\n\n\n{}\n{}\n", fm.trim_end(), attribution, quoted_body);
+    // Compose full content with {{SIGNATURE}} placeholder between reply area and quoted text
+    let full_content = format!(
+        "{}\n\n\n{{{{SIGNATURE}}}}\n\n{}\n{}\n",
+        fm.trim_end(),
+        attribution,
+        quoted_body
+    );
 
     // Determine output path
     let output_dir = drafts_dir.unwrap_or_else(|| Path::new("."));
@@ -1151,8 +1054,31 @@ fn markdown_to_html(markdown: &str, config: &EmailConfig, signature: Option<&str
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
 
-    // Add signature if provided
+    // Handle signature placement:
+    // If {{SIGNATURE}} placeholder is present (reply drafts), split the HTML at the placeholder,
+    // inject the signature, and wrap the quoted content in <div class="gmail_quote"> so Gmail
+    // only collapses the quoted text — not the signature.
+    // Otherwise (regular drafts), append signature at the end.
     let signature_html = signature.unwrap_or_default();
+    let body = if html_output.contains("{{SIGNATURE}}") {
+        // pulldown-cmark wraps the placeholder in <p> tags; match that form first
+        let marker = if html_output.contains("<p>{{SIGNATURE}}</p>") {
+            "<p>{{SIGNATURE}}</p>"
+        } else {
+            "{{SIGNATURE}}"
+        };
+        let parts: Vec<&str> = html_output.splitn(2, marker).collect();
+        let reply_part = parts[0];
+        let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
+        format!(
+            "{}\n{}\n<div class=\"gmail_quote\">\n{}\n</div>",
+            reply_part.trim_end(),
+            signature_html,
+            quoted_part.trim_start()
+        )
+    } else {
+        format!("{}\n{}", html_output, signature_html)
+    };
 
     // Wrap in basic HTML structure with styling from config
     format!(
@@ -1168,13 +1094,11 @@ p {{ margin: 0 0 1em 0; }}
 </head>
 <body>
 {body}
-{signature}
 </body>
 </html>"#,
         font_family = config.email.font_family,
         font_size = config.email.font_size,
-        body = html_output,
-        signature = signature_html
+        body = body,
     )
 }
 
@@ -1484,6 +1408,24 @@ fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>) -> Result<
     Ok(())
 }
 
+/// Resolve the drafts directory using a fallback chain:
+/// 1. If the user passed an explicit (non-default) path, use it as-is.
+/// 2. Else if DRAFTS_DIR env var is set and points to an existing directory, use that.
+/// 3. Else fall back to "." (current directory).
+fn resolve_drafts_dir(cli_dir: &Path) -> PathBuf {
+    if cli_dir != Path::new(".") {
+        return cli_dir.to_path_buf();
+    }
+    if let Ok(env_dir) = std::env::var("DRAFTS_DIR") {
+        let s = env_dir.trim_matches('"').trim_matches('\'');
+        let expanded = PathBuf::from(shellexpand::tilde(s).into_owned());
+        if expanded.is_dir() {
+            return expanded;
+        }
+    }
+    cli_dir.to_path_buf()
+}
+
 fn find_drafts(dir: &Path, status_filter: Option<EmailStatus>) -> Result<Vec<EmailDraft>> {
     let mut drafts = Vec::new();
 
@@ -1638,6 +1580,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::SendApproved { dir }) => {
+            let dir = resolve_drafts_dir(&dir);
             let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
 
             if drafts.is_empty() {
@@ -1702,6 +1645,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::List { dir }) => {
+            let dir = resolve_drafts_dir(&dir);
             let drafts = find_drafts(&dir, None)?;
 
             if drafts.is_empty() {
@@ -1840,10 +1784,12 @@ attachments: []
         }
 
         Some(Commands::Reply { file, all }) => {
-            let drafts_dir: Option<PathBuf> = std::env::var("DRAFTS_DIR").ok().map(|s| {
-                let s = s.trim_matches('"').trim_matches('\'');
-                PathBuf::from(shellexpand::tilde(s).into_owned())
-            });
+            let resolved = resolve_drafts_dir(Path::new("."));
+            let drafts_dir: Option<PathBuf> = if resolved != Path::new(".").to_path_buf() {
+                Some(resolved)
+            } else {
+                None
+            };
 
             let source_file = match file {
                 Some(f) => f,

@@ -11,6 +11,7 @@ CLI tool for managing email drafts written in Markdown with YAML frontmatter. Su
 - **SMTP:** `lettre` (async, TLS)
 - **IMAP:** `imap` + `native-tls`
 - **Email parsing:** `mailparse`
+- **HTML → plaintext:** `html2text`
 - **Frontmatter:** `gray_matter` + `serde_yaml`
 - **Markdown → HTML:** `pulldown-cmark`
 - **Terminal output:** `colored`
@@ -32,11 +33,14 @@ Single-file project: all code lives in `src/main.rs`.
 | `email validate [file\|dir]` | Validate frontmatter and fields |
 | `email mark-approved <file>` | Change status from draft to approved |
 | `email new <name>` | Create a new draft from template |
+| `email reply [file] [--all]` | Create a reply draft from a received email |
+| `email list-mailboxes` | List available IMAP mailboxes |
 | `email fetch [filters]` | Fetch emails via IMAP |
 
 ## Configuration
 
 - **`.env`** — SMTP/IMAP credentials, directory paths (`DRAFTS_DIR`, `SENT_DIR`, `INBOX_DIR`). Gitignored.
+- **`DRAFTS_DIR` resolution** — `list`, `send-approved`, and `reply` auto-resolve the drafts directory via `resolve_drafts_dir`: explicit CLI arg → `DRAFTS_DIR` env var → `"."` fallback.
 - **`config.toml`** — Email formatting (font family/size), signature definitions. Searched up to 3 parent directories.
 
 ## Email Draft Format
@@ -53,6 +57,10 @@ Email body in **Markdown**.
 ```
 
 Status workflow: `draft` → `approved` (via `mark-approved`) → `sent` (via `send`).
+
+### Reply Drafts & Signature Placement
+
+Reply drafts (created via `email reply`) include a `{{SIGNATURE}}` placeholder between the reply area and the quoted conversation. When sent, `markdown_to_html` replaces this placeholder with the signature HTML, ensuring the signature appears between the reply and the quoted text. If the placeholder is removed, the signature falls back to being appended at the end (same as regular drafts).
 
 ## Output Conventions
 
