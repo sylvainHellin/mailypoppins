@@ -532,13 +532,54 @@ fn slugify_subject(subject: &str) -> String {
         }
     }
     let result = result.trim_matches('-').to_string();
-    if result.len() > 60 {
+    if result.len() > 40 {
         // Truncate at word boundary
-        let truncated = &result[..60];
+        let truncated = &result[..40];
         truncated.trim_end_matches('-').to_string()
     } else {
         result
     }
+}
+
+fn slugify_sender(from: &str) -> String {
+    // Extract display name if present (e.g. "John Doe <john@example.com>" -> "John Doe")
+    // Otherwise use the local part of the email address
+    let name = if let Some(start) = from.find('<') {
+        let display = from[..start].trim().trim_matches('"');
+        if display.is_empty() {
+            // No display name, use local part of email
+            let email = &from[start + 1..from.find('>').unwrap_or(from.len())];
+            email.split('@').next().unwrap_or("unknown").to_string()
+        } else {
+            display.to_string()
+        }
+    } else if from.contains('@') {
+        from.split('@').next().unwrap_or("unknown").to_string()
+    } else {
+        from.to_string()
+    };
+
+    // Slugify the name
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    // Collapse consecutive hyphens and trim
+    let mut result = String::new();
+    let mut prev_hyphen = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            prev_hyphen = false;
+            result.push(c);
+        }
+    }
+    result.trim_matches('-').to_string()
 }
 
 fn extract_email_address(raw: &str) -> String {
@@ -724,16 +765,25 @@ fn create_reply_draft(
     // Determine output path
     let output_dir = drafts_dir.unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(output_dir)?;
-    let date_prefix = Utc::now().format("%Y-%m-%d").to_string();
+    let date_prefix = Utc::now().format("%Y-%m-%d-%H%M").to_string();
+    let sender_slug = slugify_sender(&inbox.from);
     let subject_slug = slugify_subject(&reply_subject);
-    let filename = format!("{}_{}.md", date_prefix, subject_slug);
+    let filename = if subject_slug.is_empty() {
+        format!("{}_{}_email.md", date_prefix, sender_slug)
+    } else {
+        format!("{}_{}_{}.md", date_prefix, sender_slug, subject_slug)
+    };
     let mut dest = output_dir.join(&filename);
 
     // Avoid overwriting
     if dest.exists() {
         let mut counter = 1;
         loop {
-            let name = format!("{}_{}-{}.md", date_prefix, subject_slug, counter);
+            let name = if subject_slug.is_empty() {
+                format!("{}_{}_email-{}.md", date_prefix, sender_slug, counter)
+            } else {
+                format!("{}_{}_{}-{}.md", date_prefix, sender_slug, subject_slug, counter)
+            };
             dest = output_dir.join(&name);
             if !dest.exists() {
                 break;
@@ -747,12 +797,12 @@ fn create_reply_draft(
 }
 
 fn parse_email_date_prefix(date_str: &str) -> String {
-    // Try parsing common email date formats to extract YYYY-MM-DD
+    // Try parsing common email date formats to extract YYYY-MM-DD-HHMM
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(date_str) {
-        return dt.format("%Y-%m-%d").to_string();
+        return dt.format("%Y-%m-%d-%H%M").to_string();
     }
-    // Fallback: use today's date
-    Utc::now().format("%Y-%m-%d").to_string()
+    // Fallback: use current datetime
+    Utc::now().format("%Y-%m-%d-%H%M").to_string()
 }
 
 fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usize, usize)> {
@@ -804,11 +854,12 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usi
         }
 
         let date_prefix = parse_email_date_prefix(&email.date);
+        let sender_slug = slugify_sender(&email.from);
         let subject_slug = slugify_subject(&email.subject);
         let filename = if subject_slug.is_empty() {
-            format!("{}_email.md", date_prefix)
+            format!("{}_{}_email.md", date_prefix, sender_slug)
         } else {
-            format!("{}_{}.md", date_prefix, subject_slug)
+            format!("{}_{}_{}.md", date_prefix, sender_slug, subject_slug)
         };
 
         let mut dest = inbox_dir.join(&filename);
@@ -817,9 +868,9 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usi
             let mut counter = 1;
             loop {
                 let name = if subject_slug.is_empty() {
-                    format!("{}_email-{}.md", date_prefix, counter)
+                    format!("{}_{}_email-{}.md", date_prefix, sender_slug, counter)
                 } else {
-                    format!("{}_{}-{}.md", date_prefix, subject_slug, counter)
+                    format!("{}_{}_{}-{}.md", date_prefix, sender_slug, subject_slug, counter)
                 };
                 dest = inbox_dir.join(&name);
                 if !dest.exists() {
@@ -1056,8 +1107,9 @@ fn markdown_to_html(markdown: &str, config: &EmailConfig, signature: Option<&str
 
     // Handle signature placement:
     // If {{SIGNATURE}} placeholder is present (reply drafts), split the HTML at the placeholder,
-    // inject the signature, and wrap the quoted content in <div class="gmail_quote"> so Gmail
-    // only collapses the quoted text — not the signature.
+    // inject the signature, and wrap the quoted content in a styled div.
+    // Replace <blockquote> with styled <div> in the quoted section to prevent email clients
+    // (Apple Mail, Gmail) from collapsing the signature and conversation behind "see more".
     // Otherwise (regular drafts), append signature at the end.
     let signature_html = signature.unwrap_or_default();
     let body = if html_output.contains("{{SIGNATURE}}") {
@@ -1070,11 +1122,15 @@ fn markdown_to_html(markdown: &str, config: &EmailConfig, signature: Option<&str
         let parts: Vec<&str> = html_output.splitn(2, marker).collect();
         let reply_part = parts[0];
         let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
+        // Replace <blockquote> with styled divs so email clients don't collapse them
+        let quoted_styled = quoted_part
+            .replace("<blockquote>", "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">")
+            .replace("</blockquote>", "</div>");
         format!(
-            "{}\n{}\n<div class=\"gmail_quote\">\n{}\n</div>",
+            "{}\n{}\n<div style=\"padding-top:1em\">\n{}\n</div>",
             reply_part.trim_end(),
             signature_html,
-            quoted_part.trim_start()
+            quoted_styled.trim_start()
         )
     } else {
         format!("{}\n{}", html_output, signature_html)
@@ -1090,6 +1146,7 @@ fn markdown_to_html(markdown: &str, config: &EmailConfig, signature: Option<&str
 body {{ font-family: {font_family}; font-size: {font_size}; line-height: 1.6; color: #000; }}
 a {{ color: #0066cc; }}
 p {{ margin: 0 0 1em 0; }}
+blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; white-space: pre-wrap; }}
 </style>
 </head>
 <body>
@@ -1388,11 +1445,9 @@ fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>) -> Result<
     // Determine destination path
     let dest_path = if let Some(sent_dir) = sent_dir {
         fs::create_dir_all(sent_dir)?;
-        // Prepend datetime to filename to avoid overwriting and make search easier
-        let timestamp = Utc::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+        // Keep the original filename (already includes date-time prefix)
         let original_name = draft.path.file_name().unwrap().to_string_lossy();
-        let new_name = format!("{}_{}", timestamp, original_name);
-        sent_dir.join(new_name)
+        sent_dir.join(original_name.as_ref())
     } else {
         draft.path.clone()
     };
