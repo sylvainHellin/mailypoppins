@@ -129,6 +129,16 @@ enum Commands {
         /// Name for the new draft file
         name: String,
     },
+    /// Create a reply draft from a received email
+    Reply {
+        /// Path to the email to reply to (interactive selection if omitted)
+        file: Option<PathBuf>,
+        /// Reply to all recipients
+        #[arg(long)]
+        all: bool,
+    },
+    /// List available IMAP mailboxes/folders
+    ListMailboxes,
     /// Fetch emails from IMAP server
     Fetch {
         /// Filter by sender address
@@ -170,6 +180,7 @@ enum EmailStatus {
     Draft,
     Approved,
     Sent,
+    Inbox,
 }
 
 impl std::fmt::Display for EmailStatus {
@@ -178,6 +189,7 @@ impl std::fmt::Display for EmailStatus {
             EmailStatus::Draft => write!(f, "draft"),
             EmailStatus::Approved => write!(f, "approved"),
             EmailStatus::Sent => write!(f, "sent"),
+            EmailStatus::Inbox => write!(f, "inbox"),
         }
     }
 }
@@ -583,6 +595,29 @@ fn fetch_emails(
     Ok(emails)
 }
 
+fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    let mailboxes = session
+        .list(None, Some("*"))
+        .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?;
+
+    let names: Vec<String> = mailboxes.iter().map(|m| m.name().to_string()).collect();
+
+    session.logout().ok();
+    Ok(names)
+}
+
 fn slugify_subject(subject: &str) -> String {
     let slug: String = subject
         .to_lowercase()
@@ -614,6 +649,198 @@ fn slugify_subject(subject: &str) -> String {
     } else {
         result
     }
+}
+
+fn extract_email_address(raw: &str) -> String {
+    if let Some(start) = raw.find('<') {
+        if let Some(end) = raw.find('>') {
+            return raw[start + 1..end].trim().to_string();
+        }
+    }
+    raw.trim().to_string()
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct InboxFrontmatter {
+    from: String,
+    to: String,
+    #[serde(default)]
+    cc: Option<String>,
+    subject: String,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+fn select_inbox_email(inbox_dir: &Path) -> Result<PathBuf> {
+    let mut entries: Vec<(PathBuf, InboxFrontmatter)> = Vec::new();
+
+    for entry in WalkDir::new(inbox_dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            let content = match fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let matter = Matter::<YAML>::new();
+            let parsed = matter.parse(&content);
+            if let Some(data) = parsed.data {
+                if let Ok(fm) = data.deserialize::<InboxFrontmatter>() {
+                    entries.push((path.to_path_buf(), fm));
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return Err(anyhow!("No inbox emails found in {}", inbox_dir.display()));
+    }
+
+    // Sort by date descending (most recent first)
+    entries.sort_by(|a, b| {
+        let da = a.1.date.as_deref().unwrap_or("");
+        let db = b.1.date.as_deref().unwrap_or("");
+        db.cmp(da)
+    });
+
+    // Build display strings for the fuzzy selector
+    let display_items: Vec<String> = entries
+        .iter()
+        .map(|(_, fm)| {
+            let date_short = fm
+                .date
+                .as_deref()
+                .and_then(|d| chrono::DateTime::parse_from_rfc2822(d).ok())
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let from_short = extract_email_address(&fm.from);
+            format!("{} | {} | {}", date_short, from_short, fm.subject)
+        })
+        .collect();
+
+    let selection = dialoguer::FuzzySelect::new()
+        .with_prompt("Select an email to reply to")
+        .items(&display_items)
+        .default(0)
+        .interact()
+        .context("Selection cancelled")?;
+
+    Ok(entries[selection].0.clone())
+}
+
+fn create_reply_draft(
+    source_path: &Path,
+    reply_all: bool,
+    default_from: &str,
+    drafts_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    let content = fs::read_to_string(source_path)?;
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(&content);
+    let inbox: InboxFrontmatter = parsed
+        .data
+        .ok_or_else(|| anyhow!("No frontmatter found"))?
+        .deserialize()?;
+    let original_body = parsed.content.trim();
+
+    // Build reply fields
+    let reply_to = extract_email_address(&inbox.from);
+
+    let reply_cc = if reply_all {
+        let mut all_recipients: Vec<String> = Vec::new();
+        for addr in inbox.to.split(',') {
+            let email = extract_email_address(addr.trim());
+            if email.to_lowercase() != default_from.to_lowercase() {
+                all_recipients.push(email);
+            }
+        }
+        if let Some(ref cc) = inbox.cc {
+            for addr in cc.split(',') {
+                let email = extract_email_address(addr.trim());
+                if email.to_lowercase() != default_from.to_lowercase()
+                    && !all_recipients
+                        .iter()
+                        .any(|r| r.to_lowercase() == email.to_lowercase())
+                {
+                    all_recipients.push(email);
+                }
+            }
+        }
+        if all_recipients.is_empty() {
+            None
+        } else {
+            Some(all_recipients.join(", "))
+        }
+    } else {
+        None
+    };
+
+    // Build subject with Re: prefix (case-insensitive check)
+    let reply_subject = if inbox.subject.to_lowercase().starts_with("re: ") {
+        inbox.subject.clone()
+    } else {
+        format!("Re: {}", inbox.subject)
+    };
+
+    // Build quoted body with attribution
+    let attribution = format!(
+        "On {}, {} wrote:",
+        inbox.date.as_deref().unwrap_or("(unknown date)"),
+        inbox.from
+    );
+    let quoted_body: String = original_body
+        .lines()
+        .map(|line| format!("> {}", line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Build frontmatter
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("from: \"{}\"\n", default_from));
+    fm.push_str(&format!("to: \"{}\"\n", reply_to));
+    if let Some(ref cc) = reply_cc {
+        fm.push_str(&format!("cc: \"{}\"\n", cc));
+    }
+    fm.push_str(&format!("bcc: \"{}\"\n", default_from));
+    fm.push_str(&format!(
+        "subject: \"{}\"\n",
+        reply_subject.replace('"', "\\\"")
+    ));
+    fm.push_str("status: draft\n");
+    fm.push_str("---\n");
+
+    // Compose full content
+    let full_content = format!("{}\n\n\n{}\n{}\n", fm.trim_end(), attribution, quoted_body);
+
+    // Determine output path
+    let output_dir = drafts_dir.unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(output_dir)?;
+    let date_prefix = Utc::now().format("%Y-%m-%d").to_string();
+    let subject_slug = slugify_subject(&reply_subject);
+    let filename = format!("{}_{}.md", date_prefix, subject_slug);
+    let mut dest = output_dir.join(&filename);
+
+    // Avoid overwriting
+    if dest.exists() {
+        let mut counter = 1;
+        loop {
+            let name = format!("{}_{}-{}.md", date_prefix, subject_slug, counter);
+            dest = output_dir.join(&name);
+            if !dest.exists() {
+                break;
+            }
+            counter += 1;
+        }
+    }
+
+    fs::write(&dest, full_content)?;
+    Ok(dest)
 }
 
 fn parse_email_date_prefix(date_str: &str) -> String {
@@ -746,13 +973,13 @@ fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
 
     for (i, email) in emails.iter().enumerate() {
         println!("{}", "─".repeat(60));
-        println!("{}: {}", "From".bold(), email.from);
-        println!("{}: {}", "To".bold(), email.to);
+        println!("{}: {}", "From".bold().green(), email.from);
+        println!("{}: {}", "To".bold().blue(), email.to);
         if let Some(ref cc) = email.cc {
-            println!("{}: {}", "Cc".bold(), cc);
+            println!("{}: {}", "Cc".bold().blue(), cc);
         }
-        println!("{}: {}", "Subject".bold(), email.subject);
-        println!("{}: {}", "Date".bold(), email.date);
+        println!("{}: {}", "Subject".bold().yellow(), email.subject);
+        println!("{}: {}", "Date".bold().magenta(), email.date);
         if email.has_attachments {
             println!("{}", "[has attachments]".yellow());
         }
@@ -1334,6 +1561,8 @@ async fn main() -> Result<()> {
         Some(Commands::Validate { path }) => Some(path.clone()),
         Some(Commands::MarkApproved { file }) => Some(file.clone()),
         Some(Commands::New { name }) => Some(PathBuf::from(name)),
+        Some(Commands::Reply { file, .. }) => file.clone(),
+        Some(Commands::ListMailboxes) => None,
         Some(Commands::Fetch { .. }) => None,
         None => cli.file.clone(),
     };
@@ -1483,6 +1712,7 @@ async fn main() -> Result<()> {
             let mut draft_count = 0;
             let mut approved_count = 0;
             let mut sent_count = 0;
+            let mut inbox_count = 0;
 
             println!("\n{}", "Email Drafts:".bold());
             println!("{}", "─".repeat(60));
@@ -1492,12 +1722,14 @@ async fn main() -> Result<()> {
                     EmailStatus::Draft => "draft".yellow(),
                     EmailStatus::Approved => "approved".green(),
                     EmailStatus::Sent => "sent".dimmed(),
+                    EmailStatus::Inbox => "inbox".cyan(),
                 };
 
                 match draft.frontmatter.status {
                     EmailStatus::Draft => draft_count += 1,
                     EmailStatus::Approved => approved_count += 1,
                     EmailStatus::Sent => sent_count += 1,
+                    EmailStatus::Inbox => inbox_count += 1,
                 }
 
                 println!(
@@ -1510,11 +1742,12 @@ async fn main() -> Result<()> {
 
             println!("{}", "─".repeat(60));
             println!(
-                "Total: {} | Draft: {} | Approved: {} | Sent: {}",
+                "Total: {} | Draft: {} | Approved: {} | Sent: {} | Inbox: {}",
                 drafts.len(),
                 draft_count.to_string().yellow(),
                 approved_count.to_string().green(),
-                sent_count.to_string().dimmed()
+                sent_count.to_string().dimmed(),
+                inbox_count.to_string().cyan()
             );
         }
 
@@ -1604,6 +1837,53 @@ attachments: []
 
             fs::write(&path, skeleton)?;
             println!("{} Created new draft: {}", "✓".green(), path.display());
+        }
+
+        Some(Commands::Reply { file, all }) => {
+            let drafts_dir: Option<PathBuf> = std::env::var("DRAFTS_DIR").ok().map(|s| {
+                let s = s.trim_matches('"').trim_matches('\'');
+                PathBuf::from(shellexpand::tilde(s).into_owned())
+            });
+
+            let source_file = match file {
+                Some(f) => f,
+                None => {
+                    let inbox_dir: PathBuf = std::env::var("INBOX_DIR")
+                        .map(|s| {
+                            let s = s.trim_matches('"').trim_matches('\'');
+                            PathBuf::from(shellexpand::tilde(s).into_owned())
+                        })
+                        .context(
+                            "INBOX_DIR not set in .env (required for interactive reply selection)",
+                        )?;
+                    select_inbox_email(&inbox_dir)?
+                }
+            };
+
+            let draft_path = create_reply_draft(
+                &source_file,
+                all,
+                &smtp_config.default_from,
+                drafts_dir.as_deref(),
+            )?;
+            println!(
+                "{} Reply draft created: {}",
+                "✓".green(),
+                draft_path.display()
+            );
+        }
+
+        Some(Commands::ListMailboxes) => {
+            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let mailboxes = tokio::task::spawn_blocking(move || {
+                list_mailboxes(&imap_config)
+            })
+            .await??;
+
+            println!("{} Available mailboxes:", "ℹ".blue());
+            for name in &mailboxes {
+                println!("  {}", name);
+            }
         }
 
         Some(Commands::Fetch {
