@@ -10,6 +10,7 @@ use lettre::{
 };
 use mailparse::{parse_mail, MailHeaderMap};
 use pulldown_cmark::{html, Options, Parser as MdParser};
+use skim::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -172,6 +173,21 @@ enum Commands {
         #[arg(long, default_value = "INBOX")]
         mailbox: String,
     },
+    /// Sync local mailbox folders with IMAP server
+    Sync {
+        /// Max messages per mailbox (default: 50)
+        #[arg(short = 'n', long, default_value = "50")]
+        limit: usize,
+        /// Mailboxes to sync (default: INBOX, Archive)
+        #[arg(long)]
+        mailbox: Option<Vec<String>>,
+    },
+    /// Interactive email browser
+    Browse {
+        /// Starting directory: inbox, drafts, or sent (default: inbox)
+        #[arg(default_value = "inbox")]
+        view: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +197,7 @@ enum EmailStatus {
     Approved,
     Sent,
     Inbox,
+    Archived,
 }
 
 impl std::fmt::Display for EmailStatus {
@@ -190,6 +207,7 @@ impl std::fmt::Display for EmailStatus {
             EmailStatus::Approved => write!(f, "approved"),
             EmailStatus::Sent => write!(f, "sent"),
             EmailStatus::Inbox => write!(f, "inbox"),
+            EmailStatus::Archived => write!(f, "archived"),
         }
     }
 }
@@ -230,6 +248,7 @@ struct SmtpConfig {
     default_from: String,
 }
 
+#[derive(Clone)]
 struct ImapConfig {
     host: String,
     port: u16,
@@ -805,7 +824,7 @@ fn parse_email_date_prefix(date_str: &str) -> String {
     Utc::now().format("%Y-%m-%d-%H%M").to_string()
 }
 
-fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usize, usize)> {
+fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
     fs::create_dir_all(inbox_dir)?;
 
     // Collect existing message IDs from inbox
@@ -893,7 +912,7 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usi
         if let Some(ref mid) = email.message_id {
             frontmatter.push_str(&format!("message_id: \"{}\"\n", mid.replace('"', "\\\"")));
         }
-        frontmatter.push_str("status: inbox\n");
+        frontmatter.push_str(&format!("status: {}\n", status));
         frontmatter.push_str(&format!("has_attachments: {}\n", email.has_attachments));
         frontmatter.push_str(&format!("fetched_at: \"{}\"\n", fetched_at));
         frontmatter.push_str("---\n\n");
@@ -910,6 +929,36 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path) -> Result<(usi
     }
 
     Ok((saved, skipped))
+}
+
+fn delete_md_files(dir: &Path) -> Result<usize> {
+    let mut count = 0;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            fs::remove_file(&path)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn resolve_mailbox_dir(mailbox: &str) -> Result<PathBuf> {
+    let env_var = match mailbox {
+        "INBOX" => "INBOX_DIR",
+        "Archive" => "ARCHIVE_DIR",
+        _ => {
+            return Err(anyhow!(
+                "Unsupported mailbox '{}'. Supported: INBOX, Archive",
+                mailbox
+            ))
+        }
+    };
+    let raw = std::env::var(env_var)
+        .with_context(|| format!("{} env var not set (needed for mailbox '{}')", env_var, mailbox))?;
+    let expanded = shellexpand::tilde(raw.trim_matches('"').trim_matches('\'')).into_owned();
+    Ok(PathBuf::from(expanded))
 }
 
 fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
@@ -1546,6 +1595,541 @@ fn mark_as_approved(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// --- Browse command support ---
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DirType {
+    Inbox,
+    Drafts,
+    Sent,
+    Archive,
+}
+
+impl std::fmt::Display for DirType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DirType::Inbox => write!(f, "INBOX"),
+            DirType::Drafts => write!(f, "DRAFTS"),
+            DirType::Sent => write!(f, "SENT"),
+            DirType::Archive => write!(f, "ARCHIVE"),
+        }
+    }
+}
+
+struct EmailSkimItem {
+    display_text: String,
+    file_path: PathBuf,
+    preview_text: String,
+}
+
+impl SkimItem for EmailSkimItem {
+    fn text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.display_text)
+    }
+
+    fn output(&self) -> Cow<'_, str> {
+        Cow::Owned(self.file_path.to_string_lossy().into_owned())
+    }
+
+    fn preview(&self, _context: PreviewContext) -> ItemPreview {
+        ItemPreview::Text(self.preview_text.clone())
+    }
+}
+
+fn build_browse_items(dir: &Path, dir_type: DirType) -> Vec<Arc<dyn SkimItem>> {
+    let mut items: Vec<(String, Arc<dyn SkimItem>)> = Vec::new();
+
+    for entry in WalkDir::new(dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() || path.extension().map_or(true, |ext| ext != "md") {
+            continue;
+        }
+
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let matter = Matter::<YAML>::new();
+        let parsed = matter.parse(&content);
+        let data = match parsed.data {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let yaml: serde_yaml::Value = match data.deserialize() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let get_str = |key: &str| -> String {
+            yaml.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+
+        let subject = get_str("subject");
+        let status = get_str("status");
+
+        let contact = match dir_type {
+            DirType::Inbox | DirType::Archive => {
+                let from = get_str("from");
+                extract_email_address(&from)
+            }
+            DirType::Drafts | DirType::Sent => {
+                let to = get_str("to");
+                extract_email_address(&to)
+            }
+        };
+
+        let date_display = if dir_type == DirType::Inbox || dir_type == DirType::Archive {
+            let date_str = get_str("date");
+            chrono::DateTime::parse_from_rfc2822(&date_str)
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        } else {
+            let sent_at = get_str("sent_at");
+            if !sent_at.is_empty() {
+                chrono::DateTime::parse_from_rfc3339(&sent_at)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|_| "unknown".to_string())
+            } else {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.get(..10))
+                    .unwrap_or("unknown")
+                    .to_string()
+            }
+        };
+
+        let display_text = format!(
+            "{}  {:<30}  {:<40}  [{}]",
+            date_display,
+            if contact.len() > 30 { &contact[..30] } else { &contact },
+            if subject.len() > 40 { &subject[..40] } else { &subject },
+            status
+        );
+
+        let mut preview_lines = Vec::new();
+        if dir_type == DirType::Inbox || dir_type == DirType::Archive {
+            preview_lines.push(format!("From: {}", get_str("from")));
+            preview_lines.push(format!("To: {}", get_str("to")));
+            let cc = get_str("cc");
+            if !cc.is_empty() {
+                preview_lines.push(format!("Cc: {}", cc));
+            }
+        } else {
+            preview_lines.push(format!("To: {}", get_str("to")));
+            let cc = get_str("cc");
+            if !cc.is_empty() {
+                preview_lines.push(format!("Cc: {}", cc));
+            }
+            let from = get_str("from");
+            if !from.is_empty() {
+                preview_lines.push(format!("From: {}", from));
+            }
+        }
+        preview_lines.push(format!("Subject: {}", subject));
+        if dir_type == DirType::Inbox || dir_type == DirType::Archive {
+            preview_lines.push(format!("Date: {}", get_str("date")));
+        }
+        preview_lines.push(format!("Status: {}", status));
+        preview_lines.push(String::new());
+        preview_lines.push("─".repeat(60));
+        preview_lines.push(String::new());
+
+        let body = parsed.content.trim().to_string();
+        preview_lines.push(body);
+
+        let preview_text = preview_lines.join("\n");
+        let sort_key = date_display.clone();
+
+        items.push((sort_key, Arc::new(EmailSkimItem {
+            display_text,
+            file_path: path.to_path_buf(),
+            preview_text,
+        })));
+    }
+
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+    items.into_iter().map(|(_, item)| item).collect()
+}
+
+fn resolve_browse_dir(dir_type: DirType) -> Result<PathBuf> {
+    let dir = match dir_type {
+        DirType::Inbox => std::env::var("INBOX_DIR")
+            .map(|s| {
+                let s = s.trim_matches('"').trim_matches('\'');
+                PathBuf::from(shellexpand::tilde(s).into_owned())
+            })
+            .unwrap_or_else(|_| PathBuf::from(".")),
+        DirType::Drafts => resolve_drafts_dir(Path::new(".")),
+        DirType::Sent => std::env::var("SENT_DIR")
+            .map(|s| {
+                let s = s.trim_matches('"').trim_matches('\'');
+                PathBuf::from(shellexpand::tilde(s).into_owned())
+            })
+            .unwrap_or_else(|_| PathBuf::from(".")),
+        DirType::Archive => std::env::var("ARCHIVE_DIR")
+            .map(|s| {
+                let s = s.trim_matches('"').trim_matches('\'');
+                PathBuf::from(shellexpand::tilde(s).into_owned())
+            })
+            .unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    Ok(dir)
+}
+
+fn next_dir_type(current: DirType) -> DirType {
+    match current {
+        DirType::Inbox => DirType::Drafts,
+        DirType::Drafts => DirType::Sent,
+        DirType::Sent => DirType::Archive,
+        DirType::Archive => DirType::Inbox,
+    }
+}
+
+fn build_browse_header(dir_type: DirType, count: usize) -> String {
+    let actions = match dir_type {
+        DirType::Inbox => "⏎:open ^y:reply ^o:reply-all ^s:archive ^d:delete",
+        DirType::Drafts => "⏎:open ^g:approve ^x:send ^d:delete",
+        DirType::Sent => "⏎:open ^d:delete",
+        DirType::Archive => "⏎:open ^d:delete",
+    };
+    format!(
+        "[{}] {} emails | {} | tab:next mailbox ^r:refresh | esc:quit",
+        dir_type, count, actions
+    )
+}
+
+fn refresh_inbox() -> Result<()> {
+    println!("{} Fetching new emails...", "ℹ".blue());
+
+    let imap_config = ImapConfig::from_env(None)?;
+    let criteria = FetchCriteria {
+        from: None,
+        to: None,
+        cc: None,
+        subject: None,
+        body: None,
+        since: None,
+        before: None,
+    };
+
+    let emails = fetch_emails(&imap_config, &criteria, "INBOX", 20)?;
+
+    let inbox_dir = std::env::var("INBOX_DIR")
+        .map(|s| {
+            let s = s.trim_matches('"').trim_matches('\'');
+            PathBuf::from(shellexpand::tilde(s).into_owned())
+        })
+        .unwrap_or_else(|_| PathBuf::from("."));
+
+    let (saved, _skipped) = save_fetched_emails(&emails, &inbox_dir, "inbox")?;
+    println!("{} Fetched {} new emails", "✓".green(), saved);
+
+    Ok(())
+}
+
+fn archive_email_on_server(message_id: &str) -> Result<()> {
+    let imap_config = ImapConfig::from_env(None)?;
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    session
+        .select("INBOX")
+        .map_err(|e| anyhow!("Failed to select INBOX: {}", e))?;
+
+    let query = format!("HEADER Message-ID \"{}\"", message_id);
+    let uids = session
+        .uid_search(&query)
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        session.logout().ok();
+        return Err(anyhow!(
+            "Email with Message-ID {} not found in INBOX on server",
+            message_id
+        ));
+    }
+
+    let uid = *uids.iter().next().unwrap();
+    let uid_str = uid.to_string();
+
+    session
+        .uid_copy(&uid_str, "Archive")
+        .map_err(|e| anyhow!("Failed to copy email to Archive: {}", e))?;
+
+    session
+        .uid_store(&uid_str, "+FLAGS (\\Deleted)")
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+
+    session
+        .expunge()
+        .map_err(|e| anyhow!("Failed to expunge: {}", e))?;
+
+    session.logout().ok();
+    Ok(())
+}
+
+fn archive_email_locally(file_path: &Path) -> Result<()> {
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(&content);
+    let inbox_fm: InboxFrontmatter = parsed
+        .data
+        .ok_or_else(|| anyhow!("No frontmatter found in {}", file_path.display()))?
+        .deserialize()
+        .context("Failed to parse frontmatter")?;
+
+    // Archive on server using message_id
+    if let Some(ref mid) = inbox_fm.message_id {
+        archive_email_on_server(mid)?;
+    } else {
+        return Err(anyhow!(
+            "No message_id in frontmatter — cannot archive on server"
+        ));
+    }
+
+    // Determine archive directory
+    let archive_dir = std::env::var("ARCHIVE_DIR")
+        .map(|s| {
+            let s = s.trim_matches('"').trim_matches('\'');
+            PathBuf::from(shellexpand::tilde(s).into_owned())
+        })
+        .context("ARCHIVE_DIR not set in .env")?;
+
+    fs::create_dir_all(&archive_dir)?;
+
+    // Update status from inbox to archived in the content
+    let new_content = content.replacen("status: inbox", "status: archived", 1);
+
+    // Move the file to archive dir
+    let file_name = file_path
+        .file_name()
+        .ok_or_else(|| anyhow!("Invalid file path"))?;
+    let dest = archive_dir.join(file_name);
+
+    fs::write(&dest, new_content)?;
+    fs::remove_file(file_path)?;
+
+    Ok(())
+}
+
+fn browse_emails(starting_view: &str) -> Result<()> {
+    let _ = dotenvy::dotenv();
+    load_env_from_path(None);
+
+    let mut current_dir_type = match starting_view {
+        "drafts" => DirType::Drafts,
+        "sent" => DirType::Sent,
+        "archive" => DirType::Archive,
+        _ => DirType::Inbox,
+    };
+
+    loop {
+        let dir = resolve_browse_dir(current_dir_type)?;
+        let items = build_browse_items(&dir, current_dir_type);
+
+        let count = items.len();
+        let header = build_browse_header(current_dir_type, count);
+
+        let mut bindings: Vec<String> = vec![
+            "esc:abort".to_string(),
+            "tab:accept".to_string(),
+            "ctrl-r:accept".to_string(),
+            "ctrl-d:accept".to_string(),
+        ];
+
+        match current_dir_type {
+            DirType::Inbox => {
+                bindings.push("enter:execute(hx {})+accept".to_string());
+                bindings.push("ctrl-y:accept".to_string());
+                bindings.push("ctrl-o:accept".to_string());
+                bindings.push("ctrl-s:accept".to_string());
+            }
+            DirType::Drafts => {
+                bindings.push("enter:execute(hx {})".to_string());
+                bindings.push("ctrl-g:accept".to_string());
+                bindings.push("ctrl-x:execute(email send {})".to_string());
+            }
+            DirType::Sent => {
+                bindings.push("enter:execute(hx {})".to_string());
+            }
+            DirType::Archive => {
+                bindings.push("enter:execute(hx {})".to_string());
+            }
+        }
+
+        let options = SkimOptionsBuilder::default()
+            .height(String::from("100%"))
+            .multi(false)
+            .preview(Some(String::new()))
+            .preview_window(String::from("right:50%"))
+            .header(Some(header.clone()))
+            .bind(bindings)
+            .color(Some(String::from(
+                "fg:#cdd6f4,bg:#1e1e2e,hl:#cba6f7,fg+:#b4befe,bg+:#313244,hl+:#fab387,\
+                 query:#cdd6f4,prompt:#cba6f7,pointer:#f5e0dc,marker:#f5e0dc,\
+                 header:#a6adc8,border:#585b70,info:#bac2de,spinner:#cba6f7"
+            )))
+            .build()
+            .map_err(|e| anyhow!("Failed to build skim options: {}", e))?;
+
+        let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
+        for item in items {
+            let _ = tx.send(item);
+        }
+        drop(tx);
+
+        let output = Skim::run_with(&options, Some(rx));
+
+        match output {
+            None => break,
+            Some(out) if out.is_abort => break,
+            Some(out) => {
+                let key = out.final_key;
+
+                match key {
+                    Key::Tab => {
+                        current_dir_type = next_dir_type(current_dir_type);
+                        continue;
+                    }
+                    Key::Ctrl('r') => {
+                        if current_dir_type == DirType::Inbox {
+                            if let Err(e) = refresh_inbox() {
+                                eprintln!("{} Refresh failed: {}", "✗".red(), e);
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                            }
+                        }
+                        continue;
+                    }
+                    Key::Ctrl('g') => {
+                        // Mark-approved in drafts
+                        if current_dir_type == DirType::Drafts {
+                            if let Some(selected) = out.selected_items.first() {
+                                let file_path = selected.output().to_string();
+                                let path = Path::new(&file_path);
+                                if let Err(e) = mark_as_approved(path) {
+                                    eprintln!("{} {}", "✗".red(), e);
+                                    std::thread::sleep(std::time::Duration::from_secs(2));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Key::Ctrl('d') => {
+                        if let Some(selected) = out.selected_items.first() {
+                            let file_path = selected.output().to_string();
+                            let path = Path::new(&file_path);
+                            match std::fs::remove_file(path) {
+                                Ok(()) => {
+                                    println!("{} Deleted: {}", "✓".green(), file_path);
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                }
+                                Err(e) => {
+                                    eprintln!("{} Failed to delete: {}", "✗".red(), e);
+                                    std::thread::sleep(std::time::Duration::from_secs(2));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Key::Ctrl('s') => {
+                        // Archive email from inbox
+                        if current_dir_type == DirType::Inbox {
+                            if let Some(selected) = out.selected_items.first() {
+                                let file_path = selected.output().to_string();
+                                let path = Path::new(&file_path);
+                                match archive_email_locally(path) {
+                                    Ok(()) => {
+                                        println!(
+                                            "{} Archived: {}",
+                                            "✓".green(),
+                                            path.file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_default()
+                                        );
+                                        std::thread::sleep(std::time::Duration::from_millis(500));
+                                    }
+                                    Err(e) => {
+                                        eprintln!("{} Archive failed: {}", "✗".red(), e);
+                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Key::Ctrl('y') | Key::Ctrl('o') => {
+                        // Reply / reply-all in inbox
+                        if current_dir_type == DirType::Inbox {
+                            if let Some(selected) = out.selected_items.first() {
+                                let file_path = selected.output().to_string();
+                                let reply_all = key == Key::Ctrl('o');
+                                match SmtpConfig::from_env(Some(Path::new(&file_path))) {
+                                    Ok(cfg) => {
+                                        let drafts_dir = resolve_drafts_dir(Path::new("."));
+                                        let drafts_opt = if drafts_dir != PathBuf::from(".") {
+                                            Some(drafts_dir)
+                                        } else {
+                                            None
+                                        };
+                                        match create_reply_draft(
+                                            Path::new(&file_path),
+                                            reply_all,
+                                            &cfg.default_from,
+                                            drafts_opt.as_deref(),
+                                        ) {
+                                            Ok(draft_path) => {
+                                                let _ = std::process::Command::new("hx")
+                                                    .arg(&draft_path)
+                                                    .status();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("{} {}", "✗".red(), e);
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_secs(2),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("{} Could not load config: {}", "✗".red(), e);
+                                        std::thread::sleep(std::time::Duration::from_secs(2));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1561,6 +2145,8 @@ async fn main() -> Result<()> {
         Some(Commands::Reply { file, .. }) => file.clone(),
         Some(Commands::ListMailboxes) => None,
         Some(Commands::Fetch { .. }) => None,
+        Some(Commands::Sync { .. }) => None,
+        Some(Commands::Browse { .. }) => None,
         None => cli.file.clone(),
     };
 
@@ -1712,6 +2298,7 @@ async fn main() -> Result<()> {
             let mut approved_count = 0;
             let mut sent_count = 0;
             let mut inbox_count = 0;
+            let mut archived_count = 0;
 
             println!("\n{}", "Email Drafts:".bold());
             println!("{}", "─".repeat(60));
@@ -1722,6 +2309,7 @@ async fn main() -> Result<()> {
                     EmailStatus::Approved => "approved".green(),
                     EmailStatus::Sent => "sent".dimmed(),
                     EmailStatus::Inbox => "inbox".cyan(),
+                    EmailStatus::Archived => "archived".blue(),
                 };
 
                 match draft.frontmatter.status {
@@ -1729,6 +2317,7 @@ async fn main() -> Result<()> {
                     EmailStatus::Approved => approved_count += 1,
                     EmailStatus::Sent => sent_count += 1,
                     EmailStatus::Inbox => inbox_count += 1,
+                    EmailStatus::Archived => archived_count += 1,
                 }
 
                 println!(
@@ -1741,12 +2330,13 @@ async fn main() -> Result<()> {
 
             println!("{}", "─".repeat(60));
             println!(
-                "Total: {} | Draft: {} | Approved: {} | Sent: {} | Inbox: {}",
+                "Total: {} | Draft: {} | Approved: {} | Sent: {} | Inbox: {} | Archived: {}",
                 drafts.len(),
                 draft_count.to_string().yellow(),
                 approved_count.to_string().green(),
                 sent_count.to_string().dimmed(),
-                inbox_count.to_string().cyan()
+                inbox_count.to_string().cyan(),
+                archived_count.to_string().blue()
             );
         }
 
@@ -1925,7 +2515,7 @@ attachments: []
 
             if let Some(ref inbox_dir) = inbox_dir {
                 if !emails.is_empty() {
-                    match save_fetched_emails(&emails, inbox_dir) {
+                    match save_fetched_emails(&emails, inbox_dir, "inbox") {
                         Ok((saved, skipped)) => {
                             if saved > 0 {
                                 println!(
@@ -1954,6 +2544,65 @@ attachments: []
                     "ℹ".blue()
                 );
             }
+        }
+
+        Some(Commands::Sync { limit, mailbox }) => {
+            let mailboxes = mailbox.unwrap_or_else(|| vec!["INBOX".to_string(), "Archive".to_string()]);
+            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+
+            for mb in &mailboxes {
+                let local_dir = resolve_mailbox_dir(mb)?;
+                let status_str = match mb.as_str() {
+                    "INBOX" => "inbox",
+                    "Archive" => "archived",
+                    _ => "inbox",
+                };
+
+                // Delete existing .md files
+                if local_dir.exists() {
+                    let deleted = delete_md_files(&local_dir)?;
+                    if deleted > 0 {
+                        println!(
+                            "{} Deleted {} existing file(s) from {}",
+                            "ℹ".blue(),
+                            deleted,
+                            local_dir.display()
+                        );
+                    }
+                }
+
+                // Fetch emails from IMAP
+                let imap_cfg = imap_config.clone();
+                let mb_name = mb.clone();
+                let fetch_limit = limit;
+                let emails = tokio::task::spawn_blocking(move || {
+                    let criteria = FetchCriteria {
+                        from: None,
+                        to: None,
+                        cc: None,
+                        subject: None,
+                        body: None,
+                        since: None,
+                        before: None,
+                    };
+                    fetch_emails(&imap_cfg, &criteria, &mb_name, fetch_limit)
+                })
+                .await??;
+
+                // Save fetched emails
+                let (saved, _skipped) = save_fetched_emails(&emails, &local_dir, status_str)?;
+                println!(
+                    "{} Synced {}: {} email(s) saved to {}",
+                    "✓".green(),
+                    mb,
+                    saved,
+                    local_dir.display()
+                );
+            }
+        }
+
+        Some(Commands::Browse { view }) => {
+            browse_emails(&view)?;
         }
 
         None => {

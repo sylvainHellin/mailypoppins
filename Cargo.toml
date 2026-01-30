@@ -26,3 +26,4 @@ native-tls = "0.2"
 mailparse = "0.15"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 html2text = "0.14"
+skim = "0.20"

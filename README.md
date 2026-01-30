@@ -27,6 +27,7 @@ DEFAULT_FROM=your.name@tum.de
 DRAFTS_DIR="~/path/to/email/drafts"  # Optional
 SENT_DIR="~/path/to/email/sent"      # Optional: where to move sent emails
 INBOX_DIR="~/path/to/email/inbox"    # Optional: where to save fetched emails
+ARCHIVE_DIR="~/path/to/email/archive" # Optional: where to move archived emails
 ```
 
 ### IMAP Configuration (`.env`)
@@ -105,7 +106,7 @@ to: recipient@example.com
 cc: optional@example.com       # Optional
 bcc: hidden@example.com        # Optional
 subject: "Your subject line"
-status: draft                  # draft | approved | sent
+status: draft                  # draft | approved | sent | inbox | archived
 from: alternate@tum.de         # Optional, overrides DEFAULT_FROM
 reply_to: reply@example.com    # Optional
 attachments:                   # Optional
@@ -236,6 +237,27 @@ Requires IMAP configuration in `.env` (see above).
 
 **Inbox saving:** If `INBOX_DIR` is set in `.env`, fetched emails are automatically saved as `.md` files with YAML frontmatter (matching the draft/sent format). Files are named `YYYY-MM-DD_<subject-slug>.md`. Duplicate emails (by `Message-ID`) are skipped on subsequent fetches.
 
+### Sync Mailboxes (IMAP)
+
+```bash
+email sync                           # Sync INBOX and Archive (50 msgs each)
+email sync -n 10                     # Sync with limit of 10 per mailbox
+email sync --mailbox INBOX           # Sync only inbox
+email sync --mailbox INBOX Archive   # Explicit mailbox list
+```
+
+Replaces local `.md` files in inbox and archive directories with fresh copies from the IMAP server. For each mailbox:
+1. Deletes all existing `.md` files in the local directory
+2. Fetches the latest N emails from the IMAP server
+3. Saves them as `.md` files with appropriate status (`inbox` or `archived`)
+
+| Option | Description |
+|--------|-------------|
+| `-n, --limit <N>` | Max messages per mailbox (default: 50) |
+| `--mailbox <name>...` | Mailboxes to sync (default: INBOX, Archive) |
+
+Requires `INBOX_DIR` and/or `ARCHIVE_DIR` set in `.env` for the corresponding mailboxes.
+
 ### Create New Draft
 
 ```bash
@@ -243,6 +265,55 @@ email new draft-name
 ```
 
 Creates a new `.md` file with empty YAML frontmatter template.
+
+### Browse (Interactive)
+
+```bash
+email browse              # Start in inbox view
+email browse --view drafts
+email browse --view sent
+email browse --view archive
+```
+
+Opens an interactive fuzzy-finder (skim) to browse emails. Supports four mailbox views (Inbox, Drafts, Sent, Archive) with context-specific keybindings:
+
+**Global keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle to next mailbox (Inbox → Drafts → Sent → Archive) |
+| `Ctrl+r` | Refresh current mailbox |
+| `Ctrl+d` | Delete selected email's local file |
+| `Esc` | Quit |
+
+**Inbox keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open email in editor |
+| `Ctrl+y` | Create reply draft and open in editor |
+| `Ctrl+o` | Create reply-all draft and open in editor |
+| `Ctrl+s` | Archive email (moves to Archive on server and locally) |
+
+**Drafts keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open draft in editor |
+| `Ctrl+g` | Mark draft as approved |
+| `Ctrl+x` | Send draft |
+
+**Sent keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open email in editor |
+
+**Archive keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open email in editor |
 
 ## Status Workflow
 
