@@ -17,6 +17,7 @@ CLI tool for managing email drafts written in Markdown with YAML frontmatter. Su
 - **Terminal output:** `colored`
 - **Async runtime:** `tokio`
 - **Error handling:** `anyhow`
+- **Clipboard:** `arboard`
 - **Logging:** `log` + `simplelog` (file-based, daily rotation)
 
 ## Architecture
@@ -94,13 +95,19 @@ Reply drafts (created via `email reply`) include a `{{SIGNATURE}}` placeholder b
 
 The `browse` command uses skim (fuzzy finder) with context-specific keybindings:
 
-- **Global:** `Tab` (next mailbox: Inbox → Drafts → Sent → Archive), `Ctrl+r` (refresh), `Ctrl+d` (delete local file), `Esc` (quit)
+- **Global:** `Tab` (next mailbox: Inbox → Drafts → Sent → Archive), `Ctrl+r` (refresh), `Ctrl+d` (delete local file), `Ctrl+p` (copy file path to clipboard), `Esc` (quit)
 - **Inbox:** `Enter` (open), `Ctrl+y` (reply), `Ctrl+o` (reply-all), `Ctrl+s` (archive)
 - **Drafts:** `Enter` (open), `Ctrl+g` (approve), `Ctrl+x` (send)
 - **Sent:** `Enter` (open)
 - **Archive:** `Enter` (open)
 
 Note: `Ctrl+a/e` are reserved by skim (emacs line editing). Avoid binding them.
+
+### Browse Header Coloring
+
+The two header lines (mailbox info + global keybindings) are colored using skim's `AnsiString` with `Attr` fragments, NOT raw ANSI escape codes. This is required because skim's `SkimItem::display()` does not parse ANSI escape codes — only skim's internal `DefaultSkimItem` does that during construction. Custom `SkimItem` implementations must build `AnsiString` objects directly via `AnsiString::new_string(stripped, fragments)` with `Attr { fg: Color::Rgb(r, g, b), ..Attr::default() }` from `skim::tuikit::prelude`.
+
+The `ColoredLine` helper struct handles position tracking: each `.push(text, attr)` call appends text and records the `(start, end)` char range for the attribute fragment. Colors follow the Catppuccin Mocha palette.
 
 ## After Each Change
 

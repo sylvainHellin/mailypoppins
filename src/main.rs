@@ -14,6 +14,7 @@ use mailparse::{parse_mail, MailHeaderMap};
 use pulldown_cmark::{html, Options, Parser as MdParser};
 use simplelog::{CombinedLogger, Config as LogConfig, LevelFilter, WriteLogger};
 use skim::prelude::*;
+use skim::tuikit::prelude::{Attr, Color};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1837,7 +1838,56 @@ impl SkimItem for EmailSkimItem {
     }
 
     fn preview(&self, _context: PreviewContext) -> ItemPreview {
-        ItemPreview::Text(self.preview_text.clone())
+        ItemPreview::AnsiText(self.preview_text.clone())
+    }
+}
+
+struct ColoredLine {
+    text: String,
+    fragments: Vec<(Attr, (u32, u32))>,
+}
+
+impl ColoredLine {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            fragments: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, s: &str, attr: Attr) -> &mut Self {
+        let start = self.text.chars().count() as u32;
+        self.text.push_str(s);
+        let end = self.text.chars().count() as u32;
+        self.fragments.push((attr, (start, end)));
+        self
+    }
+
+    fn into_ansi_string(self) -> AnsiString<'static> {
+        AnsiString::new_string(self.text, self.fragments)
+    }
+}
+
+struct HeaderSkimItem {
+    stripped: String,
+    ansi: AnsiString<'static>,
+}
+
+impl SkimItem for HeaderSkimItem {
+    fn text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.stripped)
+    }
+
+    fn display<'a>(&'a self, _context: DisplayContext<'a>) -> AnsiString<'a> {
+        self.ansi.clone()
+    }
+
+    fn output(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn preview(&self, _context: PreviewContext) -> ItemPreview {
+        ItemPreview::Text(String::new())
     }
 }
 
@@ -1920,32 +1970,41 @@ fn build_browse_items(dir: &Path, dir_type: DirType) -> Vec<Arc<dyn SkimItem>> {
             status
         );
 
+        // Catppuccin Mocha ANSI colors for preview header fields
+        let green = "\x1b[1;38;2;166;227;161m";   // #a6e3a1 — From
+        let blue = "\x1b[1;38;2;137;180;250m";    // #89b4fa — To/Cc
+        let yellow = "\x1b[1;38;2;249;226;175m";  // #f9e2af — Subject
+        let magenta = "\x1b[1;38;2;203;166;247m"; // #cba6f7 — Date
+        let teal = "\x1b[1;38;2;148;226;213m";    // #94e2d5 — Status
+        let dim = "\x1b[38;2;108;112;134m";        // #6c7086 — separator
+        let reset = "\x1b[0m";
+
         let mut preview_lines = Vec::new();
         if dir_type == DirType::Inbox || dir_type == DirType::Archive {
-            preview_lines.push(format!("From: {}", get_str("from")));
-            preview_lines.push(format!("To: {}", get_str("to")));
+            preview_lines.push(format!("{green}From:{reset} {}", get_str("from")));
+            preview_lines.push(format!("{blue}To:{reset} {}", get_str("to")));
             let cc = get_str("cc");
             if !cc.is_empty() {
-                preview_lines.push(format!("Cc: {}", cc));
+                preview_lines.push(format!("{blue}Cc:{reset} {}", cc));
             }
         } else {
-            preview_lines.push(format!("To: {}", get_str("to")));
+            preview_lines.push(format!("{blue}To:{reset} {}", get_str("to")));
             let cc = get_str("cc");
             if !cc.is_empty() {
-                preview_lines.push(format!("Cc: {}", cc));
+                preview_lines.push(format!("{blue}Cc:{reset} {}", cc));
             }
             let from = get_str("from");
             if !from.is_empty() {
-                preview_lines.push(format!("From: {}", from));
+                preview_lines.push(format!("{green}From:{reset} {}", from));
             }
         }
-        preview_lines.push(format!("Subject: {}", subject));
+        preview_lines.push(format!("{yellow}Subject:{reset} {}", subject));
         if dir_type == DirType::Inbox || dir_type == DirType::Archive {
-            preview_lines.push(format!("Date: {}", get_str("date")));
+            preview_lines.push(format!("{magenta}Date:{reset} {}", get_str("date")));
         }
-        preview_lines.push(format!("Status: {}", status));
+        preview_lines.push(format!("{teal}Status:{reset} {}", status));
         preview_lines.push(String::new());
-        preview_lines.push("─".repeat(60));
+        preview_lines.push(format!("{dim}{}{reset}", "─".repeat(60)));
         preview_lines.push(String::new());
 
         let body = parsed.content.trim().to_string();
@@ -1999,17 +2058,51 @@ fn next_dir_type(current: DirType) -> DirType {
     }
 }
 
-fn build_browse_header(dir_type: DirType, count: usize) -> String {
-    let actions = match dir_type {
-        DirType::Inbox => "⏎:open ^y:reply ^o:reply-all ^s:archive ^d:delete",
-        DirType::Drafts => "⏎:open ^g:approve ^x:send ^d:delete",
-        DirType::Sent => "⏎:open ^d:delete",
-        DirType::Archive => "⏎:open ^d:delete",
-    };
-    format!(
-        "[{}] {} emails | {} | tab:next mailbox ^r:refresh | esc:quit",
-        dir_type, count, actions
-    )
+fn build_browse_header(dir_type: DirType, count: usize) -> Vec<Arc<dyn SkimItem>> {
+    // Catppuccin Mocha palette
+    let mauve = Attr { fg: Color::Rgb(203, 166, 247), ..Attr::default() };   // #cba6f7 — mailbox title
+    let peach = Attr { fg: Color::Rgb(250, 179, 135), ..Attr::default() };    // #fab387 — mailbox-specific keys
+    let teal = Attr { fg: Color::Rgb(148, 226, 213), ..Attr::default() };     // #94e2d5 — global keys
+    let subtext = Attr { fg: Color::Rgb(166, 173, 200), ..Attr::default() };  // #a6adc8 — labels
+    let overlay = Attr { fg: Color::Rgb(108, 112, 134), ..Attr::default() };  // #6c7086 — separators
+
+    let mut l1 = ColoredLine::new();
+    l1.push(&format!("[{}]", dir_type), mauve);
+    l1.push(&format!(" {} emails", count), subtext);
+
+    match dir_type {
+        DirType::Inbox => {
+            l1.push(" | ", overlay);
+            l1.push("^y", peach).push(":reply  ", subtext);
+            l1.push("^o", peach).push(":reply-all  ", subtext);
+            l1.push("^s", peach).push(":archive", subtext);
+        }
+        DirType::Drafts => {
+            l1.push(" | ", overlay);
+            l1.push("^g", peach).push(":approve  ", subtext);
+            l1.push("^x", peach).push(":send", subtext);
+        }
+        _ => {}
+    }
+
+    let mut l2 = ColoredLine::new();
+    l2.push("⏎", teal).push(":open  ", subtext);
+    l2.push("tab", teal).push(":next  ", subtext);
+    l2.push("^r", teal).push(":refresh  ", subtext);
+    l2.push("^d", teal).push(":delete  ", subtext);
+    l2.push("^p", teal).push(":copy-path  ", subtext);
+    l2.push("esc", teal).push(":quit", subtext);
+
+    vec![
+        Arc::new(HeaderSkimItem {
+            stripped: l1.text.clone(),
+            ansi: l1.into_ansi_string(),
+        }),
+        Arc::new(HeaderSkimItem {
+            stripped: l2.text.clone(),
+            ansi: l2.into_ansi_string(),
+        }),
+    ]
 }
 
 fn refresh_inbox() -> Result<()> {
@@ -2155,13 +2248,15 @@ fn browse_emails(starting_view: &str) -> Result<()> {
         let items = build_browse_items(&dir, current_dir_type);
 
         let count = items.len();
-        let header = build_browse_header(current_dir_type, count);
+        let header_items = build_browse_header(current_dir_type, count);
+        let num_header_lines = header_items.len();
 
         let mut bindings: Vec<String> = vec![
             "esc:abort".to_string(),
             "tab:accept".to_string(),
             "ctrl-r:accept".to_string(),
             "ctrl-d:accept".to_string(),
+            "ctrl-p:accept".to_string(),
         ];
 
         match current_dir_type {
@@ -2185,14 +2280,15 @@ fn browse_emails(starting_view: &str) -> Result<()> {
         }
 
         let options = SkimOptionsBuilder::default()
+            .ansi(true)
             .height(String::from("100%"))
             .multi(false)
             .preview(Some(String::new()))
             .preview_window(String::from("right:50%"))
-            .header(Some(header.clone()))
+            .header_lines(num_header_lines)
             .bind(bindings)
             .color(Some(String::from(
-                "fg:#cdd6f4,bg:#1e1e2e,hl:#cba6f7,fg+:#b4befe,bg+:#313244,hl+:#fab387,\
+                "fg:#cdd6f4,bg:#1e1e2e,hl:#cba6f7,fg+:#a6e3a1,bg+:#313244,hl+:#fab387,\
                  query:#cdd6f4,prompt:#cba6f7,pointer:#f5e0dc,marker:#f5e0dc,\
                  header:#a6adc8,border:#585b70,info:#bac2de,spinner:#cba6f7"
             )))
@@ -2200,6 +2296,9 @@ fn browse_emails(starting_view: &str) -> Result<()> {
             .map_err(|e| anyhow!("Failed to build skim options: {}", e))?;
 
         let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
+        for item in header_items {
+            let _ = tx.send(item);
+        }
         for item in items {
             let _ = tx.send(item);
         }
@@ -2238,6 +2337,13 @@ fn browse_emails(starting_view: &str) -> Result<()> {
                                     std::thread::sleep(std::time::Duration::from_secs(2));
                                 }
                             }
+                        }
+                        continue;
+                    }
+                    Key::Ctrl('p') => {
+                        if let Some(selected) = out.selected_items.first() {
+                            let file_path = selected.output().to_string();
+                            let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&file_path));
                         }
                         continue;
                     }
