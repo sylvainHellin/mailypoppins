@@ -4,15 +4,18 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use gray_matter::{engine::YAML, Matter};
 use lettre::{
+    address::Envelope,
     message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
+use log::{debug, error, info, warn};
 use mailparse::{parse_mail, MailHeaderMap};
 use pulldown_cmark::{html, Options, Parser as MdParser};
+use simplelog::{CombinedLogger, Config as LogConfig, LevelFilter, WriteLogger};
 use skim::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -297,6 +300,107 @@ struct FetchedEmail {
     message_id: Option<String>,
 }
 
+/// Initialize file-based logging to ~/.email-cli/logs/email-cli-YYYY-MM-DD.log.
+/// Non-fatal: prints a warning and continues if setup fails.
+fn init_logging() {
+    let log_dir = dirs_next().join("logs");
+    if let Err(e) = fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "{} Could not create log directory {}: {}",
+            "⚠".yellow(),
+            log_dir.display(),
+            e
+        );
+        return;
+    }
+
+    let filename = format!("email-cli-{}.log", Utc::now().format("%Y-%m-%d"));
+    let log_path = log_dir.join(filename);
+
+    let log_file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "{} Could not open log file {}: {}",
+                "⚠".yellow(),
+                log_path.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    if let Err(e) = CombinedLogger::init(vec![WriteLogger::new(
+        LevelFilter::Debug,
+        LogConfig::default(),
+        log_file,
+    )]) {
+        eprintln!("{} Could not initialize logger: {}", "⚠".yellow(), e);
+    }
+}
+
+/// Return the base directory for email-cli data: ~/.email-cli
+fn dirs_next() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".email-cli")
+}
+
+// ---------------------------------------------------------------------------
+// Per-recipient sending types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RecipientRole {
+    To,
+    Cc,
+    Bcc,
+}
+
+impl std::fmt::Display for RecipientRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecipientRole::To => write!(f, "To"),
+            RecipientRole::Cc => write!(f, "Cc"),
+            RecipientRole::Bcc => write!(f, "Bcc"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RecipientResult {
+    address: String,
+    role: RecipientRole,
+    success: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct SendResult {
+    results: Vec<RecipientResult>,
+}
+
+impl SendResult {
+    fn all_succeeded(&self) -> bool {
+        self.results.iter().all(|r| r.success)
+    }
+
+    fn any_succeeded(&self) -> bool {
+        self.results.iter().any(|r| r.success)
+    }
+
+    fn succeeded(&self) -> Vec<&RecipientResult> {
+        self.results.iter().filter(|r| r.success).collect()
+    }
+
+    fn failed(&self) -> Vec<&RecipientResult> {
+        self.results.iter().filter(|r| !r.success).collect()
+    }
+}
+
 fn build_imap_search_query(criteria: &FetchCriteria) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -418,6 +522,7 @@ fn fetch_emails(
     mailbox: &str,
     limit: usize,
 ) -> Result<Vec<FetchedEmail>> {
+    info!("Fetching emails from mailbox '{}' (limit: {})", mailbox, limit);
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
         (imap_config.host.as_str(), imap_config.port),
@@ -1048,6 +1153,7 @@ fn load_email_config(path_hint: Option<&Path>) -> EmailConfig {
         if location.exists() {
             if let Ok(content) = fs::read_to_string(&location) {
                 if let Ok(mut config) = toml::from_str::<EmailConfig>(&content) {
+                    debug!("Loaded config from {}", location.display());
                     // Resolve relative signature paths to absolute
                     let config_dir = location.parent().unwrap_or(Path::new("."));
                     for entry in config.signatures.entries.values_mut() {
@@ -1061,6 +1167,7 @@ fn load_email_config(path_hint: Option<&Path>) -> EmailConfig {
         }
     }
 
+    debug!("No config.toml found, using defaults");
     EmailConfig::default()
 }
 
@@ -1354,7 +1461,7 @@ async fn send_email(
     smtp_config: &SmtpConfig,
     email_config: &EmailConfig,
     signature: Option<&str>,
-) -> Result<()> {
+) -> Result<SendResult> {
     // Check status
     if draft.frontmatter.status != EmailStatus::Approved {
         return Err(anyhow!(
@@ -1373,36 +1480,71 @@ async fn send_email(
         .parse()
         .context("Invalid 'from' email address")?;
 
-    // Build the message
-    let mut builder = Message::builder()
-        .from(from_mailbox)
-        .subject(&draft.frontmatter.subject);
+    info!(
+        "Sending email: subject=\"{}\", from={}",
+        draft.frontmatter.subject, from_address
+    );
 
-    // Add To recipients
+    // Collect all recipients with roles, deduplicating by address
+    let mut seen = HashSet::new();
+    let mut recipients: Vec<(String, RecipientRole)> = Vec::new();
+
     for to in draft.frontmatter.to.split(',') {
-        let to_mailbox: Mailbox = to.trim().parse().context("Invalid 'to' email address")?;
-        builder = builder.to(to_mailbox);
+        let addr = to.trim().to_string();
+        if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+            recipients.push((addr, RecipientRole::To));
+        }
     }
-
-    // Add Cc recipients
     if let Some(cc) = &draft.frontmatter.cc {
         for cc_addr in cc.split(',') {
-            let cc_mailbox: Mailbox = cc_addr
-                .trim()
-                .parse()
-                .context("Invalid 'cc' email address")?;
-            builder = builder.cc(cc_mailbox);
+            let addr = cc_addr.trim().to_string();
+            if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+                recipients.push((addr, RecipientRole::Cc));
+            }
+        }
+    }
+    if let Some(bcc) = &draft.frontmatter.bcc {
+        for bcc_addr in bcc.split(',') {
+            let addr = bcc_addr.trim().to_string();
+            if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+                recipients.push((addr, RecipientRole::Bcc));
+            }
         }
     }
 
-    // Add Bcc recipients
-    if let Some(bcc) = &draft.frontmatter.bcc {
-        for bcc_addr in bcc.split(',') {
-            let bcc_mailbox: Mailbox = bcc_addr
-                .trim()
-                .parse()
-                .context("Invalid 'bcc' email address")?;
-            builder = builder.bcc(bcc_mailbox);
+    if recipients.is_empty() {
+        return Err(anyhow!("No recipients specified"));
+    }
+
+    debug!(
+        "Recipients ({}): {:?}",
+        recipients.len(),
+        recipients
+            .iter()
+            .map(|(a, r)| format!("{}({})", a, r))
+            .collect::<Vec<_>>()
+    );
+
+    // Build the message with visible To/Cc headers (Bcc omitted from headers by lettre)
+    let mut builder = Message::builder()
+        .from(from_mailbox.clone())
+        .subject(&draft.frontmatter.subject);
+
+    // Add To recipients to headers
+    for (addr, role) in &recipients {
+        match role {
+            RecipientRole::To => {
+                let mbox: Mailbox = addr.parse().context("Invalid 'to' email address")?;
+                builder = builder.to(mbox);
+            }
+            RecipientRole::Cc => {
+                let mbox: Mailbox = addr.parse().context("Invalid 'cc' email address")?;
+                builder = builder.cc(mbox);
+            }
+            RecipientRole::Bcc => {
+                let mbox: Mailbox = addr.parse().context("Invalid 'bcc' email address")?;
+                builder = builder.bcc(mbox);
+            }
         }
     }
 
@@ -1433,7 +1575,6 @@ async fn send_email(
     // Build message with or without attachments
     let message = if let Some(attachments) = &draft.frontmatter.attachments {
         if !attachments.is_empty() {
-            // Wrap body in mixed multipart and add attachments
             let mut mixed = MultiPart::mixed().multipart(body_multipart);
 
             for attachment_path in attachments {
@@ -1464,6 +1605,15 @@ async fn send_email(
         builder.multipart(body_multipart).context("Failed to build email message")?
     };
 
+    // Get raw message bytes for send_raw
+    let raw_message = message.formatted();
+
+    // Parse from address for envelope
+    let from_addr: lettre::Address = from_address
+        .parse::<Mailbox>()
+        .context("Invalid 'from' address")?
+        .email;
+
     // Create SMTP transport
     let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
 
@@ -1473,13 +1623,68 @@ async fn send_email(
             .credentials(creds)
             .build();
 
-    // Send the email
-    mailer.send(message).await.context("Failed to send email")?;
+    // Send to each recipient individually
+    let mut results = Vec::with_capacity(recipients.len());
 
-    Ok(())
+    for (addr, role) in &recipients {
+        let rcpt_addr: lettre::Address = match addr.parse::<Mailbox>() {
+            Ok(mbox) => mbox.email,
+            Err(e) => {
+                let err_msg = format!("Invalid address '{}': {}", addr, e);
+                error!("{}", err_msg);
+                results.push(RecipientResult {
+                    address: addr.clone(),
+                    role: *role,
+                    success: false,
+                    error: Some(err_msg),
+                });
+                continue;
+            }
+        };
+
+        let envelope = match Envelope::new(Some(from_addr.clone()), vec![rcpt_addr]) {
+            Ok(env) => env,
+            Err(e) => {
+                let err_msg = format!("Failed to create envelope for '{}': {}", addr, e);
+                error!("{}", err_msg);
+                results.push(RecipientResult {
+                    address: addr.clone(),
+                    role: *role,
+                    success: false,
+                    error: Some(err_msg),
+                });
+                continue;
+            }
+        };
+
+        match mailer.send_raw(&envelope, &raw_message).await {
+            Ok(_) => {
+                info!("Sent to {} ({})", addr, role);
+                results.push(RecipientResult {
+                    address: addr.clone(),
+                    role: *role,
+                    success: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let err_msg = format!("{}", e);
+                error!("Failed to send to {} ({}): {}", addr, role, err_msg);
+                results.push(RecipientResult {
+                    address: addr.clone(),
+                    role: *role,
+                    success: false,
+                    error: Some(err_msg),
+                });
+            }
+        }
+    }
+
+    Ok(SendResult { results })
 }
 
 fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>) -> Result<()> {
+    info!("Updating status to sent: {}", draft.path.display());
     let mut frontmatter = draft.frontmatter.clone();
     frontmatter.status = EmailStatus::Sent;
     frontmatter.sent_at = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
@@ -1837,6 +2042,7 @@ fn refresh_inbox() -> Result<()> {
 }
 
 fn archive_email_on_server(message_id: &str) -> Result<()> {
+    info!("Archiving email on server: Message-ID={}", message_id);
     let imap_config = ImapConfig::from_env(None)?;
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
@@ -1887,6 +2093,7 @@ fn archive_email_on_server(message_id: &str) -> Result<()> {
 }
 
 fn archive_email_locally(file_path: &Path) -> Result<()> {
+    info!("Archiving email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
@@ -2132,7 +2339,10 @@ fn browse_emails(starting_view: &str) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
     let cli = Cli::parse();
+
+    info!("email-cli started: {:?}", std::env::args().collect::<Vec<_>>());
 
     // Determine a path hint for finding .env file
     let path_hint: Option<PathBuf> = match &cli.command {
@@ -2204,20 +2414,62 @@ async fn main() -> Result<()> {
             }
 
             println!("Sending email...");
-            send_email(
+            let send_result = send_email(
                 &draft,
                 &smtp_config,
                 &email_config,
                 signature_content.as_deref(),
             )
             .await?;
-            update_status_to_sent(&draft, sent_dir.as_deref())?;
 
-            println!(
-                "{} Email sent successfully to {}",
-                "✓".green().bold(),
-                draft.frontmatter.to
-            );
+            // Display per-recipient results
+            for r in &send_result.succeeded() {
+                println!(
+                    "  {} {} ({})",
+                    "✓".green(),
+                    r.address,
+                    r.role
+                );
+            }
+            for r in &send_result.failed() {
+                println!(
+                    "  {} {} ({}): {}",
+                    "✗".red(),
+                    r.address,
+                    r.role,
+                    r.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+
+            if send_result.all_succeeded() {
+                update_status_to_sent(&draft, sent_dir.as_deref())?;
+                info!("Email marked as sent: {}", draft.path.display());
+                println!(
+                    "{} Email sent successfully to all {} recipient(s)",
+                    "✓".green().bold(),
+                    send_result.results.len()
+                );
+            } else if send_result.any_succeeded() {
+                update_status_to_sent(&draft, sent_dir.as_deref())?;
+                warn!(
+                    "Partial send: {} succeeded, {} failed for {}",
+                    send_result.succeeded().len(),
+                    send_result.failed().len(),
+                    draft.path.display()
+                );
+                println!(
+                    "{} Partial send: {} succeeded, {} failed (marked as sent — see logs for details)",
+                    "⚠".yellow().bold(),
+                    send_result.succeeded().len().to_string().green(),
+                    send_result.failed().len().to_string().red()
+                );
+            } else {
+                error!("All recipients failed for {}", draft.path.display());
+                return Err(anyhow!(
+                    "Failed to send to all {} recipient(s)",
+                    send_result.results.len()
+                ));
+            }
         }
 
         Some(Commands::SendApproved { dir }) => {
@@ -2262,16 +2514,53 @@ async fn main() -> Result<()> {
                 )
                 .await
                 {
-                    Ok(()) => {
-                        if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref()) {
-                            println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
+                    Ok(send_result) => {
+                        if send_result.all_succeeded() {
+                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref()) {
+                                println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
+                            } else {
+                                println!("{}", "✓".green());
+                            }
+                            sent_count += 1;
+                        } else if send_result.any_succeeded() {
+                            // Partial success — mark as sent, warn about failures
+                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref()) {
+                                println!("{} (partial send, failed to update status: {})", "⚠".yellow(), e);
+                            } else {
+                                println!(
+                                    "{} (partial: {}/{} recipients)",
+                                    "⚠".yellow(),
+                                    send_result.succeeded().len(),
+                                    send_result.results.len()
+                                );
+                            }
+                            for r in &send_result.failed() {
+                                warn!(
+                                    "Failed recipient {} ({}) for {}: {}",
+                                    r.address,
+                                    r.role,
+                                    draft.path.display(),
+                                    r.error.as_deref().unwrap_or("unknown")
+                                );
+                            }
+                            sent_count += 1;
                         } else {
-                            println!("{}", "✓".green());
+                            println!("{} all recipients failed", "✗".red());
+                            for r in &send_result.failed() {
+                                error!(
+                                    "Failed recipient {} ({}) for {}: {}",
+                                    r.address,
+                                    r.role,
+                                    draft.path.display(),
+                                    r.error.as_deref().unwrap_or("unknown")
+                                );
+                            }
+                            failed_count += 1;
                         }
-                        sent_count += 1;
                     }
                     Err(e) => {
                         println!("{} {}", "✗".red(), e);
+                        error!("Fatal send error for {}: {}", draft.path.display(), e);
                         failed_count += 1;
                     }
                 }
@@ -2403,7 +2692,8 @@ async fn main() -> Result<()> {
             } else {
                 format!("{}.md", name)
             };
-            let path = PathBuf::from(&file_name);
+            let drafts_dir = resolve_drafts_dir(Path::new("."));
+            let path = drafts_dir.join(&file_name);
 
             // Check if file already exists
             if path.exists() {

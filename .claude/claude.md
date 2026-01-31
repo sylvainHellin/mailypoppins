@@ -17,6 +17,7 @@ CLI tool for managing email drafts written in Markdown with YAML frontmatter. Su
 - **Terminal output:** `colored`
 - **Async runtime:** `tokio`
 - **Error handling:** `anyhow`
+- **Logging:** `log` + `simplelog` (file-based, daily rotation)
 
 ## Architecture
 
@@ -44,6 +45,25 @@ Single-file project: all code lives in `src/main.rs`.
 - **`.env`** — SMTP/IMAP credentials, directory paths (`DRAFTS_DIR`, `SENT_DIR`, `INBOX_DIR`, `ARCHIVE_DIR`). Gitignored.
 - **`DRAFTS_DIR` resolution** — `list`, `send-approved`, and `reply` auto-resolve the drafts directory via `resolve_drafts_dir`: explicit CLI arg → `DRAFTS_DIR` env var → `"."` fallback.
 - **`config.toml`** — Email formatting (font family/size), signature definitions. Searched up to 3 parent directories.
+
+## Logging
+
+Logs are written to `~/.email-cli/logs/email-cli-YYYY-MM-DD.log` (append mode, one file per day). Logging is initialized at startup via `init_logging()` and is non-fatal — if the log directory or file can't be created, a warning is printed and execution continues.
+
+**Log levels used:**
+- `INFO`: Command invoked, email sending started, per-recipient success, IMAP operations, archive operations
+- `WARN`: Partial send failures, missing config fallbacks
+- `ERROR`: SMTP failures (per recipient), IMAP connection failures, invalid addresses
+- `DEBUG`: Config paths, recipient list details
+
+## Per-Recipient Sending
+
+`send_email` sends to each recipient individually via `send_raw` with single-recipient envelopes, while preserving visible To/Cc headers for all recipients. This provides per-recipient success/failure tracking. Recipients are deduplicated by address. Return type is `SendResult` containing `Vec<RecipientResult>` (address, role, success, error).
+
+**Caller behavior:**
+- **All succeeded** → mark as sent
+- **Partial success** → mark as sent + warn (re-sending would duplicate to successful recipients; log file provides audit trail)
+- **All failed** → return error, do not mark as sent
 
 ## Email Draft Format
 
