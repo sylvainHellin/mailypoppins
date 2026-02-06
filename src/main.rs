@@ -1965,8 +1965,8 @@ fn build_browse_items(dir: &Path, dir_type: DirType) -> Vec<Arc<dyn SkimItem>> {
         let display_text = format!(
             "{}  {:<30}  {:<40}  [{}]",
             date_display,
-            if contact.len() > 30 { &contact[..30] } else { &contact },
-            if subject.len() > 40 { &subject[..40] } else { &subject },
+            if contact.len() > 30 { let mut i = 30; while !contact.is_char_boundary(i) { i -= 1; } &contact[..i] } else { &contact },
+            if subject.len() > 40 { let mut i = 40; while !subject.is_char_boundary(i) { i -= 1; } &subject[..i] } else { &subject },
             status
         );
 
