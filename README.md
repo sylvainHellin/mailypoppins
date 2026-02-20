@@ -32,7 +32,7 @@ ARCHIVE_DIR="~/path/to/email/archive" # Optional: where to move archived emails
 
 ### IMAP Configuration (`.env`)
 
-For the `fetch` command, add IMAP settings:
+For the `fetch`, `sync`, and `watch` commands, add IMAP settings:
 
 ```bash
 IMAP_HOST=xmail.mwn.de          # Required
@@ -257,6 +257,31 @@ Replaces local `.md` files in inbox and archive directories with fresh copies fr
 | `--mailbox <name>...` | Mailboxes to sync (default: INBOX, Archive) |
 
 Requires `INBOX_DIR` and/or `ARCHIVE_DIR` set in `.env` for the corresponding mailboxes.
+
+### Watch Mailbox (IMAP IDLE)
+
+```bash
+email watch                          # Watch INBOX, block until change
+email watch --timeout 300            # Watch with 5-minute timeout
+email watch --mailbox Archive        # Watch a different mailbox
+```
+
+Uses IMAP IDLE (RFC 2177) to block until the mailbox changes, then exits. Designed for integration with external tools (TUI apps, scripts, notification daemons) that need real-time mailbox change detection without polling.
+
+| Option | Description |
+|--------|-------------|
+| `--mailbox <name>` | Mailbox to watch (default: INBOX) |
+| `--timeout <seconds>` | Timeout in seconds |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Mailbox changed (new/deleted/flagged messages) |
+| `1` | Error (connection failed, auth failed, etc.) |
+| `2` | Timed out (only when `--timeout` is set) |
+
+Requires IMAP configuration in `.env` (see above).
 
 ### Create New Draft
 

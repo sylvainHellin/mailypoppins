@@ -192,6 +192,15 @@ enum Commands {
         #[arg(default_value = "inbox")]
         view: String,
     },
+    /// Watch a mailbox for changes using IMAP IDLE
+    Watch {
+        /// Mailbox to watch (default: INBOX)
+        #[arg(long, default_value = "INBOX")]
+        mailbox: String,
+        /// Timeout in seconds (exits with code 2 on timeout)
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -631,6 +640,61 @@ fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
 
     session.logout().ok();
     Ok(names)
+}
+
+fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
+    use imap::extensions::idle::WaitOutcome;
+
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    session
+        .select(mailbox)
+        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+
+    info!("Watching mailbox '{}' for changes (IMAP IDLE)", mailbox);
+    println!("Watching {} for changes...", mailbox);
+
+    let exit_code = match timeout {
+        None => {
+            // No timeout: block until mailbox changes, with automatic keepalive
+            session.idle()?.wait_keepalive()?;
+            0 // mailbox changed
+        }
+        Some(timeout_secs) => {
+            let total_timeout = std::time::Duration::from_secs(timeout_secs);
+            let idle_interval = std::time::Duration::from_secs(29.min(timeout_secs));
+            let start = std::time::Instant::now();
+
+            loop {
+                let remaining = total_timeout.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    break 2; // timed out
+                }
+
+                let wait_duration = idle_interval.min(remaining);
+                let outcome = session.idle()?.wait_with_timeout(wait_duration)?;
+
+                match outcome {
+                    WaitOutcome::MailboxChanged => break 0,
+                    WaitOutcome::TimedOut => continue, // re-idle for keepalive
+                }
+            }
+        }
+    };
+
+    session.logout().ok();
+
+    Ok(exit_code)
 }
 
 fn slugify_subject(subject: &str) -> String {
@@ -2463,6 +2527,7 @@ async fn main() -> Result<()> {
         Some(Commands::Fetch { .. }) => None,
         Some(Commands::Sync { .. }) => None,
         Some(Commands::Browse { .. }) => None,
+        Some(Commands::Watch { .. }) => None,
         None => cli.file.clone(),
     };
 
@@ -2999,6 +3064,24 @@ attachments: []
 
         Some(Commands::Browse { view }) => {
             browse_emails(&view)?;
+        }
+
+        Some(Commands::Watch { mailbox, timeout }) => {
+            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let exit_code = tokio::task::spawn_blocking(move || {
+                watch_mailbox(&imap_config, &mailbox, timeout)
+            })
+            .await??;
+
+            match exit_code {
+                0 => println!("{} Mailbox changed.", "✓".green()),
+                2 => println!("{} Timed out.", "ℹ".blue()),
+                _ => {}
+            }
+
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
 
         None => {
