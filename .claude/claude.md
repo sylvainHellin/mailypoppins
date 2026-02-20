@@ -40,6 +40,7 @@ Single-file project: all code lives in `src/main.rs`.
 | `email fetch [filters]` | Fetch emails via IMAP |
 | `email sync [--limit N] [--mailbox ...]` | Sync local mailbox folders with IMAP server |
 | `email browse [--view]` | Interactive fuzzy-finder email browser |
+| `email watch [--mailbox] [--timeout]` | Watch mailbox for changes via IMAP IDLE |
 
 ## Configuration
 
