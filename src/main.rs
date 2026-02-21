@@ -106,12 +106,18 @@ enum Commands {
     Send {
         /// Path to the email draft file
         file: PathBuf,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Send all approved emails in a directory
     SendApproved {
         /// Directory containing email drafts
         #[arg(default_value = ".")]
         dir: PathBuf,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// List emails by status
     List {
@@ -200,6 +206,11 @@ enum Commands {
         /// Timeout in seconds (exits with code 2 on timeout)
         #[arg(long)]
         timeout: Option<u64>,
+    },
+    /// Archive an inbox email (server + local)
+    Archive {
+        /// Path to the inbox email file
+        file: PathBuf,
     },
 }
 
@@ -2516,8 +2527,8 @@ async fn main() -> Result<()> {
 
     // Determine a path hint for finding .env file
     let path_hint: Option<PathBuf> = match &cli.command {
-        Some(Commands::Send { file }) => Some(file.clone()),
-        Some(Commands::SendApproved { dir }) => Some(dir.clone()),
+        Some(Commands::Send { file, .. }) => Some(file.clone()),
+        Some(Commands::SendApproved { dir, .. }) => Some(dir.clone()),
         Some(Commands::List { dir }) => Some(dir.clone()),
         Some(Commands::Validate { path }) => Some(path.clone()),
         Some(Commands::MarkApproved { file }) => Some(file.clone()),
@@ -2528,6 +2539,7 @@ async fn main() -> Result<()> {
         Some(Commands::Sync { .. }) => None,
         Some(Commands::Browse { .. }) => None,
         Some(Commands::Watch { .. }) => None,
+        Some(Commands::Archive { file }) => Some(file.clone()),
         None => cli.file.clone(),
     };
 
@@ -2567,7 +2579,7 @@ async fn main() -> Result<()> {
     });
 
     match cli.command {
-        Some(Commands::Send { file }) => {
+        Some(Commands::Send { file, yes }) => {
             let draft = parse_email_draft(&file)?;
             validate_draft(&draft)?;
 
@@ -2579,7 +2591,7 @@ async fn main() -> Result<()> {
                 false,
             )?;
 
-            if !prompt_confirmation("Send this email?") {
+            if !yes && !prompt_confirmation("Send this email?") {
                 println!("Cancelled.");
                 return Ok(());
             }
@@ -2643,7 +2655,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::SendApproved { dir }) => {
+        Some(Commands::SendApproved { dir, yes }) => {
             let dir = resolve_drafts_dir(&dir);
             let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
 
@@ -2665,7 +2677,7 @@ async fn main() -> Result<()> {
                 );
             }
 
-            if !prompt_confirmation(&format!("\nSend all {} emails?", drafts.len())) {
+            if !yes && !prompt_confirmation(&format!("\nSend all {} emails?", drafts.len())) {
                 println!("Cancelled.");
                 return Ok(());
             }
@@ -3081,6 +3093,27 @@ attachments: []
 
             if exit_code != 0 {
                 std::process::exit(exit_code);
+            }
+        }
+
+        Some(Commands::Archive { file }) => {
+            match archive_email_locally(&file) {
+                Ok(()) => {
+                    println!(
+                        "{} Archived: {}",
+                        "✓".green(),
+                        file.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to archive {}: {}",
+                        "✗".red(),
+                        file.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
             }
         }
 
