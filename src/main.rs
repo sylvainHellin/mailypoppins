@@ -322,6 +322,7 @@ struct FetchedEmail {
     subject: String,
     date: String,
     body_text: String,
+    html_body: Option<String>,
     has_attachments: bool,
     message_id: Option<String>,
 }
@@ -494,39 +495,53 @@ fn html_to_plain(html: &str) -> String {
     html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string())
 }
 
-fn extract_body_text(parsed: &mailparse::ParsedMail) -> String {
-    // If this part is text/plain, return it
+/// Recursively collect the first text/plain and text/html parts from a parsed email.
+fn extract_body_parts(parsed: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
     if parsed.ctype.mimetype == "text/plain" {
-        return parsed.get_body().unwrap_or_default();
-    }
-
-    // Search subparts for text/plain first, then text/html
-    let mut html_body = None;
-    for sub in &parsed.subparts {
-        let result = extract_body_text(sub);
-        if !result.is_empty() {
-            if sub.ctype.mimetype == "text/plain"
-                || (sub.ctype.mimetype.starts_with("multipart/") && !result.is_empty())
-            {
-                return result;
-            }
-            if sub.ctype.mimetype == "text/html" {
-                html_body = Some(result);
-            }
+        let body = parsed.get_body().unwrap_or_default();
+        if !body.is_empty() {
+            return (Some(body), None);
         }
     }
 
-    // Fall back to HTML body if no plain text found
-    if let Some(html) = html_body {
-        return html_to_plain(&html);
-    }
-
-    // If this is text/html at top level
     if parsed.ctype.mimetype == "text/html" {
-        return html_to_plain(&parsed.get_body().unwrap_or_default());
+        let body = parsed.get_body().unwrap_or_default();
+        if !body.is_empty() {
+            return (None, Some(body));
+        }
     }
 
-    String::new()
+    let mut plain = None;
+    let mut html = None;
+
+    for sub in &parsed.subparts {
+        let (sub_plain, sub_html) = extract_body_parts(sub);
+        if plain.is_none() {
+            plain = sub_plain;
+        }
+        if html.is_none() {
+            html = sub_html;
+        }
+        if plain.is_some() && html.is_some() {
+            break;
+        }
+    }
+
+    (plain, html)
+}
+
+/// Extract body text from a parsed email.
+/// Returns (plain_text, Option<html_body>).
+fn extract_body_text(parsed: &mailparse::ParsedMail) -> (String, Option<String>) {
+    let (plain, html) = extract_body_parts(parsed);
+
+    if let Some(plain_text) = plain {
+        (plain_text, html)
+    } else if let Some(ref html_text) = html {
+        (html_to_plain(html_text), html)
+    } else {
+        (String::new(), None)
+    }
 }
 
 fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
@@ -616,7 +631,7 @@ fn fetch_emails(
 
         let message_id = headers.get_first_value("Message-ID")
             .or_else(|| headers.get_first_value("Message-Id"));
-        let body_text = extract_body_text(&parsed);
+        let (body_text, html_body) = extract_body_text(&parsed);
         let attachments = has_attachments(&parsed);
 
         emails.push(FetchedEmail {
@@ -626,6 +641,7 @@ fn fetch_emails(
             subject,
             date,
             body_text,
+            html_body,
             has_attachments: attachments,
             message_id,
         });
@@ -998,6 +1014,25 @@ fn create_reply_draft(
     }
 
     fs::write(&dest, full_content)?;
+
+    // Copy and wrap companion HTML for the draft if the original has one
+    let source_html = source_path.with_extension("html");
+    if source_html.exists() {
+        if let Ok(html_content) = fs::read_to_string(&source_html) {
+            let wrapped = format!(
+                "<p style=\"color:#666\">On {}, {} wrote:</p>\n\
+                 <div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">\n\
+                 {}\n\
+                 </div>",
+                inbox.date.as_deref().unwrap_or("(unknown date)"),
+                inbox.from,
+                html_content,
+            );
+            let draft_html = dest.with_extension("html");
+            fs::write(&draft_html, wrapped)?;
+        }
+    }
+
     Ok(dest)
 }
 
@@ -1106,6 +1141,12 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) 
         let content = format!("{}{}", frontmatter, email.body_text);
         fs::write(&dest, content)?;
 
+        // Save companion HTML file if available
+        if let Some(ref html) = email.html_body {
+            let html_path = dest.with_extension("html");
+            fs::write(&html_path, html)?;
+        }
+
         // Track the new message_id to prevent duplicates within the same batch
         if let Some(ref mid) = email.message_id {
             existing_ids.insert(mid.clone());
@@ -1123,6 +1164,11 @@ fn delete_md_files(dir: &Path) -> Result<usize> {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            // Also remove companion HTML file
+            let html_companion = path.with_extension("html");
+            if html_companion.exists() {
+                fs::remove_file(&html_companion)?;
+            }
             fs::remove_file(&path)?;
             count += 1;
         }
@@ -1333,7 +1379,12 @@ impl SmtpConfig {
     }
 }
 
-fn markdown_to_html(markdown: &str, config: &EmailConfig, signature: Option<&str>) -> String {
+fn markdown_to_html(
+    markdown: &str,
+    config: &EmailConfig,
+    signature: Option<&str>,
+    quoted_html: Option<&str>,
+) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
@@ -1358,17 +1409,28 @@ fn markdown_to_html(markdown: &str, config: &EmailConfig, signature: Option<&str
         };
         let parts: Vec<&str> = html_output.splitn(2, marker).collect();
         let reply_part = parts[0];
-        let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
-        // Replace <blockquote> with styled divs so email clients don't collapse them
-        let quoted_styled = quoted_part
-            .replace("<blockquote>", "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">")
-            .replace("</blockquote>", "</div>");
-        format!(
-            "{}\n{}\n<div style=\"padding-top:1em\">\n{}\n</div>",
-            reply_part.trim_end(),
-            signature_html,
-            quoted_styled.trim_start()
-        )
+
+        if let Some(original_html) = quoted_html {
+            // Use original HTML instead of Markdown-converted blockquotes
+            format!(
+                "{}\n{}\n<div style=\"padding-top:1em\">\n{}\n</div>",
+                reply_part.trim_end(),
+                signature_html,
+                original_html,
+            )
+        } else {
+            // Fallback: convert Markdown blockquotes to styled divs
+            let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
+            let quoted_styled = quoted_part
+                .replace("<blockquote>", "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">")
+                .replace("</blockquote>", "</div>");
+            format!(
+                "{}\n{}\n<div style=\"padding-top:1em\">\n{}\n</div>",
+                reply_part.trim_end(),
+                signature_html,
+                quoted_styled.trim_start()
+            )
+        }
     } else {
         format!("{}\n{}", html_output, signature_html)
     };
@@ -1637,8 +1699,21 @@ async fn send_email(
         builder = builder.reply_to(reply_mailbox);
     }
 
-    // Generate HTML with signature
-    let body_html = markdown_to_html(&draft.body_markdown, email_config, signature);
+    // Load companion HTML for quoted section if available
+    let html_companion_path = draft.path.with_extension("html");
+    let quoted_html = if html_companion_path.exists() {
+        fs::read_to_string(&html_companion_path).ok()
+    } else {
+        None
+    };
+
+    // Generate HTML with signature (and original HTML for quoted section if available)
+    let body_html = markdown_to_html(
+        &draft.body_markdown,
+        email_config,
+        signature,
+        quoted_html.as_deref(),
+    );
 
     // Build the text/html alternative part
     let body_multipart = MultiPart::alternative()
@@ -1793,6 +1868,12 @@ fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>) -> Result<
     // If we moved the file, remove the original
     if sent_dir.is_some() && dest_path != draft.path {
         fs::remove_file(&draft.path)?;
+    }
+
+    // Clean up companion HTML file (not needed in sent/)
+    let html_companion = draft.path.with_extension("html");
+    if html_companion.exists() {
+        fs::remove_file(&html_companion).ok();
     }
 
     Ok(())
@@ -2309,6 +2390,14 @@ fn archive_email_locally(file_path: &Path) -> Result<()> {
     fs::write(&dest, new_content)?;
     fs::remove_file(file_path)?;
 
+    // Move companion HTML file if it exists
+    let html_companion = file_path.with_extension("html");
+    if html_companion.exists() {
+        let html_dest = dest.with_extension("html");
+        fs::copy(&html_companion, &html_dest)?;
+        fs::remove_file(&html_companion)?;
+    }
+
     Ok(())
 }
 
@@ -2382,6 +2471,12 @@ fn delete_email_locally(file_path: &Path) -> Result<()> {
 
     fs::remove_file(file_path)
         .with_context(|| format!("Failed to remove local file: {}", file_path.display()))?;
+
+    // Remove companion HTML file if it exists
+    let html_companion = file_path.with_extension("html");
+    if html_companion.exists() {
+        fs::remove_file(&html_companion).ok();
+    }
 
     Ok(())
 }
@@ -2505,6 +2600,11 @@ fn browse_emails(starting_view: &str) -> Result<()> {
                         if let Some(selected) = out.selected_items.first() {
                             let file_path = selected.output().to_string();
                             let path = Path::new(&file_path);
+                            // Remove companion HTML file if it exists
+                            let html_companion = path.with_extension("html");
+                            if html_companion.exists() {
+                                std::fs::remove_file(&html_companion).ok();
+                            }
                             match std::fs::remove_file(path) {
                                 Ok(()) => {
                                     println!("{} Deleted: {}", "✓".green(), file_path);
