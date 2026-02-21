@@ -212,6 +212,11 @@ enum Commands {
         /// Path to the inbox email file
         file: PathBuf,
     },
+    /// Delete an inbox email (server + local)
+    Delete {
+        /// Path to the inbox email file
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2307,6 +2312,80 @@ fn archive_email_locally(file_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn delete_email_on_server(message_id: &str) -> Result<()> {
+    info!("Deleting email on server: Message-ID={}", message_id);
+    let imap_config = ImapConfig::from_env(None)?;
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    session
+        .select("INBOX")
+        .map_err(|e| anyhow!("Failed to select INBOX: {}", e))?;
+
+    let query = format!("HEADER Message-ID \"{}\"", message_id);
+    let uids = session
+        .uid_search(&query)
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        session.logout().ok();
+        return Err(anyhow!(
+            "Email with Message-ID {} not found in INBOX on server",
+            message_id
+        ));
+    }
+
+    let uid = *uids.iter().next().unwrap();
+    let uid_str = uid.to_string();
+
+    session
+        .uid_store(&uid_str, "+FLAGS (\\Deleted)")
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+
+    session
+        .expunge()
+        .map_err(|e| anyhow!("Failed to expunge: {}", e))?;
+
+    session.logout().ok();
+    Ok(())
+}
+
+fn delete_email_locally(file_path: &Path) -> Result<()> {
+    info!("Deleting email locally: {}", file_path.display());
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(&content);
+    let inbox_fm: InboxFrontmatter = parsed
+        .data
+        .ok_or_else(|| anyhow!("No frontmatter found in {}", file_path.display()))?
+        .deserialize()
+        .context("Failed to parse frontmatter")?;
+
+    if let Some(ref mid) = inbox_fm.message_id {
+        delete_email_on_server(mid)?;
+    } else {
+        return Err(anyhow!(
+            "No message_id in frontmatter — cannot delete on server"
+        ));
+    }
+
+    fs::remove_file(file_path)
+        .with_context(|| format!("Failed to remove local file: {}", file_path.display()))?;
+
+    Ok(())
+}
+
 fn browse_emails(starting_view: &str) -> Result<()> {
     let _ = dotenvy::dotenv();
     load_env_from_path(None);
@@ -2540,6 +2619,7 @@ async fn main() -> Result<()> {
         Some(Commands::Browse { .. }) => None,
         Some(Commands::Watch { .. }) => None,
         Some(Commands::Archive { file }) => Some(file.clone()),
+        Some(Commands::Delete { file }) => Some(file.clone()),
         None => cli.file.clone(),
     };
 
@@ -3108,6 +3188,23 @@ attachments: []
                 Err(e) => {
                     eprintln!(
                         "{} Failed to archive {}: {}",
+                        "✗".red(),
+                        file.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Some(Commands::Delete { file }) => {
+            match delete_email_locally(&file) {
+                Ok(()) => {
+                    println!("{} Deleted: {}", "✓".green(), file.display());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to delete {}: {}",
                         "✗".red(),
                         file.display(),
                         e
