@@ -260,6 +260,8 @@ struct EmailFrontmatter {
     sent_at: Option<String>,
     #[serde(default)]
     sent_via: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -674,6 +676,30 @@ fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
     Ok(names)
 }
 
+fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8]) -> Result<()> {
+    let sent_mailbox = resolve_sent_mailbox();
+    info!("Appending sent email to IMAP folder '{}'", sent_mailbox);
+
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    session.append_with_flags(&sent_mailbox, raw_message, &[imap::types::Flag::Seen])
+        .map_err(|e| anyhow!("Failed to APPEND to '{}': {}", sent_mailbox, e))?;
+
+    session.logout().ok();
+    info!("Successfully appended to '{}'", sent_mailbox);
+    Ok(())
+}
+
 fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
     use imap::extensions::idle::WaitOutcome;
 
@@ -967,7 +993,6 @@ fn create_reply_draft(
     if let Some(ref cc) = reply_cc {
         fm.push_str(&format!("cc: \"{}\"\n", cc));
     }
-    fm.push_str(&format!("bcc: \"{}\"\n", default_from));
     fm.push_str(&format!(
         "subject: \"{}\"\n",
         reply_subject.replace('"', "\\\"")
@@ -1158,31 +1183,14 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) 
     Ok((saved, skipped))
 }
 
-fn delete_md_files(dir: &Path) -> Result<usize> {
-    let mut count = 0;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            // Also remove companion HTML file
-            let html_companion = path.with_extension("html");
-            if html_companion.exists() {
-                fs::remove_file(&html_companion)?;
-            }
-            fs::remove_file(&path)?;
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
 fn resolve_mailbox_dir(mailbox: &str) -> Result<PathBuf> {
     let env_var = match mailbox {
         "INBOX" => "INBOX_DIR",
         "Archive" => "ARCHIVE_DIR",
+        "Sent" => "SENT_DIR",
         _ => {
             return Err(anyhow!(
-                "Unsupported mailbox '{}'. Supported: INBOX, Archive",
+                "Unsupported mailbox '{}'. Supported: INBOX, Archive, Sent",
                 mailbox
             ))
         }
@@ -1191,6 +1199,11 @@ fn resolve_mailbox_dir(mailbox: &str) -> Result<PathBuf> {
         .with_context(|| format!("{} env var not set (needed for mailbox '{}')", env_var, mailbox))?;
     let expanded = shellexpand::tilde(raw.trim_matches('"').trim_matches('\'')).into_owned();
     Ok(PathBuf::from(expanded))
+}
+
+fn resolve_sent_mailbox() -> String {
+    std::env::var("SENT_MAILBOX")
+        .unwrap_or_else(|_| "Sent".to_string())
 }
 
 fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
@@ -1604,7 +1617,7 @@ async fn send_email(
     smtp_config: &SmtpConfig,
     email_config: &EmailConfig,
     signature: Option<&str>,
-) -> Result<SendResult> {
+) -> Result<(SendResult, Vec<u8>, Option<String>)> {
     // Check status
     if draft.frontmatter.status != EmailStatus::Approved {
         return Err(anyhow!(
@@ -1669,9 +1682,11 @@ async fn send_email(
     );
 
     // Build the message with visible To/Cc headers (Bcc omitted from headers by lettre)
+    // message_id(None) triggers auto-generation of a unique Message-ID header
     let mut builder = Message::builder()
         .from(from_mailbox.clone())
-        .subject(&draft.frontmatter.subject);
+        .subject(&draft.frontmatter.subject)
+        .message_id(None);
 
     // Add To recipients to headers
     for (addr, role) in &recipients {
@@ -1761,8 +1776,17 @@ async fn send_email(
         builder.multipart(body_multipart).context("Failed to build email message")?
     };
 
-    // Get raw message bytes for send_raw
+    // Get raw message bytes for send_raw and IMAP APPEND
     let raw_message = message.formatted();
+
+    // Extract Message-ID from the raw message headers
+    let message_id = mailparse::parse_headers(&raw_message)
+        .ok()
+        .and_then(|(headers, _)| {
+            headers.iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case("Message-ID"))
+                .map(|h| h.get_value().trim().to_string())
+        });
 
     // Parse from address for envelope
     let from_addr: lettre::Address = from_address
@@ -1836,15 +1860,16 @@ async fn send_email(
         }
     }
 
-    Ok(SendResult { results })
+    Ok((SendResult { results }, raw_message, message_id))
 }
 
-fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>) -> Result<()> {
+fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>, message_id: Option<&str>) -> Result<()> {
     info!("Updating status to sent: {}", draft.path.display());
     let mut frontmatter = draft.frontmatter.clone();
     frontmatter.status = EmailStatus::Sent;
     frontmatter.sent_at = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
     frontmatter.sent_via = Some(format!("email-cli v{}", env!("CARGO_PKG_VERSION")));
+    frontmatter.message_id = message_id.map(|s| s.to_string());
 
     // Serialize the updated frontmatter
     let yaml = serde_yaml::to_string(&frontmatter)?;
@@ -2777,7 +2802,7 @@ async fn main() -> Result<()> {
             }
 
             println!("Sending email...");
-            let send_result = send_email(
+            let (send_result, raw_message, message_id) = send_email(
                 &draft,
                 &smtp_config,
                 &email_config,
@@ -2805,23 +2830,47 @@ async fn main() -> Result<()> {
             }
 
             if send_result.all_succeeded() {
-                update_status_to_sent(&draft, sent_dir.as_deref())?;
+                update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref())?;
                 info!("Email marked as sent: {}", draft.path.display());
+
+                // IMAP APPEND to Sent folder (best-effort)
+                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
+                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                        warn!("Failed to append to Sent folder: {}", e);
+                        println!(
+                            "  {} Could not copy to server Sent folder: {}",
+                            "⚠".yellow(), e
+                        );
+                    }
+                }
+
                 println!(
                     "{} Email sent successfully to all {} recipient(s)",
                     "✓".green().bold(),
                     send_result.results.len()
                 );
             } else if send_result.any_succeeded() {
-                update_status_to_sent(&draft, sent_dir.as_deref())?;
+                update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref())?;
                 warn!(
                     "Partial send: {} succeeded, {} failed for {}",
                     send_result.succeeded().len(),
                     send_result.failed().len(),
                     draft.path.display()
                 );
+
+                // IMAP APPEND to Sent folder (best-effort)
+                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
+                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                        warn!("Failed to append to Sent folder: {}", e);
+                        println!(
+                            "  {} Could not copy to server Sent folder: {}",
+                            "⚠".yellow(), e
+                        );
+                    }
+                }
+
                 println!(
-                    "{} Partial send: {} succeeded, {} failed (marked as sent — see logs for details)",
+                    "{} Partial send: {} succeeded, {} failed (marked as sent -- see logs for details)",
                     "⚠".yellow().bold(),
                     send_result.succeeded().len().to_string().green(),
                     send_result.failed().len().to_string().red()
@@ -2877,19 +2926,31 @@ async fn main() -> Result<()> {
                 )
                 .await
                 {
-                    Ok(send_result) => {
+                    Ok((send_result, raw_message, message_id)) => {
                         if send_result.all_succeeded() {
-                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref()) {
+                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref()) {
                                 println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
                             } else {
+                                // IMAP APPEND to Sent folder (best-effort)
+                                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
+                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                                        warn!("Failed to append to Sent folder: {}", e);
+                                    }
+                                }
                                 println!("{}", "✓".green());
                             }
                             sent_count += 1;
                         } else if send_result.any_succeeded() {
-                            // Partial success — mark as sent, warn about failures
-                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref()) {
+                            // Partial success -- mark as sent, warn about failures
+                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref()) {
                                 println!("{} (partial send, failed to update status: {})", "⚠".yellow(), e);
                             } else {
+                                // IMAP APPEND to Sent folder (best-effort)
+                                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
+                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                                        warn!("Failed to append to Sent folder: {}", e);
+                                    }
+                                }
                                 println!(
                                     "{} (partial: {}/{} recipients)",
                                     "⚠".yellow(),
@@ -3200,33 +3261,27 @@ attachments: []
         }
 
         Some(Commands::Sync { limit, mailbox }) => {
-            let mailboxes = mailbox.unwrap_or_else(|| vec!["INBOX".to_string(), "Archive".to_string()]);
+            let mailboxes = mailbox.unwrap_or_else(|| vec!["INBOX".to_string(), "Archive".to_string(), "Sent".to_string()]);
             let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
 
             for mb in &mailboxes {
+                // Resolve IMAP mailbox name (may differ from local name for Sent)
+                let imap_mailbox = if mb == "Sent" {
+                    resolve_sent_mailbox()
+                } else {
+                    mb.clone()
+                };
+
                 let local_dir = resolve_mailbox_dir(mb)?;
                 let status_str = match mb.as_str() {
                     "INBOX" => "inbox",
                     "Archive" => "archived",
+                    "Sent" => "sent",
                     _ => "inbox",
                 };
 
-                // Delete existing .md files
-                if local_dir.exists() {
-                    let deleted = delete_md_files(&local_dir)?;
-                    if deleted > 0 {
-                        println!(
-                            "{} Deleted {} existing file(s) from {}",
-                            "ℹ".blue(),
-                            deleted,
-                            local_dir.display()
-                        );
-                    }
-                }
-
                 // Fetch emails from IMAP
                 let imap_cfg = imap_config.clone();
-                let mb_name = mb.clone();
                 let fetch_limit = limit;
                 let emails = tokio::task::spawn_blocking(move || {
                     let criteria = FetchCriteria {
@@ -3238,19 +3293,30 @@ attachments: []
                         since: None,
                         before: None,
                     };
-                    fetch_emails(&imap_cfg, &criteria, &mb_name, fetch_limit)
+                    fetch_emails(&imap_cfg, &criteria, &imap_mailbox, fetch_limit)
                 })
                 .await??;
 
-                // Save fetched emails
-                let (saved, _skipped) = save_fetched_emails(&emails, &local_dir, status_str)?;
-                println!(
-                    "{} Synced {}: {} email(s) saved to {}",
-                    "✓".green(),
-                    mb,
-                    saved,
-                    local_dir.display()
-                );
+                // Save fetched emails (additive: only new emails by Message-ID dedup)
+                let (saved, skipped) = save_fetched_emails(&emails, &local_dir, status_str)?;
+                if skipped > 0 {
+                    println!(
+                        "{} Synced {}: {} new, {} already present in {}",
+                        "✓".green(),
+                        mb,
+                        saved,
+                        skipped,
+                        local_dir.display()
+                    );
+                } else {
+                    println!(
+                        "{} Synced {}: {} email(s) saved to {}",
+                        "✓".green(),
+                        mb,
+                        saved,
+                        local_dir.display()
+                    );
+                }
             }
         }
 
