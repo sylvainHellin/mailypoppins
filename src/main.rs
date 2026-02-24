@@ -188,9 +188,12 @@ enum Commands {
         /// Max messages per mailbox (default: 50)
         #[arg(short = 'n', long, default_value = "50")]
         limit: usize,
-        /// Mailboxes to sync (default: INBOX, Archive)
+        /// Mailboxes to sync (default: INBOX, Archive, Sent)
         #[arg(long)]
         mailbox: Option<Vec<String>>,
+        /// Reconcile local files against server (detect moves/deletes)
+        #[arg(long)]
+        reconcile: bool,
     },
     /// Interactive email browser
     Browse {
@@ -559,13 +562,111 @@ fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
     false
 }
 
+/// Compress a sorted list of UIDs into IMAP sequence set format using ranges.
+/// e.g., [1,2,3,5,7,8,9] -> "1:3,5,7:9"
+fn compress_uid_set(uids: &[u32]) -> String {
+    if uids.is_empty() {
+        return String::new();
+    }
+    let mut sorted = uids.to_vec();
+    sorted.sort();
+
+    let mut ranges = Vec::new();
+    let mut start = sorted[0];
+    let mut end = sorted[0];
+
+    for &uid in &sorted[1..] {
+        if uid == end + 1 {
+            end = uid;
+        } else {
+            if start == end {
+                ranges.push(start.to_string());
+            } else {
+                ranges.push(format!("{}:{}", start, end));
+            }
+            start = uid;
+            end = uid;
+        }
+    }
+    if start == end {
+        ranges.push(start.to_string());
+    } else {
+        ranges.push(format!("{}:{}", start, end));
+    }
+    ranges.join(",")
+}
+
+/// Fetch only Message-IDs from a mailbox (lightweight, no body download).
+fn fetch_server_message_ids(
+    imap_config: &ImapConfig,
+    mailbox: &str,
+) -> Result<std::collections::HashSet<String>> {
+    info!("Fetching Message-IDs from mailbox '{}'", mailbox);
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect(
+        (imap_config.host.as_str(), imap_config.port),
+        &imap_config.host,
+        &tls,
+    )
+    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let mut session = client
+        .login(&imap_config.username, &imap_config.password)
+        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+    session
+        .select(mailbox)
+        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+
+    let uids = session
+        .uid_search("ALL")
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        session.logout().ok();
+        return Ok(std::collections::HashSet::new());
+    }
+
+    let mut uid_list: Vec<u32> = uids.into_iter().collect();
+    uid_list.sort();
+    let uid_set = compress_uid_set(&uid_list);
+
+    let fetched = session
+        .uid_fetch(&uid_set, "BODY.PEEK[HEADER.FIELDS (Message-ID)]")
+        .map_err(|e| anyhow!("Failed to fetch Message-IDs: {}", e))?;
+
+    let mut ids = std::collections::HashSet::new();
+    for msg in fetched.iter() {
+        if let Some(header_bytes) = msg.header() {
+            if let Ok(text) = std::str::from_utf8(header_bytes) {
+                // Parse "Message-ID: <...>\r\n" from the header field
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(value) = trimmed.strip_prefix("Message-ID:")
+                        .or_else(|| trimmed.strip_prefix("Message-Id:"))
+                        .or_else(|| trimmed.strip_prefix("message-id:"))
+                    {
+                        let id = value.trim();
+                        if !id.is_empty() {
+                            ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    session.logout().ok();
+    Ok(ids)
+}
+
 fn fetch_emails(
     imap_config: &ImapConfig,
     criteria: &FetchCriteria,
     mailbox: &str,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<FetchedEmail>> {
-    info!("Fetching emails from mailbox '{}' (limit: {})", mailbox, limit);
+    info!("Fetching emails from mailbox '{}' (limit: {:?})", mailbox, limit);
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
         (imap_config.host.as_str(), imap_config.port),
@@ -595,13 +696,12 @@ fn fetch_emails(
     // Take the last N UIDs (most recent)
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort();
-    let selected_uids: Vec<u32> = uid_list.into_iter().rev().take(limit).collect();
+    let selected_uids: Vec<u32> = match limit {
+        Some(n) => uid_list.into_iter().rev().take(n).collect(),
+        None => uid_list,
+    };
 
-    let uid_set = selected_uids
-        .iter()
-        .map(|u| u.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
+    let uid_set = compress_uid_set(&selected_uids);
 
     let fetched = session
         .uid_fetch(&uid_set, "RFC822")
@@ -1181,6 +1281,163 @@ fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) 
     }
 
     Ok((saved, skipped))
+}
+
+/// Scan a directory for .md files and extract their Message-IDs from frontmatter.
+/// Returns a map from message_id to file path.
+fn scan_local_message_ids(dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
+    let mut ids: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    if !dir.exists() {
+        return Ok(ids);
+    }
+    for entry in WalkDir::new(dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            if let Ok(content) = fs::read_to_string(path) {
+                let mut in_frontmatter = false;
+                for line in content.lines() {
+                    if line == "---" {
+                        if !in_frontmatter {
+                            in_frontmatter = true;
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    if in_frontmatter && line.starts_with("message_id:") {
+                        let id = line.trim_start_matches("message_id:").trim().trim_matches('"');
+                        if !id.is_empty() {
+                            ids.insert(id.to_string(), path.to_path_buf());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Move a local email file from one mailbox directory to another, updating its status.
+fn move_local_email(
+    file_path: &Path,
+    target_dir: &Path,
+    old_status: &str,
+    new_status: &str,
+) -> Result<()> {
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read {}", file_path.display()))?;
+
+    let new_content = content.replacen(
+        &format!("status: {}", old_status),
+        &format!("status: {}", new_status),
+        1,
+    );
+
+    let file_name = file_path
+        .file_name()
+        .ok_or_else(|| anyhow!("Invalid file path"))?;
+    let dest = target_dir.join(file_name);
+
+    fs::create_dir_all(target_dir)?;
+    fs::write(&dest, new_content)?;
+    fs::remove_file(file_path)?;
+
+    // Move companion HTML file if it exists
+    let html_source = file_path.with_extension("html");
+    if html_source.exists() {
+        let html_dest = dest.with_extension("html");
+        fs::copy(&html_source, &html_dest)?;
+        fs::remove_file(&html_source)?;
+    }
+
+    Ok(())
+}
+
+/// Reconcile local files against server-side Message-ID sets.
+/// Moves files that changed mailbox on the server, deletes files no longer on any server mailbox.
+/// Only operates on INBOX and Archive (Sent is skipped -- locally-authored files are source of truth).
+fn reconcile_local_files(
+    server_ids: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    local_dirs: &std::collections::HashMap<String, PathBuf>,
+) -> Result<(usize, usize)> {
+    let mut moved = 0;
+    let mut removed = 0;
+
+    let status_for = |mb: &str| -> &str {
+        match mb {
+            "INBOX" => "inbox",
+            "Archive" => "archived",
+            _ => "inbox",
+        }
+    };
+
+    // Only reconcile INBOX and Archive
+    let reconcile_mailboxes = ["INBOX", "Archive"];
+
+    for mb in &reconcile_mailboxes {
+        let Some(local_dir) = local_dirs.get(*mb) else { continue };
+        let Some(server_set) = server_ids.get(*mb) else { continue };
+
+        let local_ids = scan_local_message_ids(local_dir)?;
+
+        for (mid, file_path) in &local_ids {
+            if server_set.contains(mid) {
+                continue; // Still on server in this mailbox
+            }
+
+            // Message-ID not on server in this mailbox. Check other synced mailboxes.
+            let mut found_in: Option<&str> = None;
+            for other_mb in &reconcile_mailboxes {
+                if *other_mb == *mb {
+                    continue;
+                }
+                if let Some(other_set) = server_ids.get(*other_mb) {
+                    if other_set.contains(mid) {
+                        found_in = Some(other_mb);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(target_mb) = found_in {
+                // Email was moved to another mailbox on the server
+                let target_dir = &local_dirs[target_mb];
+
+                // Check if a copy already exists in target (from the additive sync)
+                let target_ids = scan_local_message_ids(target_dir)?;
+                if target_ids.contains_key(mid) {
+                    // Already present in target -- just delete the stale copy
+                    fs::remove_file(file_path)?;
+                    let html_companion = file_path.with_extension("html");
+                    if html_companion.exists() {
+                        fs::remove_file(&html_companion)?;
+                    }
+                    info!("Removed stale copy from {} (already in {}): {}", mb, target_mb, file_path.display());
+                } else {
+                    // Move to target mailbox
+                    move_local_email(file_path, target_dir, status_for(mb), status_for(target_mb))?;
+                    info!("Moved from {} to {}: {}", mb, target_mb, file_path.display());
+                }
+                moved += 1;
+            } else {
+                // Not found in any synced mailbox -- deleted on server
+                fs::remove_file(file_path)?;
+                let html_companion = file_path.with_extension("html");
+                if html_companion.exists() {
+                    fs::remove_file(&html_companion)?;
+                }
+                info!("Removed (no longer on server): {}", file_path.display());
+                removed += 1;
+            }
+        }
+    }
+
+    Ok((moved, removed))
 }
 
 fn resolve_mailbox_dir(mailbox: &str) -> Result<PathBuf> {
@@ -2305,7 +2562,7 @@ fn refresh_inbox() -> Result<()> {
         before: None,
     };
 
-    let emails = fetch_emails(&imap_config, &criteria, "INBOX", 20)?;
+    let emails = fetch_emails(&imap_config, &criteria, "INBOX", Some(20))?;
 
     let inbox_dir = std::env::var("INBOX_DIR")
         .map(|s| {
@@ -3215,7 +3472,7 @@ attachments: []
             };
 
             let emails = tokio::task::spawn_blocking(move || {
-                fetch_emails(&imap_config, &criteria, &mailbox, limit)
+                fetch_emails(&imap_config, &criteria, &mailbox, Some(limit))
             })
             .await??;
 
@@ -3260,12 +3517,12 @@ attachments: []
             }
         }
 
-        Some(Commands::Sync { limit, mailbox }) => {
+        Some(Commands::Sync { limit, mailbox, reconcile }) => {
             let mailboxes = mailbox.unwrap_or_else(|| vec!["INBOX".to_string(), "Archive".to_string(), "Sent".to_string()]);
             let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
 
+            // Pass 1: Additive sync (fetch full emails, save new ones)
             for mb in &mailboxes {
-                // Resolve IMAP mailbox name (may differ from local name for Sent)
                 let imap_mailbox = if mb == "Sent" {
                     resolve_sent_mailbox()
                 } else {
@@ -3280,9 +3537,8 @@ attachments: []
                     _ => "inbox",
                 };
 
-                // Fetch emails from IMAP
                 let imap_cfg = imap_config.clone();
-                let fetch_limit = limit;
+                let fetch_limit = Some(limit);
                 let emails = tokio::task::spawn_blocking(move || {
                     let criteria = FetchCriteria {
                         from: None,
@@ -3297,8 +3553,8 @@ attachments: []
                 })
                 .await??;
 
-                // Save fetched emails (additive: only new emails by Message-ID dedup)
                 let (saved, skipped) = save_fetched_emails(&emails, &local_dir, status_str)?;
+
                 if skipped > 0 {
                     println!(
                         "{} Synced {}: {} new, {} already present in {}",
@@ -3316,6 +3572,38 @@ attachments: []
                         saved,
                         local_dir.display()
                     );
+                }
+            }
+
+            // Pass 2: Reconciliation (only with --reconcile flag)
+            if reconcile {
+                let reconcile_mailboxes = ["INBOX", "Archive"];
+                let mut server_ids: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+                let mut local_dirs: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+
+                for mb in &reconcile_mailboxes {
+                    let imap_mailbox = mb.to_string();
+                    let local_dir = resolve_mailbox_dir(mb)?;
+                    local_dirs.insert(mb.to_string(), local_dir);
+
+                    let imap_cfg = imap_config.clone();
+                    let ids = tokio::task::spawn_blocking(move || {
+                        fetch_server_message_ids(&imap_cfg, &imap_mailbox)
+                    })
+                    .await??;
+                    server_ids.insert(mb.to_string(), ids);
+                }
+
+                let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
+                if moved > 0 || removed > 0 {
+                    println!(
+                        "{} Reconciled: {} moved, {} removed",
+                        "ℹ".blue(),
+                        moved,
+                        removed,
+                    );
+                } else {
+                    println!("{} Reconciled: already in sync", "✓".green());
                 }
             }
         }
