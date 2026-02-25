@@ -1,6 +1,6 @@
 [package]
 name = "email"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "A CLI tool for sending emails from Markdown drafts with YAML frontmatter"
 authors = ["Sylvain Hellin"]
@@ -26,7 +26,5 @@ native-tls = "0.2"
 mailparse = "0.15"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 html2text = "0.14"
-skim = "0.20"
 log = "0.4"
 simplelog = "0.12"
-arboard = "3"
