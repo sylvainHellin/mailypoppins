@@ -500,20 +500,22 @@ pub(crate) fn delete_email_locally(file_path: &Path) -> Result<()> {
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
+    // Extract just the message_id from frontmatter without requiring a specific struct.
+    // This allows deletion of any email type (inbox, draft, sent, etc.).
     let matter = Matter::<YAML>::new();
     let parsed = matter.parse(&content);
-    let inbox_fm: InboxFrontmatter = parsed
+    let message_id: Option<String> = parsed
         .data
-        .ok_or_else(|| anyhow!("No frontmatter found in {}", file_path.display()))?
-        .deserialize()
-        .context("Failed to parse frontmatter")?;
+        .and_then(|d| d.deserialize::<std::collections::HashMap<String, serde_yaml::Value>>().ok())
+        .and_then(|map| map.get("message_id").and_then(|v| v.as_str().map(|s| s.to_string())));
 
-    if let Some(ref mid) = inbox_fm.message_id {
+    if let Some(ref mid) = message_id {
         delete_email_on_server(mid)?;
     } else {
-        return Err(anyhow!(
-            "No message_id in frontmatter -- cannot delete on server"
-        ));
+        info!(
+            "No message_id in frontmatter -- skipping server deletion for {}",
+            file_path.display()
+        );
     }
 
     fs::remove_file(file_path)
