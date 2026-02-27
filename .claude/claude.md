@@ -17,20 +17,42 @@ CLI tool for managing email drafts written in Markdown with YAML frontmatter. Su
 - **Terminal output:** `colored`
 - **Async runtime:** `tokio`
 - **Error handling:** `anyhow`
-- **Clipboard:** `arboard`
 - **Logging:** `log` + `simplelog` (file-based, daily rotation)
 
 ## Architecture
 
-Single-file project: all code lives in `src/main.rs`.
+Multi-module project:
+
+| File | Lines | Responsibility |
+|------|-------|---------------|
+| `src/main.rs` | ~890 | CLI definition (`Cli`, `Commands`), `main()`, command dispatch |
+| `src/types.rs` | ~70 | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
+| `src/config.rs` | ~300 | Config loading, env resolution, logging, `SmtpConfig`, `ImapConfig` |
+| `src/parse.rs` | ~370 | Email body parsing, slugifying, `FetchedEmail`, save/display |
+| `src/imap_client.rs` | ~530 | All IMAP operations: fetch, list, append, watch, archive, delete |
+| `src/draft.rs` | ~480 | Draft parsing, validation, preview, reply creation, status updates |
+| `src/send.rs` | ~400 | `RecipientRole`, `SendResult`, `markdown_to_html`, `send_email` |
+| `src/sync.rs` | ~180 | Local file scanning, reconciliation, mailbox dir resolution |
+
+Dependency graph (no cycles):
+```
+types      --> (none)
+config     --> (none)
+parse      --> types
+imap_client--> config, parse, types
+draft      --> config, parse, types
+send       --> config, types
+sync       --> (none, only external crates)
+main       --> all modules
+```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `email <file>` | Preview a draft (dry-run, default) |
-| `email send <file>` | Send an approved email |
-| `email send-approved [dir]` | Batch send all approved drafts |
+| `email send <file> [--yes]` | Send an approved email (`-y` skips confirmation) |
+| `email send-approved [dir] [--yes]` | Batch send all approved drafts (`-y` skips confirmation) |
 | `email list [dir]` | List drafts grouped by status |
 | `email validate [file\|dir]` | Validate frontmatter and fields |
 | `email mark-approved <file>` | Change status from draft to approved |
@@ -38,14 +60,16 @@ Single-file project: all code lives in `src/main.rs`.
 | `email reply [file] [--all]` | Create a reply draft from a received email |
 | `email list-mailboxes` | List available IMAP mailboxes |
 | `email fetch [filters]` | Fetch emails via IMAP |
-| `email sync [--limit N] [--mailbox ...]` | Sync local mailbox folders with IMAP server |
-| `email browse [--view]` | Interactive fuzzy-finder email browser |
+| `email sync [--limit N] [--mailbox ...] [--reconcile]` | Additive sync (Message-ID dedup); `--reconcile` detects server moves/deletes |
 | `email watch [--mailbox] [--timeout]` | Watch mailbox for changes via IMAP IDLE |
+| `email archive <file>` | Archive an inbox email (server + local) |
+| `email delete <file>` | Delete an inbox email (server + local) |
 
 ## Configuration
 
-- **`.env`** — SMTP/IMAP credentials, directory paths (`DRAFTS_DIR`, `SENT_DIR`, `INBOX_DIR`, `ARCHIVE_DIR`). Gitignored.
+- **`.env`** — SMTP/IMAP credentials, directory paths (`DRAFTS_DIR`, `SENT_DIR`, `INBOX_DIR`, `ARCHIVE_DIR`), and `SENT_MAILBOX` (IMAP Sent folder name, default: `"Sent"`). Gitignored.
 - **`DRAFTS_DIR` resolution** — `list`, `send-approved`, and `reply` auto-resolve the drafts directory via `resolve_drafts_dir`: explicit CLI arg → `DRAFTS_DIR` env var → `"."` fallback.
+- **`SENT_MAILBOX`** — Configures the IMAP Sent folder name for IMAP APPEND and sync. Defaults to `"Sent"`. Some providers use `"Sent Items"`, `"INBOX.Sent"`, etc.
 - **`config.toml`** — Email formatting (font family/size), signature definitions. Searched up to 3 parent directories.
 
 ## Logging
@@ -60,12 +84,14 @@ Logs are written to `~/.email-cli/logs/email-cli-YYYY-MM-DD.log` (append mode, o
 
 ## Per-Recipient Sending
 
-`send_email` sends to each recipient individually via `send_raw` with single-recipient envelopes, while preserving visible To/Cc headers for all recipients. This provides per-recipient success/failure tracking. Recipients are deduplicated by address. Return type is `SendResult` containing `Vec<RecipientResult>` (address, role, success, error).
+`send_email` sends to each recipient individually via `send_raw` with single-recipient envelopes, while preserving visible To/Cc headers for all recipients. This provides per-recipient success/failure tracking. Recipients are deduplicated by address. Return type is `(SendResult, Vec<u8>, Option<String>)` -- results, raw RFC 822 message, and extracted Message-ID.
 
 **Caller behavior:**
-- **All succeeded** → mark as sent
-- **Partial success** → mark as sent + warn (re-sending would duplicate to successful recipients; log file provides audit trail)
+- **All succeeded** → mark as sent, IMAP APPEND to Sent folder (best-effort)
+- **Partial success** → mark as sent + warn, IMAP APPEND to Sent folder (best-effort)
 - **All failed** → return error, do not mark as sent
+
+**IMAP APPEND:** After a successful send, the raw message is appended to the server-side Sent folder (configured via `SENT_MAILBOX`) with `\Seen` flag. This is best-effort -- APPEND failure is logged as a warning but does not fail the send. The `message_id` is stored in the local sent file's frontmatter for sync dedup.
 
 ## Email Draft Format
 
@@ -80,7 +106,9 @@ status: draft
 Email body in **Markdown**.
 ```
 
-Status workflow: `draft` → `approved` (via `mark-approved`) → `sent` (via `send`). Inbox emails: `inbox` → `archived` (via archive action in browse).
+Status workflow: `draft` → `approved` (via `mark-approved`) → `sent` (via `send`). Inbox emails: `inbox` → `archived` (via `archive` command).
+
+Sent files include additional fields: `sent_at`, `sent_via`, and `message_id` (the RFC 822 Message-ID, used for sync dedup).
 
 ### Reply Drafts & Signature Placement
 
@@ -92,25 +120,18 @@ Reply drafts (created via `email reply`) include a `{{SIGNATURE}}` placeholder b
 - `✓` green for success, `✗` red for errors, `⚠` yellow for warnings, `ℹ` blue for info
 - Header keys in `fetch` display use distinct colors: From (green), To/Cc (blue), Subject (yellow), Date (magenta)
 
-## Browse Keybindings
+## Sync Reconciliation
 
-The `browse` command uses skim (fuzzy finder) with context-specific keybindings:
+`email sync` is additive by default. Pass `--reconcile` to also detect server-side moves and deletes:
 
-- **Global:** `Tab` (next mailbox: Inbox → Drafts → Sent → Archive), `Ctrl+r` (refresh), `Ctrl+d` (delete local file), `Ctrl+p` (copy file path to clipboard), `Esc` (quit)
-- **Inbox:** `Enter` (open), `Ctrl+y` (reply), `Ctrl+o` (reply-all), `Ctrl+s` (archive)
-- **Drafts:** `Enter` (open), `Ctrl+g` (approve), `Ctrl+x` (send)
-- **Sent:** `Enter` (open)
-- **Archive:** `Enter` (open)
+1. **Additive pass** (always): Fetch last N emails per mailbox (default 50), save new ones locally with Message-ID dedup.
+2. **Reconciliation pass** (`--reconcile` only): Lightweight fetch of just Message-ID headers from INBOX and Archive (no body download). Compares local files against server sets. Emails moved between INBOX and Archive on the server are moved locally (with status update). Emails deleted on the server are removed locally. Companion `.html` files are moved/deleted alongside `.md` files.
 
-Note: `Ctrl+a/e` are reserved by skim (emacs line editing). Avoid binding them.
-
-### Browse Header Coloring
-
-The two header lines (mailbox info + global keybindings) are colored using skim's `AnsiString` with `Attr` fragments, NOT raw ANSI escape codes. This is required because skim's `SkimItem::display()` does not parse ANSI escape codes — only skim's internal `DefaultSkimItem` does that during construction. Custom `SkimItem` implementations must build `AnsiString` objects directly via `AnsiString::new_string(stripped, fragments)` with `Attr { fg: Color::Rgb(r, g, b), ..Attr::default() }` from `skim::tuikit::prelude`.
-
-The `ColoredLine` helper struct handles position tracking: each `.push(text, attr)` call appends text and records the `(start, end)` char range for the attribute fragment. Colors follow the Catppuccin Mocha palette.
+**Important constraints:**
+- The Sent directory is never reconciled -- locally-authored files are the source of truth.
+- Only INBOX and Archive participate in reconciliation.
 
 ## After Each Change
 
 1. **Test the app** — Run the binary yourself to verify the change works as expected.
-2. **Update the binary** — If it works, install the updated binary via `cargo install --path .` so it's available on the machine.
+2. **Update the binary** — If it works, install the updated binary via `cargo install --path .` so it's available at `~/.cargo/bin/email`.

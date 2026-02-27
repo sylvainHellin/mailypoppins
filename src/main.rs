@@ -661,6 +661,7 @@ attachments: []
                 before,
             };
 
+            let mailbox_for_save = mailbox.clone();
             let emails = tokio::task::spawn_blocking(move || {
                 fetch_emails(&imap_config, &criteria, &mailbox, Some(limit))
             })
@@ -668,22 +669,37 @@ attachments: []
 
             display_fetched_emails(&emails, full);
 
-            // Save to inbox if INBOX_DIR is configured
-            let inbox_dir: Option<PathBuf> = std::env::var("INBOX_DIR").ok().map(|s| {
-                let s = s.trim_matches('"').trim_matches('\'');
-                PathBuf::from(shellexpand::tilde(s).into_owned())
-            });
+            // Determine save directory and status from the mailbox
+            let (save_dir, status) = match resolve_mailbox_dir(&mailbox_for_save) {
+                Ok(dir) => {
+                    let status = match mailbox_for_save.as_str() {
+                        "INBOX" => "inbox",
+                        "Archive" => "archived",
+                        "Sent" => "sent",
+                        _ => "inbox",
+                    };
+                    (Some(dir), status)
+                }
+                Err(_) => {
+                    // Fallback to INBOX_DIR for unknown mailboxes
+                    let dir = std::env::var("INBOX_DIR").ok().map(|s| {
+                        let s = s.trim_matches('"').trim_matches('\'');
+                        PathBuf::from(shellexpand::tilde(s).into_owned())
+                    });
+                    (dir, "inbox")
+                }
+            };
 
-            if let Some(ref inbox_dir) = inbox_dir {
+            if let Some(ref save_dir) = save_dir {
                 if !emails.is_empty() {
-                    match save_fetched_emails(&emails, inbox_dir, "inbox") {
+                    match save_fetched_emails(&emails, save_dir, status) {
                         Ok((saved, skipped)) => {
                             if saved > 0 {
                                 println!(
                                     "\n{} Saved {} email(s) to {}",
                                     "✓".green(),
                                     saved,
-                                    inbox_dir.display()
+                                    save_dir.display()
                                 );
                             }
                             if skipped > 0 {
@@ -701,8 +717,9 @@ attachments: []
                 }
             } else if !emails.is_empty() {
                 println!(
-                    "\n{} Set INBOX_DIR in .env to automatically save fetched emails.",
-                    "ℹ".blue()
+                    "\n{} No local directory configured for mailbox '{}'. Set INBOX_DIR, ARCHIVE_DIR, or SENT_DIR in .env.",
+                    "ℹ".blue(),
+                    mailbox_for_save
                 );
             }
         }
