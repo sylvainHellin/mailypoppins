@@ -672,13 +672,7 @@ attachments: []
             // Determine save directory and status from the mailbox
             let (save_dir, status) = match resolve_mailbox_dir(&mailbox_for_save) {
                 Ok(dir) => {
-                    let status = match mailbox_for_save.as_str() {
-                        "INBOX" => "inbox",
-                        "Archive" => "archived",
-                        "Sent" => "sent",
-                        _ => "inbox",
-                    };
-                    (Some(dir), status)
+                    (Some(dir), mailbox_status(&mailbox_for_save))
                 }
                 Err(_) => {
                     // Fallback to INBOX_DIR for unknown mailboxes
@@ -737,12 +731,7 @@ attachments: []
                 };
 
                 let local_dir = resolve_mailbox_dir(mb)?;
-                let status_str = match mb.as_str() {
-                    "INBOX" => "inbox",
-                    "Archive" => "archived",
-                    "Sent" => "sent",
-                    _ => "inbox",
-                };
+                let status_str = mailbox_status(mb);
 
                 let imap_cfg = imap_config.clone();
                 let fetch_limit = Some(limit);

@@ -90,14 +90,6 @@ pub(crate) fn reconcile_local_files(
     let mut moved = 0;
     let mut removed = 0;
 
-    let status_for = |mb: &str| -> &str {
-        match mb {
-            "INBOX" => "inbox",
-            "Archive" => "archived",
-            _ => "inbox",
-        }
-    };
-
     // Only reconcile INBOX and Archive
     let reconcile_mailboxes = ["INBOX", "Archive"];
 
@@ -142,7 +134,7 @@ pub(crate) fn reconcile_local_files(
                     info!("Removed stale copy from {} (already in {}): {}", mb, target_mb, file_path.display());
                 } else {
                     // Move to target mailbox
-                    move_local_email(file_path, target_dir, status_for(mb), status_for(target_mb))?;
+                    move_local_email(file_path, target_dir, mailbox_status(mb), mailbox_status(target_mb))?;
                     info!("Moved from {} to {}: {}", mb, target_mb, file_path.display());
                 }
                 moved += 1;
@@ -162,17 +154,31 @@ pub(crate) fn reconcile_local_files(
     Ok((moved, removed))
 }
 
+/// Map a mailbox name to the corresponding email status string (case-insensitive).
+pub(crate) fn mailbox_status(mailbox: &str) -> &'static str {
+    if mailbox.eq_ignore_ascii_case("inbox") {
+        "inbox"
+    } else if mailbox.eq_ignore_ascii_case("archive") {
+        "archived"
+    } else if mailbox.eq_ignore_ascii_case("sent") {
+        "sent"
+    } else {
+        "inbox"
+    }
+}
+
 pub(crate) fn resolve_mailbox_dir(mailbox: &str) -> Result<PathBuf> {
-    let env_var = match mailbox {
-        "INBOX" => "INBOX_DIR",
-        "Archive" => "ARCHIVE_DIR",
-        "Sent" => "SENT_DIR",
-        _ => {
-            return Err(anyhow!(
-                "Unsupported mailbox '{}'. Supported: INBOX, Archive, Sent",
-                mailbox
-            ))
-        }
+    let env_var = if mailbox.eq_ignore_ascii_case("inbox") {
+        "INBOX_DIR"
+    } else if mailbox.eq_ignore_ascii_case("archive") {
+        "ARCHIVE_DIR"
+    } else if mailbox.eq_ignore_ascii_case("sent") {
+        "SENT_DIR"
+    } else {
+        return Err(anyhow!(
+            "Unsupported mailbox '{}'. Supported: INBOX, Archive, Sent",
+            mailbox
+        ));
     };
     let raw = std::env::var(env_var)
         .with_context(|| format!("{} env var not set (needed for mailbox '{}')", env_var, mailbox))?;
