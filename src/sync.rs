@@ -166,22 +166,3 @@ pub(crate) fn mailbox_status(mailbox: &str) -> &'static str {
         "inbox"
     }
 }
-
-pub(crate) fn resolve_mailbox_dir(mailbox: &str) -> Result<PathBuf> {
-    let env_var = if mailbox.eq_ignore_ascii_case("inbox") {
-        "INBOX_DIR"
-    } else if mailbox.eq_ignore_ascii_case("archive") {
-        "ARCHIVE_DIR"
-    } else if mailbox.eq_ignore_ascii_case("sent") {
-        "SENT_DIR"
-    } else {
-        return Err(anyhow!(
-            "Unsupported mailbox '{}'. Supported: INBOX, Archive, Sent",
-            mailbox
-        ));
-    };
-    let raw = std::env::var(env_var)
-        .with_context(|| format!("{} env var not set (needed for mailbox '{}')", env_var, mailbox))?;
-    let expanded = shellexpand::tilde(raw.trim_matches('"').trim_matches('\'')).into_owned();
-    Ok(PathBuf::from(expanded))
-}

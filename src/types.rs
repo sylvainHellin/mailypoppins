@@ -54,7 +54,6 @@ pub(crate) struct EmailDraft {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub(crate) struct InboxFrontmatter {
     pub(crate) from: String,
     pub(crate) to: String,

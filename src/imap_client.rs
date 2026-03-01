@@ -4,9 +4,9 @@ use log::info;
 use mailparse::{parse_mail, MailHeaderMap};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::config::{ImapConfig, resolve_sent_mailbox};
+use crate::config::ImapConfig;
 use crate::parse::{compress_uid_set, extract_body_text, has_attachments, FetchedEmail};
 use crate::types::InboxFrontmatter;
 
@@ -263,8 +263,7 @@ pub(crate) fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
     Ok(names)
 }
 
-pub(crate) fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8]) -> Result<()> {
-    let sent_mailbox = resolve_sent_mailbox();
+pub(crate) fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8], sent_mailbox: &str) -> Result<()> {
     info!("Appending sent email to IMAP folder '{}'", sent_mailbox);
 
     let tls = native_tls::TlsConnector::builder().build()?;
@@ -279,7 +278,7 @@ pub(crate) fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8]
         .login(&imap_config.username, &imap_config.password)
         .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
 
-    session.append_with_flags(&sent_mailbox, raw_message, &[imap::types::Flag::Seen])
+    session.append_with_flags(sent_mailbox, raw_message, &[imap::types::Flag::Seen])
         .map_err(|e| anyhow!("Failed to APPEND to '{}': {}", sent_mailbox, e))?;
 
     session.logout().ok();
@@ -342,9 +341,8 @@ pub(crate) fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Op
     Ok(exit_code)
 }
 
-pub(crate) fn archive_email_on_server(message_id: &str) -> Result<()> {
-    info!("Archiving email on server: Message-ID={}", message_id);
-    let imap_config = ImapConfig::from_env(None)?;
+pub(crate) fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archive_mailbox: &str) -> Result<()> {
+    info!("Archiving email on server: Message-ID={} -> {}", message_id, archive_mailbox);
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
         (imap_config.host.as_str(), imap_config.port),
@@ -378,8 +376,8 @@ pub(crate) fn archive_email_on_server(message_id: &str) -> Result<()> {
     let uid_str = uid.to_string();
 
     session
-        .uid_copy(&uid_str, "Archive")
-        .map_err(|e| anyhow!("Failed to copy email to Archive: {}", e))?;
+        .uid_copy(&uid_str, archive_mailbox)
+        .map_err(|e| anyhow!("Failed to copy email to {}: {}", archive_mailbox, e))?;
 
     session
         .uid_store(&uid_str, "+FLAGS (\\Deleted)")
@@ -393,7 +391,7 @@ pub(crate) fn archive_email_on_server(message_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn archive_email_locally(file_path: &Path) -> Result<()> {
+pub(crate) fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_path: &Path, archive_mailbox: &str) -> Result<()> {
     info!("Archiving email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -408,22 +406,14 @@ pub(crate) fn archive_email_locally(file_path: &Path) -> Result<()> {
 
     // Archive on server using message_id
     if let Some(ref mid) = inbox_fm.message_id {
-        archive_email_on_server(mid)?;
+        archive_email_on_server(imap_config, mid, archive_mailbox)?;
     } else {
         return Err(anyhow!(
             "No message_id in frontmatter -- cannot archive on server"
         ));
     }
 
-    // Determine archive directory
-    let archive_dir = std::env::var("ARCHIVE_DIR")
-        .map(|s| {
-            let s = s.trim_matches('"').trim_matches('\'');
-            PathBuf::from(shellexpand::tilde(s).into_owned())
-        })
-        .context("ARCHIVE_DIR not set in .env")?;
-
-    fs::create_dir_all(&archive_dir)?;
+    fs::create_dir_all(archive_dir)?;
 
     // Update status from inbox to archived in the content
     let new_content = content.replacen("status: inbox", "status: archived", 1);
@@ -448,9 +438,8 @@ pub(crate) fn archive_email_locally(file_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn delete_email_on_server(message_id: &str) -> Result<()> {
+pub(crate) fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) -> Result<()> {
     info!("Deleting email on server: Message-ID={}", message_id);
-    let imap_config = ImapConfig::from_env(None)?;
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
         (imap_config.host.as_str(), imap_config.port),
@@ -495,7 +484,7 @@ pub(crate) fn delete_email_on_server(message_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn delete_email_locally(file_path: &Path) -> Result<()> {
+pub(crate) fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Result<()> {
     info!("Deleting email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -510,7 +499,7 @@ pub(crate) fn delete_email_locally(file_path: &Path) -> Result<()> {
         .and_then(|map| map.get("message_id").and_then(|v| v.as_str().map(|s| s.to_string())));
 
     if let Some(ref mid) = message_id {
-        delete_email_on_server(mid)?;
+        delete_email_on_server(imap_config, mid)?;
     } else {
         info!(
             "No message_id in frontmatter -- skipping server deletion for {}",

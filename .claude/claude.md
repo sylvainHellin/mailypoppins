@@ -18,32 +18,36 @@ CLI tool for managing email drafts written in Markdown with YAML frontmatter. Su
 - **Async runtime:** `tokio`
 - **Error handling:** `anyhow`
 - **Logging:** `log` + `simplelog` (file-based, daily rotation)
+- **Secrets:** `keyring` (OS-native: macOS Keychain, Windows Credential Manager, Linux Secret Service)
+- **Interactive prompts:** `dialoguer` (fuzzy-select, multi-select, password input)
 
 ## Architecture
 
 Multi-module project:
 
-| File | Lines | Responsibility |
-|------|-------|---------------|
-| `src/main.rs` | ~890 | CLI definition (`Cli`, `Commands`), `main()`, command dispatch |
-| `src/types.rs` | ~70 | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
-| `src/config.rs` | ~300 | Config loading, env resolution, logging, `SmtpConfig`, `ImapConfig` |
-| `src/parse.rs` | ~370 | Email body parsing, slugifying, `FetchedEmail`, save/display |
-| `src/imap_client.rs` | ~530 | All IMAP operations: fetch, list, append, watch, archive, delete |
-| `src/draft.rs` | ~480 | Draft parsing, validation, preview, reply creation, status updates |
-| `src/send.rs` | ~400 | `RecipientRole`, `SendResult`, `markdown_to_html`, `send_email` |
-| `src/sync.rs` | ~180 | Local file scanning, reconciliation, mailbox dir resolution |
+| File | Responsibility |
+|------|---------------|
+| `src/main.rs` | CLI definition (`Cli`, `Commands`), `main()`, command dispatch |
+| `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
+| `src/config.rs` | Global config loading (`~/.config/email/config.toml`), keyring integration, mailbox resolution, logging |
+| `src/config_cmd.rs` | Config subcommands: init wizard (credential testing, mailbox discovery), show, set-password, path |
+| `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, save/display |
+| `src/imap_client.rs` | All IMAP operations: fetch, list, append, watch, archive, delete |
+| `src/draft.rs` | Draft parsing, validation, preview, reply creation, status updates |
+| `src/send.rs` | `RecipientRole`, `SendResult`, `markdown_to_html`, `send_email` |
+| `src/sync.rs` | Local file scanning, reconciliation, mailbox dir resolution |
 
 Dependency graph (no cycles):
 ```
-types      --> (none)
-config     --> (none)
-parse      --> types
-imap_client--> config, parse, types
-draft      --> config, parse, types
-send       --> config, types
-sync       --> (none, only external crates)
-main       --> all modules
+types       --> (none)
+config      --> (none)
+parse       --> types
+imap_client --> config, parse, types
+draft       --> config, parse, types
+send        --> config, types
+sync        --> (none, only external crates)
+config_cmd  --> config, imap_client
+main        --> all modules
 ```
 
 ## Commands
@@ -64,13 +68,34 @@ main       --> all modules
 | `email watch [--mailbox] [--timeout]` | Watch mailbox for changes via IMAP IDLE |
 | `email archive <file>` | Archive an inbox email (server + local) |
 | `email delete <file>` | Delete an inbox email (server + local) |
+| `email config init` | Interactive setup wizard with credential testing |
+| `email config show` | Show current configuration (passwords masked) |
+| `email config set-password` | Store SMTP or IMAP password in OS keyring |
+| `email config path` | Print config file path |
 
 ## Configuration
 
-- **`.env`** — SMTP/IMAP credentials, directory paths (`DRAFTS_DIR`, `SENT_DIR`, `INBOX_DIR`, `ARCHIVE_DIR`), and `SENT_MAILBOX` (IMAP Sent folder name, default: `"Sent"`). Gitignored.
-- **`DRAFTS_DIR` resolution** — `list`, `send-approved`, and `reply` auto-resolve the drafts directory via `resolve_drafts_dir`: explicit CLI arg → `DRAFTS_DIR` env var → `"."` fallback.
-- **`SENT_MAILBOX`** — Configures the IMAP Sent folder name for IMAP APPEND and sync. Defaults to `"Sent"`. Some providers use `"Sent Items"`, `"INBOX.Sent"`, etc.
-- **`config.toml`** — Email formatting (font family/size), signature definitions. Searched up to 3 parent directories.
+All configuration lives in a single global file: **`~/.config/email/config.toml`**.
+
+- **`[email]`** -- Font family/size, signature toggle.
+- **`[smtp]`** -- Host, port, username, default_from. Password stored in OS keyring (key: `smtp-password`).
+- **`[imap]`** -- Host, port, username (all fall back to SMTP values if omitted). Password in keyring (key: `imap-password`, falls back to `smtp-password`).
+- **`[directories]`** -- `root` (base path, e.g. `~/notes/email`) and `drafts` (relative to root or absolute).
+- **`[mailboxes.inbox]`, `[mailboxes.archive]`, `[mailboxes.sent]`** -- Three special-role mailboxes, each with `server` (IMAP name) and `local` (directory, relative to root).
+- **`[[mailboxes.extra]]`** -- Additional mailboxes to sync (same `server`/`local` structure).
+- **`[signatures]`** -- Default signature name and named entries with `path` (absolute or `~`-expanded).
+
+### Mailbox resolution
+`resolve_mailbox_dir(config, name)` looks up by IMAP server name (case-insensitive) or by role name (`inbox`, `archive`, `sent`). Local paths relative to `directories.root`.
+
+### Drafts directory resolution
+`list`, `send-approved`, and `reply` auto-resolve via `resolve_drafts_dir`: explicit CLI arg -> `config.directories.drafts` (resolved against root) -> `"."` fallback.
+
+### Config subcommands
+- `email config init` -- Interactive wizard: tests SMTP/IMAP credentials, discovers server mailboxes, assigns roles, writes config.
+- `email config show` -- Displays resolved config with masked passwords.
+- `email config set-password smtp|imap` -- Stores password in OS keyring.
+- `email config path` -- Prints config file path.
 
 ## Logging
 
@@ -91,7 +116,7 @@ Logs are written to `~/.email-cli/logs/email-cli-YYYY-MM-DD.log` (append mode, o
 - **Partial success** → mark as sent + warn, IMAP APPEND to Sent folder (best-effort)
 - **All failed** → return error, do not mark as sent
 
-**IMAP APPEND:** After a successful send, the raw message is appended to the server-side Sent folder (configured via `SENT_MAILBOX`) with `\Seen` flag. This is best-effort -- APPEND failure is logged as a warning but does not fail the send. The `message_id` is stored in the local sent file's frontmatter for sync dedup.
+**IMAP APPEND:** After a successful send, the raw message is appended to the server-side Sent folder (configured via `mailboxes.sent.server`) with `\Seen` flag. This is best-effort -- APPEND failure is logged as a warning but does not fail the send. The `message_id` is stored in the local sent file's frontmatter for sync dedup.
 
 ## Email Draft Format
 
@@ -124,7 +149,7 @@ Reply drafts (created via `email reply`) include a `{{SIGNATURE}}` placeholder b
 
 `email sync` is additive by default. Pass `--reconcile` to also detect server-side moves and deletes:
 
-1. **Additive pass** (always): Fetch last N emails per mailbox (default 50), save new ones locally with Message-ID dedup.
+1. **Additive pass** (always): Fetch last N emails per mailbox (default 50), save new ones locally with Message-ID dedup. Default mailbox list comes from all configured mailboxes (`mailboxes.inbox`, `mailboxes.archive`, `mailboxes.sent`, plus any `mailboxes.extra` entries).
 2. **Reconciliation pass** (`--reconcile` only): Lightweight fetch of just Message-ID headers from INBOX and Archive (no body download). Compares local files against server sets. Emails moved between INBOX and Archive on the server are moved locally (with status update). Emails deleted on the server are removed locally. Companion `.html` files are moved/deleted alongside `.md` files.
 
 **Important constraints:**
