@@ -12,8 +12,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 gray_matter = "0.2"
 pulldown-cmark = "0.9"
-dotenvy = "0.15"
 anyhow = "1.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 chrono = "0.4"
 walkdir = "2.4"
 colored = "2.1"

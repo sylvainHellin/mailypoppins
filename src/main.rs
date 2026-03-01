@@ -1,5 +1,6 @@
 mod types;
 mod config;
+mod config_cmd;
 mod parse;
 mod imap_client;
 mod draft;
@@ -13,8 +14,9 @@ use imap_client::*;
 use draft::*;
 use send::*;
 use sync::*;
+use config_cmd::*;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 use log::{error, info, warn};
@@ -158,6 +160,26 @@ enum Commands {
         /// Path to the inbox email file
         file: PathBuf,
     },
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Interactive setup wizard
+    Init,
+    /// Show current configuration
+    Show,
+    /// Store a password in the OS keyring
+    SetPassword {
+        /// Which password to set: "smtp" or "imap"
+        which: String,
+    },
+    /// Print config file path
+    Path,
 }
 
 fn prompt_confirmation(message: &str) -> bool {
@@ -177,58 +199,46 @@ async fn main() -> Result<()> {
 
     info!("email-cli started: {:?}", std::env::args().collect::<Vec<_>>());
 
-    // Determine a path hint for finding .env file
-    let path_hint: Option<PathBuf> = match &cli.command {
-        Some(Commands::Send { file, .. }) => Some(file.clone()),
-        Some(Commands::SendApproved { dir, .. }) => Some(dir.clone()),
-        Some(Commands::List { dir }) => Some(dir.clone()),
-        Some(Commands::Validate { path }) => Some(path.clone()),
-        Some(Commands::MarkApproved { file }) => Some(file.clone()),
-        Some(Commands::New { name }) => Some(PathBuf::from(name)),
-        Some(Commands::Reply { file, .. }) => file.clone(),
-        Some(Commands::ListMailboxes) => None,
-        Some(Commands::Fetch { .. }) => None,
-        Some(Commands::Sync { .. }) => None,
-        Some(Commands::Watch { .. }) => None,
-        Some(Commands::Archive { file }) => Some(file.clone()),
-        Some(Commands::Delete { file }) => Some(file.clone()),
-        None => cli.file.clone(),
-    };
+    // Load global config from ~/.config/email/config.toml
+    let global_config = load_global_config().unwrap_or_else(|e| {
+        eprintln!("{} {}", "⚠".yellow(), e);
+        eprintln!("  Some commands may not work without proper configuration.");
+        GlobalConfig::default()
+    });
 
-    // Load SMTP config with path hint for finding .env
-    let smtp_config = SmtpConfig::from_env(path_hint.as_deref()).unwrap_or_else(|e| {
+    // Load SMTP config from global config + keyring
+    let smtp_config = SmtpConfig::load(&global_config).unwrap_or_else(|e| {
         eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
         eprintln!("  Some commands may not work without proper configuration.");
         SmtpConfig {
             host: "localhost".to_string(),
-            port: 587,
+            port: 465,
             username: String::new(),
             password: String::new(),
             default_from: "user@example.com".to_string(),
         }
     });
 
-    // Load email config (fonts, signatures)
-    let email_config = load_email_config(path_hint.as_deref());
-
     // Determine signature to use
     let signature_content: Option<String> = if cli.no_signature {
         None
-    } else if email_config.email.include_signature {
-        load_signature(&email_config, cli.signature.as_deref())
+    } else if global_config.email.include_signature {
+        load_signature(&global_config, cli.signature.as_deref())
     } else {
         // include_signature is false, but user can override with --signature
         cli.signature
             .as_deref()
-            .and_then(|s| load_signature(&email_config, Some(s)))
+            .and_then(|s| load_signature(&global_config, Some(s)))
     };
 
-    // Get sent directory from env (now loaded from .env via path hint)
-    // Strip quotes if present (some .env parsers keep them)
-    let sent_dir: Option<PathBuf> = std::env::var("SENT_DIR").ok().map(|s| {
-        let s = s.trim_matches('"').trim_matches('\'');
-        PathBuf::from(shellexpand::tilde(s).into_owned())
-    });
+    // Resolve directories from config (mailbox-based)
+    let sent_dir: Option<PathBuf> = global_config.mailboxes.sent.as_ref()
+        .map(|m| resolve_mailbox_local_path(&global_config, m));
+    let drafts_dir: Option<PathBuf> = resolve_drafts_dir_from_config(&global_config);
+    let inbox_dir: Option<PathBuf> = global_config.mailboxes.inbox.as_ref()
+        .map(|m| resolve_mailbox_local_path(&global_config, m));
+    let archive_dir: Option<PathBuf> = global_config.mailboxes.archive.as_ref()
+        .map(|m| resolve_mailbox_local_path(&global_config, m));
 
     match cli.command {
         Some(Commands::Send { file, yes }) => {
@@ -238,7 +248,7 @@ async fn main() -> Result<()> {
             preview_draft(
                 &draft,
                 &smtp_config,
-                &email_config,
+                &global_config,
                 signature_content.as_deref(),
                 false,
             )?;
@@ -252,7 +262,7 @@ async fn main() -> Result<()> {
             let (send_result, raw_message, message_id) = send_email(
                 &draft,
                 &smtp_config,
-                &email_config,
+                &global_config,
                 signature_content.as_deref(),
             )
             .await?;
@@ -281,8 +291,9 @@ async fn main() -> Result<()> {
                 info!("Email marked as sent: {}", draft.path.display());
 
                 // IMAP APPEND to Sent folder (best-effort)
-                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
-                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                if let Ok(imap_config) = ImapConfig::load(&global_config) {
+                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
                         warn!("Failed to append to Sent folder: {}", e);
                         println!(
                             "  {} Could not copy to server Sent folder: {}",
@@ -306,8 +317,9 @@ async fn main() -> Result<()> {
                 );
 
                 // IMAP APPEND to Sent folder (best-effort)
-                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
-                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                if let Ok(imap_config) = ImapConfig::load(&global_config) {
+                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
                         warn!("Failed to append to Sent folder: {}", e);
                         println!(
                             "  {} Could not copy to server Sent folder: {}",
@@ -332,7 +344,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::SendApproved { dir, yes }) => {
-            let dir = resolve_drafts_dir(&dir);
+            let dir = resolve_drafts_dir(&dir, &drafts_dir);
             let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
 
             if drafts.is_empty() {
@@ -368,7 +380,7 @@ async fn main() -> Result<()> {
                 match send_email(
                     &draft,
                     &smtp_config,
-                    &email_config,
+                    &global_config,
                     signature_content.as_deref(),
                 )
                 .await
@@ -379,8 +391,9 @@ async fn main() -> Result<()> {
                                 println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
                             } else {
                                 // IMAP APPEND to Sent folder (best-effort)
-                                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
-                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                                if let Ok(imap_config) = ImapConfig::load(&global_config) {
+                                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
                                 }
@@ -393,8 +406,9 @@ async fn main() -> Result<()> {
                                 println!("{} (partial send, failed to update status: {})", "⚠".yellow(), e);
                             } else {
                                 // IMAP APPEND to Sent folder (best-effort)
-                                if let Ok(imap_config) = ImapConfig::from_env(path_hint.as_deref()) {
-                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message) {
+                                if let Ok(imap_config) = ImapConfig::load(&global_config) {
+                                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
                                 }
@@ -446,7 +460,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::List { dir }) => {
-            let dir = resolve_drafts_dir(&dir);
+            let dir = resolve_drafts_dir(&dir, &drafts_dir);
             let drafts = find_drafts(&dir, None)?;
 
             if drafts.is_empty() {
@@ -563,8 +577,8 @@ async fn main() -> Result<()> {
             } else {
                 format!("{}.md", name)
             };
-            let drafts_dir = resolve_drafts_dir(Path::new("."));
-            let path = drafts_dir.join(&file_name);
+            let dir = resolve_drafts_dir(Path::new("."), &drafts_dir);
+            let path = dir.join(&file_name);
 
             // Check if file already exists
             if path.exists() {
@@ -590,8 +604,8 @@ attachments: []
         }
 
         Some(Commands::Reply { file, all }) => {
-            let resolved = resolve_drafts_dir(Path::new("."));
-            let drafts_dir: Option<PathBuf> = if resolved != Path::new(".").to_path_buf() {
+            let resolved = resolve_drafts_dir(Path::new("."), &drafts_dir);
+            let reply_drafts_dir: Option<PathBuf> = if resolved != Path::new(".").to_path_buf() {
                 Some(resolved)
             } else {
                 None
@@ -600,15 +614,10 @@ attachments: []
             let source_file = match file {
                 Some(f) => f,
                 None => {
-                    let inbox_dir: PathBuf = std::env::var("INBOX_DIR")
-                        .map(|s| {
-                            let s = s.trim_matches('"').trim_matches('\'');
-                            PathBuf::from(shellexpand::tilde(s).into_owned())
-                        })
-                        .context(
-                            "INBOX_DIR not set in .env (required for interactive reply selection)",
-                        )?;
-                    select_inbox_email(&inbox_dir)?
+                    let dir = inbox_dir.as_ref().ok_or_else(|| {
+                        anyhow!("Inbox mailbox not configured. Check [mailboxes.inbox] in {}", config_path().display())
+                    })?;
+                    select_inbox_email(dir)?
                 }
             };
 
@@ -616,7 +625,7 @@ attachments: []
                 &source_file,
                 all,
                 &smtp_config.default_from,
-                drafts_dir.as_deref(),
+                reply_drafts_dir.as_deref(),
             )?;
             println!(
                 "{} Reply draft created: {}",
@@ -626,7 +635,7 @@ attachments: []
         }
 
         Some(Commands::ListMailboxes) => {
-            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let imap_config = ImapConfig::load(&global_config)?;
             let mailboxes = tokio::task::spawn_blocking(move || {
                 list_mailboxes(&imap_config)
             })
@@ -650,7 +659,7 @@ attachments: []
             full,
             mailbox,
         }) => {
-            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let imap_config = ImapConfig::load(&global_config)?;
             let criteria = FetchCriteria {
                 from,
                 to,
@@ -670,17 +679,13 @@ attachments: []
             display_fetched_emails(&emails, full);
 
             // Determine save directory and status from the mailbox
-            let (save_dir, status) = match resolve_mailbox_dir(&mailbox_for_save) {
+            let (save_dir, status) = match resolve_mailbox_dir(&global_config, &mailbox_for_save) {
                 Ok(dir) => {
                     (Some(dir), mailbox_status(&mailbox_for_save))
                 }
                 Err(_) => {
-                    // Fallback to INBOX_DIR for unknown mailboxes
-                    let dir = std::env::var("INBOX_DIR").ok().map(|s| {
-                        let s = s.trim_matches('"').trim_matches('\'');
-                        PathBuf::from(shellexpand::tilde(s).into_owned())
-                    });
-                    (dir, "inbox")
+                    // Fallback to inbox_dir for unknown mailboxes
+                    (inbox_dir.clone(), "inbox")
                 }
             };
 
@@ -711,30 +716,41 @@ attachments: []
                 }
             } else if !emails.is_empty() {
                 println!(
-                    "\n{} No local directory configured for mailbox '{}'. Set INBOX_DIR, ARCHIVE_DIR, or SENT_DIR in .env.",
+                    "\n{} No local directory configured for mailbox '{}'. Check [mailboxes] in {}.",
                     "ℹ".blue(),
-                    mailbox_for_save
+                    mailbox_for_save,
+                    config_path().display()
                 );
             }
         }
 
         Some(Commands::Sync { limit, mailbox, reconcile }) => {
-            let mailboxes = mailbox.unwrap_or_else(|| vec!["INBOX".to_string(), "Archive".to_string(), "Sent".to_string()]);
-            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let imap_config = ImapConfig::load(&global_config)?;
+
+            // Build the list of (role, server_name, local_dir, status) to sync
+            let sync_targets: Vec<(String, String, PathBuf, &str)> = if let Some(ref user_mailboxes) = mailbox {
+                // User specified mailboxes explicitly
+                user_mailboxes.iter().map(|mb| {
+                    let server_name = find_server_name_for_role(&global_config, mb);
+                    let local_dir = resolve_mailbox_dir(&global_config, mb)
+                        .unwrap_or_else(|_| PathBuf::from(mb));
+                    let status_str = mailbox_status(mb);
+                    (mb.clone(), server_name, local_dir, status_str)
+                }).collect()
+            } else {
+                // Default: all configured mailboxes
+                all_configured_mailboxes(&global_config).iter().map(|(role, mapping)| {
+                    let local_dir = resolve_mailbox_local_path(&global_config, mapping);
+                    let status_str = mailbox_status(role);
+                    (role.clone(), mapping.server.clone(), local_dir, status_str)
+                }).collect()
+            };
 
             // Pass 1: Additive sync (fetch full emails, save new ones)
-            for mb in &mailboxes {
-                let imap_mailbox = if mb == "Sent" {
-                    resolve_sent_mailbox()
-                } else {
-                    mb.clone()
-                };
-
-                let local_dir = resolve_mailbox_dir(mb)?;
-                let status_str = mailbox_status(mb);
-
+            for (mb, imap_mailbox, local_dir, status_str) in &sync_targets {
                 let imap_cfg = imap_config.clone();
                 let fetch_limit = Some(limit);
+                let imap_mb = imap_mailbox.clone();
                 let emails = tokio::task::spawn_blocking(move || {
                     let criteria = FetchCriteria {
                         from: None,
@@ -745,11 +761,11 @@ attachments: []
                         since: None,
                         before: None,
                     };
-                    fetch_emails(&imap_cfg, &criteria, &imap_mailbox, fetch_limit)
+                    fetch_emails(&imap_cfg, &criteria, &imap_mb, fetch_limit)
                 })
                 .await??;
 
-                let (saved, skipped) = save_fetched_emails(&emails, &local_dir, status_str)?;
+                let (saved, skipped) = save_fetched_emails(&emails, local_dir, status_str)?;
 
                 if skipped > 0 {
                     println!(
@@ -773,21 +789,28 @@ attachments: []
 
             // Pass 2: Reconciliation (only with --reconcile flag)
             if reconcile {
-                let reconcile_mailboxes = ["INBOX", "Archive"];
+                // Only INBOX and Archive participate in reconciliation
+                let mut reconcile_pairs: Vec<(String, String, PathBuf)> = Vec::new();
+                if let Some(ref m) = global_config.mailboxes.inbox {
+                    reconcile_pairs.push(("INBOX".to_string(), m.server.clone(), resolve_mailbox_local_path(&global_config, m)));
+                }
+                if let Some(ref m) = global_config.mailboxes.archive {
+                    reconcile_pairs.push(("Archive".to_string(), m.server.clone(), resolve_mailbox_local_path(&global_config, m)));
+                }
+
                 let mut server_ids: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
                 let mut local_dirs: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
 
-                for mb in &reconcile_mailboxes {
-                    let imap_mailbox = mb.to_string();
-                    let local_dir = resolve_mailbox_dir(mb)?;
-                    local_dirs.insert(mb.to_string(), local_dir);
+                for (role, imap_mailbox, local_dir) in &reconcile_pairs {
+                    local_dirs.insert(role.clone(), local_dir.clone());
 
                     let imap_cfg = imap_config.clone();
+                    let imap_mb = imap_mailbox.clone();
                     let ids = tokio::task::spawn_blocking(move || {
-                        fetch_server_message_ids(&imap_cfg, &imap_mailbox)
+                        fetch_server_message_ids(&imap_cfg, &imap_mb)
                     })
                     .await??;
-                    server_ids.insert(mb.to_string(), ids);
+                    server_ids.insert(role.clone(), ids);
                 }
 
                 let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
@@ -805,7 +828,7 @@ attachments: []
         }
 
         Some(Commands::Watch { mailbox, timeout }) => {
-            let imap_config = ImapConfig::from_env(path_hint.as_deref())?;
+            let imap_config = ImapConfig::load(&global_config)?;
             let exit_code = tokio::task::spawn_blocking(move || {
                 watch_mailbox(&imap_config, &mailbox, timeout)
             })
@@ -823,7 +846,14 @@ attachments: []
         }
 
         Some(Commands::Archive { file }) => {
-            match archive_email_locally(&file) {
+            let imap_config = ImapConfig::load(&global_config)?;
+            let dir = archive_dir.as_ref().ok_or_else(|| {
+                anyhow!("Archive mailbox not configured. Check [mailboxes.archive] in {}", config_path().display())
+            })?;
+            let archive_server_name = global_config.mailboxes.archive.as_ref()
+                .map(|m| m.server.as_str())
+                .unwrap_or("Archive");
+            match archive_email_locally(&imap_config, dir, &file, archive_server_name) {
                 Ok(()) => {
                     println!(
                         "{} Archived: {}",
@@ -844,7 +874,8 @@ attachments: []
         }
 
         Some(Commands::Delete { file }) => {
-            match delete_email_locally(&file) {
+            let imap_config = ImapConfig::load(&global_config)?;
+            match delete_email_locally(&imap_config, &file) {
                 Ok(()) => {
                     println!("{} Deleted: {}", "✓".green(), file.display());
                 }
@@ -860,6 +891,15 @@ attachments: []
             }
         }
 
+        Some(Commands::Config { action }) => {
+            match action {
+                ConfigAction::Init => cmd_config_init()?,
+                ConfigAction::Show => cmd_config_show()?,
+                ConfigAction::SetPassword { which } => cmd_set_password(&which)?,
+                ConfigAction::Path => cmd_config_path(),
+            }
+        }
+
         None => {
             // Default: preview mode (dry run)
             if let Some(file) = cli.file {
@@ -867,7 +907,7 @@ attachments: []
                 preview_draft(
                     &draft,
                     &smtp_config,
-                    &email_config,
+                    &global_config,
                     signature_content.as_deref(),
                     true,
                 )?;
@@ -875,17 +915,21 @@ attachments: []
                 // No file provided, show help
                 println!("email-cli - A CLI tool for sending emails from Markdown drafts\n");
                 println!("Usage:");
-                println!("  email-cli <file>              Preview a draft (dry-run)");
-                println!("  email-cli send <file>         Send a single approved email");
-                println!("  email-cli send-approved <dir> Send all approved emails");
-                println!("  email-cli list <dir>          List emails by status");
-                println!("  email-cli validate <path>     Validate YAML frontmatter");
-                println!("  email-cli mark-approved <file> Mark as approved");
-                println!("  email-cli new <name>          Create a new draft from template");
+                println!("  email <file>              Preview a draft (dry-run)");
+                println!("  email send <file>         Send a single approved email");
+                println!("  email send-approved <dir> Send all approved emails");
+                println!("  email list <dir>          List emails by status");
+                println!("  email validate <path>     Validate YAML frontmatter");
+                println!("  email mark-approved <file> Mark as approved");
+                println!("  email new <name>          Create a new draft from template");
+                println!("  email config init         Interactive setup wizard");
+                println!("  email config show         Show current configuration");
+                println!("  email config set-password  Store password in keyring");
+                println!("  email config path         Show config file path");
                 println!("\nOptions:");
                 println!("  -s, --signature <name>  Use a specific signature");
                 println!("  --no-signature          Skip signature entirely");
-                println!("\nRun 'email-cli --help' for more information.");
+                println!("\nRun 'email --help' for more information.");
             }
         }
     }

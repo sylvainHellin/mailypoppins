@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::config::{EmailConfig, SmtpConfig};
+use crate::config::{GlobalConfig, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ impl SendResult {
 
 pub(crate) fn markdown_to_html(
     markdown: &str,
-    config: &EmailConfig,
+    config: &GlobalConfig,
     signature: Option<&str>,
     quoted_html: Option<&str>,
 ) -> String {
@@ -148,7 +148,7 @@ blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; 
 pub(crate) async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
-    email_config: &EmailConfig,
+    email_config: &GlobalConfig,
     signature: Option<&str>,
 ) -> Result<(SendResult, Vec<u8>, Option<String>)> {
     // Check status

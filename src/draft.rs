@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::config::{EmailConfig, SmtpConfig};
+use crate::config::{GlobalConfig, SmtpConfig};
 use crate::parse::{extract_email_address, html_to_plain, slugify_sender, slugify_subject};
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
@@ -282,7 +282,7 @@ pub(crate) fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
 pub(crate) fn preview_draft(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
-    email_config: &EmailConfig,
+    email_config: &GlobalConfig,
     signature: Option<&str>,
     is_dry_run: bool,
 ) -> Result<()> {
@@ -404,17 +404,15 @@ pub(crate) fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>,
 
 /// Resolve the drafts directory using a fallback chain:
 /// 1. If the user passed an explicit (non-default) path, use it as-is.
-/// 2. Else if DRAFTS_DIR env var is set and points to an existing directory, use that.
+/// 2. Else if config_drafts_dir is set and points to an existing directory, use that.
 /// 3. Else fall back to "." (current directory).
-pub(crate) fn resolve_drafts_dir(cli_dir: &Path) -> PathBuf {
+pub(crate) fn resolve_drafts_dir(cli_dir: &Path, config_drafts_dir: &Option<PathBuf>) -> PathBuf {
     if cli_dir != Path::new(".") {
         return cli_dir.to_path_buf();
     }
-    if let Ok(env_dir) = std::env::var("DRAFTS_DIR") {
-        let s = env_dir.trim_matches('"').trim_matches('\'');
-        let expanded = PathBuf::from(shellexpand::tilde(s).into_owned());
-        if expanded.is_dir() {
-            return expanded;
+    if let Some(ref dir) = config_drafts_dir {
+        if dir.is_dir() {
+            return dir.clone();
         }
     }
     cli_dir.to_path_buf()
