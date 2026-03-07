@@ -404,35 +404,42 @@ pub(crate) fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path
         .deserialize()
         .context("Failed to parse frontmatter")?;
 
-    // Archive on server using message_id
-    if let Some(ref mid) = inbox_fm.message_id {
-        archive_email_on_server(imap_config, mid, archive_mailbox)?;
-    } else {
-        return Err(anyhow!(
-            "No message_id in frontmatter -- cannot archive on server"
-        ));
-    }
+    let message_id = inbox_fm.message_id.as_ref().ok_or_else(|| {
+        anyhow!("No message_id in frontmatter -- cannot archive on server")
+    })?;
 
+    // --- Local operations (instant) ---
     fs::create_dir_all(archive_dir)?;
 
-    // Update status from inbox to archived in the content
     let new_content = content.replacen("status: inbox", "status: archived", 1);
 
-    // Move the file to archive dir
     let file_name = file_path
         .file_name()
         .ok_or_else(|| anyhow!("Invalid file path"))?;
     let dest = archive_dir.join(file_name);
 
-    fs::write(&dest, new_content)?;
+    fs::write(&dest, &new_content)?;
     fs::remove_file(file_path)?;
 
-    // Move companion HTML file if it exists
     let html_companion = file_path.with_extension("html");
-    if html_companion.exists() {
-        let html_dest = dest.with_extension("html");
+    let html_dest = dest.with_extension("html");
+    let had_html = html_companion.exists();
+    if had_html {
         fs::copy(&html_companion, &html_dest)?;
         fs::remove_file(&html_companion)?;
+    }
+
+    // --- IMAP operation (slow) ---
+    if let Err(e) = archive_email_on_server(imap_config, message_id, archive_mailbox) {
+        // Rollback: restore local files to original state
+        info!("IMAP archive failed, rolling back local changes: {}", e);
+        fs::write(file_path, &content)?;
+        fs::remove_file(&dest)?;
+        if had_html {
+            fs::copy(&html_dest, &html_companion)?;
+            fs::remove_file(&html_dest)?;
+        }
+        return Err(e.context("IMAP archive failed; local changes have been rolled back"));
     }
 
     Ok(())
@@ -498,22 +505,38 @@ pub(crate) fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -
         .and_then(|d| d.deserialize::<std::collections::HashMap<String, serde_yaml::Value>>().ok())
         .and_then(|map| map.get("message_id").and_then(|v| v.as_str().map(|s| s.to_string())));
 
+    // Save companion HTML content for potential rollback
+    let html_companion = file_path.with_extension("html");
+    let html_content = if html_companion.exists() {
+        Some(fs::read_to_string(&html_companion)?)
+    } else {
+        None
+    };
+
+    // --- Local operations (instant) ---
+    fs::remove_file(file_path)
+        .with_context(|| format!("Failed to remove local file: {}", file_path.display()))?;
+
+    if html_content.is_some() {
+        fs::remove_file(&html_companion).ok();
+    }
+
+    // --- IMAP operation (slow) ---
     if let Some(ref mid) = message_id {
-        delete_email_on_server(imap_config, mid)?;
+        if let Err(e) = delete_email_on_server(imap_config, mid) {
+            // Rollback: restore local files
+            info!("IMAP delete failed, rolling back local changes: {}", e);
+            fs::write(file_path, &content)?;
+            if let Some(ref html) = html_content {
+                fs::write(&html_companion, html)?;
+            }
+            return Err(e.context("IMAP delete failed; local changes have been rolled back"));
+        }
     } else {
         info!(
             "No message_id in frontmatter -- skipping server deletion for {}",
             file_path.display()
         );
-    }
-
-    fs::remove_file(file_path)
-        .with_context(|| format!("Failed to remove local file: {}", file_path.display()))?;
-
-    // Remove companion HTML file if it exists
-    let html_companion = file_path.with_extension("html");
-    if html_companion.exists() {
-        fs::remove_file(&html_companion).ok();
     }
 
     Ok(())
