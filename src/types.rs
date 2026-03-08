@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum EmailStatus {
+pub enum EmailStatus {
     Draft,
     Approved,
     Sent,
@@ -24,44 +24,44 @@ impl std::fmt::Display for EmailStatus {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub(crate) struct EmailFrontmatter {
-    pub(crate) to: String,
+pub struct EmailFrontmatter {
+    pub to: String,
     #[serde(default)]
-    pub(crate) cc: Option<String>,
+    pub cc: Option<String>,
     #[serde(default)]
-    pub(crate) bcc: Option<String>,
-    pub(crate) subject: String,
-    pub(crate) status: EmailStatus,
+    pub bcc: Option<String>,
+    pub subject: String,
+    pub status: EmailStatus,
     #[serde(default)]
-    pub(crate) from: Option<String>,
+    pub from: Option<String>,
     #[serde(default)]
-    pub(crate) reply_to: Option<String>,
+    pub reply_to: Option<String>,
     #[serde(default)]
-    pub(crate) attachments: Option<Vec<String>>,
+    pub attachments: Option<Vec<String>>,
     #[serde(default)]
-    pub(crate) sent_at: Option<String>,
+    pub sent_at: Option<String>,
     #[serde(default)]
-    pub(crate) sent_via: Option<String>,
+    pub sent_via: Option<String>,
     #[serde(default)]
-    pub(crate) message_id: Option<String>,
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug)]
-pub(crate) struct EmailDraft {
-    pub(crate) path: PathBuf,
-    pub(crate) frontmatter: EmailFrontmatter,
-    pub(crate) body_markdown: String,
+pub struct EmailDraft {
+    pub path: PathBuf,
+    pub frontmatter: EmailFrontmatter,
+    pub body_markdown: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct InboxFrontmatter {
-    pub(crate) from: String,
-    pub(crate) to: String,
+pub struct InboxFrontmatter {
+    pub from: String,
+    pub to: String,
     #[serde(default)]
-    pub(crate) cc: Option<String>,
-    pub(crate) subject: String,
+    pub cc: Option<String>,
+    pub subject: String,
     #[serde(default)]
-    pub(crate) date: Option<String>,
+    pub date: Option<String>,
     #[serde(default)]
-    pub(crate) message_id: Option<String>,
+    pub message_id: Option<String>,
 }

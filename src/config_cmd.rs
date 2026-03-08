@@ -10,12 +10,12 @@ use crate::config::{
 use crate::imap_client::list_mailboxes;
 
 /// Print the config file path.
-pub(crate) fn cmd_config_path() {
+pub fn cmd_config_path() {
     println!("{}", config_path().display());
 }
 
 /// Display the resolved config with masked passwords.
-pub(crate) fn cmd_config_show() -> Result<()> {
+pub fn cmd_config_show() -> Result<()> {
     let config = load_global_config()?;
 
     println!("{}", "=== Email CLI Configuration ===".bold().cyan());
@@ -124,7 +124,7 @@ pub(crate) fn cmd_config_show() -> Result<()> {
 }
 
 /// Store a password in the OS keyring.
-pub(crate) fn cmd_set_password(which: &str) -> Result<()> {
+pub fn cmd_set_password(which: &str) -> Result<()> {
     let key = match which {
         "smtp" => "smtp-password",
         "imap" => "imap-password",
@@ -197,7 +197,7 @@ fn test_imap_connection(host: &str, port: u16, username: &str, password: &str) -
 // ---------------------------------------------------------------------------
 
 /// Interactive setup wizard for creating the config file.
-pub(crate) fn cmd_config_init() -> Result<()> {
+pub fn cmd_config_init() -> Result<()> {
     let path = config_path();
 
     if path.exists() {
@@ -494,7 +494,7 @@ pub(crate) fn cmd_config_init() -> Result<()> {
 
     // Extra mailboxes
     for mb in &extra_mailboxes {
-        toml_content.push_str(&format!("\n[[mailboxes.extra]]\n"));
+        toml_content.push_str("\n[[mailboxes.extra]]\n");
         toml_content.push_str(&format!("server = \"{}\"\n", mb));
         toml_content.push_str(&format!("local = \"{}\"\n", slugify_mailbox_name(mb)));
     }

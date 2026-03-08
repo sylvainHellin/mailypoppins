@@ -6,24 +6,24 @@ use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 
-pub(crate) struct FetchedEmail {
-    pub(crate) from: String,
-    pub(crate) to: String,
-    pub(crate) cc: Option<String>,
-    pub(crate) subject: String,
-    pub(crate) date: String,
-    pub(crate) body_text: String,
-    pub(crate) html_body: Option<String>,
-    pub(crate) has_attachments: bool,
-    pub(crate) message_id: Option<String>,
+pub struct FetchedEmail {
+    pub from: String,
+    pub to: String,
+    pub cc: Option<String>,
+    pub subject: String,
+    pub date: String,
+    pub body_text: String,
+    pub html_body: Option<String>,
+    pub has_attachments: bool,
+    pub message_id: Option<String>,
 }
 
-pub(crate) fn html_to_plain(html: &str) -> String {
+pub fn html_to_plain(html: &str) -> String {
     html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string())
 }
 
 /// Recursively collect the first text/plain and text/html parts from a parsed email.
-pub(crate) fn extract_body_parts(parsed: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
+pub fn extract_body_parts(parsed: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
     if parsed.ctype.mimetype == "text/plain" {
         let body = parsed.get_body().unwrap_or_default();
         if !body.is_empty() {
@@ -59,7 +59,7 @@ pub(crate) fn extract_body_parts(parsed: &mailparse::ParsedMail) -> (Option<Stri
 
 /// Extract body text from a parsed email.
 /// Returns (plain_text, Option<html_body>).
-pub(crate) fn extract_body_text(parsed: &mailparse::ParsedMail) -> (String, Option<String>) {
+pub fn extract_body_text(parsed: &mailparse::ParsedMail) -> (String, Option<String>) {
     let (plain, html) = extract_body_parts(parsed);
 
     if let Some(plain_text) = plain {
@@ -71,7 +71,7 @@ pub(crate) fn extract_body_text(parsed: &mailparse::ParsedMail) -> (String, Opti
     }
 }
 
-pub(crate) fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
+pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
     for sub in &parsed.subparts {
         let disposition = sub.get_content_disposition();
         if disposition.disposition == mailparse::DispositionType::Attachment {
@@ -86,7 +86,7 @@ pub(crate) fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
 
 /// Compress a sorted list of UIDs into IMAP sequence set format using ranges.
 /// e.g., [1,2,3,5,7,8,9] -> "1:3,5,7:9"
-pub(crate) fn compress_uid_set(uids: &[u32]) -> String {
+pub fn compress_uid_set(uids: &[u32]) -> String {
     if uids.is_empty() {
         return String::new();
     }
@@ -118,7 +118,7 @@ pub(crate) fn compress_uid_set(uids: &[u32]) -> String {
     ranges.join(",")
 }
 
-pub(crate) fn slugify_subject(subject: &str) -> String {
+pub fn slugify_subject(subject: &str) -> String {
     let slug: String = subject
         .to_lowercase()
         .chars()
@@ -151,7 +151,7 @@ pub(crate) fn slugify_subject(subject: &str) -> String {
     }
 }
 
-pub(crate) fn slugify_sender(from: &str) -> String {
+pub fn slugify_sender(from: &str) -> String {
     // Extract display name if present (e.g. "John Doe <john@example.com>" -> "John Doe")
     // Otherwise use the local part of the email address
     let name = if let Some(start) = from.find('<') {
@@ -192,7 +192,7 @@ pub(crate) fn slugify_sender(from: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
-pub(crate) fn extract_email_address(raw: &str) -> String {
+pub fn extract_email_address(raw: &str) -> String {
     if let Some(start) = raw.find('<') {
         if let Some(end) = raw.find('>') {
             return raw[start + 1..end].trim().to_string();
@@ -201,7 +201,7 @@ pub(crate) fn extract_email_address(raw: &str) -> String {
     raw.trim().to_string()
 }
 
-pub(crate) fn parse_email_date_prefix(date_str: &str) -> String {
+pub fn parse_email_date_prefix(date_str: &str) -> String {
     // Try parsing common email date formats to extract YYYY-MM-DD-HHMM
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(date_str) {
         return dt.format("%Y-%m-%d-%H%M").to_string();
@@ -210,7 +210,7 @@ pub(crate) fn parse_email_date_prefix(date_str: &str) -> String {
     Utc::now().format("%Y-%m-%d-%H%M").to_string()
 }
 
-pub(crate) fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
+pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
     fs::create_dir_all(inbox_dir)?;
 
     // Collect existing message IDs from inbox
@@ -323,7 +323,7 @@ pub(crate) fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, sta
     Ok((saved, skipped))
 }
 
-pub(crate) fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
+pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
     if emails.is_empty() {
         println!("No emails found matching the criteria.");
         return;

@@ -2,19 +2,21 @@
 
 ## Overview
 
-CLI tool for managing email drafts written in Markdown with YAML frontmatter. Supports sending via SMTP, fetching via IMAP, archiving via IMAP, and an auditable draft workflow (`draft → approved → sent`). Inbox emails can be archived (`inbox → archived`).
+CLI tool and TUI for managing email drafts written in Markdown with YAML frontmatter. Supports sending via SMTP, fetching via IMAP, archiving via IMAP, and an auditable draft workflow (`draft → approved → sent`). Inbox emails can be archived (`inbox → archived`). Running `email` with no arguments launches a ratatui-based TUI for interactive email management.
 
 ## Tech Stack
 
 - **Language:** Rust (Edition 2021)
 - **CLI parsing:** `clap` (derive macros)
+- **TUI:** `ratatui` + `crossterm` (alternate screen, raw mode, event loop)
+- **Clipboard:** `arboard` (copy-to-clipboard in TUI)
 - **SMTP:** `lettre` (async, TLS)
 - **IMAP:** `imap` + `native-tls`
 - **Email parsing:** `mailparse`
 - **HTML → plaintext:** `html2text`
 - **Frontmatter:** `gray_matter` + `serde_yaml`
 - **Markdown → HTML:** `pulldown-cmark`
-- **Terminal output:** `colored`
+- **Terminal output:** `colored` (CLI mode)
 - **Async runtime:** `tokio`
 - **Error handling:** `anyhow`
 - **Logging:** `log` + `simplelog` (file-based, daily rotation)
@@ -23,21 +25,30 @@ CLI tool for managing email drafts written in Markdown with YAML frontmatter. Su
 
 ## Architecture
 
-Multi-module project:
+The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The library exposes all modules so the TUI can call them directly without subprocess spawning.
+
+### Modules
 
 | File | Responsibility |
 |------|---------------|
-| `src/main.rs` | CLI definition (`Cli`, `Commands`), `main()`, command dispatch |
+| `src/lib.rs` | Library root, re-exports all modules |
+| `src/main.rs` | CLI definition (`Cli`, `Commands`), `main()`, command dispatch; launches TUI when no args given |
 | `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
-| `src/config.rs` | Global config loading (`~/.config/email/config.toml`), keyring integration, mailbox resolution, logging |
+| `src/config.rs` | Global config loading (`~/.config/email/config.toml`), keyring integration, mailbox resolution, logging. All config types derive `Clone` for TUI thread sharing. |
 | `src/config_cmd.rs` | Config subcommands: init wizard (credential testing, mailbox discovery), show, set-password, path |
 | `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, save/display |
 | `src/imap_client.rs` | All IMAP operations: fetch, list, append, watch, archive, delete |
 | `src/draft.rs` | Draft parsing, validation, preview, reply creation, status updates |
 | `src/send.rs` | `RecipientRole`, `SendResult`, `markdown_to_html`, `send_email` |
 | `src/sync.rs` | Local file scanning, reconciliation, mailbox dir resolution |
+| `src/tui/mod.rs` | TUI entry point (`tui::run()`), main event loop, action dispatcher, background task handling, terminal management, IMAP watcher thread |
+| `src/tui/app.rs` | TUI state (`App`), TEA-pattern message/update cycle, `EmailEntry` type, mailbox model, key handlers |
+| `src/tui/ui.rs` | TUI rendering (sidebar, email list, headers pane, preview pane, status bar, overlays) |
+| `src/tui/event.rs` | Terminal event polling (crossterm), tick rate management |
+| `src/tui/theme.rs` | Catppuccin Mocha color palette constants |
 
-Dependency graph (no cycles):
+### Dependency graph (no cycles)
+
 ```
 types       --> (none)
 config      --> (none)
@@ -47,14 +58,16 @@ draft       --> config, parse, types
 send        --> config, types
 sync        --> (none, only external crates)
 config_cmd  --> config, imap_client
-main        --> all modules
+tui         --> config, draft, imap_client, parse, send, sync, types
+main        --> all modules (via lib)
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `email <file>` | Preview a draft (dry-run, default) |
+| `email` | Launch the TUI (no arguments) |
+| `email <file>` | Preview a draft (dry-run) |
 | `email send <file> [--yes]` | Send an approved email (`-y` skips confirmation) |
 | `email send-approved [dir] [--yes]` | Batch send all approved drafts (`-y` skips confirmation) |
 | `email list [dir]` | List drafts grouped by status |
@@ -139,7 +152,55 @@ Sent files include additional fields: `sent_at`, `sent_via`, and `message_id` (t
 
 Reply drafts (created via `email reply`) include a `{{SIGNATURE}}` placeholder between the reply area and the quoted conversation. When sent, `markdown_to_html` replaces this placeholder with the signature HTML, ensuring the signature appears between the reply and the quoted text. If the placeholder is removed, the signature falls back to being appended at the end (same as regular drafts).
 
-## Output Conventions
+## TUI (v0.5.0)
+
+Running `email` with no arguments launches an interactive TUI built with `ratatui` and `crossterm`.
+
+### Layout
+
+Four panes: sidebar (mailbox list), email list, headers, and body preview. Panes adapt to terminal width (sidebar hidden below 40 cols, right panes hidden below 80 cols).
+
+### TUI Architecture (TEA pattern)
+
+The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::update()` is a pure state transition. Side-effects (IMAP, SMTP, filesystem) are handled in `handle_action()` in `tui/mod.rs`, dispatched via `Action` variants. Background operations (send, sync, archive, delete, fetch, reconcile) run on dedicated threads and report results through an `mpsc` channel as `BgResult` variants.
+
+### Background Operations
+
+- **IMAP watcher**: A long-lived thread runs IMAP IDLE on INBOX and sends `WatchEvent::Changed` when new mail arrives, triggering an automatic fetch.
+- **Mutations** (archive, delete): Optimistic -- local file removed from list immediately, server operation runs in background. On failure, caches are invalidated and the list reloads.
+- **Queued actions**: Fetch/sync/reconcile are deferred if mutations are in progress (`bg_mutations > 0`), then auto-executed when mutations complete.
+
+### Key Bindings (List focus)
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Navigate up/down |
+| `g g`/`G` | Jump to top/bottom |
+| `Enter`/`e` | Open in `$EDITOR` |
+| `r`/`R` | Reply / Reply All |
+| `a` | Archive (with confirmation) |
+| `d` | Delete (with confirmation) |
+| `A` | Mark as approved |
+| `x` | Send (with confirmation) |
+| `X` | Send all approved (with confirmation) |
+| `n` | New draft |
+| `y` | Copy file path to clipboard |
+| `f` | Fetch inbox |
+| `F` | Full sync |
+| `S` | Sync + reconcile |
+| `/` | Search (subject/contact/date) |
+| `\` | Search (includes body) |
+| `s` | Focus sidebar |
+| `1`-`9` | Jump to mailbox by index |
+| `Tab`/`Shift-Tab` | Cycle pane focus |
+| `?` | Help overlay |
+| `q` | Quit |
+
+### TUI Direct Library Calls
+
+The TUI calls library functions directly (e.g., `send_email`, `fetch_emails`, `archive_email_locally`) rather than spawning `email` subprocesses. This is why `src/lib.rs` exists and why config types derive `Clone` -- they need to be moved into background threads.
+
+## Output Conventions (CLI mode)
 
 - `colored` crate for terminal styling
 - `✓` green for success, `✗` red for errors, `⚠` yellow for warnings, `ℹ` blue for info

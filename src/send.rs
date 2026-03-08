@@ -19,7 +19,7 @@ use crate::types::{EmailDraft, EmailStatus};
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum RecipientRole {
+pub enum RecipientRole {
     To,
     Cc,
     Bcc,
@@ -36,37 +36,37 @@ impl std::fmt::Display for RecipientRole {
 }
 
 #[derive(Debug)]
-pub(crate) struct RecipientResult {
-    pub(crate) address: String,
-    pub(crate) role: RecipientRole,
-    pub(crate) success: bool,
-    pub(crate) error: Option<String>,
+pub struct RecipientResult {
+    pub address: String,
+    pub role: RecipientRole,
+    pub success: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug)]
-pub(crate) struct SendResult {
-    pub(crate) results: Vec<RecipientResult>,
+pub struct SendResult {
+    pub results: Vec<RecipientResult>,
 }
 
 impl SendResult {
-    pub(crate) fn all_succeeded(&self) -> bool {
+    pub fn all_succeeded(&self) -> bool {
         self.results.iter().all(|r| r.success)
     }
 
-    pub(crate) fn any_succeeded(&self) -> bool {
+    pub fn any_succeeded(&self) -> bool {
         self.results.iter().any(|r| r.success)
     }
 
-    pub(crate) fn succeeded(&self) -> Vec<&RecipientResult> {
+    pub fn succeeded(&self) -> Vec<&RecipientResult> {
         self.results.iter().filter(|r| r.success).collect()
     }
 
-    pub(crate) fn failed(&self) -> Vec<&RecipientResult> {
+    pub fn failed(&self) -> Vec<&RecipientResult> {
         self.results.iter().filter(|r| !r.success).collect()
     }
 }
 
-pub(crate) fn markdown_to_html(
+pub fn markdown_to_html(
     markdown: &str,
     config: &GlobalConfig,
     signature: Option<&str>,
@@ -145,7 +145,7 @@ blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; 
     )
 }
 
-pub(crate) async fn send_email(
+pub async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
     email_config: &GlobalConfig,

@@ -11,7 +11,7 @@ use crate::config::{GlobalConfig, SmtpConfig};
 use crate::parse::{extract_email_address, html_to_plain, slugify_sender, slugify_subject};
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
-pub(crate) fn select_inbox_email(inbox_dir: &Path) -> Result<PathBuf> {
+pub fn select_inbox_email(inbox_dir: &Path) -> Result<PathBuf> {
     let mut entries: Vec<(PathBuf, InboxFrontmatter)> = Vec::new();
 
     for entry in WalkDir::new(inbox_dir)
@@ -71,7 +71,7 @@ pub(crate) fn select_inbox_email(inbox_dir: &Path) -> Result<PathBuf> {
     Ok(entries[selection].0.clone())
 }
 
-pub(crate) fn create_reply_draft(
+pub fn create_reply_draft(
     source_path: &Path,
     reply_all: bool,
     default_from: &str,
@@ -220,7 +220,7 @@ pub(crate) fn create_reply_draft(
     Ok(dest)
 }
 
-pub(crate) fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
+pub fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
@@ -242,7 +242,7 @@ pub(crate) fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
     })
 }
 
-pub(crate) fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
+pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
     // Check required fields
@@ -279,7 +279,7 @@ pub(crate) fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     Ok(warnings)
 }
 
-pub(crate) fn preview_draft(
+pub fn preview_draft(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
     email_config: &GlobalConfig,
@@ -361,7 +361,7 @@ pub(crate) fn preview_draft(
     Ok(())
 }
 
-pub(crate) fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>, message_id: Option<&str>) -> Result<()> {
+pub fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>, message_id: Option<&str>) -> Result<()> {
     info!("Updating status to sent: {}", draft.path.display());
     let mut frontmatter = draft.frontmatter.clone();
     frontmatter.status = EmailStatus::Sent;
@@ -406,7 +406,7 @@ pub(crate) fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>,
 /// 1. If the user passed an explicit (non-default) path, use it as-is.
 /// 2. Else if config_drafts_dir is set and points to an existing directory, use that.
 /// 3. Else fall back to "." (current directory).
-pub(crate) fn resolve_drafts_dir(cli_dir: &Path, config_drafts_dir: &Option<PathBuf>) -> PathBuf {
+pub fn resolve_drafts_dir(cli_dir: &Path, config_drafts_dir: &Option<PathBuf>) -> PathBuf {
     if cli_dir != Path::new(".") {
         return cli_dir.to_path_buf();
     }
@@ -418,7 +418,7 @@ pub(crate) fn resolve_drafts_dir(cli_dir: &Path, config_drafts_dir: &Option<Path
     cli_dir.to_path_buf()
 }
 
-pub(crate) fn find_drafts(dir: &Path, status_filter: Option<EmailStatus>) -> Result<Vec<EmailDraft>> {
+pub fn find_drafts(dir: &Path, status_filter: Option<EmailStatus>) -> Result<Vec<EmailDraft>> {
     let mut drafts = Vec::new();
 
     for entry in WalkDir::new(dir)
@@ -448,12 +448,11 @@ pub(crate) fn find_drafts(dir: &Path, status_filter: Option<EmailStatus>) -> Res
     Ok(drafts)
 }
 
-pub(crate) fn mark_as_approved(path: &Path) -> Result<()> {
+pub fn mark_as_approved(path: &Path) -> Result<String> {
     let draft = parse_email_draft(path)?;
 
     if draft.frontmatter.status == EmailStatus::Approved {
-        println!("{} Already approved: {}", "ℹ".blue(), path.display());
-        return Ok(());
+        return Ok(format!("Already approved: {}", path.display()));
     }
 
     if draft.frontmatter.status == EmailStatus::Sent {
@@ -468,7 +467,5 @@ pub(crate) fn mark_as_approved(path: &Path) -> Result<()> {
 
     fs::write(path, new_content)?;
 
-    println!("{} Marked as approved: {}", "✓".green(), path.display());
-
-    Ok(())
+    Ok(format!("Marked as approved: {}", path.display()))
 }

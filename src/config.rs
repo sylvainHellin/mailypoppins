@@ -13,30 +13,30 @@ use chrono::Utc;
 // Global config (loaded from ~/.config/email/config.toml)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct GlobalConfig {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct GlobalConfig {
     #[serde(default)]
-    pub(crate) email: EmailSettings,
+    pub email: EmailSettings,
     #[serde(default)]
-    pub(crate) smtp: SmtpSettings,
+    pub smtp: SmtpSettings,
     #[serde(default)]
-    pub(crate) imap: ImapSettings,
+    pub imap: ImapSettings,
     #[serde(default)]
-    pub(crate) directories: DirectorySettings,
+    pub directories: DirectorySettings,
     #[serde(default)]
-    pub(crate) mailboxes: MailboxesConfig,
+    pub mailboxes: MailboxesConfig,
     #[serde(default)]
-    pub(crate) signatures: SignaturesConfig,
+    pub signatures: SignaturesConfig,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct EmailSettings {
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmailSettings {
     #[serde(default = "default_font_family")]
-    pub(crate) font_family: String,
+    pub font_family: String,
     #[serde(default = "default_font_size")]
-    pub(crate) font_size: String,
+    pub font_size: String,
     #[serde(default = "default_true")]
-    pub(crate) include_signature: bool,
+    pub include_signature: bool,
 }
 
 impl Default for EmailSettings {
@@ -61,95 +61,96 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct SmtpSettings {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct SmtpSettings {
     #[serde(default)]
-    pub(crate) host: String,
+    pub host: String,
     #[serde(default = "default_smtp_port")]
-    pub(crate) port: u16,
+    pub port: u16,
     #[serde(default)]
-    pub(crate) username: String,
+    pub username: String,
     #[serde(default)]
-    pub(crate) default_from: String,
+    pub default_from: String,
 }
 
 fn default_smtp_port() -> u16 {
     465
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct ImapSettings {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ImapSettings {
     #[serde(default)]
-    pub(crate) host: String,
+    pub host: String,
     #[serde(default = "default_imap_port")]
-    pub(crate) port: u16,
+    pub port: u16,
     #[serde(default)]
-    pub(crate) username: String,
+    pub username: String,
 }
 
 fn default_imap_port() -> u16 {
     993
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct DirectorySettings {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct DirectorySettings {
     #[serde(default)]
-    pub(crate) root: Option<String>,
+    pub root: Option<String>,
     #[serde(default)]
-    pub(crate) drafts: Option<String>,
+    pub drafts: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub(crate) struct MailboxMapping {
-    pub(crate) server: String,
-    pub(crate) local: String,
+pub struct MailboxMapping {
+    pub server: String,
+    pub local: String,
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct MailboxesConfig {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct MailboxesConfig {
     #[serde(default)]
-    pub(crate) inbox: Option<MailboxMapping>,
+    pub inbox: Option<MailboxMapping>,
     #[serde(default)]
-    pub(crate) archive: Option<MailboxMapping>,
+    pub archive: Option<MailboxMapping>,
     #[serde(default)]
-    pub(crate) sent: Option<MailboxMapping>,
+    pub sent: Option<MailboxMapping>,
     #[serde(default)]
-    pub(crate) extra: Option<Vec<MailboxMapping>>,
+    pub extra: Option<Vec<MailboxMapping>>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct SignaturesConfig {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct SignaturesConfig {
     #[serde(default)]
-    pub(crate) default: Option<String>,
+    pub default: Option<String>,
     #[serde(flatten)]
-    pub(crate) entries: HashMap<String, SignatureEntry>,
+    pub entries: HashMap<String, SignatureEntry>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub(crate) struct SignatureEntry {
+pub struct SignatureEntry {
     #[serde(default)]
-    pub(crate) name: Option<String>,
-    pub(crate) path: String,
+    pub name: Option<String>,
+    pub path: String,
 }
 
 // ---------------------------------------------------------------------------
 // Resolved runtime configs (include secrets from keyring)
 // ---------------------------------------------------------------------------
 
-pub(crate) struct SmtpConfig {
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) username: String,
-    pub(crate) password: String,
-    pub(crate) default_from: String,
+#[derive(Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub default_from: String,
 }
 
 #[derive(Clone)]
-pub(crate) struct ImapConfig {
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) username: String,
-    pub(crate) password: String,
+pub struct ImapConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ pub(crate) struct ImapConfig {
 
 const KEYRING_SERVICE: &str = "email-cli";
 
-pub(crate) fn get_keyring_password(key: &str) -> Result<String> {
+pub fn get_keyring_password(key: &str) -> Result<String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, key)
         .context("Failed to create keyring entry")?;
     entry
@@ -166,7 +167,7 @@ pub(crate) fn get_keyring_password(key: &str) -> Result<String> {
         .with_context(|| format!("Password '{}' not found in keyring. Run `email config set-password` to set it.", key))
 }
 
-pub(crate) fn set_keyring_password(key: &str, password: &str) -> Result<()> {
+pub fn set_keyring_password(key: &str, password: &str) -> Result<()> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, key)
         .context("Failed to create keyring entry")?;
     entry
@@ -179,7 +180,7 @@ pub(crate) fn set_keyring_password(key: &str, password: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Return the path to the global config file: ~/.config/email/config.toml
-pub(crate) fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
@@ -188,7 +189,7 @@ pub(crate) fn config_path() -> PathBuf {
 }
 
 /// Load the global config from ~/.config/email/config.toml
-pub(crate) fn load_global_config() -> Result<GlobalConfig> {
+pub fn load_global_config() -> Result<GlobalConfig> {
     let path = config_path();
     if !path.exists() {
         return Err(anyhow::anyhow!(
@@ -206,7 +207,7 @@ pub(crate) fn load_global_config() -> Result<GlobalConfig> {
 
 /// Build SmtpConfig from GlobalConfig + keyring password
 impl SmtpConfig {
-    pub(crate) fn load(config: &GlobalConfig) -> Result<Self> {
+    pub fn load(config: &GlobalConfig) -> Result<Self> {
         let password = get_keyring_password("smtp-password")?;
         Ok(Self {
             host: config.smtp.host.clone(),
@@ -220,7 +221,7 @@ impl SmtpConfig {
 
 /// Build ImapConfig from GlobalConfig + keyring password (with SMTP fallback)
 impl ImapConfig {
-    pub(crate) fn load(config: &GlobalConfig) -> Result<Self> {
+    pub fn load(config: &GlobalConfig) -> Result<Self> {
         // Username falls back to SMTP username if empty
         let username = if config.imap.username.is_empty() {
             config.smtp.username.clone()
@@ -261,23 +262,23 @@ fn expand_path(s: &str, root: Option<&Path>) -> PathBuf {
 }
 
 /// Resolve an optional directory path from config: expand ~ and return PathBuf
-pub(crate) fn resolve_dir(dir: &Option<String>) -> Option<PathBuf> {
+pub fn resolve_dir(dir: &Option<String>) -> Option<PathBuf> {
     dir.as_ref().map(|s| expand_path(s, None))
 }
 
 /// Resolve the root directory from config
-pub(crate) fn resolve_root_dir(config: &GlobalConfig) -> Option<PathBuf> {
+pub fn resolve_root_dir(config: &GlobalConfig) -> Option<PathBuf> {
     resolve_dir(&config.directories.root)
 }
 
 /// Resolve a MailboxMapping's local path, relative to root if not absolute
-pub(crate) fn resolve_mailbox_local_path(config: &GlobalConfig, mapping: &MailboxMapping) -> PathBuf {
+pub fn resolve_mailbox_local_path(config: &GlobalConfig, mapping: &MailboxMapping) -> PathBuf {
     let root = resolve_root_dir(config);
     expand_path(&mapping.local, root.as_deref())
 }
 
 /// Resolve the sent mailbox server name from config
-pub(crate) fn resolve_sent_mailbox(config: &GlobalConfig) -> String {
+pub fn resolve_sent_mailbox(config: &GlobalConfig) -> String {
     config
         .mailboxes
         .sent
@@ -287,7 +288,7 @@ pub(crate) fn resolve_sent_mailbox(config: &GlobalConfig) -> String {
 }
 
 /// Resolve the drafts directory from config (relative to root or absolute)
-pub(crate) fn resolve_drafts_dir_from_config(config: &GlobalConfig) -> Option<PathBuf> {
+pub fn resolve_drafts_dir_from_config(config: &GlobalConfig) -> Option<PathBuf> {
     let root = resolve_root_dir(config);
     config.directories.drafts.as_ref().map(|s| expand_path(s, root.as_deref()))
 }
@@ -322,7 +323,7 @@ fn find_mailbox_mapping<'a>(config: &'a GlobalConfig, mailbox: &str) -> Option<&
 }
 
 /// Resolve a mailbox name to its local directory from the config
-pub(crate) fn resolve_mailbox_dir(config: &GlobalConfig, mailbox: &str) -> Result<PathBuf> {
+pub fn resolve_mailbox_dir(config: &GlobalConfig, mailbox: &str) -> Result<PathBuf> {
     let mapping = find_mailbox_mapping(config, mailbox).with_context(|| {
         format!(
             "No mailbox configured for '{}'. Check [mailboxes] in {}",
@@ -335,7 +336,7 @@ pub(crate) fn resolve_mailbox_dir(config: &GlobalConfig, mailbox: &str) -> Resul
 
 /// Return all configured mailboxes: (role_or_server_name, mapping)
 /// Roles: "inbox", "archive", "sent", plus extra server names.
-pub(crate) fn all_configured_mailboxes(config: &GlobalConfig) -> Vec<(String, &MailboxMapping)> {
+pub fn all_configured_mailboxes(config: &GlobalConfig) -> Vec<(String, &MailboxMapping)> {
     let mut result = Vec::new();
     if let Some(ref m) = config.mailboxes.inbox {
         result.push(("inbox".to_string(), m));
@@ -356,7 +357,7 @@ pub(crate) fn all_configured_mailboxes(config: &GlobalConfig) -> Vec<(String, &M
 
 /// Given a user-specified mailbox name (which might be a role like "inbox" or
 /// a server name like "INBOX"), return the actual IMAP server name from config.
-pub(crate) fn find_server_name_for_role(config: &GlobalConfig, name: &str) -> String {
+pub fn find_server_name_for_role(config: &GlobalConfig, name: &str) -> String {
     if let Some(mapping) = find_mailbox_mapping(config, name) {
         mapping.server.clone()
     } else {
@@ -366,7 +367,7 @@ pub(crate) fn find_server_name_for_role(config: &GlobalConfig, name: &str) -> St
 
 /// Slugify a mailbox name for use as a local directory name.
 /// Lowercase, replace spaces/dots/slashes with hyphens, collapse consecutive hyphens.
-pub(crate) fn slugify_mailbox_name(name: &str) -> String {
+pub fn slugify_mailbox_name(name: &str) -> String {
     let slug: String = name
         .to_lowercase()
         .chars()
@@ -400,7 +401,7 @@ pub(crate) fn slugify_mailbox_name(name: &str) -> String {
 
 /// Initialize file-based logging to ~/.email-cli/logs/email-cli-YYYY-MM-DD.log.
 /// Non-fatal: prints a warning and continues if setup fails.
-pub(crate) fn init_logging() {
+pub fn init_logging() {
     let log_dir = log_base_dir().join("logs");
     if let Err(e) = fs::create_dir_all(&log_dir) {
         eprintln!(
@@ -452,7 +453,7 @@ fn log_base_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Load signature HTML content
-pub(crate) fn load_signature(config: &GlobalConfig, signature_name: Option<&str>) -> Option<String> {
+pub fn load_signature(config: &GlobalConfig, signature_name: Option<&str>) -> Option<String> {
     let sig_name = signature_name
         .map(|s| s.to_string())
         .or_else(|| config.signatures.default.clone())?;

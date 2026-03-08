@@ -1,6 +1,6 @@
 # email
 
-A CLI tool for sending emails from Markdown drafts with YAML frontmatter. Supports IMAP fetch/sync/archive and an auditable draft workflow (`draft -> approved -> sent`).
+A CLI tool and TUI for managing emails from Markdown drafts with YAML frontmatter. Supports IMAP fetch/sync/archive and an auditable draft workflow (`draft -> approved -> sent`). Running `email` with no arguments launches an interactive terminal UI.
 
 ## Installation
 
@@ -124,6 +124,12 @@ The file is updated in-place with `status: sent`, `sent_at` timestamp, `sent_via
 
 ## Commands
 
+### TUI
+
+```bash
+email                           # Launch the interactive TUI
+```
+
 ### Global options
 
 ```bash
@@ -204,25 +210,55 @@ Title | Organization
 
 Reply drafts include a `{{SIGNATURE}}` placeholder between the reply area and quoted text. When sent, the placeholder is replaced with the signature HTML.
 
+## TUI
+
+Running `email` with no arguments opens a full-screen terminal interface (built on `ratatui`).
+
+**Layout:** sidebar (mailbox list) | email list | headers + body preview. Adapts to terminal width.
+
+**Key bindings (list view):**
+
+| Key | Action |
+|-----|--------|
+| `j`/`k`, arrows | Navigate |
+| `Enter`/`e` | Open in `$EDITOR` |
+| `r`/`R` | Reply / Reply all |
+| `a`/`d` | Archive / Delete (with confirmation) |
+| `A` | Mark as approved |
+| `x`/`X` | Send / Send all approved |
+| `n` | New draft |
+| `f`/`F`/`S` | Fetch / Sync / Reconcile |
+| `/` or `\` | Search (header-only or full-body) |
+| `1`-`9` | Jump to mailbox |
+| `?` | Help |
+| `q` | Quit |
+
+The TUI calls library functions directly (no subprocess spawning). Background IMAP IDLE watches for new mail and triggers automatic fetches.
+
 ## Example workflow
 
 ```bash
 # 1. Set up (once)
 email config init
 
-# 2. Sync inbox
+# 2. Launch the TUI for interactive management
+email
+
+# Or use CLI commands directly:
+
+# 3. Sync inbox
 email sync
 
-# 3. Create and review drafts
+# 4. Create and review drafts
 email new meeting-followup
 email list ~/notes/email/drafts/
 email ~/notes/email/drafts/2026-03-01_meeting-followup.md   # preview
 
-# 4. Approve and send
+# 5. Approve and send
 email mark-approved ~/notes/email/drafts/2026-03-01_meeting-followup.md
 email send ~/notes/email/drafts/2026-03-01_meeting-followup.md
 
-# 5. Or batch send all approved
+# 6. Or batch send all approved
 email send-approved ~/notes/email/drafts/
 ```
 

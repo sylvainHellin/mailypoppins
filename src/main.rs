@@ -1,20 +1,11 @@
-mod types;
-mod config;
-mod config_cmd;
-mod parse;
-mod imap_client;
-mod draft;
-mod send;
-mod sync;
-
-use types::*;
-use config::*;
-use parse::*;
-use imap_client::*;
-use draft::*;
-use send::*;
-use sync::*;
-use config_cmd::*;
+use email::types::*;
+use email::config::*;
+use email::parse::*;
+use email::imap_client::*;
+use email::draft::*;
+use email::send::*;
+use email::sync::*;
+use email::config_cmd::*;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
@@ -567,7 +558,12 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::MarkApproved { file }) => {
-            mark_as_approved(&file)?;
+            let msg = mark_as_approved(&file)?;
+            if msg.starts_with("Already") {
+                println!("{} {}", "ℹ".blue(), msg);
+            } else {
+                println!("{} {}", "✓".green(), msg);
+            }
         }
 
         Some(Commands::New { name }) => {
@@ -829,6 +825,7 @@ attachments: []
 
         Some(Commands::Watch { mailbox, timeout }) => {
             let imap_config = ImapConfig::load(&global_config)?;
+            println!("Watching {} for changes...", mailbox);
             let exit_code = tokio::task::spawn_blocking(move || {
                 watch_mailbox(&imap_config, &mailbox, timeout)
             })
@@ -901,8 +898,8 @@ attachments: []
         }
 
         None => {
-            // Default: preview mode (dry run)
             if let Some(file) = cli.file {
+                // Preview mode (dry run)
                 let draft = parse_email_draft(&file)?;
                 preview_draft(
                     &draft,
@@ -912,24 +909,8 @@ attachments: []
                     true,
                 )?;
             } else {
-                // No file provided, show help
-                println!("email-cli - A CLI tool for sending emails from Markdown drafts\n");
-                println!("Usage:");
-                println!("  email <file>              Preview a draft (dry-run)");
-                println!("  email send <file>         Send a single approved email");
-                println!("  email send-approved <dir> Send all approved emails");
-                println!("  email list <dir>          List emails by status");
-                println!("  email validate <path>     Validate YAML frontmatter");
-                println!("  email mark-approved <file> Mark as approved");
-                println!("  email new <name>          Create a new draft from template");
-                println!("  email config init         Interactive setup wizard");
-                println!("  email config show         Show current configuration");
-                println!("  email config set-password  Store password in keyring");
-                println!("  email config path         Show config file path");
-                println!("\nOptions:");
-                println!("  -s, --signature <name>  Use a specific signature");
-                println!("  --no-signature          Skip signature entirely");
-                println!("\nRun 'email --help' for more information.");
+                // No file, no subcommand -> launch TUI
+                email::tui::run()?;
             }
         }
     }

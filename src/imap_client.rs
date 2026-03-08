@@ -10,14 +10,14 @@ use crate::config::ImapConfig;
 use crate::parse::{compress_uid_set, extract_body_text, has_attachments, FetchedEmail};
 use crate::types::InboxFrontmatter;
 
-pub(crate) struct FetchCriteria {
-    pub(crate) from: Option<String>,
-    pub(crate) to: Option<String>,
-    pub(crate) cc: Option<String>,
-    pub(crate) subject: Option<String>,
-    pub(crate) body: Option<String>,
-    pub(crate) since: Option<String>,
-    pub(crate) before: Option<String>,
+pub struct FetchCriteria {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub since: Option<String>,
+    pub before: Option<String>,
 }
 
 fn build_imap_search_query(criteria: &FetchCriteria) -> String {
@@ -84,7 +84,7 @@ fn parse_date_to_imap(date_str: &str) -> Option<String> {
 }
 
 /// Fetch only Message-IDs from a mailbox (lightweight, no body download).
-pub(crate) fn fetch_server_message_ids(
+pub fn fetch_server_message_ids(
     imap_config: &ImapConfig,
     mailbox: &str,
 ) -> Result<HashSet<String>> {
@@ -147,7 +147,7 @@ pub(crate) fn fetch_server_message_ids(
     Ok(ids)
 }
 
-pub(crate) fn fetch_emails(
+pub fn fetch_emails(
     imap_config: &ImapConfig,
     criteria: &FetchCriteria,
     mailbox: &str,
@@ -240,7 +240,7 @@ pub(crate) fn fetch_emails(
     Ok(emails)
 }
 
-pub(crate) fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
+pub fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
         (imap_config.host.as_str(), imap_config.port),
@@ -263,7 +263,7 @@ pub(crate) fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
     Ok(names)
 }
 
-pub(crate) fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8], sent_mailbox: &str) -> Result<()> {
+pub fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8], sent_mailbox: &str) -> Result<()> {
     info!("Appending sent email to IMAP folder '{}'", sent_mailbox);
 
     let tls = native_tls::TlsConnector::builder().build()?;
@@ -286,7 +286,7 @@ pub(crate) fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8]
     Ok(())
 }
 
-pub(crate) fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
+pub fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
     use imap::extensions::idle::WaitOutcome;
 
     let tls = native_tls::TlsConnector::builder().build()?;
@@ -306,7 +306,6 @@ pub(crate) fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Op
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
 
     info!("Watching mailbox '{}' for changes (IMAP IDLE)", mailbox);
-    println!("Watching {} for changes...", mailbox);
 
     let exit_code = match timeout {
         None => {
@@ -341,7 +340,7 @@ pub(crate) fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Op
     Ok(exit_code)
 }
 
-pub(crate) fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archive_mailbox: &str) -> Result<()> {
+pub fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archive_mailbox: &str) -> Result<()> {
     info!("Archiving email on server: Message-ID={} -> {}", message_id, archive_mailbox);
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
@@ -391,7 +390,7 @@ pub(crate) fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str
     Ok(())
 }
 
-pub(crate) fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_path: &Path, archive_mailbox: &str) -> Result<()> {
+pub fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_path: &Path, archive_mailbox: &str) -> Result<()> {
     info!("Archiving email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -445,7 +444,7 @@ pub(crate) fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path
     Ok(())
 }
 
-pub(crate) fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) -> Result<()> {
+pub fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) -> Result<()> {
     info!("Deleting email on server: Message-ID={}", message_id);
     let tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::connect(
@@ -491,7 +490,7 @@ pub(crate) fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str)
     Ok(())
 }
 
-pub(crate) fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Result<()> {
+pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Result<()> {
     info!("Deleting email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;

@@ -1,0 +1,9 @@
+pub mod types;
+pub mod config;
+pub mod config_cmd;
+pub mod parse;
+pub mod imap_client;
+pub mod draft;
+pub mod send;
+pub mod sync;
+pub mod tui;

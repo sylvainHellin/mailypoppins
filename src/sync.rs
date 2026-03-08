@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 /// Scan a directory for .md files and extract their Message-IDs from frontmatter.
 /// Returns a map from message_id to file path.
-pub(crate) fn scan_local_message_ids(dir: &Path) -> Result<HashMap<String, PathBuf>> {
+pub fn scan_local_message_ids(dir: &Path) -> Result<HashMap<String, PathBuf>> {
     let mut ids: HashMap<String, PathBuf> = HashMap::new();
     if !dir.exists() {
         return Ok(ids);
@@ -45,7 +45,7 @@ pub(crate) fn scan_local_message_ids(dir: &Path) -> Result<HashMap<String, PathB
 }
 
 /// Move a local email file from one mailbox directory to another, updating its status.
-pub(crate) fn move_local_email(
+pub fn move_local_email(
     file_path: &Path,
     target_dir: &Path,
     old_status: &str,
@@ -83,7 +83,7 @@ pub(crate) fn move_local_email(
 /// Reconcile local files against server-side Message-ID sets.
 /// Moves files that changed mailbox on the server, deletes files no longer on any server mailbox.
 /// Only operates on INBOX and Archive (Sent is skipped -- locally-authored files are source of truth).
-pub(crate) fn reconcile_local_files(
+pub fn reconcile_local_files(
     server_ids: &HashMap<String, HashSet<String>>,
     local_dirs: &HashMap<String, PathBuf>,
 ) -> Result<(usize, usize)> {
@@ -155,7 +155,7 @@ pub(crate) fn reconcile_local_files(
 }
 
 /// Map a mailbox name to the corresponding email status string (case-insensitive).
-pub(crate) fn mailbox_status(mailbox: &str) -> &'static str {
+pub fn mailbox_status(mailbox: &str) -> &'static str {
     if mailbox.eq_ignore_ascii_case("inbox") {
         "inbox"
     } else if mailbox.eq_ignore_ascii_case("archive") {
