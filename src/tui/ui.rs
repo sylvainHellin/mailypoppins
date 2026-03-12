@@ -197,7 +197,11 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .map(|(i, email)| {
                 let is_selected = i == app.list_index;
                 let contact = truncate(email.display_contact(app.active_kind()), contact_width);
-                let subject = truncate(&email.subject, subject_width);
+                let subject_prefix = if email.has_attachments { "\u{f0c6} " } else { "" };
+                let subject = truncate(
+                    &format!("{}{}", subject_prefix, email.subject),
+                    subject_width,
+                );
 
                 let row_style = if is_selected {
                     Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
@@ -249,7 +253,11 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .enumerate()
             .map(|(i, email)| {
                 let is_selected = i == app.list_index;
-                let subject = truncate(&email.subject, subject_width);
+                let subject_prefix = if email.has_attachments { "\u{f0c6} " } else { "" };
+                let subject = truncate(
+                    &format!("{}{}", subject_prefix, email.subject),
+                    subject_width,
+                );
 
                 let row_style = if is_selected {
                     Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
@@ -759,10 +767,18 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let total = app.mailbox_counts[app.active_mailbox];
     let shown = app.emails.len();
     let watch_prefix = if app.watcher_active { "WATCHING " } else { "" };
-    let mailbox_text = if !app.search_query.is_empty() && shown != total {
-        format!("{} {}/{} ", app.active_label(), shown, total)
+    let mailbox_text = if shown == 0 {
+        format!("{} 0 ", app.active_label())
+    } else if !app.search_query.is_empty() && shown != total {
+        format!(
+            "{} {}/{} ({}) ",
+            app.active_label(),
+            app.list_index + 1,
+            shown,
+            total
+        )
     } else {
-        format!("{} {} ", app.active_label(), total)
+        format!("{} {}/{} ", app.active_label(), app.list_index + 1, shown)
     };
     let right_len = (watch_prefix.len() + mailbox_text.len() + 1) as u16;
 
