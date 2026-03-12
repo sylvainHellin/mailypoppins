@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::NaiveDate;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gray_matter::engine::YAML;
 use gray_matter::Matter;
 use serde::Deserialize;
@@ -189,7 +190,6 @@ fn resolve_date(
 pub enum BgResult {
     Fetch { result: Result<String, String> },
     Sync { result: Result<String, String> },
-    Reconcile { result: Result<String, String> },
     Send { result: Result<String, String> },
     SendApproved { result: Result<String, String> },
     Archive { result: Result<String, String> },
@@ -246,10 +246,11 @@ pub enum Action {
     Approve,
     Archive,
     Delete,
+    BatchArchive(Vec<PathBuf>),
+    BatchDelete(Vec<PathBuf>),
     CopyPath,
     Fetch,
     Sync,
-    Reconcile,
 }
 
 /// Which destructive action a confirmation dialog is guarding.
@@ -291,6 +292,7 @@ pub struct App {
     pub g_pending: bool,
     pub headers_scroll: u16,
     pub preview_scroll: u16,
+    pub selection: HashSet<PathBuf>,
     email_cache: Vec<Option<Vec<EmailEntry>>>,
 
     pub pending_action: Option<Action>,
@@ -379,6 +381,7 @@ impl App {
             g_pending: false,
             headers_scroll: 0,
             preview_scroll: 0,
+            selection: HashSet::new(),
             email_cache: cache,
             pending_action: None,
             confirm_dialog: None,
@@ -496,6 +499,35 @@ impl App {
         Some(path)
     }
 
+    pub fn remove_selected_from_list_batch(&mut self, paths: &HashSet<PathBuf>) -> Vec<PathBuf> {
+        let removed: Vec<PathBuf> = self.emails
+            .iter()
+            .filter(|e| paths.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+
+        self.emails.retain(|e| !paths.contains(&e.path));
+
+        if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
+            cached.retain(|e| !paths.contains(&e.path));
+        }
+
+        if !self.emails.is_empty() {
+            self.list_index = self.list_index.min(self.emails.len() - 1);
+        } else {
+            self.list_index = 0;
+        }
+
+        if let Some(count) = self.mailbox_counts.get_mut(self.active_mailbox) {
+            *count = self.emails.len();
+        }
+
+        self.headers_scroll = 0;
+        self.preview_scroll = 0;
+
+        removed
+    }
+
     pub fn set_persistent_error(&mut self, msg: String) {
         self.persistent_error = Some(PersistentError { message: msg });
     }
@@ -527,6 +559,7 @@ impl App {
         let changing = self.active_mailbox != idx;
         self.active_mailbox = idx;
         if changing {
+            self.selection.clear();
             self.search_query.clear();
             self.search_includes_body = false;
         }
@@ -647,12 +680,24 @@ impl App {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if let Some(dialog) = self.confirm_dialog.take() {
-                    self.pending_action = Some(match dialog.action {
-                        ConfirmAction::Archive => Action::Archive,
-                        ConfirmAction::Delete => Action::Delete,
-                        ConfirmAction::Send => Action::Send,
-                        ConfirmAction::SendApproved => Action::SendApproved,
-                    });
+                    match dialog.action {
+                        ConfirmAction::Archive if !self.selection.is_empty() => {
+                            let paths: Vec<PathBuf> = self.selection.drain().collect();
+                            self.pending_action = Some(Action::BatchArchive(paths));
+                        }
+                        ConfirmAction::Delete if !self.selection.is_empty() => {
+                            let paths: Vec<PathBuf> = self.selection.drain().collect();
+                            self.pending_action = Some(Action::BatchDelete(paths));
+                        }
+                        _ => {
+                            self.pending_action = Some(match dialog.action {
+                                ConfirmAction::Archive => Action::Archive,
+                                ConfirmAction::Delete => Action::Delete,
+                                ConfirmAction::Send => Action::Send,
+                                ConfirmAction::SendApproved => Action::SendApproved,
+                            });
+                        }
+                    }
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
@@ -706,7 +751,6 @@ impl App {
             match key.code {
                 KeyCode::Char('f') => self.pending_action = Some(Action::Fetch),
                 KeyCode::Char('F') => self.pending_action = Some(Action::Sync),
-                KeyCode::Char('S') => self.pending_action = Some(Action::Reconcile),
                 KeyCode::Char('n') => self.pending_action = Some(Action::NewDraft),
                 _ => {}
             }
@@ -752,7 +796,16 @@ impl App {
             }
             KeyCode::Char('a') => {
                 self.g_pending = false;
-                if let Some(email) = self.selected_email() {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.selection = self.emails.iter().map(|e| e.path.clone()).collect();
+                } else if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.confirm_dialog = Some(ConfirmDialog {
+                        title: format!("Archive {} emails?", count),
+                        detail: format!("{} selected emails", count),
+                        action: ConfirmAction::Archive,
+                    });
+                } else if let Some(email) = self.selected_email() {
                     self.confirm_dialog = Some(ConfirmDialog {
                         title: "Archive this email?".to_string(),
                         detail: format!("{} - {}", email.from, email.subject),
@@ -762,7 +815,14 @@ impl App {
             }
             KeyCode::Char('d') => {
                 self.g_pending = false;
-                if let Some(email) = self.selected_email() {
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.confirm_dialog = Some(ConfirmDialog {
+                        title: format!("Delete {} emails?", count),
+                        detail: format!("{} selected emails", count),
+                        action: ConfirmAction::Delete,
+                    });
+                } else if let Some(email) = self.selected_email() {
                     self.confirm_dialog = Some(ConfirmDialog {
                         title: "Delete this email?".to_string(),
                         detail: format!("{} - {}", email.from, email.subject),
@@ -808,9 +868,25 @@ impl App {
                 self.g_pending = false;
                 self.pending_action = Some(Action::Sync);
             }
-            KeyCode::Char('S') => {
+
+            KeyCode::Char(' ') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Reconcile);
+                if let Some(path) = self.selected_email_path() {
+                    if self.selection.contains(&path) {
+                        self.selection.remove(&path);
+                    } else {
+                        self.selection.insert(path);
+                    }
+                    if self.list_index < self.emails.len() - 1 {
+                        self.list_index += 1;
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    self.selection.clear();
+                }
             }
 
             _ => {
@@ -902,6 +978,7 @@ impl App {
     }
 
     fn apply_search_filter(&mut self) {
+        self.selection.clear();
         let idx = self.active_mailbox;
         let all_emails = self.email_cache.get(idx)
             .and_then(|c| c.as_ref())

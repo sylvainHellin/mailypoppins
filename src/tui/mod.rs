@@ -3,7 +3,7 @@ mod event;
 mod theme;
 mod ui;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -26,8 +26,9 @@ use crate::draft::{
     validate_draft,
 };
 use crate::imap_client::{
-    append_to_sent_folder, archive_email_locally, delete_email_locally, fetch_emails,
-    fetch_server_message_ids, watch_mailbox as imap_watch, FetchCriteria,
+    append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
+    batch_delete_emails_locally, delete_email_locally, fetch_emails, fetch_server_message_ids,
+    watch_mailbox as imap_watch, FetchCriteria,
 };
 use crate::parse::save_fetched_emails;
 use crate::send::send_email;
@@ -401,6 +402,77 @@ fn handle_action(
             }
         }
 
+        Action::BatchArchive(paths) => {
+            let imap_config = match app.imap_config.clone() {
+                Some(c) => c,
+                None => {
+                    app.set_status("IMAP not configured".to_string());
+                    return Ok(());
+                }
+            };
+            let archive_dir = match app.archive_dir.clone() {
+                Some(d) => d,
+                None => {
+                    app.set_status("Archive directory not configured".to_string());
+                    return Ok(());
+                }
+            };
+            let archive_server_name = app.archive_server_name.clone();
+
+            let path_set: HashSet<PathBuf> = paths.iter().cloned().collect();
+            app.remove_selected_from_list_batch(&path_set);
+
+            let count = paths.len();
+            app.bg_count += count;
+            app.bg_mutations += count;
+            app.set_status(format!("Archiving {} emails...", count));
+            terminal.draw(|frame| ui::view(app, frame))?;
+
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let results = batch_archive_emails_locally(
+                    &imap_config,
+                    &archive_dir,
+                    &paths,
+                    &archive_server_name,
+                );
+                for (_path, result) in results {
+                    let _ = tx.send(BgResult::Archive {
+                        result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                    });
+                }
+            });
+        }
+
+        Action::BatchDelete(paths) => {
+            let imap_config = match app.imap_config.clone() {
+                Some(c) => c,
+                None => {
+                    app.set_status("IMAP not configured".to_string());
+                    return Ok(());
+                }
+            };
+
+            let path_set: HashSet<PathBuf> = paths.iter().cloned().collect();
+            app.remove_selected_from_list_batch(&path_set);
+
+            let count = paths.len();
+            app.bg_count += count;
+            app.bg_mutations += count;
+            app.set_status(format!("Deleting {} emails...", count));
+            terminal.draw(|frame| ui::view(app, frame))?;
+
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let results = batch_delete_emails_locally(&imap_config, &paths);
+                for (_path, result) in results {
+                    let _ = tx.send(BgResult::Delete {
+                        result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                    });
+                }
+            });
+        }
+
         Action::CopyPath => {
             if let Some(path) = app.selected_email_path() {
                 match copy_to_clipboard(&path.display().to_string()) {
@@ -432,43 +504,9 @@ fn handle_action(
             app.set_status("Fetching...".to_string());
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let result = (|| -> anyhow::Result<String> {
-                    let criteria = FetchCriteria {
-                        from: None,
-                        to: None,
-                        cc: None,
-                        subject: None,
-                        body: None,
-                        since: None,
-                        before: None,
-                    };
-                    let imap_mailbox = global_config
-                        .mailboxes
-                        .inbox
-                        .as_ref()
-                        .map(|m| m.server.as_str())
-                        .unwrap_or("INBOX");
-                    let inbox_dir = global_config
-                        .mailboxes
-                        .inbox
-                        .as_ref()
-                        .map(|m| resolve_mailbox_local_path(&global_config, m));
-
-                    let emails =
-                        fetch_emails(&imap_config, &criteria, imap_mailbox, Some(10))?;
-                    if let Some(ref dir) = inbox_dir {
-                        let (saved, skipped) = save_fetched_emails(&emails, dir, "inbox")?;
-                        Ok(format!("Fetched: {} new, {} existing", saved, skipped))
-                    } else {
-                        Ok(format!(
-                            "Fetched {} emails (no inbox configured)",
-                            emails.len()
-                        ))
-                    }
-                })();
-                let _ = tx.send(BgResult::Fetch {
-                    result: result.map_err(|e| e.to_string()),
-                });
+                let result =
+                    lib_sync(&global_config, &imap_config, 10).map_err(|e| e.to_string());
+                let _ = tx.send(BgResult::Fetch { result });
             });
         }
 
@@ -494,37 +532,9 @@ fn handle_action(
             app.set_status("Syncing...".to_string());
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let result =
-                    lib_sync(&global_config, &imap_config, 50).map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Sync { result });
-            });
-        }
-
-        Action::Reconcile => {
-            if app.bg_mutations > 0 {
-                app.queued_action = Some(Action::Reconcile);
-                app.set_status(format!(
-                    "Reconcile queued ({} ops pending...)",
-                    app.bg_mutations
-                ));
-                return Ok(());
-            }
-            let imap_config = match app.imap_config.clone() {
-                Some(c) => c,
-                None => {
-                    app.set_status("IMAP not configured".to_string());
-                    return Ok(());
-                }
-            };
-            let global_config = app.global_config.clone();
-
-            app.bg_count += 1;
-            app.set_status("Reconciling...".to_string());
-            let tx = bg_tx.clone();
-            std::thread::spawn(move || {
                 let result = lib_sync_reconcile(&global_config, &imap_config, 50)
                     .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Reconcile { result });
+                let _ = tx.send(BgResult::Sync { result });
             });
         }
     }
@@ -549,7 +559,7 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                     app.set_persistent_error(format!(
-                        "Archive failed: {e}\nEmail restored to inbox. Sync to retry?"
+                        "Archive failed: {e}\nEmail restored to inbox. Sync (F) to fix?"
                     ));
                 }
             }
@@ -565,7 +575,7 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                     app.set_persistent_error(format!(
-                        "Delete failed: {e}\nEmail restored. Sync to retry?"
+                        "Delete failed: {e}\nEmail restored. Sync (F) to fix?"
                     ));
                 }
             }
@@ -612,17 +622,6 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
                     app.reload_current_mailbox();
                 }
                 Err(e) => app.set_status(format!("Sync failed: {e}")),
-            }
-        }
-
-        BgResult::Reconcile { result } => {
-            match result {
-                Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Reconcile complete".into() } else { msg });
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
-                }
-                Err(e) => app.set_status(format!("Reconcile failed: {e}")),
             }
         }
     }
