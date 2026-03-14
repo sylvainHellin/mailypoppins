@@ -64,4 +64,6 @@ pub struct InboxFrontmatter {
     pub date: Option<String>,
     #[serde(default)]
     pub message_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }

@@ -85,6 +85,11 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
+    /// Forward an email to new recipients
+    Forward {
+        /// Path to the email to forward (interactive selection if omitted)
+        file: Option<PathBuf>,
+    },
     /// List available IMAP mailboxes/folders
     ListMailboxes,
     /// Fetch emails from IMAP server
@@ -613,7 +618,7 @@ attachments: []
                     let dir = inbox_dir.as_ref().ok_or_else(|| {
                         anyhow!("Inbox mailbox not configured. Check [mailboxes.inbox] in {}", config_path().display())
                     })?;
-                    select_inbox_email(dir)?
+                    select_inbox_email(dir, "Select an email to reply to")?
                 }
             };
 
@@ -625,6 +630,36 @@ attachments: []
             )?;
             println!(
                 "{} Reply draft created: {}",
+                "✓".green(),
+                draft_path.display()
+            );
+        }
+
+        Some(Commands::Forward { file }) => {
+            let resolved = resolve_drafts_dir(Path::new("."), &drafts_dir);
+            let fwd_drafts_dir: Option<PathBuf> = if resolved != Path::new(".").to_path_buf() {
+                Some(resolved)
+            } else {
+                None
+            };
+
+            let source_file = match file {
+                Some(f) => f,
+                None => {
+                    let dir = inbox_dir.as_ref().ok_or_else(|| {
+                        anyhow!("Inbox mailbox not configured. Check [mailboxes.inbox] in {}", config_path().display())
+                    })?;
+                    select_inbox_email(dir, "Select an email to forward")?
+                }
+            };
+
+            let draft_path = create_forward_draft(
+                &source_file,
+                &smtp_config.default_from,
+                fwd_drafts_dir.as_deref(),
+            )?;
+            println!(
+                "{} Forward draft created: {}",
                 "✓".green(),
                 draft_path.display()
             );

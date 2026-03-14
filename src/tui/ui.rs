@@ -861,6 +861,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("edit "),
                 hint_span("r"),
                 desc_span("reply "),
+                hint_span("w"),
+                desc_span("fwd "),
                 hint_span("a"),
                 desc_span("archive "),
                 hint_span("A"),
@@ -1065,7 +1067,7 @@ fn truncate(s: &str, max_width: usize) -> String {
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let help_width = 50u16.min(area.width.saturating_sub(4));
-    let help_height = 41u16.min(area.height.saturating_sub(2));
+    let help_height = 42u16.min(area.height.saturating_sub(2));
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
@@ -1130,6 +1132,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         entry("h / l", "Focus sidebar / body"),
         entry("Enter / e", "Open in editor"),
         entry("r / R", "Reply / Reply-all"),
+        entry("w", "Forward"),
         entry("a", "Archive"),
         entry("d", "Delete"),
         entry("A", "Approve draft"),

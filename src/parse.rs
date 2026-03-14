@@ -3,7 +3,7 @@ use chrono::Utc;
 use colored::*;
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct FetchedEmail {
@@ -16,6 +16,12 @@ pub struct FetchedEmail {
     pub html_body: Option<String>,
     pub has_attachments: bool,
     pub message_id: Option<String>,
+    pub attachments: Vec<AttachmentData>,
+}
+
+pub struct AttachmentData {
+    pub filename: String,
+    pub content: Vec<u8>,
 }
 
 pub fn html_to_plain(html: &str) -> String {
@@ -82,6 +88,61 @@ pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
         }
     }
     false
+}
+
+/// Extract all attachments from a parsed email, recursing through MIME subparts.
+pub fn extract_attachments(parsed: &mailparse::ParsedMail) -> Vec<AttachmentData> {
+    let mut attachments = Vec::new();
+    let mut counter = 0usize;
+    collect_attachments(parsed, &mut attachments, &mut counter);
+    attachments
+}
+
+fn collect_attachments(
+    parsed: &mailparse::ParsedMail,
+    attachments: &mut Vec<AttachmentData>,
+    counter: &mut usize,
+) {
+    let disposition = parsed.get_content_disposition();
+    if disposition.disposition == mailparse::DispositionType::Attachment {
+        let filename = disposition
+            .params
+            .get("filename")
+            .or_else(|| parsed.ctype.params.get("name"))
+            .cloned()
+            .unwrap_or_else(|| {
+                *counter += 1;
+                format!("attachment-{}.bin", counter)
+            });
+        let filename = sanitize_attachment_filename(&filename);
+        if let Ok(content) = parsed.get_body_raw() {
+            attachments.push(AttachmentData { filename, content });
+        }
+    }
+    for sub in &parsed.subparts {
+        collect_attachments(sub, attachments, counter);
+    }
+}
+
+fn sanitize_attachment_filename(name: &str) -> String {
+    let name = name.replace(['/', '\\', '\0'], "_");
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        "attachment.bin".to_string()
+    } else if name.len() > 200 {
+        name[..200].to_string()
+    } else {
+        name
+    }
+}
+
+/// Return the attachments directory path for a given .md email file.
+/// Convention: `{parent}/{stem}_attachments/`
+pub fn attachments_dir_for(md_path: &Path) -> PathBuf {
+    let parent = md_path.parent().unwrap_or(Path::new("."));
+    let stem = md_path.file_stem().unwrap_or_default().to_string_lossy();
+    parent.join(format!("{}_attachments", stem))
 }
 
 /// Compress a sorted list of UIDs into IMAP sequence set format using ranges.
@@ -300,6 +361,45 @@ pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &s
         }
         frontmatter.push_str(&format!("status: {}\n", status));
         frontmatter.push_str(&format!("has_attachments: {}\n", email.has_attachments));
+        // Save attachment files and record filenames in frontmatter
+        let mut saved_filenames: Vec<String> = Vec::new();
+        if !email.attachments.is_empty() {
+            let att_dir = attachments_dir_for(&dest);
+            fs::create_dir_all(&att_dir)?;
+
+            let mut used_names: HashSet<String> = HashSet::new();
+            for att in &email.attachments {
+                let mut name = att.filename.clone();
+                if used_names.contains(&name) {
+                    let stem = Path::new(&name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let ext = Path::new(&name)
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    let mut n = 1;
+                    loop {
+                        name = format!("{}-{}{}", stem, n, ext);
+                        if !used_names.contains(&name) {
+                            break;
+                        }
+                        n += 1;
+                    }
+                }
+                used_names.insert(name.clone());
+                fs::write(att_dir.join(&name), &att.content)?;
+                saved_filenames.push(name);
+            }
+        }
+        if !saved_filenames.is_empty() {
+            frontmatter.push_str("attachments:\n");
+            for name in &saved_filenames {
+                frontmatter.push_str(&format!("  - \"{}\"\n", name.replace('"', "\\\"")));
+            }
+        }
         frontmatter.push_str(&format!("fetched_at: \"{}\"\n", fetched_at));
         frontmatter.push_str("---\n\n");
 

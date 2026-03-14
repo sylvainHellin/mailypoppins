@@ -50,6 +50,8 @@ struct Frontmatter {
     date: Option<String>,
     sent_at: Option<String>,
     has_attachments: Option<bool>,
+    #[allow(dead_code)]
+    attachments: Option<Vec<String>>,
 }
 
 /// Load all emails from a directory.
@@ -240,6 +242,7 @@ pub struct MailboxInfo {
 pub enum Action {
     EditCurrent,
     Reply(bool),
+    Forward,
     Send,
     SendApproved,
     NewDraft,
@@ -793,6 +796,10 @@ impl App {
             KeyCode::Char('R') => {
                 self.g_pending = false;
                 self.pending_action = Some(Action::Reply(true));
+            }
+            KeyCode::Char('w') => {
+                self.g_pending = false;
+                self.pending_action = Some(Action::Forward);
             }
             KeyCode::Char('a') => {
                 self.g_pending = false;

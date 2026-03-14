@@ -22,8 +22,8 @@ use crate::config::{
     all_configured_mailboxes, resolve_mailbox_local_path, resolve_sent_mailbox, ImapConfig,
 };
 use crate::draft::{
-    create_reply_draft, find_drafts, mark_as_approved, parse_email_draft, update_status_to_sent,
-    validate_draft,
+    create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, parse_email_draft,
+    update_status_to_sent, validate_draft,
 };
 use crate::imap_client::{
     append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
@@ -159,6 +159,28 @@ fn handle_action(
                         }
                     }
                     Err(e) => app.set_status(format!("Reply failed: {e}")),
+                }
+                app.reload_current_mailbox();
+            }
+        }
+
+        Action::Forward => {
+            if let Some(path) = app.selected_email_path() {
+                let default_from = app.smtp_config.as_ref()
+                    .map(|s| s.default_from.clone())
+                    .unwrap_or_default();
+                let drafts_dir = app.drafts_dir.clone();
+                match create_forward_draft(&path, &default_from, drafts_dir.as_deref()) {
+                    Ok(draft_path) => {
+                        suspend_terminal(terminal)?;
+                        let _ = edit_file(&draft_path);
+                        resume_terminal(terminal)?;
+                        app.set_status("Forward draft ready".to_string());
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                    }
+                    Err(e) => app.set_status(format!("Forward failed: {e}")),
                 }
                 app.reload_current_mailbox();
             }

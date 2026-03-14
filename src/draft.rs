@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::config::{GlobalConfig, SmtpConfig};
-use crate::parse::{extract_email_address, html_to_plain, slugify_sender, slugify_subject};
+use crate::parse::{attachments_dir_for, extract_email_address, html_to_plain, slugify_sender, slugify_subject};
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
-pub fn select_inbox_email(inbox_dir: &Path) -> Result<PathBuf> {
+pub fn select_inbox_email(inbox_dir: &Path, prompt: &str) -> Result<PathBuf> {
     let mut entries: Vec<(PathBuf, InboxFrontmatter)> = Vec::new();
 
     for entry in WalkDir::new(inbox_dir)
@@ -62,7 +62,7 @@ pub fn select_inbox_email(inbox_dir: &Path) -> Result<PathBuf> {
         .collect();
 
     let selection = dialoguer::FuzzySelect::new()
-        .with_prompt("Select an email to reply to")
+        .with_prompt(prompt)
         .items(&display_items)
         .default(0)
         .interact()
@@ -210,6 +210,148 @@ pub fn create_reply_draft(
                  </div>",
                 inbox.date.as_deref().unwrap_or("(unknown date)"),
                 inbox.from,
+                html_content,
+            );
+            let draft_html = dest.with_extension("html");
+            fs::write(&draft_html, wrapped)?;
+        }
+    }
+
+    Ok(dest)
+}
+
+pub fn create_forward_draft(
+    source_path: &Path,
+    default_from: &str,
+    drafts_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    let content = fs::read_to_string(source_path)?;
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(&content);
+    let inbox: InboxFrontmatter = parsed
+        .data
+        .ok_or_else(|| anyhow!("No frontmatter found"))?
+        .deserialize()?;
+    let original_body = parsed.content.trim();
+
+    // Build forward subject
+    let fwd_subject = if inbox.subject.to_lowercase().starts_with("fwd: ") {
+        inbox.subject.clone()
+    } else {
+        format!("Fwd: {}", inbox.subject)
+    };
+
+    // Resolve attachment paths (absolute paths to source attachment files)
+    let attachment_paths: Vec<String> = if let Some(ref filenames) = inbox.attachments {
+        let att_dir = attachments_dir_for(source_path);
+        filenames
+            .iter()
+            .filter_map(|name| {
+                let abs_path = att_dir.join(name);
+                if abs_path.exists() {
+                    abs_path.canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Build frontmatter
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("from: \"{}\"\n", default_from));
+    fm.push_str("to: \"\"\n");
+    fm.push_str(&format!(
+        "subject: \"{}\"\n",
+        fwd_subject.replace('"', "\\\"")
+    ));
+    fm.push_str("status: draft\n");
+    if !attachment_paths.is_empty() {
+        fm.push_str("attachments:\n");
+        for path in &attachment_paths {
+            fm.push_str(&format!("  - \"{}\"\n", path.replace('"', "\\\"")));
+        }
+    }
+    fm.push_str("---\n");
+
+    // Build forwarded message header block
+    let fwd_header = format!(
+        "---------- Forwarded message ----------\n\
+         From: {}\n\
+         Date: {}\n\
+         Subject: {}\n\
+         To: {}",
+        inbox.from,
+        inbox.date.as_deref().unwrap_or("(unknown date)"),
+        inbox.subject,
+        inbox.to,
+    );
+
+    // Clean up body
+    let clean_body = if original_body.contains('<') && original_body.contains('>') {
+        html_to_plain(original_body)
+    } else {
+        original_body.to_string()
+    };
+
+    let full_content = format!(
+        "{}\n\n\n{{{{SIGNATURE}}}}\n\n{}\n\n{}\n",
+        fm.trim_end(),
+        fwd_header,
+        clean_body.trim()
+    );
+
+    // Determine output path
+    let output_dir = drafts_dir.unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(output_dir)?;
+    let date_prefix = Utc::now().format("%Y-%m-%d-%H%M").to_string();
+    let sender_slug = slugify_sender(&inbox.from);
+    let subject_slug = slugify_subject(&fwd_subject);
+    let filename = if subject_slug.is_empty() {
+        format!("{}_{}_email.md", date_prefix, sender_slug)
+    } else {
+        format!("{}_{}_{}.md", date_prefix, sender_slug, subject_slug)
+    };
+    let mut dest = output_dir.join(&filename);
+
+    // Avoid overwriting
+    if dest.exists() {
+        let mut counter = 1;
+        loop {
+            let name = if subject_slug.is_empty() {
+                format!("{}_{}_email-{}.md", date_prefix, sender_slug, counter)
+            } else {
+                format!("{}_{}_{}-{}.md", date_prefix, sender_slug, subject_slug, counter)
+            };
+            dest = output_dir.join(&name);
+            if !dest.exists() {
+                break;
+            }
+            counter += 1;
+        }
+    }
+
+    fs::write(&dest, full_content)?;
+
+    // Create companion HTML for the forward
+    let source_html = source_path.with_extension("html");
+    if source_html.exists() {
+        if let Ok(html_content) = fs::read_to_string(&source_html) {
+            let wrapped = format!(
+                "<p style=\"color:#666\">---------- Forwarded message ----------<br/>\n\
+                 From: {}<br/>\n\
+                 Date: {}<br/>\n\
+                 Subject: {}<br/>\n\
+                 To: {}</p>\n\
+                 <div>\n\
+                 {}\n\
+                 </div>",
+                inbox.from,
+                inbox.date.as_deref().unwrap_or("(unknown date)"),
+                inbox.subject,
+                inbox.to,
                 html_content,
             );
             let draft_html = dest.with_extension("html");

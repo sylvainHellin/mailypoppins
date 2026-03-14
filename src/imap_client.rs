@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::ImapConfig;
-use crate::parse::{compress_uid_set, extract_body_text, has_attachments, FetchedEmail};
+use crate::parse::{attachments_dir_for, compress_uid_set, extract_attachments, extract_body_text, has_attachments, FetchedEmail};
 use crate::types::InboxFrontmatter;
 
 pub type ImapSession = imap::Session<native_tls::TlsStream<std::net::TcpStream>>;
@@ -219,7 +219,8 @@ pub fn fetch_emails(
         let message_id = headers.get_first_value("Message-ID")
             .or_else(|| headers.get_first_value("Message-Id"));
         let (body_text, html_body) = extract_body_text(&parsed);
-        let attachments = has_attachments(&parsed);
+        let has_att = has_attachments(&parsed);
+        let att_data = extract_attachments(&parsed);
 
         emails.push(FetchedEmail {
             from,
@@ -229,8 +230,9 @@ pub fn fetch_emails(
             date,
             body_text,
             html_body,
-            has_attachments: attachments,
+            has_attachments: has_att,
             message_id,
+            attachments: att_data,
         });
     }
 
@@ -386,6 +388,13 @@ pub fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_
         fs::remove_file(&html_companion)?;
     }
 
+    let att_source = attachments_dir_for(file_path);
+    let att_dest = attachments_dir_for(&dest);
+    let had_att_dir = att_source.is_dir();
+    if had_att_dir {
+        fs::rename(&att_source, &att_dest)?;
+    }
+
     // --- IMAP operation (slow) ---
     if let Err(e) = archive_email_on_server(imap_config, message_id, archive_mailbox) {
         // Rollback: restore local files to original state
@@ -395,6 +404,9 @@ pub fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_
         if had_html {
             fs::copy(&html_dest, &html_companion)?;
             fs::remove_file(&html_dest)?;
+        }
+        if had_att_dir {
+            fs::rename(&att_dest, &att_source).ok();
         }
         return Err(e.context("IMAP archive failed; local changes have been rolled back"));
     }
@@ -460,6 +472,14 @@ pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Resul
         None
     };
 
+    // Move attachment dir to temp location for potential rollback
+    let att_dir = attachments_dir_for(file_path);
+    let att_backup = att_dir.with_extension("deleting");
+    let had_att_dir = att_dir.is_dir();
+    if had_att_dir {
+        fs::rename(&att_dir, &att_backup)?;
+    }
+
     // --- Local operations (instant) ---
     fs::remove_file(file_path)
         .with_context(|| format!("Failed to remove local file: {}", file_path.display()))?;
@@ -477,6 +497,9 @@ pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Resul
             if let Some(ref html) = html_content {
                 fs::write(&html_companion, html)?;
             }
+            if had_att_dir {
+                fs::rename(&att_backup, &att_dir).ok();
+            }
             return Err(e.context("IMAP delete failed; local changes have been rolled back"));
         }
     } else {
@@ -484,6 +507,11 @@ pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Resul
             "No message_id in frontmatter -- skipping server deletion for {}",
             file_path.display()
         );
+    }
+
+    // Clean up attachment backup on success
+    if had_att_dir && att_backup.exists() {
+        fs::remove_dir_all(&att_backup).ok();
     }
 
     Ok(())
@@ -588,6 +616,9 @@ pub fn batch_archive_emails_locally(
         had_html: bool,
         html_companion: PathBuf,
         html_dest: PathBuf,
+        had_att_dir: bool,
+        att_source: PathBuf,
+        att_dest: PathBuf,
     }
 
     let mut prepared: Vec<LocalPrep> = Vec::new();
@@ -626,6 +657,13 @@ pub fn batch_archive_emails_locally(
                 fs::remove_file(&html_companion)?;
             }
 
+            let att_source = attachments_dir_for(path);
+            let att_dest = attachments_dir_for(&dest);
+            let had_att_dir = att_source.is_dir();
+            if had_att_dir {
+                fs::rename(&att_source, &att_dest)?;
+            }
+
             Ok(LocalPrep {
                 idx: i,
                 message_id,
@@ -634,6 +672,9 @@ pub fn batch_archive_emails_locally(
                 had_html,
                 html_companion,
                 html_dest,
+                had_att_dir,
+                att_source,
+                att_dest,
             })
         })();
 
@@ -705,6 +746,9 @@ pub fn batch_archive_emails_locally(
                     let _ = fs::copy(&prep.html_dest, &prep.html_companion);
                     let _ = fs::remove_file(&prep.html_dest);
                 }
+                if prep.had_att_dir {
+                    let _ = fs::rename(&prep.att_dest, &prep.att_source);
+                }
                 results.push((
                     path,
                     Err(e.context("IMAP archive failed; local changes rolled back")),
@@ -737,6 +781,9 @@ pub fn batch_delete_emails_locally(
         original_content: String,
         html_content: Option<String>,
         html_companion: PathBuf,
+        had_att_dir: bool,
+        att_dir: PathBuf,
+        att_backup: PathBuf,
     }
 
     let mut prepared: Vec<LocalPrep> = Vec::new();
@@ -766,6 +813,13 @@ pub fn batch_delete_emails_locally(
                 None
             };
 
+            let att_dir = attachments_dir_for(path);
+            let att_backup = att_dir.with_extension("deleting");
+            let had_att_dir = att_dir.is_dir();
+            if had_att_dir {
+                fs::rename(&att_dir, &att_backup)?;
+            }
+
             fs::remove_file(path)
                 .with_context(|| format!("Failed to remove local file: {}", path.display()))?;
 
@@ -779,6 +833,9 @@ pub fn batch_delete_emails_locally(
                 original_content: content,
                 html_content,
                 html_companion,
+                had_att_dir,
+                att_dir,
+                att_backup,
             })
         })();
 
@@ -865,6 +922,10 @@ pub fn batch_delete_emails_locally(
                         path.display()
                     );
                 }
+                // Clean up attachment backup on success
+                if prep.had_att_dir && prep.att_backup.exists() {
+                    let _ = fs::remove_dir_all(&prep.att_backup);
+                }
                 results.push((path, Ok(())));
             }
             Err(e) => {
@@ -876,6 +937,9 @@ pub fn batch_delete_emails_locally(
                 let _ = fs::write(&path, &prep.original_content);
                 if let Some(ref html) = prep.html_content {
                     let _ = fs::write(&prep.html_companion, html);
+                }
+                if prep.had_att_dir {
+                    let _ = fs::rename(&prep.att_backup, &prep.att_dir);
                 }
                 results.push((
                     path,

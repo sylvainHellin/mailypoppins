@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::parse::attachments_dir_for;
+
 /// Scan a directory for .md files and extract their Message-IDs from frontmatter.
 /// Returns a map from message_id to file path.
 pub fn scan_local_message_ids(dir: &Path) -> Result<HashMap<String, PathBuf>> {
@@ -77,6 +79,13 @@ pub fn move_local_email(
         fs::remove_file(&html_source)?;
     }
 
+    // Move attachment directory if it exists
+    let att_source = attachments_dir_for(file_path);
+    if att_source.is_dir() {
+        let att_dest = attachments_dir_for(&dest);
+        fs::rename(&att_source, &att_dest)?;
+    }
+
     Ok(())
 }
 
@@ -131,6 +140,10 @@ pub fn reconcile_local_files(
                     if html_companion.exists() {
                         fs::remove_file(&html_companion)?;
                     }
+                    let att_dir = attachments_dir_for(file_path);
+                    if att_dir.is_dir() {
+                        fs::remove_dir_all(&att_dir)?;
+                    }
                     info!("Removed stale copy from {} (already in {}): {}", mb, target_mb, file_path.display());
                 } else {
                     // Move to target mailbox
@@ -144,6 +157,10 @@ pub fn reconcile_local_files(
                 let html_companion = file_path.with_extension("html");
                 if html_companion.exists() {
                     fs::remove_file(&html_companion)?;
+                }
+                let att_dir = attachments_dir_for(file_path);
+                if att_dir.is_dir() {
+                    fs::remove_dir_all(&att_dir)?;
                 }
                 info!("Removed (no longer on server): {}", file_path.display());
                 removed += 1;
