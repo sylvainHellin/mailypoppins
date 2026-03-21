@@ -10,7 +10,7 @@ use super::app::{App, Focus};
 use super::theme;
 
 /// Render the entire UI from the current app state.
-pub fn view(app: &App, frame: &mut Frame) {
+pub fn view(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
     let outer = Layout::default()
@@ -69,7 +69,7 @@ pub fn view(app: &App, frame: &mut Frame) {
     }
 
     if app.show_help {
-        render_help_overlay(frame, area);
+        render_help_overlay(app, frame, area);
     }
 
     if let Some(error) = &app.persistent_error {
@@ -1065,7 +1065,54 @@ fn truncate(s: &str, max_width: usize) -> String {
     }
 }
 
-fn render_help_overlay(frame: &mut Frame, area: Rect) {
+fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    vec![
+        ("GLOBAL", vec![
+            ("q", "Quit"),
+            ("1-9", "Jump to mailbox"),
+            ("s", "Focus sidebar"),
+            ("Tab", "Cycle focus forward"),
+            ("Shift+Tab", "Cycle focus backward"),
+            ("/", "Filter by metadata"),
+            ("\\", "Search email content"),
+            ("?", "Toggle this help"),
+        ]),
+        ("SIDEBAR", vec![
+            ("j/k", "Navigate mailboxes"),
+            ("Enter/l", "Select mailbox"),
+            ("Esc/h", "Return to list"),
+        ]),
+        ("EMAIL LIST", vec![
+            ("j/k", "Navigate emails"),
+            ("gg / G", "Jump to top / bottom"),
+            ("Space", "Toggle selection"),
+            ("Ctrl+a", "Select all visible"),
+            ("Esc", "Clear selection"),
+            ("h / l", "Focus sidebar / body"),
+            ("Enter / e", "Open in editor"),
+            ("r / R", "Reply / Reply-all"),
+            ("w", "Forward"),
+            ("a", "Archive"),
+            ("d", "Delete"),
+            ("A", "Approve draft"),
+            ("x / X", "Send / Send all approved"),
+            ("y", "Copy file path"),
+            ("n", "New draft"),
+            ("f / F", "Fetch / Sync"),
+        ]),
+        ("HEADERS", vec![
+            ("j/k", "Scroll headers"),
+            ("h / l", "Back to list / body"),
+        ]),
+        ("BODY", vec![
+            ("j/k", "Scroll line by line"),
+            ("d/u", "Half-page down / up"),
+            ("Esc/h", "Return to list"),
+        ]),
+    ]
+}
+
+fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
     let help_width = 50u16.min(area.width.saturating_sub(4));
     let help_height = 42u16.min(area.height.saturating_sub(2));
 
@@ -1084,14 +1131,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let help_area = vertical[0];
     frame.render_widget(Clear, help_area);
 
-    let block = Block::default()
-        .title(" Help ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BASE));
-
-    let section = |title: &str| -> Line {
+    let section_line = |title: &str| -> Line {
         Line::from(Span::styled(
             format!("  {title}"),
             Style::default()
@@ -1100,61 +1140,103 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ))
     };
 
-    let entry = |key: &str, desc: &str| -> Line {
+    let entry_line = |key: &str, desc: &str| -> Line {
         Line::from(vec![
             Span::styled(format!("  {key:<12}"), Style::default().fg(theme::BLUE)),
             Span::styled(desc.to_string(), Style::default().fg(theme::TEXT)),
         ])
     };
 
-    let lines = vec![
-        section("GLOBAL"),
-        entry("q", "Quit"),
-        entry("1-9", "Jump to mailbox"),
-        entry("s", "Focus sidebar"),
-        entry("Tab", "Cycle focus forward"),
-        entry("Shift+Tab", "Cycle focus backward"),
-        entry("/", "Filter by metadata"),
-        entry("\\", "Search email content"),
-        entry("?", "Toggle this help"),
-        Line::from(""),
-        section("SIDEBAR"),
-        entry("j/k", "Navigate mailboxes"),
-        entry("Enter/l", "Select mailbox"),
-        entry("Esc/h", "Return to list"),
-        Line::from(""),
-        section("EMAIL LIST"),
-        entry("j/k", "Navigate emails"),
-        entry("gg / G", "Jump to top / bottom"),
-        entry("Space", "Toggle selection"),
-        entry("Ctrl+a", "Select all visible"),
-        entry("Esc", "Clear selection"),
-        entry("h / l", "Focus sidebar / body"),
-        entry("Enter / e", "Open in editor"),
-        entry("r / R", "Reply / Reply-all"),
-        entry("w", "Forward"),
-        entry("a", "Archive"),
-        entry("d", "Delete"),
-        entry("A", "Approve draft"),
-        entry("x / X", "Send / Send all approved"),
-        entry("y", "Copy file path"),
-        entry("n", "New draft"),
-        entry("f / F", "Fetch / Sync"),
-        Line::from(""),
-        section("HEADERS"),
-        entry("j/k", "Scroll headers"),
-        entry("h / l", "Back to list / body"),
-        Line::from(""),
-        section("BODY"),
-        entry("j/k", "Scroll line by line"),
-        entry("d/u", "Half-page down / up"),
-        entry("Esc/h", "Return to list"),
-    ];
+    // Build filtered content
+    let filter = app.help_filter.to_lowercase();
+    let sections = help_sections();
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (title, entries) in &sections {
+        let matched: Vec<_> = if filter.is_empty() {
+            entries.iter().collect()
+        } else {
+            entries.iter().filter(|(key, desc)| {
+                key.to_lowercase().contains(&filter) || desc.to_lowercase().contains(&filter)
+            }).collect()
+        };
+
+        if matched.is_empty() {
+            continue;
+        }
+
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(section_line(title));
+        for (key, desc) in matched {
+            lines.push(entry_line(key, desc));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No matching bindings",
+            Style::default().fg(theme::OVERLAY0),
+        )));
+    }
+
+    let content_height = lines.len() as u16;
+
+    // Determine if filter bar is shown
+    let show_filter_bar = app.help_filter_active || !app.help_filter.is_empty();
+    let inner_height = help_area.height.saturating_sub(2); // subtract top + bottom border
+    let filter_bar_height: u16 = if show_filter_bar && inner_height >= 3 { 1 } else { 0 };
+    let visible_height = inner_height.saturating_sub(filter_bar_height);
+
+    // Clamp scroll
+    let max_scroll = content_height.saturating_sub(visible_height);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+
+    // Bottom title: scroll position or hints
+    let bottom_title = if content_height > visible_height {
+        let top = app.help_scroll + 1;
+        let bottom = (app.help_scroll + visible_height).min(content_height);
+        format!(" {top}-{bottom}/{content_height} ")
+    } else {
+        " /filter  j/k scroll ".to_string()
+    };
+
+    let block = Block::default()
+        .title(" Help ")
+        .title_bottom(Line::from(bottom_title).alignment(Alignment::Center))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BLUE))
+        .style(Style::default().bg(theme::BASE));
+
+    let block_inner = block.inner(help_area);
+    frame.render_widget(block, help_area);
+
+    // Render filter bar if visible
+    let content_area = if filter_bar_height > 0 && block_inner.height >= 2 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(block_inner);
+
+        let mut spans = vec![
+            Span::styled("/", Style::default().fg(theme::BLUE)),
+            Span::styled(app.help_filter.as_str(), Style::default().fg(theme::TEXT)),
+        ];
+        if app.help_filter_active {
+            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::BLUE)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+
+        chunks[1]
+    } else {
+        block_inner
+    };
 
     let help = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(help, help_area);
+        .scroll((app.help_scroll, 0));
+    frame.render_widget(help, content_area);
 }
 
 fn pane_border_style(current_focus: Focus, pane: Focus) -> Style {

@@ -305,6 +305,9 @@ pub struct App {
     pub search_query: String,
     pub search_includes_body: bool,
     pub show_help: bool,
+    pub help_scroll: u16,
+    pub help_filter: String,
+    pub help_filter_active: bool,
     pub watcher_active: bool,
 
     pub bg_count: usize,
@@ -393,6 +396,9 @@ impl App {
             search_query: String::new(),
             search_includes_body: false,
             show_help: false,
+            help_scroll: 0,
+            help_filter: String::new(),
+            help_filter_active: false,
             watcher_active: false,
             bg_count: 0,
             bg_mutations: 0,
@@ -609,6 +615,9 @@ impl App {
             KeyCode::Char('?') => {
                 self.g_pending = false;
                 self.show_help = true;
+                self.help_scroll = 0;
+                self.help_filter.clear();
+                self.help_filter_active = false;
                 return None;
             }
             KeyCode::Char('/') => {
@@ -937,11 +946,77 @@ impl App {
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) -> Option<Message> {
-        match key.code {
-            KeyCode::Char('?') | KeyCode::Esc => {
-                self.show_help = false;
+        if self.help_filter_active {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.help_filter.push(c);
+                    self.help_scroll = 0;
+                }
+                KeyCode::Backspace => {
+                    self.help_filter.pop();
+                    self.help_scroll = 0;
+                }
+                KeyCode::Enter => {
+                    self.help_filter_active = false;
+                }
+                KeyCode::Esc => {
+                    if !self.help_filter.is_empty() {
+                        self.help_filter.clear();
+                        self.help_filter_active = false;
+                        self.help_scroll = 0;
+                    } else {
+                        self.show_help = false;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+        } else {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.g_pending = false;
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.g_pending = false;
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    if self.g_pending {
+                        self.help_scroll = 0;
+                        self.g_pending = false;
+                    } else {
+                        self.g_pending = true;
+                    }
+                }
+                KeyCode::Char('G') => {
+                    self.g_pending = false;
+                    self.help_scroll = u16::MAX;
+                }
+                KeyCode::Char('d') => {
+                    self.g_pending = false;
+                    self.help_scroll = self.help_scroll.saturating_add(10);
+                }
+                KeyCode::Char('u') => {
+                    self.g_pending = false;
+                    self.help_scroll = self.help_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('/') => {
+                    self.g_pending = false;
+                    self.help_filter_active = true;
+                    self.help_filter.clear();
+                    self.help_scroll = 0;
+                }
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    self.g_pending = false;
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                    self.help_filter.clear();
+                    self.help_filter_active = false;
+                }
+                _ => {
+                    self.g_pending = false;
+                }
+            }
         }
         None
     }

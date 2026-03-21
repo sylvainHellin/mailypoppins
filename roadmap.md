@@ -32,6 +32,28 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - Background IMAP IDLE watcher, optimistic archive/delete, queued sync operations
 - Catppuccin Mocha theme, vim-style key bindings, search/filter, confirmation dialogs
 
+### Scroll Position & Attachment Indicator (v0.5.1)
+
+- Status bar now shows current position in the email list (e.g., `Inbox 3/47`, or `Inbox 3/15 (47)` when filtered)
+- Paperclip icon shown in email list for emails with attachments
+
+### Batch Operations (v0.5.2)
+
+- Toggle selection with `Space` (advances cursor), `Ctrl+a` to select all visible, `Esc` to clear
+- `a`/`d` operate on all selected when selection is active; single-item behavior preserved when nothing selected
+- Selection stored as `HashSet<PathBuf>`, stable across list mutations
+- Nerd Font checkbox icons in a dedicated column (only shown when selection is active)
+- Selected rows get `SURFACE0` background highlight; selection count shown in status bar
+- Selection cleared on mailbox switch, search, reload, and after batch confirm
+- Batch archive/delete spawn one background thread per item, reusing existing `BgResult` handling
+
+### Help Overlay Scroll & Filter (v0.5.3)
+
+- Help overlay (`?`) now supports `j`/`k` scroll, `d`/`u` half-page, `gg`/`G` top/bottom
+- Press `/` inside help to filter entries by key or description (case-insensitive)
+- Scroll position indicator in bottom border; discoverability hint when content fits
+- Filter bar with cursor, `Esc` to clear filter, `Esc` again to close help
+
 ### Backlog items (resolved)
 
 - **Fetch saves to correct mailbox**: `email fetch --mailbox Archive` now saves to the archive directory with `status: archived` (fixed in v0.3.1).
@@ -66,6 +88,25 @@ The `imap` crate's primary maintainer (jonhoo) has stepped back. `async-imap` is
 
 ## Backlog
 
-- **Browse command**: Superseded by the integrated TUI (v0.5.0). The TUI provides a full mailbox browser with search, preview, and all operations.
+### TUI enhancements
+
+*Ported from the beautifulmail roadmap after the v0.5.0 merge.*
+
+**Navigation & feedback**
+- **Unread/new indicator** -- Mark emails that arrived since last viewed (bold, dot, or color).
+- **Jump-to-date** -- Quickly jump to a specific date range in large mailboxes.
+
+**Actions**
+- ~~**Batch operations**~~ -- Done (v0.5.2).
+- **Quick-move between mailboxes** -- e.g., move an archived email back to inbox without leaving the view.
+
+**Preview & reading**
+- **Thread/conversation grouping** -- Group related emails by `In-Reply-To`/`References` headers.
+**Quality of life**
+- ~~**Help overlay scroll/filter**~~ -- Done (v0.5.3).
+- **Configurable keybindings** -- Allow users to remap keys via config file.
+- **Status pane** -- A dedicated pane to display the status of local/server actions (sent/sync/archive/etc.). Position and design TBD.
+
+### CLI
 
 - **Delete draft command**: `email delete` currently only works for inbox emails (requires `message_id` for server-side deletion). Drafts are local-only, so deleting them should just remove the local `.md` and companion `.html` files without any IMAP operation.

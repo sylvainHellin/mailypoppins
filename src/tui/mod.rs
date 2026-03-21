@@ -69,7 +69,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();
 
     while app.running {
-        terminal.draw(|frame| ui::view(&app, frame))?;
+        terminal.draw(|frame| ui::view(&mut app, frame))?;
 
         if let Some(msg) = event::poll_event()? {
             let mut current_msg = Some(msg);
