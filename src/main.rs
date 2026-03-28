@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
                 // IMAP APPEND to Sent folder (best-effort)
                 if let Ok(imap_config) = ImapConfig::load(&global_config) {
                     let sent_mailbox = resolve_sent_mailbox(&global_config);
-                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
+                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                         warn!("Failed to append to Sent folder: {}", e);
                         println!(
                             "  {} Could not copy to server Sent folder: {}",
@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
                 // IMAP APPEND to Sent folder (best-effort)
                 if let Ok(imap_config) = ImapConfig::load(&global_config) {
                     let sent_mailbox = resolve_sent_mailbox(&global_config);
-                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
+                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                         warn!("Failed to append to Sent folder: {}", e);
                         println!(
                             "  {} Could not copy to server Sent folder: {}",
@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
                                 // IMAP APPEND to Sent folder (best-effort)
                                 if let Ok(imap_config) = ImapConfig::load(&global_config) {
                                     let sent_mailbox = resolve_sent_mailbox(&global_config);
-                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
+                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
                                 }
@@ -404,7 +404,7 @@ async fn main() -> Result<()> {
                                 // IMAP APPEND to Sent folder (best-effort)
                                 if let Ok(imap_config) = ImapConfig::load(&global_config) {
                                     let sent_mailbox = resolve_sent_mailbox(&global_config);
-                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox) {
+                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
                                 }
@@ -667,10 +667,7 @@ attachments: []
 
         Some(Commands::ListMailboxes) => {
             let imap_config = ImapConfig::load(&global_config)?;
-            let mailboxes = tokio::task::spawn_blocking(move || {
-                list_mailboxes(&imap_config)
-            })
-            .await??;
+            let mailboxes = list_mailboxes(&imap_config).await?;
 
             println!("{} Available mailboxes:", "ℹ".blue());
             for name in &mailboxes {
@@ -702,10 +699,7 @@ attachments: []
             };
 
             let mailbox_for_save = mailbox.clone();
-            let emails = tokio::task::spawn_blocking(move || {
-                fetch_emails(&imap_config, &criteria, &mailbox, Some(limit))
-            })
-            .await??;
+            let emails = fetch_emails(&imap_config, &criteria, &mailbox, Some(limit)).await?;
 
             display_fetched_emails(&emails, full);
 
@@ -779,22 +773,16 @@ attachments: []
 
             // Pass 1: Additive sync (fetch full emails, save new ones)
             for (mb, imap_mailbox, local_dir, status_str) in &sync_targets {
-                let imap_cfg = imap_config.clone();
-                let fetch_limit = Some(limit);
-                let imap_mb = imap_mailbox.clone();
-                let emails = tokio::task::spawn_blocking(move || {
-                    let criteria = FetchCriteria {
-                        from: None,
-                        to: None,
-                        cc: None,
-                        subject: None,
-                        body: None,
-                        since: None,
-                        before: None,
-                    };
-                    fetch_emails(&imap_cfg, &criteria, &imap_mb, fetch_limit)
-                })
-                .await??;
+                let criteria = FetchCriteria {
+                    from: None,
+                    to: None,
+                    cc: None,
+                    subject: None,
+                    body: None,
+                    since: None,
+                    before: None,
+                };
+                let emails = fetch_emails(&imap_config, &criteria, imap_mailbox, Some(limit)).await?;
 
                 let (saved, skipped) = save_fetched_emails(&emails, local_dir, status_str)?;
 
@@ -835,12 +823,7 @@ attachments: []
                 for (role, imap_mailbox, local_dir) in &reconcile_pairs {
                     local_dirs.insert(role.clone(), local_dir.clone());
 
-                    let imap_cfg = imap_config.clone();
-                    let imap_mb = imap_mailbox.clone();
-                    let ids = tokio::task::spawn_blocking(move || {
-                        fetch_server_message_ids(&imap_cfg, &imap_mb)
-                    })
-                    .await??;
+                    let ids = fetch_server_message_ids(&imap_config, imap_mailbox).await?;
                     server_ids.insert(role.clone(), ids);
                 }
 
@@ -861,10 +844,7 @@ attachments: []
         Some(Commands::Watch { mailbox, timeout }) => {
             let imap_config = ImapConfig::load(&global_config)?;
             println!("Watching {} for changes...", mailbox);
-            let exit_code = tokio::task::spawn_blocking(move || {
-                watch_mailbox(&imap_config, &mailbox, timeout)
-            })
-            .await??;
+            let exit_code = watch_mailbox(&imap_config, &mailbox, timeout).await?;
 
             match exit_code {
                 0 => println!("{} Mailbox changed.", "✓".green()),
@@ -885,7 +865,7 @@ attachments: []
             let archive_server_name = global_config.mailboxes.archive.as_ref()
                 .map(|m| m.server.as_str())
                 .unwrap_or("Archive");
-            match archive_email_locally(&imap_config, dir, &file, archive_server_name) {
+            match archive_email_locally(&imap_config, dir, &file, archive_server_name).await {
                 Ok(()) => {
                     println!(
                         "{} Archived: {}",
@@ -907,7 +887,7 @@ attachments: []
 
         Some(Commands::Delete { file }) => {
             let imap_config = ImapConfig::load(&global_config)?;
-            match delete_email_locally(&imap_config, &file) {
+            match delete_email_locally(&imap_config, &file).await {
                 Ok(()) => {
                     println!("{} Deleted: {}", "✓".green(), file.display());
                 }

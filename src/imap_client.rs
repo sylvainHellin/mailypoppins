@@ -1,4 +1,6 @@
 use anyhow::{anyhow, Context, Result};
+use async_imap::extensions::idle::IdleResponse;
+use futures::TryStreamExt;
 use gray_matter::{engine::YAML, Matter};
 use log::info;
 use mailparse::{parse_mail, MailHeaderMap};
@@ -10,19 +12,26 @@ use crate::config::ImapConfig;
 use crate::parse::{attachments_dir_for, compress_uid_set, extract_attachments, extract_body_text, has_attachments, FetchedEmail};
 use crate::types::InboxFrontmatter;
 
-pub type ImapSession = imap::Session<native_tls::TlsStream<std::net::TcpStream>>;
+pub type ImapSession = async_imap::Session<async_native_tls::TlsStream<async_std::net::TcpStream>>;
 
-pub fn open_imap_session(imap_config: &ImapConfig) -> Result<ImapSession> {
-    let tls = native_tls::TlsConnector::builder().build()?;
-    let client = imap::connect(
-        (imap_config.host.as_str(), imap_config.port),
-        &imap_config.host,
-        &tls,
-    )
-    .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+pub async fn open_imap_session(imap_config: &ImapConfig) -> Result<ImapSession> {
+    let tls = async_native_tls::TlsConnector::new();
+    let addr = format!("{}:{}", imap_config.host, imap_config.port);
+
+    let tcp_stream = async_std::net::TcpStream::connect(&addr)
+        .await
+        .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+
+    let tls_stream = tls
+        .connect(&imap_config.host, tcp_stream)
+        .await
+        .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
+
+    let client = async_imap::Client::new(tls_stream);
 
     let session = client
         .login(&imap_config.username, &imap_config.password)
+        .await
         .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
 
     Ok(session)
@@ -102,23 +111,25 @@ fn parse_date_to_imap(date_str: &str) -> Option<String> {
 }
 
 /// Fetch only Message-IDs from a mailbox (lightweight, no body download).
-pub fn fetch_server_message_ids(
+pub async fn fetch_server_message_ids(
     imap_config: &ImapConfig,
     mailbox: &str,
 ) -> Result<HashSet<String>> {
     info!("Fetching Message-IDs from mailbox '{}'", mailbox);
-    let mut session = open_imap_session(imap_config)?;
+    let mut session = open_imap_session(imap_config).await?;
 
     session
         .select(mailbox)
+        .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
 
     let uids = session
         .uid_search("ALL")
+        .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        session.logout().ok();
+        session.logout().await.ok();
         return Ok(HashSet::new());
     }
 
@@ -126,9 +137,13 @@ pub fn fetch_server_message_ids(
     uid_list.sort();
     let uid_set = compress_uid_set(&uid_list);
 
-    let fetched = session
+    let fetched: Vec<_> = session
         .uid_fetch(&uid_set, "BODY.PEEK[HEADER.FIELDS (Message-ID)]")
-        .map_err(|e| anyhow!("Failed to fetch Message-IDs: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to fetch Message-IDs: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect Message-IDs: {}", e))?;
 
     let mut ids = HashSet::new();
     for msg in fetched.iter() {
@@ -151,30 +166,32 @@ pub fn fetch_server_message_ids(
         }
     }
 
-    session.logout().ok();
+    session.logout().await.ok();
     Ok(ids)
 }
 
-pub fn fetch_emails(
+pub async fn fetch_emails(
     imap_config: &ImapConfig,
     criteria: &FetchCriteria,
     mailbox: &str,
     limit: Option<usize>,
 ) -> Result<Vec<FetchedEmail>> {
     info!("Fetching emails from mailbox '{}' (limit: {:?})", mailbox, limit);
-    let mut session = open_imap_session(imap_config)?;
+    let mut session = open_imap_session(imap_config).await?;
 
     session
         .select(mailbox)
+        .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
 
     let query = build_imap_search_query(criteria);
     let uids = session
         .uid_search(&query)
+        .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        session.logout().ok();
+        session.logout().await.ok();
         return Ok(Vec::new());
     }
 
@@ -188,9 +205,13 @@ pub fn fetch_emails(
 
     let uid_set = compress_uid_set(&selected_uids);
 
-    let fetched = session
+    let fetched: Vec<_> = session
         .uid_fetch(&uid_set, "RFC822")
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
 
     let mut emails = Vec::new();
 
@@ -236,52 +257,68 @@ pub fn fetch_emails(
         });
     }
 
-    session.logout().ok();
+    session.logout().await.ok();
     Ok(emails)
 }
 
-pub fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
-    let mut session = open_imap_session(imap_config)?;
+pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
+    let mut session = open_imap_session(imap_config).await?;
 
-    let mailboxes = session
+    let mailboxes: Vec<_> = session
         .list(None, Some("*"))
-        .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect mailboxes: {}", e))?;
 
     let names: Vec<String> = mailboxes.iter().map(|m| m.name().to_string()).collect();
 
-    session.logout().ok();
+    session.logout().await.ok();
     Ok(names)
 }
 
-pub fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8], sent_mailbox: &str) -> Result<()> {
+pub async fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8], sent_mailbox: &str) -> Result<()> {
     info!("Appending sent email to IMAP folder '{}'", sent_mailbox);
 
-    let mut session = open_imap_session(imap_config)?;
+    let mut session = open_imap_session(imap_config).await?;
 
-    session.append_with_flags(sent_mailbox, raw_message, &[imap::types::Flag::Seen])
+    session.append(sent_mailbox, Some("(\\Seen)"), None, raw_message)
+        .await
         .map_err(|e| anyhow!("Failed to APPEND to '{}': {}", sent_mailbox, e))?;
 
-    session.logout().ok();
+    session.logout().await.ok();
     info!("Successfully appended to '{}'", sent_mailbox);
     Ok(())
 }
 
-pub fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
-    use imap::extensions::idle::WaitOutcome;
-
-    let mut session = open_imap_session(imap_config)?;
+pub async fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
+    let mut session = open_imap_session(imap_config).await?;
 
     session
         .select(mailbox)
+        .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
 
     info!("Watching mailbox '{}' for changes (IMAP IDLE)", mailbox);
 
     let exit_code = match timeout {
         None => {
-            // No timeout: block until mailbox changes, with automatic keepalive
-            session.idle()?.wait_keepalive()?;
-            0 // mailbox changed
+            // No timeout: block until mailbox changes
+            let mut handle = session.idle();
+            handle.init().await?;
+            let (fut, _stop) = handle.wait_with_timeout(std::time::Duration::from_secs(29 * 60));
+            let response = fut.await?;
+            session = handle.done().await?;
+
+            match response {
+                IdleResponse::NewData(_) => 0,
+                IdleResponse::Timeout | IdleResponse::ManualInterrupt => {
+                    // For no-timeout mode, re-interpret timeout as "no change"
+                    // but since we set a very long timeout, treat as connection issue
+                    1
+                }
+            }
         }
         Some(timeout_secs) => {
             let total_timeout = std::time::Duration::from_secs(timeout_secs);
@@ -295,36 +332,44 @@ pub fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u6
                 }
 
                 let wait_duration = idle_interval.min(remaining);
-                let outcome = session.idle()?.wait_with_timeout(wait_duration)?;
 
-                match outcome {
-                    WaitOutcome::MailboxChanged => break 0,
-                    WaitOutcome::TimedOut => continue, // re-idle for keepalive
+                let mut handle = session.idle();
+                handle.init().await?;
+                let (fut, _stop) = handle.wait_with_timeout(wait_duration);
+                let response = fut.await?;
+                session = handle.done().await?;
+
+                match response {
+                    IdleResponse::NewData(_) => break 0,
+                    IdleResponse::Timeout => continue, // re-idle for keepalive
+                    IdleResponse::ManualInterrupt => continue,
                 }
             }
         }
     };
 
-    session.logout().ok();
+    session.logout().await.ok();
 
     Ok(exit_code)
 }
 
-pub fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archive_mailbox: &str) -> Result<()> {
+pub async fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archive_mailbox: &str) -> Result<()> {
     info!("Archiving email on server: Message-ID={} -> {}", message_id, archive_mailbox);
-    let mut session = open_imap_session(imap_config)?;
+    let mut session = open_imap_session(imap_config).await?;
 
     session
         .select("INBOX")
+        .await
         .map_err(|e| anyhow!("Failed to select INBOX: {}", e))?;
 
     let query = format!("HEADER Message-ID \"{}\"", message_id);
     let uids = session
         .uid_search(&query)
+        .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        session.logout().ok();
+        session.logout().await.ok();
         return Err(anyhow!(
             "Email with Message-ID {} not found in INBOX on server",
             message_id
@@ -336,21 +381,30 @@ pub fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archi
 
     session
         .uid_copy(&uid_str, archive_mailbox)
+        .await
         .map_err(|e| anyhow!("Failed to copy email to {}: {}", archive_mailbox, e))?;
 
     session
         .uid_store(&uid_str, "+FLAGS (\\Deleted)")
-        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
 
     session
         .expunge()
-        .map_err(|e| anyhow!("Failed to expunge: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to expunge: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect expunge response: {}", e))?;
 
-    session.logout().ok();
+    session.logout().await.ok();
     Ok(())
 }
 
-pub fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_path: &Path, archive_mailbox: &str) -> Result<()> {
+pub async fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_path: &Path, archive_mailbox: &str) -> Result<()> {
     info!("Archiving email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -396,7 +450,7 @@ pub fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_
     }
 
     // --- IMAP operation (slow) ---
-    if let Err(e) = archive_email_on_server(imap_config, message_id, archive_mailbox) {
+    if let Err(e) = archive_email_on_server(imap_config, message_id, archive_mailbox).await {
         // Rollback: restore local files to original state
         info!("IMAP archive failed, rolling back local changes: {}", e);
         fs::write(file_path, &content)?;
@@ -414,21 +468,23 @@ pub fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_
     Ok(())
 }
 
-pub fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) -> Result<()> {
+pub async fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) -> Result<()> {
     info!("Deleting email on server: Message-ID={}", message_id);
-    let mut session = open_imap_session(imap_config)?;
+    let mut session = open_imap_session(imap_config).await?;
 
     session
         .select("INBOX")
+        .await
         .map_err(|e| anyhow!("Failed to select INBOX: {}", e))?;
 
     let query = format!("HEADER Message-ID \"{}\"", message_id);
     let uids = session
         .uid_search(&query)
+        .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        session.logout().ok();
+        session.logout().await.ok();
         return Err(anyhow!(
             "Email with Message-ID {} not found in INBOX on server",
             message_id
@@ -440,17 +496,25 @@ pub fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) -> Res
 
     session
         .uid_store(&uid_str, "+FLAGS (\\Deleted)")
-        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
 
     session
         .expunge()
-        .map_err(|e| anyhow!("Failed to expunge: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to expunge: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect expunge response: {}", e))?;
 
-    session.logout().ok();
+    session.logout().await.ok();
     Ok(())
 }
 
-pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Result<()> {
+pub async fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Result<()> {
     info!("Deleting email locally: {}", file_path.display());
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
@@ -490,7 +554,7 @@ pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Resul
 
     // --- IMAP operation (slow) ---
     if let Some(ref mid) = message_id {
-        if let Err(e) = delete_email_on_server(imap_config, mid) {
+        if let Err(e) = delete_email_on_server(imap_config, mid).await {
             // Rollback: restore local files
             info!("IMAP delete failed, rolling back local changes: {}", e);
             fs::write(file_path, &content)?;
@@ -523,7 +587,7 @@ pub fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) -> Resul
 
 /// SEARCH + UID COPY + UID STORE \Deleted on an existing session.
 /// Does NOT EXPUNGE -- caller batches a single EXPUNGE at the end.
-fn archive_single_on_session(
+async fn archive_single_on_session(
     session: &mut ImapSession,
     message_id: &str,
     archive_mailbox: &str,
@@ -531,6 +595,7 @@ fn archive_single_on_session(
     let query = format!("HEADER Message-ID \"{}\"", message_id);
     let uids = session
         .uid_search(&query)
+        .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
@@ -547,24 +612,30 @@ fn archive_single_on_session(
 
     session
         .uid_copy(&uid_str, archive_mailbox)
+        .await
         .map_err(|e| anyhow!("Failed to copy email to {}: {}", archive_mailbox, e))?;
 
     session
         .uid_store(&uid_str, "+FLAGS (\\Deleted)")
-        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
 
     Ok(())
 }
 
 /// SEARCH + UID STORE \Deleted on an existing session.
 /// Does NOT EXPUNGE -- caller batches a single EXPUNGE at the end.
-fn delete_single_on_session(
+async fn delete_single_on_session(
     session: &mut ImapSession,
     message_id: &str,
 ) -> Result<()> {
     let query = format!("HEADER Message-ID \"{}\"", message_id);
     let uids = session
         .uid_search(&query)
+        .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
@@ -581,7 +652,11 @@ fn delete_single_on_session(
 
     session
         .uid_store(&uid_str, "+FLAGS (\\Deleted)")
-        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?;
+        .await
+        .map_err(|e| anyhow!("Failed to mark email as deleted: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
 
     Ok(())
 }
@@ -591,7 +666,7 @@ fn delete_single_on_session(
 /// Phase 1 (local): For each path, parse frontmatter, write archive copy, remove original.
 /// Phase 2 (IMAP): Open one session, archive each email, single EXPUNGE at the end.
 /// Phase 3 (rollback): Restore local files for any IMAP failures.
-pub fn batch_archive_emails_locally(
+pub async fn batch_archive_emails_locally(
     imap_config: &ImapConfig,
     archive_dir: &Path,
     paths: &[PathBuf],
@@ -691,10 +766,11 @@ pub fn batch_archive_emails_locally(
     // Phase 2: IMAP operations (single connection)
     let mut imap_results: Vec<Result<()>> = Vec::with_capacity(prepared.len());
 
-    match open_imap_session(imap_config) {
+    match open_imap_session(imap_config).await {
         Ok(mut session) => {
             match session
                 .select("INBOX")
+                .await
                 .map_err(|e| anyhow!("Failed to select INBOX: {}", e))
             {
                 Ok(_) => {
@@ -703,12 +779,19 @@ pub fn batch_archive_emails_locally(
                             &mut session,
                             &prep.message_id,
                             archive_mailbox,
-                        ));
+                        ).await);
                     }
                     // Single EXPUNGE at the end (non-fatal)
                     if imap_results.iter().any(Result::is_ok) {
-                        if let Err(e) = session.expunge() {
-                            info!("Batch EXPUNGE failed (non-fatal): {}", e);
+                        match session.expunge().await {
+                            Ok(stream) => {
+                                if let Err(e) = stream.try_collect::<Vec<_>>().await {
+                                    info!("Batch EXPUNGE collect failed (non-fatal): {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                info!("Batch EXPUNGE failed (non-fatal): {}", e);
+                            }
                         }
                     }
                 }
@@ -719,7 +802,7 @@ pub fn batch_archive_emails_locally(
                     }
                 }
             }
-            session.logout().ok();
+            session.logout().await.ok();
         }
         Err(e) => {
             let msg = format!("IMAP connection failed: {}", e);
@@ -767,7 +850,7 @@ pub fn batch_archive_emails_locally(
 /// Phase 3 (rollback): Restore local files for any IMAP failures.
 ///
 /// Emails without `message_id` (e.g. drafts) skip IMAP and succeed after local delete.
-pub fn batch_delete_emails_locally(
+pub async fn batch_delete_emails_locally(
     imap_config: &ImapConfig,
     paths: &[PathBuf],
 ) -> Vec<(PathBuf, Result<()>)> {
@@ -866,23 +949,31 @@ pub fn batch_delete_emails_locally(
     // Phase 2: IMAP operations (single connection)
     let mut imap_results: Vec<Result<()>> = Vec::with_capacity(prepared.len());
 
-    match open_imap_session(imap_config) {
+    match open_imap_session(imap_config).await {
         Ok(mut session) => {
             match session
                 .select("INBOX")
+                .await
                 .map_err(|e| anyhow!("Failed to select INBOX: {}", e))
             {
                 Ok(_) => {
                     for prep in &prepared {
                         if let Some(ref mid) = prep.message_id {
-                            imap_results.push(delete_single_on_session(&mut session, mid));
+                            imap_results.push(delete_single_on_session(&mut session, mid).await);
                         } else {
                             imap_results.push(Ok(()));
                         }
                     }
                     if imap_results.iter().any(Result::is_ok) {
-                        if let Err(e) = session.expunge() {
-                            info!("Batch EXPUNGE failed (non-fatal): {}", e);
+                        match session.expunge().await {
+                            Ok(stream) => {
+                                if let Err(e) = stream.try_collect::<Vec<_>>().await {
+                                    info!("Batch EXPUNGE collect failed (non-fatal): {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                info!("Batch EXPUNGE failed (non-fatal): {}", e);
+                            }
                         }
                     }
                 }
@@ -897,7 +988,7 @@ pub fn batch_delete_emails_locally(
                     }
                 }
             }
-            session.logout().ok();
+            session.logout().await.ok();
         }
         Err(e) => {
             let msg = format!("IMAP connection failed: {}", e);

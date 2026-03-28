@@ -204,11 +204,11 @@ fn handle_action(
                 app.set_status("Sending...".to_string());
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
                     let result = (|| -> anyhow::Result<String> {
                         let draft = parse_email_draft(&path)?;
                         validate_draft(&draft)?;
 
-                        let rt = tokio::runtime::Runtime::new()?;
                         let (send_result, raw_message, message_id) = rt.block_on(
                             send_email(&draft, &smtp_config, &global_config, signature.as_deref()),
                         )?;
@@ -221,8 +221,9 @@ fn handle_action(
                             )?;
                             if let Some(ref imap_cfg) = imap_config {
                                 let sent_mailbox = resolve_sent_mailbox(&global_config);
-                                let _ =
-                                    append_to_sent_folder(imap_cfg, &raw_message, &sent_mailbox);
+                                let _ = rt.block_on(
+                                    append_to_sent_folder(imap_cfg, &raw_message, &sent_mailbox),
+                                );
                             }
                             if send_result.all_succeeded() {
                                 Ok(format!(
@@ -268,13 +269,13 @@ fn handle_action(
                 app.set_status("Sending approved...".to_string());
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
                     let result = (|| -> anyhow::Result<String> {
                         let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
                         if drafts.is_empty() {
                             return Ok("No approved emails found".to_string());
                         }
 
-                        let rt = tokio::runtime::Runtime::new()?;
                         let mut sent = 0usize;
                         let mut failed = 0usize;
 
@@ -295,11 +296,11 @@ fn handle_action(
                                         if let Some(ref imap_cfg) = imap_config {
                                             let sent_mailbox =
                                                 resolve_sent_mailbox(&global_config);
-                                            let _ = append_to_sent_folder(
+                                            let _ = rt.block_on(append_to_sent_folder(
                                                 imap_cfg,
                                                 &raw_message,
                                                 &sent_mailbox,
-                                            );
+                                            ));
                                         }
                                         sent += 1;
                                     } else {
@@ -386,12 +387,13 @@ fn handle_action(
                 terminal.draw(|frame| ui::view(app, frame))?;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let result = archive_email_locally(
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(archive_email_locally(
                         &imap_config,
                         &archive_dir,
                         &path,
                         &archive_server_name,
-                    )
+                    ))
                     .map(|()| String::new())
                     .map_err(|e| e.to_string());
                     let _ = tx.send(BgResult::Archive { result });
@@ -416,7 +418,8 @@ fn handle_action(
                 terminal.draw(|frame| ui::view(app, frame))?;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let result = delete_email_locally(&imap_config, &path)
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(delete_email_locally(&imap_config, &path))
                         .map(|()| String::new())
                         .map_err(|e| e.to_string());
                     let _ = tx.send(BgResult::Delete { result });
@@ -452,12 +455,13 @@ fn handle_action(
 
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let results = batch_archive_emails_locally(
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let results = rt.block_on(batch_archive_emails_locally(
                     &imap_config,
                     &archive_dir,
                     &paths,
                     &archive_server_name,
-                );
+                ));
                 for (_path, result) in results {
                     let _ = tx.send(BgResult::Archive {
                         result: result.map(|()| String::new()).map_err(|e| e.to_string()),
@@ -486,7 +490,8 @@ fn handle_action(
 
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let results = batch_delete_emails_locally(&imap_config, &paths);
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let results = rt.block_on(batch_delete_emails_locally(&imap_config, &paths));
                 for (_path, result) in results {
                     let _ = tx.send(BgResult::Delete {
                         result: result.map(|()| String::new()).map_err(|e| e.to_string()),
@@ -526,8 +531,9 @@ fn handle_action(
             app.set_status("Fetching...".to_string());
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
                 let result =
-                    lib_sync(&global_config, &imap_config, 10).map_err(|e| e.to_string());
+                    rt.block_on(lib_sync(&global_config, &imap_config, 10)).map_err(|e| e.to_string());
                 let _ = tx.send(BgResult::Fetch { result });
             });
         }
@@ -554,7 +560,8 @@ fn handle_action(
             app.set_status("Syncing...".to_string());
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let result = lib_sync_reconcile(&global_config, &imap_config, 50)
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(lib_sync_reconcile(&global_config, &imap_config, 50))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(BgResult::Sync { result });
             });
@@ -692,8 +699,15 @@ fn install_panic_hook() {
 }
 
 fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => {
+            let _ = tx.send(WatchEvent::Error("Failed to create async runtime".into()));
+            return;
+        }
+    };
     loop {
-        match imap_watch(&imap_config, "INBOX", Some(300)) {
+        match rt.block_on(imap_watch(&imap_config, "INBOX", Some(300))) {
             Ok(0) => {
                 if tx.send(WatchEvent::Changed).is_err() {
                     break;
@@ -716,7 +730,7 @@ fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig) {
 // Direct library call helpers
 // ---------------------------------------------------------------------------
 
-fn lib_sync(
+async fn lib_sync(
     global_config: &crate::config::GlobalConfig,
     imap_config: &ImapConfig,
     limit: usize,
@@ -743,7 +757,7 @@ fn lib_sync(
             since: None,
             before: None,
         };
-        let emails = fetch_emails(imap_config, &criteria, imap_mailbox, Some(limit))?;
+        let emails = fetch_emails(imap_config, &criteria, imap_mailbox, Some(limit)).await?;
         let (saved, skipped) = save_fetched_emails(&emails, local_dir, status_str)?;
         total_saved += saved;
         total_skipped += skipped;
@@ -752,12 +766,12 @@ fn lib_sync(
     Ok(format!("Synced: {} new, {} existing", total_saved, total_skipped))
 }
 
-fn lib_sync_reconcile(
+async fn lib_sync_reconcile(
     global_config: &crate::config::GlobalConfig,
     imap_config: &ImapConfig,
     limit: usize,
 ) -> anyhow::Result<String> {
-    let sync_msg = lib_sync(global_config, imap_config, limit)?;
+    let sync_msg = lib_sync(global_config, imap_config, limit).await?;
 
     let mut reconcile_pairs: Vec<(String, String, PathBuf)> = Vec::new();
     if let Some(ref m) = global_config.mailboxes.inbox {
@@ -780,7 +794,7 @@ fn lib_sync_reconcile(
 
     for (role, imap_mailbox, local_dir) in &reconcile_pairs {
         local_dirs.insert(role.clone(), local_dir.clone());
-        let ids = fetch_server_message_ids(imap_config, imap_mailbox)?;
+        let ids = fetch_server_message_ids(imap_config, imap_mailbox).await?;
         server_ids.insert(role.clone(), ids);
     }
 

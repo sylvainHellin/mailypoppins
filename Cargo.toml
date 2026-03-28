@@ -29,8 +29,10 @@ tokio = { version = "1", features = ["full"] }
 shellexpand = "3.1"
 toml = "0.8"
 mime_guess = "2"
-imap = "2.4"
-native-tls = "0.2"
+async-imap = "0.11"
+async-native-tls = "0.5"
+async-std = { version = "1", features = ["attributes"] }
+futures = "0.3"
 mailparse = "0.15"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 html2text = "0.14"

@@ -180,16 +180,30 @@ fn test_smtp_connection(host: &str, port: u16, username: &str, password: &str) -
 
 /// Test IMAP connection: connect with TLS, login, and logout.
 fn test_imap_connection(host: &str, port: u16, username: &str, password: &str) -> Result<()> {
-    let tls = native_tls::TlsConnector::builder().build()?;
-    let client = imap::connect((host, port), host, &tls)
-        .map_err(|e| anyhow::anyhow!("Failed to connect to IMAP server: {}", e))?;
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let tls = async_native_tls::TlsConnector::new();
 
-    let mut session = client
-        .login(username, password)
-        .map_err(|e| anyhow::anyhow!("IMAP login failed: {}", e.0))?;
+        let addr = format!("{}:{}", host, port);
+        let tcp_stream = async_std::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to IMAP server: {}", e))?;
 
-    session.logout().ok();
-    Ok(())
+        let tls_stream = tls
+            .connect(host, tcp_stream)
+            .await
+            .map_err(|e| anyhow::anyhow!("TLS handshake failed: {}", e))?;
+
+        let client = async_imap::Client::new(tls_stream);
+
+        let mut session = client
+            .login(username, password)
+            .await
+            .map_err(|e| anyhow::anyhow!("IMAP login failed: {}", e.0))?;
+
+        session.logout().await.ok();
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +363,8 @@ pub fn cmd_config_init() -> Result<()> {
         password: imap_password.clone(),
     };
 
-    let server_mailboxes = match list_mailboxes(&imap_config) {
+    let rt = tokio::runtime::Runtime::new()?;
+    let server_mailboxes = match rt.block_on(list_mailboxes(&imap_config)) {
         Ok(mbs) => {
             println!("{} ({} mailboxes)", "OK".green(), mbs.len());
             mbs
