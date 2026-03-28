@@ -6,6 +6,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Find the largest byte index <= `max_bytes` that lies on a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 pub struct FetchedEmail {
     pub from: String,
     pub to: String,
@@ -131,7 +143,7 @@ fn sanitize_attachment_filename(name: &str) -> String {
     if name.is_empty() {
         "attachment.bin".to_string()
     } else if name.len() > 200 {
-        name[..200].to_string()
+        name[..floor_char_boundary(&name, 200)].to_string()
     } else {
         name
     }
@@ -204,8 +216,9 @@ pub fn slugify_subject(subject: &str) -> String {
     }
     let result = result.trim_matches('-').to_string();
     if result.len() > 40 {
-        // Truncate at word boundary
-        let truncated = &result[..40];
+        // Truncate at nearest char boundary <= 40 bytes
+        let end = floor_char_boundary(&result, 40);
+        let truncated = &result[..end];
         truncated.trim_end_matches('-').to_string()
     } else {
         result
