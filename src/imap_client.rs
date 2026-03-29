@@ -2,17 +2,36 @@ use anyhow::{anyhow, Context, Result};
 use async_imap::extensions::idle::IdleResponse;
 use futures::TryStreamExt;
 use gray_matter::{engine::YAML, Matter};
-use log::info;
-use mailparse::{parse_mail, MailHeaderMap};
-use std::collections::HashSet;
+use log::{info, warn};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::ImapConfig;
-use crate::parse::{attachments_dir_for, compress_uid_set, extract_attachments, extract_body_text, has_attachments, FetchedEmail};
+use crate::parse::{
+    attachments_dir_for, compress_uid_set, parse_rfc822_to_fetched_email,
+    save_fetched_emails_with_known_ids, scan_existing_message_ids, FetchedEmail,
+};
+use crate::sync::reconcile_local_files;
 use crate::types::InboxFrontmatter;
 
 pub type ImapSession = async_imap::Session<async_native_tls::TlsStream<async_std::net::TcpStream>>;
+
+/// A mailbox target for the unified sync operation.
+pub struct SyncTarget {
+    pub role: String,
+    pub server_name: String,
+    pub local_dir: PathBuf,
+    pub status: String,
+}
+
+/// Results from a `sync_mailboxes` operation.
+pub struct SyncResult {
+    pub saved: usize,
+    pub skipped: usize,
+    pub moved: usize,
+    pub removed: usize,
+}
 
 pub async fn open_imap_session(imap_config: &ImapConfig) -> Result<ImapSession> {
     let tls = async_native_tls::TlsConnector::new();
@@ -110,14 +129,30 @@ fn parse_date_to_imap(date_str: &str) -> Option<String> {
     Some(format!("{}-{}-{}", day, month, year))
 }
 
-/// Fetch only Message-IDs from a mailbox (lightweight, no body download).
-pub async fn fetch_server_message_ids(
-    imap_config: &ImapConfig,
+/// Extract Message-ID from raw header bytes (from BODY.PEEK[HEADER.FIELDS (Message-ID)]).
+fn parse_message_id_from_header_bytes(header_bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(header_bytes).ok()?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed
+            .strip_prefix("Message-ID:")
+            .or_else(|| trimmed.strip_prefix("Message-Id:"))
+            .or_else(|| trimmed.strip_prefix("message-id:"))
+        {
+            let id = value.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Fetch only Message-IDs from a mailbox on an existing session (lightweight, no body download).
+pub async fn fetch_server_message_ids_on_session(
+    session: &mut ImapSession,
     mailbox: &str,
 ) -> Result<HashSet<String>> {
-    info!("Fetching Message-IDs from mailbox '{}'", mailbox);
-    let mut session = open_imap_session(imap_config).await?;
-
     session
         .select(mailbox)
         .await
@@ -129,7 +164,6 @@ pub async fn fetch_server_message_ids(
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        session.logout().await.ok();
         return Ok(HashSet::new());
     }
 
@@ -148,37 +182,35 @@ pub async fn fetch_server_message_ids(
     let mut ids = HashSet::new();
     for msg in fetched.iter() {
         if let Some(header_bytes) = msg.header() {
-            if let Ok(text) = std::str::from_utf8(header_bytes) {
-                // Parse "Message-ID: <...>\r\n" from the header field
-                for line in text.lines() {
-                    let trimmed = line.trim();
-                    if let Some(value) = trimmed.strip_prefix("Message-ID:")
-                        .or_else(|| trimmed.strip_prefix("Message-Id:"))
-                        .or_else(|| trimmed.strip_prefix("message-id:"))
-                    {
-                        let id = value.trim();
-                        if !id.is_empty() {
-                            ids.insert(id.to_string());
-                        }
-                    }
-                }
+            if let Some(mid) = parse_message_id_from_header_bytes(header_bytes) {
+                ids.insert(mid);
             }
         }
     }
 
+    Ok(ids)
+}
+
+/// Fetch only Message-IDs from a mailbox (lightweight, no body download).
+/// Opens and closes its own IMAP session.
+pub async fn fetch_server_message_ids(
+    imap_config: &ImapConfig,
+    mailbox: &str,
+) -> Result<HashSet<String>> {
+    info!("Fetching Message-IDs from mailbox '{}'", mailbox);
+    let mut session = open_imap_session(imap_config).await?;
+    let ids = fetch_server_message_ids_on_session(&mut session, mailbox).await?;
     session.logout().await.ok();
     Ok(ids)
 }
 
-pub async fn fetch_emails(
-    imap_config: &ImapConfig,
+/// Fetch emails on an existing session using search criteria and optional limit.
+pub async fn fetch_emails_on_session(
+    session: &mut ImapSession,
     criteria: &FetchCriteria,
     mailbox: &str,
     limit: Option<usize>,
 ) -> Result<Vec<FetchedEmail>> {
-    info!("Fetching emails from mailbox '{}' (limit: {:?})", mailbox, limit);
-    let mut session = open_imap_session(imap_config).await?;
-
     session
         .select(mailbox)
         .await
@@ -191,11 +223,9 @@ pub async fn fetch_emails(
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        session.logout().await.ok();
         return Ok(Vec::new());
     }
 
-    // Take the last N UIDs (most recent)
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort();
     let selected_uids: Vec<u32> = match limit {
@@ -214,51 +244,238 @@ pub async fn fetch_emails(
         .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
 
     let mut emails = Vec::new();
-
     for msg in fetched.iter() {
         let body_raw = msg.body().unwrap_or_default();
-        let parsed = match parse_mail(body_raw) {
-            Ok(p) => p,
-            Err(_) => continue,
+        if let Some(email) = parse_rfc822_to_fetched_email(body_raw) {
+            emails.push(email);
+        }
+    }
+
+    Ok(emails)
+}
+
+/// Fetch emails from an IMAP server. Opens and closes its own session.
+pub async fn fetch_emails(
+    imap_config: &ImapConfig,
+    criteria: &FetchCriteria,
+    mailbox: &str,
+    limit: Option<usize>,
+) -> Result<Vec<FetchedEmail>> {
+    info!(
+        "Fetching emails from mailbox '{}' (limit: {:?})",
+        mailbox, limit
+    );
+    let mut session = open_imap_session(imap_config).await?;
+    let emails = fetch_emails_on_session(&mut session, criteria, mailbox, limit).await?;
+    session.logout().await.ok();
+    Ok(emails)
+}
+
+/// Two-pass fetch: first fetch Message-ID headers (lightweight), then only download
+/// full RFC822 for emails not already present locally.
+/// Returns (new_emails, num_already_known_in_window).
+pub async fn fetch_new_emails_on_session(
+    session: &mut ImapSession,
+    mailbox: &str,
+    limit: Option<usize>,
+    known_ids: &HashSet<String>,
+) -> Result<(Vec<FetchedEmail>, usize)> {
+    session
+        .select(mailbox)
+        .await
+        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+
+    let uids = session
+        .uid_search("ALL")
+        .await
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
+    let mut uid_list: Vec<u32> = uids.into_iter().collect();
+    uid_list.sort();
+    let selected_uids: Vec<u32> = match limit {
+        Some(n) => uid_list.into_iter().rev().take(n).collect(),
+        None => uid_list,
+    };
+
+    if selected_uids.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
+    let checked_count = selected_uids.len();
+
+    // Pass 1: Fetch only Message-ID headers (~50 bytes/msg)
+    let uid_set = compress_uid_set(&selected_uids);
+    let header_fetched: Vec<_> = session
+        .uid_fetch(&uid_set, "(UID BODY.PEEK[HEADER.FIELDS (Message-ID)])")
+        .await
+        .map_err(|e| anyhow!("Failed to fetch Message-ID headers: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect Message-ID headers: {}", e))?;
+
+    // Identify UIDs whose Message-ID is not in known_ids
+    let mut new_uids: Vec<u32> = Vec::new();
+    for msg in header_fetched.iter() {
+        let uid = match msg.uid {
+            Some(u) => u,
+            None => continue,
         };
+        let mid = msg.header().and_then(parse_message_id_from_header_bytes);
+        match mid {
+            Some(ref id) if known_ids.contains(id) => {
+                // Already known locally, skip
+            }
+            _ => {
+                new_uids.push(uid);
+            }
+        }
+    }
 
-        let headers = &parsed.headers;
-        let from = headers
-            .get_first_value("From")
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let to = headers
-            .get_first_value("To")
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let cc = headers.get_first_value("Cc");
-        let subject = headers
-            .get_first_value("Subject")
-            .unwrap_or_else(|| "(no subject)".to_string());
-        let date = headers
-            .get_first_value("Date")
-            .unwrap_or_else(|| "(unknown date)".to_string());
+    let skipped = checked_count - new_uids.len();
 
-        let message_id = headers.get_first_value("Message-ID")
-            .or_else(|| headers.get_first_value("Message-Id"));
-        let (body_text, html_body) = extract_body_text(&parsed);
-        let has_att = has_attachments(&parsed);
-        let att_data = extract_attachments(&parsed);
+    if new_uids.is_empty() {
+        return Ok((Vec::new(), skipped));
+    }
 
-        emails.push(FetchedEmail {
-            from,
-            to,
-            cc,
-            subject,
-            date,
-            body_text,
-            html_body,
-            has_attachments: has_att,
-            message_id,
-            attachments: att_data,
-        });
+    info!(
+        "Two-pass fetch for '{}': {} new, {} skipped (out of {} checked)",
+        mailbox,
+        new_uids.len(),
+        skipped,
+        checked_count
+    );
+
+    // Pass 2: Fetch full RFC822 only for genuinely new messages
+    let new_uid_set = compress_uid_set(&new_uids);
+    let fetched: Vec<_> = session
+        .uid_fetch(&new_uid_set, "RFC822")
+        .await
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+
+    let mut emails = Vec::new();
+    for msg in fetched.iter() {
+        let body_raw = msg.body().unwrap_or_default();
+        if let Some(email) = parse_rfc822_to_fetched_email(body_raw) {
+            emails.push(email);
+        }
+    }
+
+    Ok((emails, skipped))
+}
+
+/// Unified sync orchestrator: fetches all mailboxes using a single IMAP connection,
+/// with optional reconciliation pass.
+pub async fn sync_mailboxes(
+    imap_config: &ImapConfig,
+    targets: &[SyncTarget],
+    limit: usize,
+    reconcile: bool,
+) -> Result<SyncResult> {
+    info!(
+        "sync_mailboxes: {} targets, limit={}, reconcile={}",
+        targets.len(),
+        limit,
+        reconcile
+    );
+
+    let mut session = open_imap_session(imap_config).await?;
+    let mut total_saved = 0usize;
+    let mut total_skipped = 0usize;
+
+    // Phase 1: Additive sync with two-pass fetch
+    for target in targets {
+        // Pre-scan local directory for known message IDs
+        let mut known_ids = scan_existing_message_ids(&target.local_dir)?;
+
+        match fetch_new_emails_on_session(
+            &mut session,
+            &target.server_name,
+            Some(limit),
+            &known_ids,
+        )
+        .await
+        {
+            Ok((new_emails, skipped)) => {
+                total_skipped += skipped;
+                if !new_emails.is_empty() {
+                    let (saved, _dup) = save_fetched_emails_with_known_ids(
+                        &new_emails,
+                        &target.local_dir,
+                        &target.status,
+                        &mut known_ids,
+                    )?;
+                    total_saved += saved;
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to sync mailbox '{}': {}. Continuing with next.",
+                    target.server_name, e
+                );
+            }
+        }
+    }
+
+    let mut total_moved = 0usize;
+    let mut total_removed = 0usize;
+
+    // Phase 2: Reconciliation (only INBOX and Archive)
+    if reconcile {
+        let mut reconcile_pairs: Vec<(String, String)> = Vec::new();
+        let mut local_dirs: HashMap<String, PathBuf> = HashMap::new();
+
+        for target in targets {
+            let role = target.role.to_ascii_lowercase();
+            if role == "inbox" || role == "archive" {
+                let key = if role == "inbox" {
+                    "INBOX".to_string()
+                } else {
+                    "Archive".to_string()
+                };
+                reconcile_pairs.push((key.clone(), target.server_name.clone()));
+                local_dirs.insert(key, target.local_dir.clone());
+            }
+        }
+
+        if !reconcile_pairs.is_empty() {
+            let mut server_ids: HashMap<String, HashSet<String>> = HashMap::new();
+            for (key, imap_mailbox) in &reconcile_pairs {
+                match fetch_server_message_ids_on_session(&mut session, imap_mailbox).await {
+                    Ok(ids) => {
+                        server_ids.insert(key.clone(), ids);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to fetch Message-IDs for reconciliation from '{}': {}",
+                            imap_mailbox, e
+                        );
+                    }
+                }
+            }
+
+            if !server_ids.is_empty() {
+                let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
+                total_moved = moved;
+                total_removed = removed;
+            }
+        }
     }
 
     session.logout().await.ok();
-    Ok(emails)
+
+    Ok(SyncResult {
+        saved: total_saved,
+        skipped: total_skipped,
+        moved: total_moved,
+        removed: total_removed,
+    })
 }
 
 pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use colored::*;
+use mailparse::{parse_mail, MailHeaderMap};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -157,6 +158,44 @@ pub fn attachments_dir_for(md_path: &Path) -> PathBuf {
     parent.join(format!("{}_attachments", stem))
 }
 
+/// Parse raw RFC822 bytes into a FetchedEmail struct.
+pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail> {
+    let parsed = parse_mail(rfc822_body).ok()?;
+    let headers = &parsed.headers;
+    let from = headers
+        .get_first_value("From")
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let to = headers
+        .get_first_value("To")
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let cc = headers.get_first_value("Cc");
+    let subject = headers
+        .get_first_value("Subject")
+        .unwrap_or_else(|| "(no subject)".to_string());
+    let date = headers
+        .get_first_value("Date")
+        .unwrap_or_else(|| "(unknown date)".to_string());
+    let message_id = headers
+        .get_first_value("Message-ID")
+        .or_else(|| headers.get_first_value("Message-Id"));
+    let (body_text, html_body) = extract_body_text(&parsed);
+    let has_att = has_attachments(&parsed);
+    let att_data = extract_attachments(&parsed);
+
+    Some(FetchedEmail {
+        from,
+        to,
+        cc,
+        subject,
+        date,
+        body_text,
+        html_body,
+        has_attachments: has_att,
+        message_id,
+        attachments: att_data,
+    })
+}
+
 /// Compress a sorted list of UIDs into IMAP sequence set format using ranges.
 /// e.g., [1,2,3,5,7,8,9] -> "1:3,5,7:9"
 pub fn compress_uid_set(uids: &[u32]) -> String {
@@ -284,12 +323,13 @@ pub fn parse_email_date_prefix(date_str: &str) -> String {
     Utc::now().format("%Y-%m-%d-%H%M").to_string()
 }
 
-pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
-    fs::create_dir_all(inbox_dir)?;
-
-    // Collect existing message IDs from inbox
-    let mut existing_ids: HashSet<String> = HashSet::new();
-    for entry in WalkDir::new(inbox_dir)
+/// Scan a directory for .md files and collect their message_ids into a HashSet.
+pub fn scan_existing_message_ids(dir: &Path) -> Result<HashSet<String>> {
+    let mut ids = HashSet::new();
+    if !dir.exists() {
+        return Ok(ids);
+    }
+    for entry in WalkDir::new(dir)
         .max_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -297,7 +337,6 @@ pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &s
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
             if let Ok(content) = fs::read_to_string(path) {
-                // Extract message_id from YAML frontmatter
                 let mut in_frontmatter = false;
                 for line in content.lines() {
                     if line == "---" {
@@ -305,13 +344,13 @@ pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &s
                             in_frontmatter = true;
                             continue;
                         } else {
-                            break; // end of frontmatter
+                            break;
                         }
                     }
                     if in_frontmatter && line.starts_with("message_id:") {
                         let id = line.trim_start_matches("message_id:").trim().trim_matches('"');
                         if !id.is_empty() {
-                            existing_ids.insert(id.to_string());
+                            ids.insert(id.to_string());
                         }
                         break;
                     }
@@ -319,6 +358,21 @@ pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &s
             }
         }
     }
+    Ok(ids)
+}
+
+pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
+    let mut existing_ids = scan_existing_message_ids(inbox_dir)?;
+    save_fetched_emails_with_known_ids(emails, inbox_dir, status, &mut existing_ids)
+}
+
+pub fn save_fetched_emails_with_known_ids(
+    emails: &[FetchedEmail],
+    inbox_dir: &Path,
+    status: &str,
+    existing_ids: &mut HashSet<String>,
+) -> Result<(usize, usize)> {
+    fs::create_dir_all(inbox_dir)?;
 
     let mut saved = 0;
     let mut skipped = 0;

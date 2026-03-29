@@ -3,7 +3,7 @@ mod event;
 mod theme;
 mod ui;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{self, stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -27,12 +27,11 @@ use crate::draft::{
 };
 use crate::imap_client::{
     append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
-    batch_delete_emails_locally, delete_email_locally, fetch_emails, fetch_server_message_ids,
-    watch_mailbox as imap_watch, FetchCriteria,
+    batch_delete_emails_locally, delete_email_locally, sync_mailboxes, SyncTarget,
+    watch_mailbox as imap_watch,
 };
-use crate::parse::save_fetched_emails;
 use crate::send::send_email;
-use crate::sync::{mailbox_status, reconcile_local_files};
+use crate::sync::mailbox_status;
 use crate::types::EmailStatus;
 
 enum WatchEvent {
@@ -533,7 +532,8 @@ fn handle_action(
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result =
-                    rt.block_on(lib_sync(&global_config, &imap_config, 10)).map_err(|e| e.to_string());
+                    rt.block_on(lib_do_sync(&global_config, &imap_config, 10, false))
+                        .map_err(|e| e.to_string());
                 let _ = tx.send(BgResult::Fetch { result });
             });
         }
@@ -561,7 +561,8 @@ fn handle_action(
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(lib_sync_reconcile(&global_config, &imap_config, 50))
+                let result = rt
+                    .block_on(lib_do_sync(&global_config, &imap_config, 50, true))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(BgResult::Sync { result });
             });
@@ -730,83 +731,36 @@ fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig) {
 // Direct library call helpers
 // ---------------------------------------------------------------------------
 
-async fn lib_sync(
+async fn lib_do_sync(
     global_config: &crate::config::GlobalConfig,
     imap_config: &ImapConfig,
     limit: usize,
+    reconcile: bool,
 ) -> anyhow::Result<String> {
-    let sync_targets: Vec<(String, String, PathBuf, &str)> = all_configured_mailboxes(global_config)
+    let targets: Vec<SyncTarget> = all_configured_mailboxes(global_config)
         .iter()
-        .map(|(role, mapping)| {
-            let local_dir = resolve_mailbox_local_path(global_config, mapping);
-            let status_str = mailbox_status(role);
-            (role.clone(), mapping.server.clone(), local_dir, status_str)
+        .map(|(role, mapping)| SyncTarget {
+            role: role.clone(),
+            server_name: mapping.server.clone(),
+            local_dir: resolve_mailbox_local_path(global_config, mapping),
+            status: mailbox_status(role).to_string(),
         })
         .collect();
 
-    let mut total_saved = 0usize;
-    let mut total_skipped = 0usize;
+    let result = sync_mailboxes(imap_config, &targets, limit, reconcile).await?;
 
-    for (_, imap_mailbox, local_dir, status_str) in &sync_targets {
-        let criteria = FetchCriteria {
-            from: None,
-            to: None,
-            cc: None,
-            subject: None,
-            body: None,
-            since: None,
-            before: None,
-        };
-        let emails = fetch_emails(imap_config, &criteria, imap_mailbox, Some(limit)).await?;
-        let (saved, skipped) = save_fetched_emails(&emails, local_dir, status_str)?;
-        total_saved += saved;
-        total_skipped += skipped;
+    let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
+    if reconcile {
+        if result.moved > 0 || result.removed > 0 {
+            msg.push_str(&format!(
+                " | Reconciled: {} moved, {} removed",
+                result.moved, result.removed
+            ));
+        } else {
+            msg.push_str(" | Already in sync");
+        }
     }
-
-    Ok(format!("Synced: {} new, {} existing", total_saved, total_skipped))
-}
-
-async fn lib_sync_reconcile(
-    global_config: &crate::config::GlobalConfig,
-    imap_config: &ImapConfig,
-    limit: usize,
-) -> anyhow::Result<String> {
-    let sync_msg = lib_sync(global_config, imap_config, limit).await?;
-
-    let mut reconcile_pairs: Vec<(String, String, PathBuf)> = Vec::new();
-    if let Some(ref m) = global_config.mailboxes.inbox {
-        reconcile_pairs.push((
-            "INBOX".to_string(),
-            m.server.clone(),
-            resolve_mailbox_local_path(global_config, m),
-        ));
-    }
-    if let Some(ref m) = global_config.mailboxes.archive {
-        reconcile_pairs.push((
-            "Archive".to_string(),
-            m.server.clone(),
-            resolve_mailbox_local_path(global_config, m),
-        ));
-    }
-
-    let mut server_ids: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    let mut local_dirs: HashMap<String, PathBuf> = HashMap::new();
-
-    for (role, imap_mailbox, local_dir) in &reconcile_pairs {
-        local_dirs.insert(role.clone(), local_dir.clone());
-        let ids = fetch_server_message_ids(imap_config, imap_mailbox).await?;
-        server_ids.insert(role.clone(), ids);
-    }
-
-    let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
-    if moved > 0 || removed > 0 {
-        Ok(format!(
-            "{} | Reconciled: {} moved, {} removed",
-            sync_msg, moved, removed
-        ))
-    } else {
-        Ok(format!("{} | Already in sync", sync_msg))
-    }
+    Ok(msg)
 }
 
 // ---------------------------------------------------------------------------

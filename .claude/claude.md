@@ -11,7 +11,7 @@ CLI tool and TUI for managing email drafts written in Markdown with YAML frontma
 - **TUI:** `ratatui` + `crossterm` (alternate screen, raw mode, event loop)
 - **Clipboard:** `arboard` (copy-to-clipboard in TUI)
 - **SMTP:** `lettre` (async, TLS)
-- **IMAP:** `imap` + `native-tls`
+- **IMAP:** `async-imap` + `async-native-tls`
 - **Email parsing:** `mailparse`
 - **HTML → plaintext:** `html2text`
 - **Frontmatter:** `gray_matter` + `serde_yaml`
@@ -36,9 +36,9 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The lib
 | `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
 | `src/config.rs` | Global config loading (`~/.config/email/config.toml`), keyring integration, mailbox resolution, logging. All config types derive `Clone` for TUI thread sharing. |
 | `src/config_cmd.rs` | Config subcommands: init wizard (credential testing, mailbox discovery), show, set-password, path |
-| `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, save/display |
-| `src/imap_client.rs` | All IMAP operations: fetch, list, append, watch, archive, delete |
-| `src/draft.rs` | Draft parsing, validation, preview, reply creation, status updates |
+| `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, RFC822 parsing, attachment extraction, save/display, local message-ID scanning |
+| `src/imap_client.rs` | All IMAP operations: fetch, list, append, watch, archive, delete, unified `sync_mailboxes()` orchestrator with two-pass fetch |
+| `src/draft.rs` | Draft parsing, validation, preview, reply/forward creation, status updates |
 | `src/send.rs` | `RecipientRole`, `SendResult`, `markdown_to_html`, `send_email` |
 | `src/sync.rs` | Local file scanning, reconciliation, mailbox dir resolution |
 | `src/tui/mod.rs` | TUI entry point (`tui::run()`), main event loop, action dispatcher, background task handling, terminal management, IMAP watcher thread |
@@ -53,10 +53,10 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The lib
 types       --> (none)
 config      --> (none)
 parse       --> types
-imap_client --> config, parse, types
+imap_client --> config, parse, sync, types
 draft       --> config, parse, types
 send        --> config, types
-sync        --> (none, only external crates)
+sync        --> parse
 config_cmd  --> config, imap_client
 tui         --> config, draft, imap_client, parse, send, sync, types
 main        --> all modules (via lib)
@@ -75,6 +75,7 @@ main        --> all modules (via lib)
 | `email mark-approved <file>` | Change status from draft to approved |
 | `email new <name>` | Create a new draft from template |
 | `email reply [file] [--all]` | Create a reply draft from a received email |
+| `email forward [file]` | Create a forward draft from a received email |
 | `email list-mailboxes` | List available IMAP mailboxes |
 | `email fetch [filters]` | Fetch emails via IMAP |
 | `email sync [--limit N] [--mailbox ...] [--reconcile]` | Additive sync (Message-ID dedup); `--reconcile` detects server moves/deletes |
@@ -152,6 +153,38 @@ Sent files include additional fields: `sent_at`, `sent_via`, and `message_id` (t
 
 Reply drafts (created via `email reply`) include a `{{SIGNATURE}}` placeholder between the reply area and the quoted conversation. When sent, `markdown_to_html` replaces this placeholder with the signature HTML, ensuring the signature appears between the reply and the quoted text. If the placeholder is removed, the signature falls back to being appended at the end (same as regular drafts).
 
+### Forward Drafts
+
+Forward drafts (created via `email forward` or `w` in TUI) include:
+- `to: ""` (empty, to be filled by the user)
+- `subject: "Fwd: ..."` prefix
+- `attachments:` with absolute paths to source attachment files (reuses existing `send.rs` attachment logic)
+- `{{SIGNATURE}}` placeholder between the reply area and the forwarded message block
+- A "---------- Forwarded message ----------" header block with original From/Date/Subject/To, followed by the original body unquoted
+
+### Attachment Storage
+
+Incoming attachments are saved next to the `.md` file in a `_attachments/` subdirectory:
+
+```
+inbox/2024-01-01-1200_sender_subject.md
+inbox/2024-01-01-1200_sender_subject.html
+inbox/2024-01-01-1200_sender_subject_attachments/
+  document.pdf
+  image.png
+```
+
+Frontmatter records filenames (not paths):
+
+```yaml
+has_attachments: true
+attachments:
+  - "document.pdf"
+  - "image.png"
+```
+
+The `_attachments/` directory is moved/deleted alongside `.md` and `.html` companion files during archive, delete, sync move, and reconciliation operations. The `attachments_dir_for(md_path)` helper in `parse.rs` computes the directory path from any `.md` file path.
+
 ## TUI (v0.5.0)
 
 Running `email` with no arguments launches an interactive TUI built with `ratatui` and `crossterm`.
@@ -176,18 +209,21 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 |-----|--------|
 | `j`/`k` | Navigate up/down |
 | `g g`/`G` | Jump to top/bottom |
+| `Space` | Toggle selection |
+| `Ctrl+a` | Select all visible |
+| `Esc` | Clear selection |
 | `Enter`/`e` | Open in `$EDITOR` |
 | `r`/`R` | Reply / Reply All |
-| `a` | Archive (with confirmation) |
-| `d` | Delete (with confirmation) |
+| `w` | Forward |
+| `a` | Archive selected or cursor (with confirmation) |
+| `d` | Delete selected or cursor (with confirmation) |
 | `A` | Mark as approved |
 | `x` | Send (with confirmation) |
 | `X` | Send all approved (with confirmation) |
 | `n` | New draft |
 | `y` | Copy file path to clipboard |
-| `f` | Fetch inbox |
-| `F` | Full sync |
-| `S` | Sync + reconcile |
+| `f` | Fetch (all mailboxes) |
+| `F` | Sync (fetch + reconcile) |
 | `/` | Search (subject/contact/date) |
 | `\` | Search (includes body) |
 | `s` | Focus sidebar |
@@ -200,18 +236,44 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 
 The TUI calls library functions directly (e.g., `send_email`, `fetch_emails`, `archive_email_locally`) rather than spawning `email` subprocesses. This is why `src/lib.rs` exists and why config types derive `Clone` -- they need to be moved into background threads.
 
+## Style Rules
+
+- **No emojis in code or output.** Use Unicode symbols or Nerd Font icons instead. The user has a Nerd Font installed.
+
 ## Output Conventions (CLI mode)
 
 - `colored` crate for terminal styling
 - `✓` green for success, `✗` red for errors, `⚠` yellow for warnings, `ℹ` blue for info
 - Header keys in `fetch` display use distinct colors: From (green), To/Cc (blue), Subject (yellow), Date (magenta)
 
-## Sync Reconciliation
+## Sync Architecture
 
-`email sync` is additive by default. Pass `--reconcile` to also detect server-side moves and deletes:
+`email sync` uses a unified `sync_mailboxes()` orchestrator in `imap_client.rs` that opens a single IMAP connection for the entire operation.
 
-1. **Additive pass** (always): Fetch last N emails per mailbox (default 50), save new ones locally with Message-ID dedup. Default mailbox list comes from all configured mailboxes (`mailboxes.inbox`, `mailboxes.archive`, `mailboxes.sent`, plus any `mailboxes.extra` entries).
-2. **Reconciliation pass** (`--reconcile` only): Lightweight fetch of just Message-ID headers from INBOX and Archive (no body download). Compares local files against server sets. Emails moved between INBOX and Archive on the server are moved locally (with status update). Emails deleted on the server are removed locally. Companion `.html` files are moved/deleted alongside `.md` files.
+### Two-pass fetch (connection reuse + bandwidth optimization)
+
+For each mailbox, `sync_mailboxes()` uses a two-pass approach via `fetch_new_emails_on_session()`:
+
+1. **Pass 1 (headers only)**: Fetch `BODY.PEEK[HEADER.FIELDS (Message-ID)]` for the last N UIDs (~50 bytes/msg). Compare against locally-known message IDs (from `scan_existing_message_ids()`).
+2. **Pass 2 (full download, new only)**: Fetch `RFC822` only for UIDs whose Message-ID is not already local. This skips full downloads for already-synced emails.
+
+All passes reuse the same IMAP session (1 TLS handshake total, vs. 5+ previously).
+
+### Session-passing variants
+
+Core IMAP functions have `_on_session` variants (`fetch_emails_on_session`, `fetch_server_message_ids_on_session`) that accept an existing `&mut ImapSession`. The original functions (`fetch_emails`, `fetch_server_message_ids`) are thin wrappers that open/close their own session for backward compatibility.
+
+### Key types
+
+- `SyncTarget { role, server_name, local_dir, status }` -- describes a mailbox to sync
+- `SyncResult { saved, skipped, moved, removed }` -- aggregate results
+
+### Reconciliation
+
+Pass `--reconcile` to also detect server-side moves and deletes (uses the same single connection):
+
+1. **Additive pass** (always): Two-pass fetch for each configured mailbox (default: INBOX, Archive, Sent, plus any `mailboxes.extra`).
+2. **Reconciliation pass** (`--reconcile` only): Fetch all Message-ID headers from INBOX and Archive via `fetch_server_message_ids_on_session()`. Compare against local files. Move/delete locally to match server state.
 
 **Important constraints:**
 - The Sent directory is never reconciled -- locally-authored files are the source of truth.

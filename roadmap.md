@@ -59,30 +59,17 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - **Fetch saves to correct mailbox**: `email fetch --mailbox Archive` now saves to the archive directory with `status: archived` (fixed in v0.3.1).
 - **Case-insensitive mailbox matching**: Mailbox fetch and sync now match IMAP folder names case-insensitively (fixed in v0.3.1).
 
----
+### Workstream 3: async-imap Swap (v0.6.0)
 
-## Up Next
-
-### Workstream 3: async-imap Swap
-
-**Complexity:** M (~4-6h feasibility), M-L (~6-8h full swap)
-**Goal:** Migrate from `imap` v2.4 to `async-imap` v0.11 to mitigate maintainer risk.
-
-The `imap` crate's primary maintainer (jonhoo) has stepped back. `async-imap` is actively maintained by Delta Chat and is API-compatible. The current sync IMAP code also blocks the tokio runtime during long operations (fetch, IDLE).
-
-**Note:** `imap-proto v0.10.2` (transitive dependency of `imap`) already generates a future Rust compatibility warning. This adds urgency to the swap.
-
-**PoC strategy:**
-1. Start with `list_mailboxes()` -- simplest function, validates connection/TLS setup
-2. Then `fetch_emails()` -- validates Stream handling and `mailparse` integration
-3. Then `watch_mailbox()` -- validates IDLE API differences
-4. Remaining functions are mechanical conversions
-
-**Key differences from current code:**
-- TLS: `async-native-tls` instead of `native-tls`
-- `fetch()` returns async `Stream` instead of `Vec` (use `.try_collect()`)
-- IDLE: `wait_with_timeout(duration)` instead of `wait_keepalive()`
-- Sessions are `!Send` -- must manage lifetime within a single task
+- Migrated from `imap` v2.4 (unmaintained) to `async-imap` v0.11 (Delta Chat-maintained)
+- Replaced `native-tls` direct dependency with `async-native-tls` + `async-std` for TLS/TCP
+- All IMAP functions in `imap_client.rs` are now `async`
+- Removed `tokio::task::spawn_blocking` wrappers in `main.rs` (direct `.await` instead)
+- TUI background threads create per-thread `tokio::runtime::Runtime` for async IMAP calls
+- IDLE watcher uses `IdleResponse::NewData` / `IdleResponse::Timeout` instead of `WaitOutcome`
+- Fetch/list results consumed via `futures::TryStreamExt::try_collect()` (Stream → Vec)
+- `config_cmd.rs` test connection uses `async-imap` with `block_on`
+- Eliminated `imap-proto v0.10.2` Rust compatibility warning
 
 ---
 
@@ -110,3 +97,7 @@ The `imap` crate's primary maintainer (jonhoo) has stepped back. `async-imap` is
 ### CLI
 
 - **Delete draft command**: `email delete` currently only works for inbox emails (requires `message_id` for server-side deletion). Drafts are local-only, so deleting them should just remove the local `.md` and companion `.html` files without any IMAP operation.
+
+---
+
+- add a function in the TUI to open the html of the email in the default browser

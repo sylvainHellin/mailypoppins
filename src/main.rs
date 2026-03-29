@@ -1,7 +1,7 @@
 use email::types::*;
 use email::config::*;
 use email::parse::*;
-use email::imap_client::*;
+use email::imap_client::{self, *};
 use email::draft::*;
 use email::send::*;
 use email::sync::*;
@@ -752,88 +752,51 @@ attachments: []
         Some(Commands::Sync { limit, mailbox, reconcile }) => {
             let imap_config = ImapConfig::load(&global_config)?;
 
-            // Build the list of (role, server_name, local_dir, status) to sync
-            let sync_targets: Vec<(String, String, PathBuf, &str)> = if let Some(ref user_mailboxes) = mailbox {
-                // User specified mailboxes explicitly
+            let targets: Vec<imap_client::SyncTarget> = if let Some(ref user_mailboxes) = mailbox {
                 user_mailboxes.iter().map(|mb| {
-                    let server_name = find_server_name_for_role(&global_config, mb);
-                    let local_dir = resolve_mailbox_dir(&global_config, mb)
-                        .unwrap_or_else(|_| PathBuf::from(mb));
-                    let status_str = mailbox_status(mb);
-                    (mb.clone(), server_name, local_dir, status_str)
+                    imap_client::SyncTarget {
+                        role: mb.clone(),
+                        server_name: find_server_name_for_role(&global_config, mb),
+                        local_dir: resolve_mailbox_dir(&global_config, mb)
+                            .unwrap_or_else(|_| PathBuf::from(mb)),
+                        status: mailbox_status(mb).to_string(),
+                    }
                 }).collect()
             } else {
-                // Default: all configured mailboxes
                 all_configured_mailboxes(&global_config).iter().map(|(role, mapping)| {
-                    let local_dir = resolve_mailbox_local_path(&global_config, mapping);
-                    let status_str = mailbox_status(role);
-                    (role.clone(), mapping.server.clone(), local_dir, status_str)
+                    imap_client::SyncTarget {
+                        role: role.clone(),
+                        server_name: mapping.server.clone(),
+                        local_dir: resolve_mailbox_local_path(&global_config, mapping),
+                        status: mailbox_status(role).to_string(),
+                    }
                 }).collect()
             };
 
-            // Pass 1: Additive sync (fetch full emails, save new ones)
-            for (mb, imap_mailbox, local_dir, status_str) in &sync_targets {
-                let criteria = FetchCriteria {
-                    from: None,
-                    to: None,
-                    cc: None,
-                    subject: None,
-                    body: None,
-                    since: None,
-                    before: None,
-                };
-                let emails = fetch_emails(&imap_config, &criteria, imap_mailbox, Some(limit)).await?;
+            let result = sync_mailboxes(&imap_config, &targets, limit, reconcile).await?;
 
-                let (saved, skipped) = save_fetched_emails(&emails, local_dir, status_str)?;
-
-                if skipped > 0 {
-                    println!(
-                        "{} Synced {}: {} new, {} already present in {}",
-                        "✓".green(),
-                        mb,
-                        saved,
-                        skipped,
-                        local_dir.display()
-                    );
-                } else {
-                    println!(
-                        "{} Synced {}: {} email(s) saved to {}",
-                        "✓".green(),
-                        mb,
-                        saved,
-                        local_dir.display()
-                    );
-                }
+            if result.skipped > 0 {
+                println!(
+                    "{} Synced: {} new, {} already present",
+                    "✓".green(),
+                    result.saved,
+                    result.skipped,
+                );
+            } else {
+                println!(
+                    "{} Synced: {} email(s) saved",
+                    "✓".green(),
+                    result.saved,
+                );
             }
 
-            // Pass 2: Reconciliation (only with --reconcile flag)
             if reconcile {
-                // Only INBOX and Archive participate in reconciliation
-                let mut reconcile_pairs: Vec<(String, String, PathBuf)> = Vec::new();
-                if let Some(ref m) = global_config.mailboxes.inbox {
-                    reconcile_pairs.push(("INBOX".to_string(), m.server.clone(), resolve_mailbox_local_path(&global_config, m)));
-                }
-                if let Some(ref m) = global_config.mailboxes.archive {
-                    reconcile_pairs.push(("Archive".to_string(), m.server.clone(), resolve_mailbox_local_path(&global_config, m)));
-                }
-
-                let mut server_ids: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
-                let mut local_dirs: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-
-                for (role, imap_mailbox, local_dir) in &reconcile_pairs {
-                    local_dirs.insert(role.clone(), local_dir.clone());
-
-                    let ids = fetch_server_message_ids(&imap_config, imap_mailbox).await?;
-                    server_ids.insert(role.clone(), ids);
-                }
-
-                let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
-                if moved > 0 || removed > 0 {
+                if result.moved > 0 || result.removed > 0 {
                     println!(
                         "{} Reconciled: {} moved, {} removed",
                         "ℹ".blue(),
-                        moved,
-                        removed,
+                        result.moved,
+                        result.removed,
                     );
                 } else {
                     println!("{} Reconciled: already in sync", "✓".green());
