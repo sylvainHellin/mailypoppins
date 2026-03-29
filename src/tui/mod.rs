@@ -16,7 +16,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{Action, App, BgResult, MailboxKind};
+use app::{Action, App, BgResult, MailboxKind, StatusLevel};
 
 use crate::config::{
     all_configured_mailboxes, resolve_mailbox_local_path, resolve_sent_mailbox, ImapConfig,
@@ -135,7 +135,7 @@ fn handle_action(
                 resume_terminal(terminal)?;
                 match result {
                     Ok(()) => app.set_status("Returned from editor".to_string()),
-                    Err(e) => app.set_status(format!("Edit failed: {e}")),
+                    Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
                 }
                 app.reload_current_mailbox();
             }
@@ -157,7 +157,7 @@ fn handle_action(
                             app.invalidate_cache_idx(idx);
                         }
                     }
-                    Err(e) => app.set_status(format!("Reply failed: {e}")),
+                    Err(e) => app.set_status_level(format!("Reply failed: {e}"), StatusLevel::Error),
                 }
                 app.reload_current_mailbox();
             }
@@ -179,7 +179,7 @@ fn handle_action(
                             app.invalidate_cache_idx(idx);
                         }
                     }
-                    Err(e) => app.set_status(format!("Forward failed: {e}")),
+                    Err(e) => app.set_status_level(format!("Forward failed: {e}"), StatusLevel::Error),
                 }
                 app.reload_current_mailbox();
             }
@@ -190,7 +190,7 @@ fn handle_action(
                 let smtp_config = match app.smtp_config.clone() {
                     Some(c) => c,
                     None => {
-                        app.set_status("SMTP not configured".to_string());
+                        app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
@@ -200,7 +200,7 @@ fn handle_action(
                 let sent_dir = app.sent_dir.clone();
 
                 app.bg_count += 1;
-                app.set_status("Sending...".to_string());
+                app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -255,7 +255,7 @@ fn handle_action(
                 let smtp_config = match app.smtp_config.clone() {
                     Some(c) => c,
                     None => {
-                        app.set_status("SMTP not configured".to_string());
+                        app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
@@ -265,7 +265,7 @@ fn handle_action(
                 let sent_dir = app.sent_dir.clone();
 
                 app.bg_count += 1;
-                app.set_status("Sending approved...".to_string());
+                app.set_status_level("Sending approved...".to_string(), StatusLevel::Progress);
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -344,7 +344,7 @@ fn handle_action(
                         }
                         app.reload_current_mailbox();
                     }
-                    Err(e) => app.set_status(format!("New draft failed: {e}")),
+                    Err(e) => app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error),
                 }
             }
         }
@@ -356,7 +356,7 @@ fn handle_action(
                         app.set_status(msg);
                         app.reload_current_mailbox();
                     }
-                    Err(e) => app.set_status(format!("Approve failed: {e}")),
+                    Err(e) => app.set_status_level(format!("Approve failed: {e}"), StatusLevel::Error),
                 }
             }
         }
@@ -366,14 +366,14 @@ fn handle_action(
                 let imap_config = match app.imap_config.clone() {
                     Some(c) => c,
                     None => {
-                        app.set_status("IMAP not configured".to_string());
+                        app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
                 let archive_dir = match app.archive_dir.clone() {
                     Some(d) => d,
                     None => {
-                        app.set_status("Archive directory not configured".to_string());
+                        app.set_status_level("Archive directory not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
@@ -382,7 +382,7 @@ fn handle_action(
                 app.remove_selected_from_list();
                 app.bg_count += 1;
                 app.bg_mutations += 1;
-                app.set_status("Archiving...".to_string());
+                app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
                 terminal.draw(|frame| ui::view(app, frame))?;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
@@ -405,7 +405,7 @@ fn handle_action(
                 let imap_config = match app.imap_config.clone() {
                     Some(c) => c,
                     None => {
-                        app.set_status("IMAP not configured".to_string());
+                        app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
@@ -413,7 +413,7 @@ fn handle_action(
                 app.remove_selected_from_list();
                 app.bg_count += 1;
                 app.bg_mutations += 1;
-                app.set_status("Deleting...".to_string());
+                app.set_status_level("Deleting...".to_string(), StatusLevel::Progress);
                 terminal.draw(|frame| ui::view(app, frame))?;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
@@ -430,14 +430,14 @@ fn handle_action(
             let imap_config = match app.imap_config.clone() {
                 Some(c) => c,
                 None => {
-                    app.set_status("IMAP not configured".to_string());
+                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                     return Ok(());
                 }
             };
             let archive_dir = match app.archive_dir.clone() {
                 Some(d) => d,
                 None => {
-                    app.set_status("Archive directory not configured".to_string());
+                    app.set_status_level("Archive directory not configured".to_string(), StatusLevel::Error);
                     return Ok(());
                 }
             };
@@ -449,7 +449,7 @@ fn handle_action(
             let count = paths.len();
             app.bg_count += count;
             app.bg_mutations += count;
-            app.set_status(format!("Archiving {} emails...", count));
+            app.set_status_level(format!("Archiving {} emails...", count), StatusLevel::Progress);
             terminal.draw(|frame| ui::view(app, frame))?;
 
             let tx = bg_tx.clone();
@@ -473,7 +473,7 @@ fn handle_action(
             let imap_config = match app.imap_config.clone() {
                 Some(c) => c,
                 None => {
-                    app.set_status("IMAP not configured".to_string());
+                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                     return Ok(());
                 }
             };
@@ -484,7 +484,7 @@ fn handle_action(
             let count = paths.len();
             app.bg_count += count;
             app.bg_mutations += count;
-            app.set_status(format!("Deleting {} emails...", count));
+            app.set_status_level(format!("Deleting {} emails...", count), StatusLevel::Progress);
             terminal.draw(|frame| ui::view(app, frame))?;
 
             let tx = bg_tx.clone();
@@ -503,7 +503,7 @@ fn handle_action(
             if let Some(path) = app.selected_email_path() {
                 match copy_to_clipboard(&path.display().to_string()) {
                     Ok(()) => app.set_status("Path copied to clipboard".to_string()),
-                    Err(e) => app.set_status(format!("Copy failed: {e}")),
+                    Err(e) => app.set_status_level(format!("Copy failed: {e}"), StatusLevel::Error),
                 }
             }
         }
@@ -520,14 +520,14 @@ fn handle_action(
             let imap_config = match app.imap_config.clone() {
                 Some(c) => c,
                 None => {
-                    app.set_status("IMAP not configured".to_string());
+                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                     return Ok(());
                 }
             };
             let global_config = app.global_config.clone();
 
             app.bg_count += 1;
-            app.set_status("Fetching...".to_string());
+            app.set_status_level("Fetching...".to_string(), StatusLevel::Progress);
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -550,14 +550,14 @@ fn handle_action(
             let imap_config = match app.imap_config.clone() {
                 Some(c) => c,
                 None => {
-                    app.set_status("IMAP not configured".to_string());
+                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                     return Ok(());
                 }
             };
             let global_config = app.global_config.clone();
 
             app.bg_count += 1;
-            app.set_status("Syncing...".to_string());
+            app.set_status_level("Syncing...".to_string(), StatusLevel::Progress);
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -580,12 +580,14 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
             app.bg_mutations = app.bg_mutations.saturating_sub(1);
             match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Email archived".into() } else { msg });
+                    let text = if msg.is_empty() { "Email archived".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
                     if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
                         app.invalidate_cache_idx(idx);
                     }
                 }
                 Err(e) => {
+                    app.push_status(format!("Archive failed: {e}"), StatusLevel::Error);
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                     app.set_persistent_error(format!(
@@ -599,9 +601,11 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
             app.bg_mutations = app.bg_mutations.saturating_sub(1);
             match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Email deleted".into() } else { msg });
+                    let text = if msg.is_empty() { "Email deleted".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
                 }
                 Err(e) => {
+                    app.push_status(format!("Delete failed: {e}"), StatusLevel::Error);
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                     app.set_persistent_error(format!(
@@ -614,44 +618,48 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
         BgResult::Send { result } => {
             match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Email sent".into() } else { msg });
+                    let text = if msg.is_empty() { "Email sent".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
-                Err(e) => app.set_status(format!("Send failed: {e}")),
+                Err(e) => app.set_status_level(format!("Send failed: {e}"), StatusLevel::Error),
             }
         }
 
         BgResult::SendApproved { result } => {
             match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Approved emails sent".into() } else { msg });
+                    let text = if msg.is_empty() { "Approved emails sent".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
-                Err(e) => app.set_status(format!("Send-approved failed: {e}")),
+                Err(e) => app.set_status_level(format!("Send-approved failed: {e}"), StatusLevel::Error),
             }
         }
 
         BgResult::Fetch { result } => {
             match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Fetch complete".into() } else { msg });
+                    let text = if msg.is_empty() { "Fetch complete".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
-                Err(e) => app.set_status(format!("Fetch failed: {e}")),
+                Err(e) => app.set_status_level(format!("Fetch failed: {e}"), StatusLevel::Error),
             }
         }
 
         BgResult::Sync { result } => {
             match result {
                 Ok(msg) => {
-                    app.set_status(if msg.is_empty() { "Sync complete".into() } else { msg });
+                    let text = if msg.is_empty() { "Sync complete".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
                     app.invalidate_all_caches();
                     app.reload_current_mailbox();
                 }
-                Err(e) => app.set_status(format!("Sync failed: {e}")),
+                Err(e) => app.set_status_level(format!("Sync failed: {e}"), StatusLevel::Error),
             }
         }
     }

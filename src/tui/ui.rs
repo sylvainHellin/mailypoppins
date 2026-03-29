@@ -6,7 +6,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use super::app::{App, Focus};
+use super::app::{App, Focus, StatusLevel};
 use super::theme;
 
 /// Render the entire UI from the current app state.
@@ -34,13 +34,27 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         let right_col = columns[1];
 
         let sidebar_height = (app.mailboxes.len() as u16) + 3;
-        let left_panels = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
-            .split(left_col);
+        let left_panels = if app.show_activity_log {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(sidebar_height),
+                    Constraint::Min(0),
+                    Constraint::Length(6),
+                ])
+                .split(left_col)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
+                .split(left_col)
+        };
 
         render_sidebar(app, frame, left_panels[0]);
         render_email_list(app, frame, left_panels[1]);
+        if app.show_activity_log && left_panels.len() > 2 {
+            render_activity_log(app, frame, left_panels[2]);
+        }
 
         let right_panels = Layout::default()
             .direction(Direction::Vertical)
@@ -51,13 +65,27 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         render_body(app, frame, right_panels[1]);
     } else if show_sidebar {
         let sidebar_height = (app.mailboxes.len() as u16) + 2;
-        let left_panels = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
-            .split(main_area);
+        let left_panels = if app.show_activity_log {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(sidebar_height),
+                    Constraint::Min(0),
+                    Constraint::Length(6),
+                ])
+                .split(main_area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
+                .split(main_area)
+        };
 
         render_sidebar(app, frame, left_panels[0]);
         render_email_list(app, frame, left_panels[1]);
+        if app.show_activity_log && left_panels.len() > 2 {
+            render_activity_log(app, frame, left_panels[2]);
+        }
     } else {
         render_email_list(app, frame, main_area);
     }
@@ -115,6 +143,55 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     let sidebar_content = Paragraph::new(lines);
     frame.render_widget(sidebar_content, inner);
+}
+
+fn render_activity_log(app: &App, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .title(" Activity ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::TEAL))
+        .style(Style::default().bg(theme::BASE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.status_log.is_empty() {
+        let empty = Paragraph::new("  No activity yet")
+            .style(Style::default().fg(theme::SUBTEXT0));
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let visible = inner.height as usize;
+    let skip = app.status_log.len().saturating_sub(visible);
+
+    let lines: Vec<Line> = app
+        .status_log
+        .iter()
+        .skip(skip)
+        .take(visible)
+        .map(|entry| {
+            let time = entry.timestamp.format("%H:%M").to_string();
+            let color = match entry.level {
+                StatusLevel::Success => theme::GREEN,
+                StatusLevel::Error => theme::RED,
+                StatusLevel::Warning => theme::YELLOW,
+                StatusLevel::Info => theme::BLUE,
+                StatusLevel::Progress => theme::TEAL,
+            };
+            Line::from(vec![
+                Span::styled(format!(" {time} "), Style::default().fg(theme::OVERLAY0)),
+                Span::styled(
+                    truncate(&entry.message, inner.width.saturating_sub(7) as usize),
+                    Style::default().fg(color),
+                ),
+            ])
+        })
+        .collect();
+
+    let content = Paragraph::new(lines);
+    frame.render_widget(content, inner);
 }
 
 fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
@@ -849,6 +926,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("select "),
                 hint_span("/"),
                 desc_span("search "),
+                hint_span("!"),
+                desc_span("log "),
                 hint_span("?"),
                 desc_span("help "),
                 hint_span("q"),
@@ -875,6 +954,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("filter "),
                 hint_span("\\"),
                 desc_span("search "),
+                hint_span("!"),
+                desc_span("log "),
                 hint_span("?"),
                 desc_span("help"),
             ]),
@@ -1076,6 +1157,7 @@ fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             ("/", "Filter by metadata"),
             ("\\", "Search email content"),
             ("?", "Toggle this help"),
+            ("!", "Toggle activity log"),
         ]),
         ("SIDEBAR", vec![
             ("j/k", "Navigate mailboxes"),
@@ -1242,8 +1324,8 @@ fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
 fn pane_border_style(current_focus: Focus, pane: Focus) -> Style {
     let focused = current_focus == pane || (current_focus == Focus::Search && pane == Focus::List);
     if focused {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::PEACH)
     } else {
-        Style::default().fg(theme::OVERLAY0)
+        Style::default().fg(theme::BLUE)
     }
 }

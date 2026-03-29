@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -278,6 +278,24 @@ pub struct PersistentError {
     pub message: String,
 }
 
+const STATUS_LOG_CAPACITY: usize = 100;
+
+#[derive(Debug, Clone)]
+pub enum StatusLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+    Progress,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusEntry {
+    pub timestamp: chrono::DateTime<chrono::Local>,
+    pub message: String,
+    pub level: StatusLevel,
+}
+
 /// Top-level application state.
 pub struct App {
     pub focus: Focus,
@@ -315,6 +333,9 @@ pub struct App {
     pub bg_spin_tick: usize,
     pub queued_action: Option<Action>,
     pub persistent_error: Option<PersistentError>,
+
+    pub status_log: VecDeque<StatusEntry>,
+    pub show_activity_log: bool,
 
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
@@ -405,6 +426,8 @@ impl App {
             bg_spin_tick: 0,
             queued_action: None,
             persistent_error: None,
+            status_log: VecDeque::new(),
+            show_activity_log: true,
             global_config,
             imap_config,
             smtp_config,
@@ -456,7 +479,25 @@ impl App {
         }
     }
 
+    pub fn push_status(&mut self, message: String, level: StatusLevel) {
+        if self.status_log.len() >= STATUS_LOG_CAPACITY {
+            self.status_log.pop_front();
+        }
+        self.status_log.push_back(StatusEntry {
+            timestamp: chrono::Local::now(),
+            message,
+            level,
+        });
+    }
+
     pub fn set_status(&mut self, msg: String) {
+        self.push_status(msg.clone(), StatusLevel::Info);
+        self.status_message = Some(msg);
+        self.status_ticks = 12;
+    }
+
+    pub fn set_status_level(&mut self, msg: String, level: StatusLevel) {
+        self.push_status(msg.clone(), level);
         self.status_message = Some(msg);
         self.status_ticks = 12;
     }
@@ -618,6 +659,11 @@ impl App {
                 self.help_scroll = 0;
                 self.help_filter.clear();
                 self.help_filter_active = false;
+                return None;
+            }
+            KeyCode::Char('!') => {
+                self.g_pending = false;
+                self.show_activity_log = !self.show_activity_log;
                 return None;
             }
             KeyCode::Char('/') => {
