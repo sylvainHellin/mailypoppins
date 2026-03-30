@@ -156,6 +156,20 @@ enum Commands {
         /// Path to the inbox email file
         file: PathBuf,
     },
+    /// Search emails on the IMAP server
+    Search {
+        /// Search query (supports from:, to:, subject:, body:, since:, before:, in: prefixes)
+        query: String,
+        /// Mailbox to search (default: all configured mailboxes)
+        #[arg(long)]
+        mailbox: Option<String>,
+        /// Max results (default: 20)
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+        /// Show full body instead of preview
+        #[arg(long)]
+        full: bool,
+    },
     /// Manage configuration
     Config {
         #[command(subcommand)]
@@ -696,6 +710,8 @@ attachments: []
                 body,
                 since,
                 before,
+                text: None,
+                in_mailbox: None,
             };
 
             let mailbox_for_save = mailbox.clone();
@@ -862,6 +878,80 @@ attachments: []
                         e
                     );
                     std::process::exit(1);
+                }
+            }
+        }
+
+        Some(Commands::Search {
+            query,
+            mailbox,
+            limit,
+            full,
+        }) => {
+            let imap_config = ImapConfig::load(&global_config)?;
+            let mut criteria = parse_search_query(&query);
+
+            // Resolve mailbox scope: --mailbox flag > in: prefix > all
+            let mailbox_name = mailbox.or_else(|| criteria.in_mailbox.take());
+            criteria.in_mailbox = None;
+
+            if let Some(ref mb) = mailbox_name {
+                let emails =
+                    fetch_emails(&imap_config, &criteria, mb, Some(limit)).await?;
+                if emails.is_empty() {
+                    println!("{}", "No results found".yellow());
+                } else {
+                    println!("{} result(s) in {}:\n", emails.len(), mb);
+                    display_fetched_emails(&emails, full);
+                }
+            } else {
+                // Search all configured mailboxes
+                let configured = all_configured_mailboxes(&global_config);
+                let mut session = imap_client::open_imap_session(&imap_config).await?;
+                let per_mb = (limit / configured.len().max(1)).max(5);
+                let mut total = 0usize;
+                let mut any_results = false;
+
+                for (role, mapping) in &configured {
+                    if total >= limit {
+                        break;
+                    }
+                    let budget = per_mb.min(limit - total);
+                    match imap_client::fetch_emails_on_session(
+                        &mut session,
+                        &criteria,
+                        &mapping.server,
+                        Some(budget),
+                    )
+                    .await
+                    {
+                        Ok(emails) if !emails.is_empty() => {
+                            total += emails.len();
+                            any_results = true;
+                            println!(
+                                "{} {} result(s) in {}:",
+                                "\u{2022}".blue(),
+                                emails.len(),
+                                role.green()
+                            );
+                            display_fetched_emails(&emails, full);
+                            println!();
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "{} Search in {} failed: {}",
+                                "\u{26a0}".yellow(),
+                                role,
+                                e
+                            );
+                        }
+                    }
+                }
+                session.logout().await.ok();
+
+                if !any_results {
+                    println!("{}", "No results found".yellow());
                 }
             }
         }

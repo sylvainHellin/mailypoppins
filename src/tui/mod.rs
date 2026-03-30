@@ -27,9 +27,10 @@ use crate::draft::{
 };
 use crate::imap_client::{
     append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
-    batch_delete_emails_locally, delete_email_locally, sync_mailboxes, SyncTarget,
-    watch_mailbox as imap_watch,
+    batch_delete_emails_locally, delete_email_locally, parse_search_query,
+    sync_mailboxes, SyncTarget, watch_mailbox as imap_watch,
 };
+use crate::parse::FetchedEmail;
 use crate::send::send_email;
 use crate::sync::mailbox_status;
 use crate::types::EmailStatus;
@@ -538,6 +539,37 @@ fn handle_action(
             });
         }
 
+        Action::ServerSearch { query, targets } => {
+            let imap_config = match app.imap_config.clone() {
+                Some(c) => c,
+                None => {
+                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
+                    return Ok(());
+                }
+            };
+
+            app.server_search_loading = true;
+            app.server_search_status = Some("Searching...".to_string());
+            app.bg_count += 1;
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result =
+                    rt.block_on(lib_do_multi_search(&imap_config, &query, &targets));
+                let _ = tx.send(BgResult::ServerSearch {
+                    result: result.map_err(|e| e.to_string()),
+                });
+            });
+        }
+
+        Action::SearchResultOpen
+        | Action::SearchResultReply(_)
+        | Action::SearchResultForward
+        | Action::SearchResultArchive => {
+            // Phase 5: actions on search results (handled below)
+            handle_search_result_action(app, terminal, action, bg_tx)?;
+        }
+
         Action::Sync => {
             if app.bg_mutations > 0 {
                 app.queued_action = Some(Action::Sync);
@@ -662,6 +694,40 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
                 Err(e) => app.set_status_level(format!("Sync failed: {e}"), StatusLevel::Error),
             }
         }
+
+        BgResult::ServerSearch { result } => {
+            app.server_search_loading = false;
+            match result {
+                Ok(hits) => {
+                    let count = hits.len();
+                    app.server_search_results = hits
+                        .into_iter()
+                        .map(|hit| app::SearchResultEntry {
+                            entry: hit.entry,
+                            fetched: hit.fetched,
+                            saved_path: None,
+                            source_label: hit.source_label,
+                            source_local_dir: hit.source_local_dir,
+                            source_status: hit.source_status,
+                        })
+                        .collect();
+                    app.server_search_index = 0;
+                    app.server_search_scroll = 0;
+                    app.server_search_headers_scroll = 0;
+                    app.server_search_status = Some(format!(
+                        "{} result{}",
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    ));
+                    if count > 0 {
+                        app.server_search_focus = app::SearchOverlayFocus::List;
+                    }
+                }
+                Err(e) => {
+                    app.server_search_status = Some(format!("Error: {}", e));
+                }
+            }
+        }
     }
 }
 
@@ -705,6 +771,281 @@ fn install_panic_hook() {
         let _ = disable_raw_mode();
         original_hook(panic_info);
     }));
+}
+
+fn handle_search_result_action(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    action: Action,
+    bg_tx: &mpsc::Sender<BgResult>,
+) -> Result<()> {
+    match action {
+        Action::SearchResultOpen => {
+            if let Some(path) = ensure_search_result_saved(app) {
+                suspend_terminal(terminal)?;
+                let result = edit_file(&path);
+                resume_terminal(terminal)?;
+                match result {
+                    Ok(()) => app.set_status("Returned from editor".to_string()),
+                    Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
+                }
+            } else {
+                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+            }
+        }
+
+        Action::SearchResultReply(reply_all) => {
+            if let Some(path) = ensure_search_result_saved(app) {
+                let default_from = app
+                    .smtp_config
+                    .as_ref()
+                    .map(|s| s.default_from.clone())
+                    .unwrap_or_default();
+                let drafts_dir = app.drafts_dir.clone();
+                match create_reply_draft(&path, reply_all, &default_from, drafts_dir.as_deref()) {
+                    Ok(draft_path) => {
+                        suspend_terminal(terminal)?;
+                        let _ = edit_file(&draft_path);
+                        resume_terminal(terminal)?;
+                        app.set_status("Reply draft ready".to_string());
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                    }
+                    Err(e) => {
+                        app.set_status_level(format!("Reply failed: {e}"), StatusLevel::Error)
+                    }
+                }
+            } else {
+                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+            }
+        }
+
+        Action::SearchResultForward => {
+            if let Some(path) = ensure_search_result_saved(app) {
+                let default_from = app
+                    .smtp_config
+                    .as_ref()
+                    .map(|s| s.default_from.clone())
+                    .unwrap_or_default();
+                let drafts_dir = app.drafts_dir.clone();
+                match create_forward_draft(&path, &default_from, drafts_dir.as_deref()) {
+                    Ok(draft_path) => {
+                        suspend_terminal(terminal)?;
+                        let _ = edit_file(&draft_path);
+                        resume_terminal(terminal)?;
+                        app.set_status("Forward draft ready".to_string());
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                    }
+                    Err(e) => {
+                        app.set_status_level(format!("Forward failed: {e}"), StatusLevel::Error)
+                    }
+                }
+            } else {
+                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+            }
+        }
+
+        Action::SearchResultArchive => {
+            if let Some(path) = ensure_search_result_saved(app) {
+                let imap_config = match app.imap_config.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                };
+                let archive_dir = match app.archive_dir.clone() {
+                    Some(d) => d,
+                    None => {
+                        app.set_status_level(
+                            "Archive dir not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                };
+                let archive_server_name = app.archive_server_name.clone();
+
+                // Remove from search results
+                app.server_search_results.remove(app.server_search_index);
+                if app.server_search_index >= app.server_search_results.len()
+                    && !app.server_search_results.is_empty()
+                {
+                    app.server_search_index = app.server_search_results.len() - 1;
+                }
+
+                app.bg_count += 1;
+                app.bg_mutations += 1;
+                app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt
+                        .block_on(archive_email_locally(
+                            &imap_config,
+                            &archive_dir,
+                            &path,
+                            &archive_server_name,
+                        ))
+                        .map(|()| String::new())
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Archive { result });
+                });
+            } else {
+                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+            }
+        }
+
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_search_result_saved(app: &mut App) -> Option<PathBuf> {
+    let idx = app.server_search_index;
+    let result = app.server_search_results.get(idx)?;
+
+    if let Some(ref path) = result.saved_path {
+        return Some(path.clone());
+    }
+
+    // Use per-result source metadata instead of active mailbox
+    let save_dir = result.source_local_dir.clone();
+    let status = result.source_status.clone();
+
+    let fetched_clone = result.fetched.clone();
+    let message_id = result.fetched.message_id.clone();
+
+    let mut known_ids = crate::parse::scan_existing_message_ids(&save_dir).unwrap_or_default();
+    match crate::parse::save_fetched_emails_with_known_ids(
+        &[fetched_clone],
+        &save_dir,
+        &status,
+        &mut known_ids,
+    ) {
+        Ok((saved, _skipped)) => {
+            if saved > 0 {
+                if let Some(ref mid) = message_id {
+                    if let Some(path) = find_file_by_message_id(&save_dir, mid) {
+                        let result = app.server_search_results.get_mut(idx)?;
+                        result.saved_path = Some(path.clone());
+                        if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
+                            app.invalidate_cache_idx(cache_idx);
+                        }
+                        return Some(path);
+                    }
+                }
+                if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
+                    app.invalidate_cache_idx(cache_idx);
+                }
+                None
+            } else {
+                // Already existed (skipped), find it
+                if let Some(ref mid) = message_id {
+                    if let Some(path) = find_file_by_message_id(&save_dir, mid) {
+                        let result = app.server_search_results.get_mut(idx)?;
+                        result.saved_path = Some(path.clone());
+                        return Some(path);
+                    }
+                }
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn find_file_by_message_id(dir: &Path, message_id: &str) -> Option<PathBuf> {
+    let walker = walkdir::WalkDir::new(dir).max_depth(1);
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        if entry.path().extension().is_some_and(|ext| ext == "md") {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if content.contains(message_id) {
+                    return Some(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn lib_do_multi_search(
+    imap_config: &ImapConfig,
+    query: &str,
+    targets: &[app::SearchTarget],
+) -> anyhow::Result<Vec<app::SearchHit>> {
+    use crate::imap_client::{open_imap_session, fetch_emails_on_session};
+
+    let mut criteria = parse_search_query(query);
+    // Clear in_mailbox -- it was already resolved to targets by the caller
+    criteria.in_mailbox = None;
+
+    let mut session = open_imap_session(imap_config).await?;
+    let total_limit = 50usize;
+    let per_mb = (total_limit / targets.len().max(1)).max(5);
+    let mut total = 0usize;
+
+    let mut hits: Vec<app::SearchHit> = Vec::new();
+
+    for target in targets {
+        if total >= total_limit {
+            break;
+        }
+        let budget = per_mb.min(total_limit - total);
+        match fetch_emails_on_session(
+            &mut session,
+            &criteria,
+            &target.server_name,
+            Some(budget),
+        )
+        .await
+        {
+            Ok(emails) => {
+                total += emails.len();
+                for fetched in emails {
+                    let entry = fetched_to_email_entry(&fetched);
+                    hits.push(app::SearchHit {
+                        entry,
+                        fetched,
+                        source_label: target.label.clone(),
+                        source_local_dir: target.local_dir.clone(),
+                        source_status: target.status.clone(),
+                    });
+                }
+            }
+            Err(e) => {
+                log::warn!("Search in {} failed: {}", target.server_name, e);
+            }
+        }
+    }
+
+    session.logout().await.ok();
+
+    // Sort by date descending
+    hits.sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
+
+    Ok(hits)
+}
+
+fn fetched_to_email_entry(fetched: &FetchedEmail) -> app::EmailEntry {
+    app::EmailEntry {
+        path: PathBuf::new(),
+        from: fetched.from.clone(),
+        to: fetched.to.clone(),
+        cc: fetched.cc.clone(),
+        subject: fetched.subject.clone(),
+        status: String::new(),
+        date_display: fetched.date.chars().take(10).collect(),
+        date_sort: fetched.date.clone(),
+        body: fetched.body_text.clone(),
+        has_attachments: fetched.has_attachments,
+    }
 }
 
 fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig) {

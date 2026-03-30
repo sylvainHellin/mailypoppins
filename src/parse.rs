@@ -19,6 +19,7 @@ fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     idx
 }
 
+#[derive(Debug, Clone)]
 pub struct FetchedEmail {
     pub from: String,
     pub to: String,
@@ -32,6 +33,7 @@ pub struct FetchedEmail {
     pub attachments: Vec<AttachmentData>,
 }
 
+#[derive(Debug, Clone)]
 pub struct AttachmentData {
     pub filename: String,
     pub content: Vec<u8>,

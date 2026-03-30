@@ -8,6 +8,8 @@ use gray_matter::engine::YAML;
 use gray_matter::Matter;
 use serde::Deserialize;
 
+use crate::parse::FetchedEmail;
+
 // ---------------------------------------------------------------------------
 // EmailEntry (ported from beautifulmail's email.rs)
 // ---------------------------------------------------------------------------
@@ -196,6 +198,43 @@ pub enum BgResult {
     SendApproved { result: Result<String, String> },
     Archive { result: Result<String, String> },
     Delete { result: Result<String, String> },
+    ServerSearch { result: Result<Vec<SearchHit>, String> },
+}
+
+/// A mailbox target for server search.
+#[derive(Debug, Clone)]
+pub struct SearchTarget {
+    pub server_name: String,
+    pub local_dir: PathBuf,
+    pub status: String,
+    pub label: String,
+}
+
+/// A single search result with source metadata (returned from background task).
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub entry: EmailEntry,
+    pub fetched: FetchedEmail,
+    pub source_label: String,
+    pub source_local_dir: PathBuf,
+    pub source_status: String,
+}
+
+/// A single server search result held in memory (with save state).
+#[derive(Debug, Clone)]
+pub struct SearchResultEntry {
+    pub entry: EmailEntry,
+    pub fetched: FetchedEmail,
+    pub saved_path: Option<PathBuf>,
+    pub source_label: String,
+    pub source_local_dir: PathBuf,
+    pub source_status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOverlayFocus {
+    Input,
+    List,
 }
 
 /// Which pane currently has focus.
@@ -235,6 +274,7 @@ pub struct MailboxInfo {
     pub icon: &'static str,
     pub dir: PathBuf,
     pub kind: MailboxKind,
+    pub server_name: Option<String>,
 }
 
 /// Side-effects that the main loop must execute (keeps update pure).
@@ -254,6 +294,11 @@ pub enum Action {
     CopyPath,
     Fetch,
     Sync,
+    ServerSearch { query: String, targets: Vec<SearchTarget> },
+    SearchResultOpen,
+    SearchResultReply(bool),
+    SearchResultForward,
+    SearchResultArchive,
 }
 
 /// Which destructive action a confirmation dialog is guarding.
@@ -336,6 +381,18 @@ pub struct App {
 
     pub status_log: VecDeque<StatusEntry>,
     pub show_activity_log: bool,
+
+    // Server search overlay
+    pub show_search_overlay: bool,
+    pub server_search_query: String,
+    pub server_search_focus: SearchOverlayFocus,
+    pub server_search_results: Vec<SearchResultEntry>,
+    pub server_search_index: usize,
+    pub server_search_headers_scroll: u16,
+    pub server_search_scroll: u16,
+    pub server_search_loading: bool,
+    pub server_search_status: Option<String>,
+    pub server_search_scope_label: String,
 
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
@@ -428,6 +485,16 @@ impl App {
             persistent_error: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
+            show_search_overlay: false,
+            server_search_query: String::new(),
+            server_search_focus: SearchOverlayFocus::Input,
+            server_search_results: Vec::new(),
+            server_search_index: 0,
+            server_search_headers_scroll: 0,
+            server_search_scroll: 0,
+            server_search_loading: false,
+            server_search_status: None,
+            server_search_scope_label: "All".to_string(),
             global_config,
             imap_config,
             smtp_config,
@@ -454,6 +521,48 @@ impl App {
 
     pub fn active_dir(&self) -> Option<&PathBuf> {
         self.mailboxes.get(self.active_mailbox).map(|m| &m.dir)
+    }
+
+    pub fn active_server_mailbox(&self) -> String {
+        self.mailboxes
+            .get(self.active_mailbox)
+            .and_then(|m| m.server_name.clone())
+            .unwrap_or_else(|| "INBOX".to_string())
+    }
+
+    /// All mailboxes that have a server name (excludes Drafts).
+    pub fn all_search_targets(&self) -> Vec<SearchTarget> {
+        self.mailboxes
+            .iter()
+            .filter(|m| m.server_name.is_some())
+            .map(|m| SearchTarget {
+                server_name: m.server_name.clone().unwrap(),
+                local_dir: m.dir.clone(),
+                status: kind_to_status(m.kind),
+                label: m.label.clone(),
+            })
+            .collect()
+    }
+
+    /// Resolve a name (server name or role alias) to a single search target.
+    pub fn search_target_by_name(&self, name: &str) -> Option<SearchTarget> {
+        let lower = name.to_lowercase();
+        self.mailboxes.iter().find(|m| {
+            m.server_name.as_ref().is_some_and(|s| s.to_lowercase() == lower)
+                || m.label.to_lowercase() == lower
+        }).and_then(|m| {
+            Some(SearchTarget {
+                server_name: m.server_name.clone()?,
+                local_dir: m.dir.clone(),
+                status: kind_to_status(m.kind),
+                label: m.label.clone(),
+            })
+        })
+    }
+
+    /// Find mailbox index by local directory path (for cache invalidation).
+    pub fn mailbox_index_for_dir(&self, dir: &Path) -> Option<usize> {
+        self.mailboxes.iter().position(|m| m.dir == dir)
     }
 
     pub fn find_mailbox_by_kind(&self, kind: MailboxKind) -> Option<usize> {
@@ -645,6 +754,10 @@ impl App {
 
         if self.show_help {
             return self.handle_help_key(key);
+        }
+
+        if self.show_search_overlay {
+            return self.handle_search_overlay_key(key);
         }
 
         if self.focus == Focus::Search {
@@ -930,6 +1043,18 @@ impl App {
                 self.g_pending = false;
                 self.pending_action = Some(Action::Sync);
             }
+            KeyCode::Char('S') => {
+                self.g_pending = false;
+                self.show_search_overlay = true;
+                self.server_search_query.clear();
+                self.server_search_results.clear();
+                self.server_search_index = 0;
+                self.server_search_scroll = 0;
+                self.server_search_headers_scroll = 0;
+                self.server_search_focus = SearchOverlayFocus::Input;
+                self.server_search_loading = false;
+                self.server_search_status = None;
+            }
 
             KeyCode::Char(' ') => {
                 self.g_pending = false;
@@ -961,6 +1086,138 @@ impl App {
             self.preview_scroll = 0;
         }
 
+        None
+    }
+
+    fn handle_search_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match self.server_search_focus {
+            SearchOverlayFocus::Input => self.handle_search_overlay_input_key(key),
+            SearchOverlayFocus::List => self.handle_search_overlay_list_key(key),
+        }
+    }
+
+    fn handle_search_overlay_input_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char(c) => {
+                self.server_search_query.push(c);
+            }
+            KeyCode::Backspace => {
+                self.server_search_query.pop();
+            }
+            KeyCode::Enter => {
+                if !self.server_search_query.is_empty() {
+                    let criteria = crate::imap_client::parse_search_query(
+                        &self.server_search_query,
+                    );
+                    let (targets, scope_label) = if let Some(ref name) = criteria.in_mailbox {
+                        if let Some(target) = self.search_target_by_name(name) {
+                            let label = target.label.clone();
+                            (vec![target], label)
+                        } else {
+                            self.server_search_status =
+                                Some(format!("Unknown mailbox: {}", name));
+                            return None;
+                        }
+                    } else {
+                        (self.all_search_targets(), "All".to_string())
+                    };
+                    self.server_search_scope_label = scope_label;
+                    self.pending_action = Some(Action::ServerSearch {
+                        query: self.server_search_query.clone(),
+                        targets,
+                    });
+                }
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                if !self.server_search_results.is_empty() {
+                    self.server_search_focus = SearchOverlayFocus::List;
+                }
+            }
+            KeyCode::Esc => {
+                self.show_search_overlay = false;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_search_overlay_list_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let len = self.server_search_results.len();
+        if len == 0 {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.server_search_focus = SearchOverlayFocus::Input;
+                }
+                KeyCode::Esc => {
+                    self.show_search_overlay = false;
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.server_search_index < len - 1 {
+                    self.server_search_index += 1;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.server_search_index > 0 {
+                    self.server_search_index -= 1;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                }
+            }
+            KeyCode::Char('g') => {
+                if self.g_pending {
+                    self.server_search_index = 0;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                    self.g_pending = false;
+                } else {
+                    self.g_pending = true;
+                }
+                return None;
+            }
+            KeyCode::Char('G') => {
+                self.g_pending = false;
+                self.server_search_index = len.saturating_sub(1);
+                self.server_search_scroll = 0;
+                self.server_search_headers_scroll = 0;
+            }
+            KeyCode::Char('d') => {
+                self.server_search_scroll = self.server_search_scroll.saturating_add(10);
+            }
+            KeyCode::Char('u') => {
+                self.server_search_scroll = self.server_search_scroll.saturating_sub(10);
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                self.pending_action = Some(Action::SearchResultOpen);
+            }
+            KeyCode::Char('r') => {
+                self.pending_action = Some(Action::SearchResultReply(false));
+            }
+            KeyCode::Char('R') => {
+                self.pending_action = Some(Action::SearchResultReply(true));
+            }
+            KeyCode::Char('w') => {
+                self.pending_action = Some(Action::SearchResultForward);
+            }
+            KeyCode::Char('a') => {
+                self.pending_action = Some(Action::SearchResultArchive);
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.server_search_focus = SearchOverlayFocus::Input;
+            }
+            KeyCode::Esc => {
+                self.show_search_overlay = false;
+            }
+            _ => {}
+        }
+        self.g_pending = false;
         None
     }
 
@@ -1148,6 +1405,15 @@ impl App {
     }
 }
 
+fn kind_to_status(kind: MailboxKind) -> String {
+    match kind {
+        MailboxKind::Inbox | MailboxKind::Extra => "inbox".to_string(),
+        MailboxKind::Archive => "archived".to_string(),
+        MailboxKind::Sent => "sent".to_string(),
+        MailboxKind::Drafts => "draft".to_string(),
+    }
+}
+
 fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
     let root = crate::config::resolve_root_dir(config)
         .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/notes/email").into_owned()));
@@ -1165,6 +1431,7 @@ fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
         icon: "\u{f0172}",
         dir: inbox_dir,
         kind: MailboxKind::Inbox,
+        server_name: config.mailboxes.inbox.as_ref().map(|m| m.server.clone()),
     });
 
     result.push(MailboxInfo {
@@ -1172,6 +1439,7 @@ fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
         icon: "\u{f03eb}",
         dir: drafts_dir,
         kind: MailboxKind::Drafts,
+        server_name: None,
     });
 
     let sent_dir = config.mailboxes.sent.as_ref()
@@ -1182,6 +1450,7 @@ fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
         icon: "\u{f046b}",
         dir: sent_dir,
         kind: MailboxKind::Sent,
+        server_name: config.mailboxes.sent.as_ref().map(|m| m.server.clone()),
     });
 
     let archive_dir = config.mailboxes.archive.as_ref()
@@ -1192,6 +1461,7 @@ fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
         icon: "\u{f013c}",
         dir: archive_dir,
         kind: MailboxKind::Archive,
+        server_name: config.mailboxes.archive.as_ref().map(|m| m.server.clone()),
     });
 
     if let Some(ref extras) = config.mailboxes.extra {
@@ -1201,6 +1471,7 @@ fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
                 icon: "\u{f0247}",
                 dir: crate::config::resolve_mailbox_local_path(config, m),
                 kind: MailboxKind::Extra,
+                server_name: Some(m.server.clone()),
             });
         }
     }

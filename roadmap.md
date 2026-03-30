@@ -101,3 +101,6 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 ---
 
 - add a function in the TUI to open the html of the email in the default browser
+- add support for exchange accounts and proton
+- add a way to have multiple accounts (another pane to navigate between accounts?)
+- add a search function

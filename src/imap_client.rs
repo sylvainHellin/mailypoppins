@@ -64,6 +64,9 @@ pub struct FetchCriteria {
     pub body: Option<String>,
     pub since: Option<String>,
     pub before: Option<String>,
+    pub text: Option<String>,
+    /// Routing directive: which mailbox to search. Not an IMAP search criterion.
+    pub in_mailbox: Option<String>,
 }
 
 fn build_imap_search_query(criteria: &FetchCriteria) -> String {
@@ -96,10 +99,130 @@ fn build_imap_search_query(criteria: &FetchCriteria) -> String {
         }
     }
 
+    if let Some(ref text) = criteria.text {
+        parts.push(format!("TEXT \"{}\"", text));
+    }
+
     if parts.is_empty() {
         "ALL".to_string()
     } else {
         parts.join(" ")
+    }
+}
+
+/// Parse a user search string into structured FetchCriteria.
+///
+/// Recognized prefixes: from:, to:, cc:, subject:, body:, since:, before:
+/// Quoted values supported: from:"John Doe"
+/// Bare text (no prefix) becomes a TEXT search.
+pub fn parse_search_query(input: &str) -> FetchCriteria {
+    let mut criteria = FetchCriteria {
+        from: None,
+        to: None,
+        cc: None,
+        subject: None,
+        body: None,
+        since: None,
+        before: None,
+        text: None,
+        in_mailbox: None,
+    };
+
+    let mut remaining = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    while chars.peek().is_some() {
+        // skip whitespace
+        while chars.peek() == Some(&' ') {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        // Try to match a known prefix
+        let rest: String = chars.clone().collect();
+        let lower_rest = rest.to_lowercase();
+
+        let mut matched = false;
+        for (prefix, setter) in [
+            ("from:", 0u8),
+            ("to:", 1),
+            ("cc:", 2),
+            ("subject:", 3),
+            ("body:", 4),
+            ("since:", 5),
+            ("before:", 6),
+            ("in:", 7),
+        ] {
+            if lower_rest.starts_with(prefix) {
+                for _ in 0..prefix.len() {
+                    chars.next();
+                }
+                let value = extract_search_value(&mut chars);
+                match setter {
+                    0 => criteria.from = Some(value),
+                    1 => criteria.to = Some(value),
+                    2 => criteria.cc = Some(value),
+                    3 => criteria.subject = Some(value),
+                    4 => criteria.body = Some(value),
+                    5 => criteria.since = Some(value),
+                    6 => criteria.before = Some(value),
+                    7 => criteria.in_mailbox = Some(value),
+                    _ => unreachable!(),
+                }
+                matched = true;
+                break;
+            }
+        }
+
+        if !matched {
+            let mut word = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == ' ' {
+                    break;
+                }
+                word.push(c);
+                chars.next();
+            }
+            if !word.is_empty() {
+                remaining.push(word);
+            }
+        }
+    }
+
+    if !remaining.is_empty() {
+        criteria.text = Some(remaining.join(" "));
+    }
+
+    criteria
+}
+
+fn extract_search_value(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    while chars.peek() == Some(&' ') {
+        chars.next();
+    }
+
+    if chars.peek() == Some(&'"') {
+        chars.next(); // consume opening quote
+        let mut value = String::new();
+        for c in chars.by_ref() {
+            if c == '"' {
+                break;
+            }
+            value.push(c);
+        }
+        value
+    } else {
+        let mut value = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == ' ' {
+                break;
+            }
+            value.push(c);
+            chars.next();
+        }
+        value
     }
 }
 
