@@ -359,7 +359,7 @@ pub async fn fetch_emails_on_session(
     let uid_set = compress_uid_set(&selected_uids);
 
     let fetched: Vec<_> = session
-        .uid_fetch(&uid_set, "RFC822")
+        .uid_fetch(&uid_set, "BODY.PEEK[]")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
         .try_collect()
@@ -472,10 +472,10 @@ pub async fn fetch_new_emails_on_session(
         checked_count
     );
 
-    // Pass 2: Fetch full RFC822 only for genuinely new messages
+    // Pass 2: Fetch full message body only for genuinely new messages
     let new_uid_set = compress_uid_set(&new_uids);
     let fetched: Vec<_> = session
-        .uid_fetch(&new_uid_set, "RFC822")
+        .uid_fetch(&new_uid_set, "BODY.PEEK[]")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
         .try_collect()
