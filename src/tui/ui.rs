@@ -96,6 +96,10 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         render_confirm_dialog(dialog, frame, area);
     }
 
+    if let Some(picker) = &app.attachment_picker {
+        render_attachment_picker(picker, frame, area);
+    }
+
     if app.show_help {
         render_help_overlay(app, frame, area);
     }
@@ -954,6 +958,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 desc_span("send "),
                 hint_span("n"),
                 desc_span("new "),
+                hint_span("o"),
+                desc_span("attach "),
                 hint_span("/"),
                 desc_span("filter "),
                 hint_span("\\"),
@@ -1068,6 +1074,68 @@ fn render_confirm_dialog(dialog: &super::app::ConfirmDialog, frame: &mut Frame, 
             Span::styled("o", Style::default().fg(theme::TEXT)),
         ]),
     ];
+
+    let content = Paragraph::new(lines).block(block);
+    frame.render_widget(content, dialog_area);
+}
+
+fn render_attachment_picker(picker: &super::app::AttachmentPicker, frame: &mut Frame, area: Rect) {
+    let file_count = picker.files.len() as u16;
+    let dialog_width = 50u16.min(area.width.saturating_sub(4));
+    let dialog_height = (file_count + 4).min(area.height.saturating_sub(2));
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(dialog_width)])
+        .flex(Flex::Center)
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(dialog_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+
+    let dialog_area = vertical[0];
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::PEACH))
+        .style(Style::default().bg(theme::BASE));
+
+    let inner_width = dialog_width.saturating_sub(4) as usize;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Select Attachment",
+            Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, path) in picker.files.iter().enumerate() {
+        let name = path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let display = if name.len() > inner_width {
+            format!("{}…", &name[..inner_width.saturating_sub(1)])
+        } else {
+            name
+        };
+        let style = if i == picker.selected {
+            Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
+        } else {
+            Style::default().fg(theme::TEXT)
+        };
+        lines.push(Line::from(Span::styled(display, style)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "j/k nav  Enter open  Esc cancel",
+        Style::default().fg(theme::SUBTEXT0),
+    )));
 
     let content = Paragraph::new(lines).block(block);
     frame.render_widget(content, dialog_area);
@@ -1460,6 +1528,7 @@ fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
             ("A", "Approve draft"),
             ("x / X", "Send / Send all approved"),
             ("y", "Copy file path"),
+            ("o", "Open attachment"),
             ("n", "New draft"),
             ("f / F", "Fetch / Sync"),
             ("S", "Server search (IMAP)"),

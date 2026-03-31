@@ -509,6 +509,20 @@ fn handle_action(
             }
         }
 
+        Action::OpenAttachment(path) => {
+            match crate::parse::open_file_with_system(&path) {
+                Ok(()) => {
+                    let name = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    app.set_status(format!("Opened: {name}"));
+                }
+                Err(e) => {
+                    app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+                }
+            }
+        }
+
         Action::Fetch => {
             if app.bg_mutations > 0 {
                 app.queued_action = Some(Action::Fetch);

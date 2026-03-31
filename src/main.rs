@@ -156,6 +156,11 @@ enum Commands {
         /// Path to the inbox email file
         file: PathBuf,
     },
+    /// Open an email's attachment in the default application
+    Open {
+        /// Path to the email file
+        file: PathBuf,
+    },
     /// Search emails on the IMAP server
     Search {
         /// Search query (supports from:, to:, subject:, body:, since:, before:, in: prefixes)
@@ -880,6 +885,32 @@ attachments: []
                     std::process::exit(1);
                 }
             }
+        }
+
+        Some(Commands::Open { file }) => {
+            let attachments = list_attachments(&file)?;
+            if attachments.is_empty() {
+                println!("No attachments found for {}", file.display());
+                return Ok(());
+            }
+            let path = if attachments.len() == 1 {
+                attachments.into_iter().next().unwrap()
+            } else {
+                let display_items: Vec<String> = attachments
+                    .iter()
+                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                    .collect();
+                let selection = dialoguer::FuzzySelect::new()
+                    .with_prompt("Select attachment to open")
+                    .items(&display_items)
+                    .default(0)
+                    .interact()
+                    .map_err(|e| anyhow!("Selection cancelled: {e}"))?;
+                attachments[selection].clone()
+            };
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            println!("Opening: {name}");
+            open_file_with_system(&path)?;
         }
 
         Some(Commands::Search {

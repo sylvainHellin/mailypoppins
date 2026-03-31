@@ -160,6 +160,34 @@ pub fn attachments_dir_for(md_path: &Path) -> PathBuf {
     parent.join(format!("{}_attachments", stem))
 }
 
+/// List all attachment files for a given email .md file.
+/// Returns an empty Vec if the attachments directory doesn't exist or is empty.
+pub fn list_attachments(email_path: &Path) -> Result<Vec<PathBuf>> {
+    let dir = attachments_dir_for(email_path);
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    Ok(files)
+}
+
+/// Open a file with the system default application (macOS `open`).
+pub fn open_file_with_system(path: &Path) -> Result<()> {
+    let status = std::process::Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run 'open': {e}"))?;
+    if !status.success() {
+        anyhow::bail!("'open' exited with status {}", status);
+    }
+    Ok(())
+}
+
 /// Parse raw RFC822 bytes into a FetchedEmail struct.
 pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail> {
     let parsed = parse_mail(rfc822_body).ok()?;

@@ -292,6 +292,7 @@ pub enum Action {
     BatchArchive(Vec<PathBuf>),
     BatchDelete(Vec<PathBuf>),
     CopyPath,
+    OpenAttachment(PathBuf),
     Fetch,
     Sync,
     ServerSearch { query: String, targets: Vec<SearchTarget> },
@@ -321,6 +322,12 @@ pub struct ConfirmDialog {
 /// Persistent error notification (requires user action to dismiss).
 pub struct PersistentError {
     pub message: String,
+}
+
+/// Overlay state for choosing among multiple attachments.
+pub struct AttachmentPicker {
+    pub files: Vec<PathBuf>,
+    pub selected: usize,
 }
 
 const STATUS_LOG_CAPACITY: usize = 100;
@@ -378,6 +385,7 @@ pub struct App {
     pub bg_spin_tick: usize,
     pub queued_action: Option<Action>,
     pub persistent_error: Option<PersistentError>,
+    pub attachment_picker: Option<AttachmentPicker>,
 
     pub status_log: VecDeque<StatusEntry>,
     pub show_activity_log: bool,
@@ -483,6 +491,7 @@ impl App {
             bg_spin_tick: 0,
             queued_action: None,
             persistent_error: None,
+            attachment_picker: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
             show_search_overlay: false,
@@ -752,6 +761,10 @@ impl App {
             return self.handle_persistent_error_key(key);
         }
 
+        if self.attachment_picker.is_some() {
+            return self.handle_attachment_picker_key(key);
+        }
+
         if self.show_help {
             return self.handle_help_key(key);
         }
@@ -912,6 +925,25 @@ impl App {
                 self.headers_scroll = self.headers_scroll.saturating_sub(1);
                 None
             }
+            KeyCode::Char('o') => {
+                if let Some(email) = self.selected_email() {
+                    match crate::parse::list_attachments(&email.path) {
+                        Ok(files) if files.is_empty() => {
+                            self.set_status("No attachments".to_string());
+                        }
+                        Ok(files) if files.len() == 1 => {
+                            self.pending_action = Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                        }
+                        Ok(files) => {
+                            self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Attachments error: {e}"));
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1056,6 +1088,25 @@ impl App {
                 self.server_search_status = None;
             }
 
+            KeyCode::Char('o') => {
+                self.g_pending = false;
+                if let Some(email) = self.selected_email() {
+                    match crate::parse::list_attachments(&email.path) {
+                        Ok(files) if files.is_empty() => {
+                            self.set_status("No attachments".to_string());
+                        }
+                        Ok(files) if files.len() == 1 => {
+                            self.pending_action = Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                        }
+                        Ok(files) => {
+                            self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Attachments error: {e}"));
+                        }
+                    }
+                }
+            }
             KeyCode::Char(' ') => {
                 self.g_pending = false;
                 if let Some(path) = self.selected_email_path() {
@@ -1240,12 +1291,55 @@ impl App {
                 self.preview_scroll = self.preview_scroll.saturating_sub(10);
                 None
             }
+            KeyCode::Char('o') => {
+                if let Some(email) = self.selected_email() {
+                    match crate::parse::list_attachments(&email.path) {
+                        Ok(files) if files.is_empty() => {
+                            self.set_status("No attachments".to_string());
+                        }
+                        Ok(files) if files.len() == 1 => {
+                            self.pending_action = Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                        }
+                        Ok(files) => {
+                            self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Attachments error: {e}"));
+                        }
+                    }
+                }
+                None
+            }
             KeyCode::Esc => {
                 self.focus = Focus::List;
                 None
             }
             _ => None,
         }
+    }
+
+    fn handle_attachment_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let picker = self.attachment_picker.as_mut().unwrap();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if picker.selected < picker.files.len().saturating_sub(1) {
+                    picker.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                let picker = self.attachment_picker.take().unwrap();
+                let path = picker.files[picker.selected].clone();
+                self.pending_action = Some(Action::OpenAttachment(path));
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.attachment_picker = None;
+            }
+            _ => {}
+        }
+        None
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) -> Option<Message> {
