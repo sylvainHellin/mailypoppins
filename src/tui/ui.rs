@@ -1,5 +1,5 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
@@ -409,13 +409,13 @@ fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn header_line<'a>(label: &'a str, value: &'a str, color: Color) -> Line<'a> {
+fn header_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
     Line::from(vec![
         Span::styled(
             format!(" {label}: "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(value, Style::default().fg(color)),
+        Span::styled(value, Style::default().fg(theme::TEXT)),
     ])
 }
 
@@ -442,17 +442,17 @@ fn render_headers(app: &App, frame: &mut Frame, area: Rect) {
     let email = selected.unwrap();
     let mut lines: Vec<Line> = Vec::new();
 
-    lines.push(header_line("From", &email.from, theme::GREEN));
-    lines.push(header_line("To", &email.to, theme::BLUE));
+    lines.push(header_line("From", &email.from));
+    lines.push(header_line("To", &email.to));
     if let Some(cc) = &email.cc {
         if !cc.is_empty() {
-            lines.push(header_line("Cc", cc, theme::BLUE));
+            lines.push(header_line("Cc", cc));
         }
     }
-    lines.push(header_line("Subj", &email.subject, theme::YELLOW));
+    lines.push(header_line("Subj", &email.subject));
 
     let date_status = format!("{}  [{}]", email.date_display, email.status);
-    lines.push(header_line("Date", &date_status, theme::MAUVE));
+    lines.push(header_line("Date", &date_status));
 
     let content = Paragraph::new(lines)
         .block(block)
@@ -1386,16 +1386,16 @@ fn render_search_result_headers(app: &App, frame: &mut Frame, area: Rect) {
 
     let entry = &result.unwrap().entry;
     let mut lines: Vec<Line> = vec![
-        header_line("From", &entry.from, theme::GREEN),
-        header_line("To", &entry.to, theme::BLUE),
+        header_line("From", &entry.from),
+        header_line("To", &entry.to),
     ];
     if let Some(ref cc) = entry.cc {
         if !cc.is_empty() {
-            lines.push(header_line("Cc", cc, theme::BLUE));
+            lines.push(header_line("Cc", cc));
         }
     }
-    lines.push(header_line("Subject", &entry.subject, theme::YELLOW));
-    lines.push(header_line("Date", &entry.date_display, theme::MAUVE));
+    lines.push(header_line("Subject", &entry.subject));
+    lines.push(header_line("Date", &entry.date_display));
 
     let content = Paragraph::new(lines)
         .block(block)
