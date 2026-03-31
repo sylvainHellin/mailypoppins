@@ -523,6 +523,17 @@ fn handle_action(
             }
         }
 
+        Action::OpenHtmlInBrowser(path) => {
+            match crate::parse::open_file_with_system(&path) {
+                Ok(()) => {
+                    app.set_status("Opened in browser".to_string());
+                }
+                Err(e) => {
+                    app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+                }
+            }
+        }
+
         Action::Fetch => {
             if app.bg_mutations > 0 {
                 app.queued_action = Some(Action::Fetch);

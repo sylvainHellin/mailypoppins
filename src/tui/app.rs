@@ -300,6 +300,7 @@ pub enum Action {
     SearchResultReply(bool),
     SearchResultForward,
     SearchResultArchive,
+    OpenHtmlInBrowser(PathBuf),
 }
 
 /// Which destructive action a confirmation dialog is guarding.
@@ -944,6 +945,17 @@ impl App {
                 }
                 None
             }
+            KeyCode::Char('b') => {
+                if let Some(email) = self.selected_email() {
+                    let html_path = email.path.with_extension("html");
+                    if html_path.exists() {
+                        self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                    } else {
+                        self.set_status("No HTML version available".to_string());
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -1107,6 +1119,17 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('b') => {
+                self.g_pending = false;
+                if let Some(email) = self.selected_email() {
+                    let html_path = email.path.with_extension("html");
+                    if html_path.exists() {
+                        self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                    } else {
+                        self.set_status("No HTML version available".to_string());
+                    }
+                }
+            }
             KeyCode::Char(' ') => {
                 self.g_pending = false;
                 if let Some(path) = self.selected_email_path() {
@@ -1260,6 +1283,20 @@ impl App {
             KeyCode::Char('a') => {
                 self.pending_action = Some(Action::SearchResultArchive);
             }
+            KeyCode::Char('b') => {
+                if let Some(result) = self.server_search_results.get(self.server_search_index) {
+                    if let Some(ref saved) = result.saved_path {
+                        let html_path = saved.with_extension("html");
+                        if html_path.exists() {
+                            self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                        } else {
+                            self.set_status("No HTML version available".to_string());
+                        }
+                    } else {
+                        self.set_status("Save email first to open HTML".to_string());
+                    }
+                }
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.server_search_focus = SearchOverlayFocus::Input;
             }
@@ -1306,6 +1343,17 @@ impl App {
                         Err(e) => {
                             self.set_status(format!("Attachments error: {e}"));
                         }
+                    }
+                }
+                None
+            }
+            KeyCode::Char('b') => {
+                if let Some(email) = self.selected_email() {
+                    let html_path = email.path.with_extension("html");
+                    if html_path.exists() {
+                        self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                    } else {
+                        self.set_status("No HTML version available".to_string());
                     }
                 }
                 None
