@@ -7,6 +7,28 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Ensure an HTML string contains a UTF-8 charset declaration.
+/// If a `<meta charset=...>` tag is already present, the HTML is returned as-is.
+/// Otherwise, the declaration is injected after `<head>` (or prepended if there
+/// is no `<head>` tag) so that browsers interpret the content correctly.
+fn ensure_utf8_charset(html: &str) -> String {
+    let lower = html.to_lowercase();
+    if lower.contains("charset") {
+        return html.to_string();
+    }
+    let meta = r#"<meta charset="UTF-8">"#;
+    if let Some(pos) = lower.find("<head>") {
+        let insert = pos + "<head>".len();
+        format!("{}{}{}", &html[..insert], meta, &html[insert..])
+    } else if let Some(pos) = lower.find("<html") {
+        // Insert a minimal <head> block right after the opening <html ...> tag.
+        let tag_end = html[pos..].find('>').map(|i| pos + i + 1).unwrap_or(pos + 6);
+        format!("{}<head>{}</head>{}", &html[..tag_end], meta, &html[tag_end..])
+    } else {
+        format!("{}{}", meta, html)
+    }
+}
+
 /// Find the largest byte index <= `max_bytes` that lies on a UTF-8 char boundary.
 fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     if max_bytes >= s.len() {
@@ -506,7 +528,7 @@ pub fn save_fetched_emails_with_known_ids(
         // Save companion HTML file if available
         if let Some(ref html) = email.html_body {
             let html_path = dest.with_extension("html");
-            fs::write(&html_path, html)?;
+            fs::write(&html_path, ensure_utf8_charset(html))?;
         }
 
         // Track the new message_id to prevent duplicates within the same batch
