@@ -35,7 +35,7 @@ async-std = { version = "1", features = ["attributes"] }
 futures = "0.3"
 mailparse = "0.15"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
-html2text = "0.14"
+html2text = { version = "0.14", features = ["css"] }
 log = "0.4"
 simplelog = "0.12"
 ratatui = "0.29"

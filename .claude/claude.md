@@ -36,7 +36,7 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The lib
 | `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
 | `src/config.rs` | Global config loading (`~/.config/email/config.toml`), keyring integration, mailbox resolution, logging. All config types derive `Clone` for TUI thread sharing. |
 | `src/config_cmd.rs` | Config subcommands: init wizard (credential testing, mailbox discovery), show, set-password, path |
-| `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, RFC822 parsing, attachment extraction, save/display, local message-ID scanning |
+| `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, RFC822 parsing, attachment extraction, save/display, local message-ID scanning, `list_attachments()`, `open_file_with_system()` |
 | `src/imap_client.rs` | All IMAP operations: fetch, list, append, watch, archive, delete, unified `sync_mailboxes()` orchestrator with two-pass fetch |
 | `src/draft.rs` | Draft parsing, validation, preview, reply/forward creation, status updates |
 | `src/send.rs` | `RecipientRole`, `SendResult`, `markdown_to_html`, `send_email` |
@@ -82,6 +82,8 @@ main        --> all modules (via lib)
 | `email watch [--mailbox] [--timeout]` | Watch mailbox for changes via IMAP IDLE |
 | `email archive <file>` | Archive an inbox email (server + local) |
 | `email delete <file>` | Delete an inbox email (server + local) |
+| `email open <file>` | Open an attachment from an email in the default application (fuzzy-select if multiple) |
+| `email search <query>` | Search emails on the IMAP server; supports `from:`, `to:`, `subject:`, `body:`, `since:`, `before:`, `in:` prefixes; `--mailbox`, `--limit` (`-n`), `--full` flags |
 | `email config init` | Interactive setup wizard with credential testing |
 | `email config show` | Show current configuration (passwords masked) |
 | `email config set-password` | Store SMTP or IMAP password in OS keyring |
@@ -185,7 +187,7 @@ attachments:
 
 The `_attachments/` directory is moved/deleted alongside `.md` and `.html` companion files during archive, delete, sync move, and reconciliation operations. The `attachments_dir_for(md_path)` helper in `parse.rs` computes the directory path from any `.md` file path.
 
-## TUI (v0.5.0)
+## TUI (v0.6.0)
 
 Running `email` with no arguments launches an interactive TUI built with `ratatui` and `crossterm`.
 
@@ -228,9 +230,53 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 | `\` | Search (includes body) |
 | `s` | Focus sidebar |
 | `1`-`9` | Jump to mailbox by index |
+| `o` | Open attachment(s) of the selected email in the default application |
+| `b` | Open the HTML version of the selected email in the browser |
+| `S` | Open server search overlay |
+| `!` | Toggle activity log panel |
 | `Tab`/`Shift-Tab` | Cycle pane focus |
 | `?` | Help overlay |
 | `q` | Quit |
+
+### Activity Log Panel
+
+A persistent panel showing timestamped status entries for all background operations. Toggled with `!`. Capped at 100 entries (`STATUS_LOG_CAPACITY`). Each entry carries a `StatusLevel` (`Info`, `Success`, `Warning`, `Error`, `Progress`) used for color coding. Entries are written via `App::push_status()` (raw) or the convenience wrappers `set_status()` and `set_status_level()`.
+
+### Server Search Overlay
+
+Activated with `S`. A full-screen overlay with two focus modes (`SearchOverlayFocus::Input` / `SearchOverlayFocus::List`) toggled with `Tab`/`Down`.
+
+**Query syntax** (parsed by `imap_client::parse_search_query()`):
+
+| Prefix | Maps to |
+|--------|---------|
+| `from:` | IMAP FROM |
+| `to:` | IMAP TO |
+| `cc:` | IMAP CC |
+| `subject:` | IMAP SUBJECT |
+| `body:` | IMAP BODY |
+| `since:` | IMAP SINCE (YYYY-MM-DD) |
+| `before:` | IMAP BEFORE (YYYY-MM-DD) |
+| `in:` | Routing: restrict to one mailbox (not sent to IMAP) |
+| bare text | IMAP TEXT |
+
+Quoted values are supported (e.g., `from:"John Doe"`). The `in:` prefix matches by IMAP server name or role label (case-insensitive).
+
+**Search scope:** `in:` prefix or `--mailbox` flag restricts to one mailbox; otherwise all configured mailboxes with a server name are searched in sequence using a shared IMAP session.
+
+**Result types:** `SearchHit` (raw result from background thread), `SearchResultEntry` (held in App state, includes `saved_path` once the email is written locally), `SearchTarget` (mailbox descriptor used to drive the search).
+
+**Result list keys:** `j`/`k` navigate, `Enter`/`e` open in `$EDITOR` (saves locally first), `r`/`R` reply/reply-all, `w` forward, `a` archive, `b` open HTML in browser, `Esc` close overlay.
+
+### Attachment Picker Overlay
+
+When an email has multiple attachments and `o` is pressed, an `AttachmentPicker` overlay appears listing all files in the `_attachments/` directory. Navigate with `j`/`k`, confirm with `Enter`, dismiss with `Esc`/`q`. For a single attachment, the file is opened immediately without the overlay. Uses `parse::list_attachments()` and `parse::open_file_with_system()` (macOS `open`).
+
+`o` is available in List focus, List-with-sidebar focus, and Preview focus.
+
+### Open HTML in Browser
+
+Press `b` on a selected email (List, Preview, or Search overlay) to open its `.html` companion file in the system default browser via `open_file_with_system()`. Reports "No HTML version available" if the `.html` file does not exist.
 
 ### TUI Direct Library Calls
 

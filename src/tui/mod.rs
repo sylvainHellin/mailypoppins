@@ -333,7 +333,9 @@ fn handle_action(
             if path.exists() {
                 app.set_status(format!("File already exists: {}", path.display()));
             } else {
-                let skeleton = "---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom:\nreply_to:\nattachments: []\n---\n\n";
+                let now = chrono::Utc::now().to_rfc2822();
+                let from = app.smtp_config.as_ref().map(|s| s.default_from.as_str()).unwrap_or("");
+                let skeleton = format!("---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom: {from}\ndate: {now}\nreply_to:\nattachments: []\n---\n\n");
                 match std::fs::write(&path, skeleton) {
                     Ok(()) => {
                         suspend_terminal(terminal)?;
@@ -535,11 +537,11 @@ fn handle_action(
         }
 
         Action::Fetch => {
-            if app.bg_mutations > 0 {
+            if app.bg_count > 0 {
                 app.queued_action = Some(Action::Fetch);
                 app.set_status(format!(
                     "Fetch queued ({} ops pending...)",
-                    app.bg_mutations
+                    app.bg_count
                 ));
                 return Ok(());
             }
@@ -596,11 +598,11 @@ fn handle_action(
         }
 
         Action::Sync => {
-            if app.bg_mutations > 0 {
+            if app.bg_count > 0 {
                 app.queued_action = Some(Action::Sync);
                 app.set_status(format!(
                     "Sync queued ({} ops pending...)",
-                    app.bg_mutations
+                    app.bg_count
                 ));
                 return Ok(());
             }

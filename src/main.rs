@@ -606,18 +606,9 @@ async fn main() -> Result<()> {
             }
 
             // Create skeleton content with all frontmatter fields
-            let skeleton = r#"---
-to:
-cc:
-bcc:
-subject:
-status: draft
-from:
-reply_to:
-attachments: []
----
-
-"#;
+            let now = chrono::Utc::now().to_rfc2822();
+            let from = &smtp_config.default_from;
+            let skeleton = format!("---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom: {from}\ndate: {now}\nreply_to:\nattachments: []\n---\n\n");
 
             fs::write(&path, skeleton)?;
             println!("{} Created new draft: {}", "✓".green(), path.display());

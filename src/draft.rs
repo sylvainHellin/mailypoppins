@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::config::{GlobalConfig, SmtpConfig};
-use crate::parse::{attachments_dir_for, extract_email_address, html_to_plain, slugify_sender, slugify_subject};
+use crate::parse::{attachments_dir_for, extract_email_address, slugify_sender, slugify_subject};
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
 pub fn select_inbox_email(inbox_dir: &Path, prompt: &str) -> Result<PathBuf> {
@@ -125,12 +125,9 @@ pub fn create_reply_draft(
         format!("Re: {}", inbox.subject)
     };
 
-    // Clean up quoted body: convert HTML remnants to plain text if needed
-    let clean_body = if original_body.contains('<') && original_body.contains('>') {
-        html_to_plain(original_body)
-    } else {
-        original_body.to_string()
-    };
+    // The body from the .md file is already plain text (either the server's
+    // text/plain or the result of html_to_plain() at fetch time). Use as-is.
+    let clean_body = original_body.to_string();
 
     // Build quoted body with attribution
     let attribution = format!(
@@ -289,12 +286,9 @@ pub fn create_forward_draft(
         inbox.to,
     );
 
-    // Clean up body
-    let clean_body = if original_body.contains('<') && original_body.contains('>') {
-        html_to_plain(original_body)
-    } else {
-        original_body.to_string()
-    };
+    // The body from the .md file is already plain text (either the server's
+    // text/plain or the result of html_to_plain() at fetch time). Use as-is.
+    let clean_body = original_body.to_string();
 
     let full_content = format!(
         "{}\n\n\n{{{{SIGNATURE}}}}\n\n{}\n\n{}\n",

@@ -62,7 +62,12 @@ pub struct AttachmentData {
 }
 
 pub fn html_to_plain(html: &str) -> String {
-    html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string())
+    html2text::config::plain()
+        .use_doc_css()
+        .no_table_borders()
+        .no_link_wrapping()
+        .string_from_read(html.as_bytes(), 10_000)
+        .unwrap_or_else(|_| html.to_string())
 }
 
 /// Recursively collect the first text/plain and text/html parts from a parsed email.
@@ -584,4 +589,73 @@ pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
         }
     }
     println!("{}", "─".repeat(60));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_html_to_plain_preserves_paragraph_breaks() {
+        let html = "<p>First paragraph</p><p>Second paragraph</p>";
+        let result = html_to_plain(html);
+        let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_empty.len(), 2, "Expected 2 non-empty lines, got: {:?}", non_empty);
+        assert!(non_empty[0].contains("First paragraph"));
+        assert!(non_empty[1].contains("Second paragraph"));
+    }
+
+    #[test]
+    fn test_html_to_plain_no_hard_wrap() {
+        // A single paragraph with a 200-char word -- must not be hard-wrapped at 80.
+        let long_word = "a".repeat(200);
+        let html = format!("<p>{}</p>", long_word);
+        let result = html_to_plain(&html);
+        let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_empty.len(), 1, "Expected 1 non-empty line (no hard wrap), got: {:?}", non_empty);
+        assert!(non_empty[0].contains(&long_word));
+    }
+
+    #[test]
+    fn test_html_to_plain_blockquote_markers() {
+        let html = "<blockquote>quoted text</blockquote>";
+        let result = html_to_plain(html);
+        let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!non_empty.is_empty(), "Expected at least one non-empty line");
+        for line in &non_empty {
+            assert!(line.starts_with("> "), "Expected line to start with '> ', got: {:?}", line);
+        }
+    }
+
+    #[test]
+    fn test_html_to_plain_nested_blockquote() {
+        let html = "<blockquote><blockquote>deep quote</blockquote></blockquote>";
+        let result = html_to_plain(html);
+        let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!non_empty.is_empty(), "Expected at least one non-empty line");
+        for line in &non_empty {
+            assert!(
+                line.starts_with("> > "),
+                "Expected line to start with '> > ', got: {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_html_to_plain_no_table_borders() {
+        let html = "<table><tr><td>cell</td></tr></table>";
+        let result = html_to_plain(html);
+        assert!(!result.contains('+'), "Output should not contain '+' table border chars: {:?}", result);
+        assert!(!result.contains("---"), "Output should not contain '---' table border chars: {:?}", result);
+        assert!(result.contains("cell"), "Output should contain the cell text");
+    }
+
+    #[test]
+    fn test_html_to_plain_fallback_on_error() {
+        // Empty string should not panic
+        let result = html_to_plain("");
+        // Just verify it returns without panicking
+        let _ = result;
+    }
 }
