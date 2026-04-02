@@ -197,6 +197,15 @@ enum ConfigAction {
     Path,
 }
 
+/// Sort fetched emails by date descending (newest first).
+fn sort_fetched_by_date(emails: &mut [FetchedEmail]) {
+    emails.sort_by(|a, b| {
+        let da = chrono::DateTime::parse_from_rfc2822(&a.date).ok();
+        let db = chrono::DateTime::parse_from_rfc2822(&b.date).ok();
+        db.cmp(&da)
+    });
+}
+
 fn prompt_confirmation(message: &str) -> bool {
     print!("{} [y/N] ", message);
     io::stdout().flush().unwrap();
@@ -918,8 +927,9 @@ async fn main() -> Result<()> {
             criteria.in_mailbox = None;
 
             if let Some(ref mb) = mailbox_name {
-                let emails =
+                let mut emails =
                     fetch_emails(&imap_config, &criteria, mb, Some(limit)).await?;
+                sort_fetched_by_date(&mut emails);
                 if emails.is_empty() {
                     println!("{}", "No results found".yellow());
                 } else {
@@ -932,7 +942,7 @@ async fn main() -> Result<()> {
                 let mut session = imap_client::open_imap_session(&imap_config).await?;
                 let per_mb = (limit / configured.len().max(1)).max(5);
                 let mut total = 0usize;
-                let mut any_results = false;
+                let mut all_emails: Vec<FetchedEmail> = Vec::new();
 
                 for (role, mapping) in &configured {
                     if total >= limit {
@@ -949,15 +959,7 @@ async fn main() -> Result<()> {
                     {
                         Ok(emails) if !emails.is_empty() => {
                             total += emails.len();
-                            any_results = true;
-                            println!(
-                                "{} {} result(s) in {}:",
-                                "\u{2022}".blue(),
-                                emails.len(),
-                                role.green()
-                            );
-                            display_fetched_emails(&emails, full);
-                            println!();
+                            all_emails.extend(emails);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -972,8 +974,11 @@ async fn main() -> Result<()> {
                 }
                 session.logout().await.ok();
 
-                if !any_results {
+                sort_fetched_by_date(&mut all_emails);
+                if all_emails.is_empty() {
                     println!("{}", "No results found".yellow());
+                } else {
+                    display_fetched_emails(&all_emails, full);
                 }
             }
         }

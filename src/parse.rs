@@ -568,7 +568,12 @@ pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
             println!("{}: {}", "Cc".bold().blue(), cc);
         }
         println!("{}: {}", "Subject".bold().yellow(), email.subject);
-        println!("{}: {}", "Date".bold().magenta(), email.date);
+        let date_display = if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&email.date) {
+            dt.format("%Y-%m-%d").to_string()
+        } else {
+            email.date.clone()
+        };
+        println!("{}: {}", "Date".bold().magenta(), date_display);
         if email.has_attachments {
             println!("{}", "[has attachments]".yellow());
         }

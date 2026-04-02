@@ -1061,6 +1061,17 @@ async fn lib_do_multi_search(
 }
 
 fn fetched_to_email_entry(fetched: &FetchedEmail) -> app::EmailEntry {
+    let (date_display, date_sort) = if let Ok(dt) =
+        chrono::DateTime::parse_from_rfc2822(&fetched.date)
+    {
+        (
+            dt.format("%Y-%m-%d").to_string(),
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        )
+    } else {
+        (fetched.date.chars().take(10).collect(), fetched.date.clone())
+    };
+
     app::EmailEntry {
         path: PathBuf::new(),
         from: fetched.from.clone(),
@@ -1068,8 +1079,8 @@ fn fetched_to_email_entry(fetched: &FetchedEmail) -> app::EmailEntry {
         cc: fetched.cc.clone(),
         subject: fetched.subject.clone(),
         status: String::new(),
-        date_display: fetched.date.chars().take(10).collect(),
-        date_sort: fetched.date.clone(),
+        date_display,
+        date_sort,
         body: fetched.body_text.clone(),
         has_attachments: fetched.has_attachments,
     }
