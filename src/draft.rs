@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::config::{GlobalConfig, SmtpConfig};
+use crate::config::{EmailSettings, SmtpConfig};
 use crate::parse::{attachments_dir_for, extract_email_address, slugify_sender, slugify_subject};
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
@@ -418,7 +418,7 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
 pub fn preview_draft(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
-    email_config: &GlobalConfig,
+    email_config: &EmailSettings,
     signature: Option<&str>,
     is_dry_run: bool,
 ) -> Result<()> {
@@ -454,7 +454,7 @@ pub fn preview_draft(
     println!("\n{}", "--- Settings ---".dimmed());
     println!(
         "  Font: {} ({})",
-        email_config.email.font_family, email_config.email.font_size
+        email_config.font_family, email_config.font_size
     );
     if let Some(sig) = signature {
         let sig_preview: String = sig.chars().take(50).collect();

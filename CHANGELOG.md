@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.0] - 2026-04-04
+
+### Added
+- Proton Mail Bridge support via IMAP STARTTLS and self-signed certificate acceptance
+- `accept_invalid_certs` config option for SMTP and IMAP (for Proton Bridge and other self-signed setups)
+- IMAP STARTTLS connection mode for non-993 ports (automatic, port-based heuristic)
+- Proton Bridge preset in `email config init` wizard (pre-fills localhost:1143/1025 with cert bypass)
+- Multi-account support: N email accounts with independent IMAP/SMTP/directories/signatures
+- New config format using `[[accounts]]` array in `config.toml`
+- Per-account keyring namespacing (`smtp-password-{name}`, `imap-password-{name}`)
+- Account switching in TUI: backtick cycles, Ctrl+1-9 for direct jump
+- Account selector in status bar with unseen-mail indicators
+- Per-account IMAP watchers (all accounts watched simultaneously)
+- `--account` / `-A` CLI flag to target a specific account
+- `email config migrate` command to convert old single-account config
+- `email config add-account` command to add accounts to existing config
+- Per-account sidebar titles
+
+### Changed
+- Config model: `[smtp]`/`[imap]`/`[directories]`/`[mailboxes]`/`[signatures]` are now nested under `[[accounts]]`
+- `default_from` moved from `[smtp]` to `[[accounts]]`
+- Status bar simplified: account labels + `? help` replace verbose hotkey hints
+- `config set-password` now takes `--account` flag
+
 ## [0.6.0] - 2026-03-30
 
 ### Added

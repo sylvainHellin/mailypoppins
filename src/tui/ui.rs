@@ -115,8 +115,13 @@ pub fn view(app: &mut App, frame: &mut Frame) {
 
 fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     let border_style = pane_border_style(app.focus, Focus::Sidebar);
+    let sidebar_title = if app.accounts.len() > 1 {
+        format!(" {} ", app.account_config.name.to_uppercase())
+    } else {
+        " Mail ".to_string()
+    };
     let block = Block::default()
-        .title(" Mail ")
+        .title(sidebar_title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
@@ -884,7 +889,8 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let total = app.mailbox_counts[app.active_mailbox];
     let shown = app.emails.len();
-    let watch_prefix = if app.watcher_active { "WATCHING " } else { "" };
+    let any_watching = app.accounts.iter().any(|a| a.watcher_active);
+    let watch_prefix = if any_watching { "WATCHING " } else { "" };
     let sel_text = if app.selection.is_empty() {
         String::new()
     } else {
@@ -926,90 +932,31 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(msg.as_str(), Style::default().fg(theme::GREEN)),
         ])
     } else {
-        match app.focus {
-            Focus::Sidebar => Line::from(vec![
-                hint_span(" j/k"),
-                desc_span("nav "),
-                hint_span("Enter"),
-                desc_span("select "),
-                hint_span("/"),
-                desc_span("search "),
-                hint_span("!"),
-                desc_span("log "),
-                hint_span("?"),
-                desc_span("help "),
-                hint_span("q"),
-                desc_span("quit"),
-            ]),
-            Focus::List => Line::from(vec![
-                hint_span(" Space"),
-                desc_span("sel "),
-                hint_span("e"),
-                desc_span("edit "),
-                hint_span("r"),
-                desc_span("reply "),
-                hint_span("w"),
-                desc_span("fwd "),
-                hint_span("a"),
-                desc_span("archive "),
-                hint_span("A"),
-                desc_span("approve "),
-                hint_span("x"),
-                desc_span("send "),
-                hint_span("n"),
-                desc_span("new "),
-                hint_span("o"),
-                desc_span("attach "),
-                hint_span("b"),
-                desc_span("browser "),
-                hint_span("/"),
-                desc_span("filter "),
-                hint_span("\\"),
-                desc_span("search "),
-                hint_span("!"),
-                desc_span("log "),
-                hint_span("?"),
-                desc_span("help"),
-            ]),
-            Focus::Headers => Line::from(vec![
-                hint_span(" j/k"),
-                desc_span("scroll "),
-                hint_span("h"),
-                desc_span("back "),
-                hint_span("l"),
-                desc_span("body "),
-                hint_span("?"),
-                desc_span("help "),
-                hint_span("q"),
-                desc_span("quit"),
-            ]),
-            Focus::Preview => Line::from(vec![
-                hint_span(" j/k"),
-                desc_span("scroll "),
-                hint_span("d/u"),
-                desc_span("page "),
-                hint_span("h"),
-                desc_span("back "),
-                hint_span("/"),
-                desc_span("search "),
-                hint_span("?"),
-                desc_span("help "),
-                hint_span("q"),
-                desc_span("quit"),
-            ]),
-            Focus::Search => {
-                let mut spans = vec![
-                    hint_span(" Enter"),
-                    desc_span("confirm "),
-                    hint_span("Esc"),
-                    desc_span("cancel"),
-                ];
-                if app.search_includes_body {
-                    spans.push(desc_span(" (content search)"));
+        // Account labels + help hint
+        let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
+        if app.accounts.len() > 1 {
+            for (i, acct) in app.accounts.iter().enumerate() {
+                let name = &acct.account_config.name;
+                let label = name.to_uppercase();
+                if i == app.active_account {
+                    spans.push(Span::styled(
+                        format!("[{}]", label),
+                        Style::default().fg(theme::BASE).bg(theme::BLUE),
+                    ));
+                } else {
+                    let style = if acct.has_unseen {
+                        Style::default().fg(theme::GREEN)
+                    } else {
+                        Style::default().fg(theme::OVERLAY0)
+                    };
+                    spans.push(Span::styled(format!(" {} ", label), style));
                 }
-                Line::from(spans)
             }
+            spans.push(Span::styled(" | ", Style::default().fg(theme::OVERLAY0)));
         }
+        spans.push(hint_span("?"));
+        spans.push(desc_span(" help"));
+        Line::from(spans)
     };
 
     let left = Paragraph::new(left_content)
@@ -1020,7 +967,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     if !sel_text.is_empty() {
         right_spans.push(Span::styled(sel_text, Style::default().fg(theme::YELLOW)));
     }
-    if app.watcher_active {
+    if any_watching {
         right_spans.push(Span::styled(watch_prefix, Style::default().fg(theme::TEAL)));
     }
     right_spans.push(Span::styled(mailbox_text, Style::default().fg(theme::BLUE)));
@@ -1501,6 +1448,8 @@ fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     vec![
         ("GLOBAL", vec![
             ("q", "Quit"),
+            ("`", "Switch account"),
+            ("Ctrl+1-9", "Jump to account"),
             ("1-9", "Jump to mailbox"),
             ("s", "Focus sidebar"),
             ("Tab", "Cycle focus forward"),

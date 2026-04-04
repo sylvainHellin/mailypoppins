@@ -18,6 +18,17 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub email: EmailSettings,
     #[serde(default)]
+    pub accounts: Vec<AccountConfig>,
+}
+
+/// Per-account configuration (one entry in [[accounts]]).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct AccountConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub default_from: String,
+    #[serde(default)]
     pub smtp: SmtpSettings,
     #[serde(default)]
     pub imap: ImapSettings,
@@ -70,7 +81,7 @@ pub struct SmtpSettings {
     #[serde(default)]
     pub username: String,
     #[serde(default)]
-    pub default_from: String,
+    pub accept_invalid_certs: bool,
 }
 
 fn default_smtp_port() -> u16 {
@@ -85,6 +96,8 @@ pub struct ImapSettings {
     pub port: u16,
     #[serde(default)]
     pub username: String,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 fn default_imap_port() -> u16 {
@@ -143,6 +156,7 @@ pub struct SmtpConfig {
     pub username: String,
     pub password: String,
     pub default_from: String,
+    pub accept_invalid_certs: bool,
 }
 
 #[derive(Clone)]
@@ -151,6 +165,7 @@ pub struct ImapConfig {
     pub port: u16,
     pub username: String,
     pub password: String,
+    pub accept_invalid_certs: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -205,46 +220,51 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     Ok(config)
 }
 
-/// Build SmtpConfig from GlobalConfig + keyring password
+/// Build SmtpConfig from AccountConfig + keyring password
 impl SmtpConfig {
-    pub fn load(config: &GlobalConfig) -> Result<Self> {
-        let password = get_keyring_password("smtp-password")?;
+    pub fn load(account: &AccountConfig) -> Result<Self> {
+        let key = format!("smtp-password-{}", account.name);
+        let password = get_keyring_password(&key)?;
         Ok(Self {
-            host: config.smtp.host.clone(),
-            port: config.smtp.port,
-            username: config.smtp.username.clone(),
+            host: account.smtp.host.clone(),
+            port: account.smtp.port,
+            username: account.smtp.username.clone(),
             password,
-            default_from: config.smtp.default_from.clone(),
+            default_from: account.default_from.clone(),
+            accept_invalid_certs: account.smtp.accept_invalid_certs,
         })
     }
 }
 
-/// Build ImapConfig from GlobalConfig + keyring password (with SMTP fallback)
+/// Build ImapConfig from AccountConfig + keyring password (with SMTP fallback)
 impl ImapConfig {
-    pub fn load(config: &GlobalConfig) -> Result<Self> {
+    pub fn load(account: &AccountConfig) -> Result<Self> {
         // Username falls back to SMTP username if empty
-        let username = if config.imap.username.is_empty() {
-            config.smtp.username.clone()
+        let username = if account.imap.username.is_empty() {
+            account.smtp.username.clone()
         } else {
-            config.imap.username.clone()
+            account.imap.username.clone()
         };
 
         // Password: try imap-password first, fall back to smtp-password
-        let password = get_keyring_password("imap-password")
-            .or_else(|_| get_keyring_password("smtp-password"))?;
+        let imap_key = format!("imap-password-{}", account.name);
+        let smtp_key = format!("smtp-password-{}", account.name);
+        let password = get_keyring_password(&imap_key)
+            .or_else(|_| get_keyring_password(&smtp_key))?;
 
         // Host falls back to SMTP host if empty
-        let host = if config.imap.host.is_empty() {
-            config.smtp.host.clone()
+        let host = if account.imap.host.is_empty() {
+            account.smtp.host.clone()
         } else {
-            config.imap.host.clone()
+            account.imap.host.clone()
         };
 
         Ok(Self {
             host,
-            port: config.imap.port,
+            port: account.imap.port,
             username,
             password,
+            accept_invalid_certs: account.imap.accept_invalid_certs,
         })
     }
 }
@@ -266,20 +286,20 @@ pub fn resolve_dir(dir: &Option<String>) -> Option<PathBuf> {
     dir.as_ref().map(|s| expand_path(s, None))
 }
 
-/// Resolve the root directory from config
-pub fn resolve_root_dir(config: &GlobalConfig) -> Option<PathBuf> {
-    resolve_dir(&config.directories.root)
+/// Resolve the root directory from an account config
+pub fn resolve_root_dir(account: &AccountConfig) -> Option<PathBuf> {
+    resolve_dir(&account.directories.root)
 }
 
 /// Resolve a MailboxMapping's local path, relative to root if not absolute
-pub fn resolve_mailbox_local_path(config: &GlobalConfig, mapping: &MailboxMapping) -> PathBuf {
-    let root = resolve_root_dir(config);
+pub fn resolve_mailbox_local_path(account: &AccountConfig, mapping: &MailboxMapping) -> PathBuf {
+    let root = resolve_root_dir(account);
     expand_path(&mapping.local, root.as_deref())
 }
 
 /// Resolve the sent mailbox server name from config
-pub fn resolve_sent_mailbox(config: &GlobalConfig) -> String {
-    config
+pub fn resolve_sent_mailbox(account: &AccountConfig) -> String {
+    account
         .mailboxes
         .sent
         .as_ref()
@@ -288,31 +308,31 @@ pub fn resolve_sent_mailbox(config: &GlobalConfig) -> String {
 }
 
 /// Resolve the drafts directory from config (relative to root or absolute)
-pub fn resolve_drafts_dir_from_config(config: &GlobalConfig) -> Option<PathBuf> {
-    let root = resolve_root_dir(config);
-    config.directories.drafts.as_ref().map(|s| expand_path(s, root.as_deref()))
+pub fn resolve_drafts_dir_from_config(account: &AccountConfig) -> Option<PathBuf> {
+    let root = resolve_root_dir(account);
+    account.directories.drafts.as_ref().map(|s| expand_path(s, root.as_deref()))
 }
 
 /// Find a mailbox mapping by server name (case-insensitive match against configured mailboxes)
-fn find_mailbox_mapping<'a>(config: &'a GlobalConfig, mailbox: &str) -> Option<&'a MailboxMapping> {
+fn find_mailbox_mapping<'a>(account: &'a AccountConfig, mailbox: &str) -> Option<&'a MailboxMapping> {
     // Check the three special-role mailboxes
-    if let Some(ref m) = config.mailboxes.inbox {
+    if let Some(ref m) = account.mailboxes.inbox {
         if m.server.eq_ignore_ascii_case(mailbox) || mailbox.eq_ignore_ascii_case("inbox") {
             return Some(m);
         }
     }
-    if let Some(ref m) = config.mailboxes.archive {
+    if let Some(ref m) = account.mailboxes.archive {
         if m.server.eq_ignore_ascii_case(mailbox) || mailbox.eq_ignore_ascii_case("archive") {
             return Some(m);
         }
     }
-    if let Some(ref m) = config.mailboxes.sent {
+    if let Some(ref m) = account.mailboxes.sent {
         if m.server.eq_ignore_ascii_case(mailbox) || mailbox.eq_ignore_ascii_case("sent") {
             return Some(m);
         }
     }
     // Check extra mailboxes
-    if let Some(ref extras) = config.mailboxes.extra {
+    if let Some(ref extras) = account.mailboxes.extra {
         for m in extras {
             if m.server.eq_ignore_ascii_case(mailbox) {
                 return Some(m);
@@ -323,31 +343,31 @@ fn find_mailbox_mapping<'a>(config: &'a GlobalConfig, mailbox: &str) -> Option<&
 }
 
 /// Resolve a mailbox name to its local directory from the config
-pub fn resolve_mailbox_dir(config: &GlobalConfig, mailbox: &str) -> Result<PathBuf> {
-    let mapping = find_mailbox_mapping(config, mailbox).with_context(|| {
+pub fn resolve_mailbox_dir(account: &AccountConfig, mailbox: &str) -> Result<PathBuf> {
+    let mapping = find_mailbox_mapping(account, mailbox).with_context(|| {
         format!(
             "No mailbox configured for '{}'. Check [mailboxes] in {}",
             mailbox,
             config_path().display()
         )
     })?;
-    Ok(resolve_mailbox_local_path(config, mapping))
+    Ok(resolve_mailbox_local_path(account, mapping))
 }
 
 /// Return all configured mailboxes: (role_or_server_name, mapping)
 /// Roles: "inbox", "archive", "sent", plus extra server names.
-pub fn all_configured_mailboxes(config: &GlobalConfig) -> Vec<(String, &MailboxMapping)> {
+pub fn all_configured_mailboxes(account: &AccountConfig) -> Vec<(String, &MailboxMapping)> {
     let mut result = Vec::new();
-    if let Some(ref m) = config.mailboxes.inbox {
+    if let Some(ref m) = account.mailboxes.inbox {
         result.push(("inbox".to_string(), m));
     }
-    if let Some(ref m) = config.mailboxes.archive {
+    if let Some(ref m) = account.mailboxes.archive {
         result.push(("archive".to_string(), m));
     }
-    if let Some(ref m) = config.mailboxes.sent {
+    if let Some(ref m) = account.mailboxes.sent {
         result.push(("sent".to_string(), m));
     }
-    if let Some(ref extras) = config.mailboxes.extra {
+    if let Some(ref extras) = account.mailboxes.extra {
         for m in extras {
             result.push((m.server.clone(), m));
         }
@@ -357,12 +377,25 @@ pub fn all_configured_mailboxes(config: &GlobalConfig) -> Vec<(String, &MailboxM
 
 /// Given a user-specified mailbox name (which might be a role like "inbox" or
 /// a server name like "INBOX"), return the actual IMAP server name from config.
-pub fn find_server_name_for_role(config: &GlobalConfig, name: &str) -> String {
-    if let Some(mapping) = find_mailbox_mapping(config, name) {
+pub fn find_server_name_for_role(account: &AccountConfig, name: &str) -> String {
+    if let Some(mapping) = find_mailbox_mapping(account, name) {
         mapping.server.clone()
     } else {
         name.to_string()
     }
+}
+
+/// Find the AccountConfig whose default_from matches the given from address.
+pub fn find_account_by_from<'a>(config: &'a GlobalConfig, from: &str) -> Option<&'a AccountConfig> {
+    let lower = from.to_lowercase();
+    config.accounts.iter().find(|a| {
+        lower.contains(&a.default_from.to_lowercase())
+    })
+}
+
+/// Return the first (default) account, or None if no accounts are configured.
+pub fn default_account(config: &GlobalConfig) -> Option<&AccountConfig> {
+    config.accounts.first()
 }
 
 /// Slugify a mailbox name for use as a local directory name.
@@ -453,12 +486,12 @@ fn log_base_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Load signature HTML content
-pub fn load_signature(config: &GlobalConfig, signature_name: Option<&str>) -> Option<String> {
+pub fn load_signature(account: &AccountConfig, signature_name: Option<&str>) -> Option<String> {
     let sig_name = signature_name
         .map(|s| s.to_string())
-        .or_else(|| config.signatures.default.clone())?;
+        .or_else(|| account.signatures.default.clone())?;
 
-    let entry = config.signatures.entries.get(&sig_name)?;
+    let entry = account.signatures.entries.get(&sig_name)?;
 
     // Expand ~ in signature path
     let expanded = shellexpand::tilde(&entry.path).into_owned();

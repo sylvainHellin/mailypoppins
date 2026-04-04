@@ -19,7 +19,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use app::{Action, App, BgResult, MailboxKind, StatusLevel};
 
 use crate::config::{
-    all_configured_mailboxes, resolve_mailbox_local_path, resolve_sent_mailbox, ImapConfig,
+    all_configured_mailboxes, resolve_mailbox_local_path, resolve_sent_mailbox,
+    AccountConfig, ImapConfig,
 };
 use crate::draft::{
     create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, parse_email_draft,
@@ -36,8 +37,8 @@ use crate::sync::mailbox_status;
 use crate::types::EmailStatus;
 
 enum WatchEvent {
-    Changed,
-    Error(String),
+    Changed { account_index: usize },
+    Error { account_index: usize, message: String },
 }
 
 /// Entry point for the TUI. Call this when `email` is invoked with no arguments.
@@ -56,13 +57,22 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     app.terminal_width = size.width;
     app.terminal_height = size.height;
 
-    // Spawn background mail watcher thread
+    // Spawn one watcher thread per account that has IMAP config
     let (watch_tx, watch_rx) = mpsc::channel::<WatchEvent>();
-    if let Some(watcher_imap) = app.imap_config.clone() {
-        app.watcher_active = true;
-        std::thread::spawn(move || {
-            watcher_loop(watch_tx, watcher_imap);
-        });
+    for (i, acct) in app.accounts.iter_mut().enumerate() {
+        if let Some(ref imap_cfg) = acct.imap_config {
+            acct.watcher_active = true;
+            let tx = watch_tx.clone();
+            let imap_clone = imap_cfg.clone();
+            let acct_idx = i;
+            std::thread::spawn(move || {
+                watcher_loop(tx, imap_clone, acct_idx);
+            });
+        }
+    }
+    // Sync watcher_active for active account
+    if let Some(acct) = app.accounts.first() {
+        app.watcher_active = acct.watcher_active;
     }
 
     // Background task results channel
@@ -85,18 +95,30 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
 
         // Check background watcher
         match watch_rx.try_recv() {
-            Ok(WatchEvent::Changed) => {
-                let mut current_msg = Some(app::Message::MailboxChanged);
+            Ok(WatchEvent::Changed { account_index }) => {
+                let mut current_msg = Some(app::Message::MailboxChanged { account_index });
                 while let Some(m) = current_msg {
                     current_msg = app.update(m);
                 }
             }
-            Ok(WatchEvent::Error(e)) => {
-                app.set_status(format!("Watch: {e}"));
-                app.watcher_active = false;
+            Ok(WatchEvent::Error { account_index, message }) => {
+                let acct_name = app.accounts.get(account_index)
+                    .map(|a| a.account_config.name.clone())
+                    .unwrap_or_default();
+                app.set_status(format!("Watch ({}): {}", acct_name, message));
+                if let Some(acct) = app.accounts.get_mut(account_index) {
+                    acct.watcher_active = false;
+                }
+                if account_index == app.active_account {
+                    app.watcher_active = false;
+                }
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
+                // All watcher threads have exited
+                for acct in &mut app.accounts {
+                    acct.watcher_active = false;
+                }
                 app.watcher_active = false;
             }
         }
@@ -188,17 +210,17 @@ fn handle_action(
 
         Action::Send => {
             if let Some(path) = app.selected_email_path() {
-                let smtp_config = match app.smtp_config.clone() {
+                // Resolve account from draft's from: field
+                let (acct_idx, smtp_config, imap_config, account_config, signature, sent_dir) =
+                    resolve_send_account(app, &path);
+                let smtp_config = match smtp_config {
                     Some(c) => c,
                     None => {
                         app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
-                let global_config = app.global_config.clone();
-                let imap_config = app.imap_config.clone();
-                let signature = app.signature_content.clone();
-                let sent_dir = app.sent_dir.clone();
+                let email_settings = app.global_config.email.clone();
 
                 app.bg_count += 1;
                 app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
@@ -210,7 +232,7 @@ fn handle_action(
                         validate_draft(&draft)?;
 
                         let (send_result, raw_message, message_id) = rt.block_on(
-                            send_email(&draft, &smtp_config, &global_config, signature.as_deref()),
+                            send_email(&draft, &smtp_config, &email_settings, signature.as_deref()),
                         )?;
 
                         if send_result.all_succeeded() || send_result.any_succeeded() {
@@ -220,7 +242,7 @@ fn handle_action(
                                 message_id.as_deref(),
                             )?;
                             if let Some(ref imap_cfg) = imap_config {
-                                let sent_mailbox = resolve_sent_mailbox(&global_config);
+                                let sent_mailbox = resolve_sent_mailbox(&account_config);
                                 let _ = rt.block_on(
                                     append_to_sent_folder(imap_cfg, &raw_message, &sent_mailbox),
                                 );
@@ -244,7 +266,7 @@ fn handle_action(
                             )
                         }
                     })();
-                    let _ = tx.send(BgResult::Send {
+                    let _ = tx.send(BgResult::Send { account_index: acct_idx,
                         result: result.map_err(|e| e.to_string()),
                     });
                 });
@@ -260,13 +282,15 @@ fn handle_action(
                         return Ok(());
                     }
                 };
-                let global_config = app.global_config.clone();
+                let email_settings = app.global_config.email.clone();
+                let account_config = app.account_config.clone();
                 let imap_config = app.imap_config.clone();
                 let signature = app.signature_content.clone();
                 let sent_dir = app.sent_dir.clone();
 
                 app.bg_count += 1;
                 app.set_status_level("Sending approved...".to_string(), StatusLevel::Progress);
+                let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -283,7 +307,7 @@ fn handle_action(
                             match rt.block_on(send_email(
                                 draft,
                                 &smtp_config,
-                                &global_config,
+                                &email_settings,
                                 signature.as_deref(),
                             )) {
                                 Ok((send_result, raw_message, message_id)) => {
@@ -295,7 +319,7 @@ fn handle_action(
                                         );
                                         if let Some(ref imap_cfg) = imap_config {
                                             let sent_mailbox =
-                                                resolve_sent_mailbox(&global_config);
+                                                resolve_sent_mailbox(&account_config);
                                             let _ = rt.block_on(append_to_sent_folder(
                                                 imap_cfg,
                                                 &raw_message,
@@ -313,7 +337,7 @@ fn handle_action(
 
                         Ok(format!("{} sent, {} failed", sent, failed))
                     })();
-                    let _ = tx.send(BgResult::SendApproved {
+                    let _ = tx.send(BgResult::SendApproved { account_index: acct_idx,
                         result: result.map_err(|e| e.to_string()),
                     });
                 });
@@ -387,6 +411,7 @@ fn handle_action(
                 app.bg_mutations += 1;
                 app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
                 terminal.draw(|frame| ui::view(app, frame))?;
+                let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -398,7 +423,7 @@ fn handle_action(
                     ))
                     .map(|()| String::new())
                     .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Archive { result });
+                    let _ = tx.send(BgResult::Archive { account_index: acct_idx, result });
                 });
             }
         }
@@ -418,13 +443,14 @@ fn handle_action(
                 app.bg_mutations += 1;
                 app.set_status_level("Deleting...".to_string(), StatusLevel::Progress);
                 terminal.draw(|frame| ui::view(app, frame))?;
+                let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let result = rt.block_on(delete_email_locally(&imap_config, &path))
                         .map(|()| String::new())
                         .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Delete { result });
+                    let _ = tx.send(BgResult::Delete { account_index: acct_idx, result });
                 });
             }
         }
@@ -455,6 +481,7 @@ fn handle_action(
             app.set_status_level(format!("Archiving {} emails...", count), StatusLevel::Progress);
             terminal.draw(|frame| ui::view(app, frame))?;
 
+            let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -466,6 +493,7 @@ fn handle_action(
                 ));
                 for (_path, result) in results {
                     let _ = tx.send(BgResult::Archive {
+                        account_index: acct_idx,
                         result: result.map(|()| String::new()).map_err(|e| e.to_string()),
                     });
                 }
@@ -490,12 +518,14 @@ fn handle_action(
             app.set_status_level(format!("Deleting {} emails...", count), StatusLevel::Progress);
             terminal.draw(|frame| ui::view(app, frame))?;
 
+            let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let results = rt.block_on(batch_delete_emails_locally(&imap_config, &paths));
                 for (_path, result) in results {
                     let _ = tx.send(BgResult::Delete {
+                        account_index: acct_idx,
                         result: result.map(|()| String::new()).map_err(|e| e.to_string()),
                     });
                 }
@@ -552,17 +582,18 @@ fn handle_action(
                     return Ok(());
                 }
             };
-            let global_config = app.global_config.clone();
+            let account_config = app.account_config.clone();
 
             app.bg_count += 1;
             app.set_status_level("Fetching...".to_string(), StatusLevel::Progress);
+            let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result =
-                    rt.block_on(lib_do_sync(&global_config, &imap_config, 10, false))
+                    rt.block_on(lib_do_sync(&account_config, &imap_config, 10, false))
                         .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Fetch { result });
+                let _ = tx.send(BgResult::Fetch { account_index: acct_idx, result });
             });
         }
 
@@ -613,17 +644,18 @@ fn handle_action(
                     return Ok(());
                 }
             };
-            let global_config = app.global_config.clone();
+            let account_config = app.account_config.clone();
 
             app.bg_count += 1;
             app.set_status_level("Syncing...".to_string(), StatusLevel::Progress);
+            let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result = rt
-                    .block_on(lib_do_sync(&global_config, &imap_config, 50, true))
+                    .block_on(lib_do_sync(&account_config, &imap_config, 50, true))
                     .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Sync { result });
+                let _ = tx.send(BgResult::Sync { account_index: acct_idx, result });
             });
         }
     }
@@ -631,24 +663,41 @@ fn handle_action(
     Ok(())
 }
 
+/// Decrement bg_mutations on the correct account.
+fn decrement_mutations(app: &mut App, account_index: usize) {
+    if account_index == app.active_account {
+        app.bg_mutations = app.bg_mutations.saturating_sub(1);
+    } else if let Some(acct) = app.accounts.get_mut(account_index) {
+        acct.bg_mutations = acct.bg_mutations.saturating_sub(1);
+    }
+}
+
 fn handle_bg_result(app: &mut App, result: BgResult) {
     app.bg_count = app.bg_count.saturating_sub(1);
 
     match result {
-        BgResult::Archive { result } => {
-            app.bg_mutations = app.bg_mutations.saturating_sub(1);
+        BgResult::Archive { account_index, result } => {
+            decrement_mutations(app, account_index);
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Email archived".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
-                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
-                        app.invalidate_cache_idx(idx);
+                    if account_index == app.active_account {
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
                     }
                 }
                 Err(e) => {
                     app.push_status(format!("Archive failed: {e}"), StatusLevel::Error);
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
+                    if account_index == app.active_account {
+                        app.invalidate_all_caches();
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
                     app.set_persistent_error(format!(
                         "Archive failed: {e}\nEmail restored to inbox. Sync (F) to fix?"
                     ));
@@ -656,8 +705,8 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Delete { result } => {
-            app.bg_mutations = app.bg_mutations.saturating_sub(1);
+        BgResult::Delete { account_index, result } => {
+            decrement_mutations(app, account_index);
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Email deleted".into() } else { msg };
@@ -665,8 +714,12 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
                 }
                 Err(e) => {
                     app.push_status(format!("Delete failed: {e}"), StatusLevel::Error);
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
+                    if account_index == app.active_account {
+                        app.invalidate_all_caches();
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
                     app.set_persistent_error(format!(
                         "Delete failed: {e}\nEmail restored. Sync (F) to fix?"
                     ));
@@ -674,49 +727,65 @@ fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Send { result } => {
+        BgResult::Send { account_index, result } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Email sent".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
+                    if account_index == app.active_account {
+                        app.invalidate_all_caches();
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
                 }
                 Err(e) => app.set_status_level(format!("Send failed: {e}"), StatusLevel::Error),
             }
         }
 
-        BgResult::SendApproved { result } => {
+        BgResult::SendApproved { account_index, result } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Approved emails sent".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
+                    if account_index == app.active_account {
+                        app.invalidate_all_caches();
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
                 }
                 Err(e) => app.set_status_level(format!("Send-approved failed: {e}"), StatusLevel::Error),
             }
         }
 
-        BgResult::Fetch { result } => {
+        BgResult::Fetch { account_index, result } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Fetch complete".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
+                    if account_index == app.active_account {
+                        app.invalidate_all_caches();
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
                 }
                 Err(e) => app.set_status_level(format!("Fetch failed: {e}"), StatusLevel::Error),
             }
         }
 
-        BgResult::Sync { result } => {
+        BgResult::Sync { account_index, result } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Sync complete".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
-                    app.invalidate_all_caches();
-                    app.reload_current_mailbox();
+                    if account_index == app.active_account {
+                        app.invalidate_all_caches();
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
                 }
                 Err(e) => app.set_status_level(format!("Sync failed: {e}"), StatusLevel::Error),
             }
@@ -910,6 +979,7 @@ fn handle_search_result_action(
                 app.bg_count += 1;
                 app.bg_mutations += 1;
                 app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
+                let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -922,7 +992,7 @@ fn handle_search_result_action(
                         ))
                         .map(|()| String::new())
                         .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Archive { result });
+                    let _ = tx.send(BgResult::Archive { account_index: acct_idx, result });
                 });
             } else {
                 app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
@@ -1086,28 +1156,37 @@ fn fetched_to_email_entry(fetched: &FetchedEmail) -> app::EmailEntry {
     }
 }
 
-fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig) {
+fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig, account_index: usize) {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(_) => {
-            let _ = tx.send(WatchEvent::Error("Failed to create async runtime".into()));
+            let _ = tx.send(WatchEvent::Error {
+                account_index,
+                message: "Failed to create async runtime".into(),
+            });
             return;
         }
     };
     loop {
         match rt.block_on(imap_watch(&imap_config, "INBOX", Some(300))) {
             Ok(0) => {
-                if tx.send(WatchEvent::Changed).is_err() {
+                if tx.send(WatchEvent::Changed { account_index }).is_err() {
                     break;
                 }
             }
             Ok(2) => continue, // timeout, re-idle
             Ok(_) => {
-                let _ = tx.send(WatchEvent::Error("Watch connection lost".into()));
+                let _ = tx.send(WatchEvent::Error {
+                    account_index,
+                    message: "Watch connection lost".into(),
+                });
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
             Err(_) => {
-                let _ = tx.send(WatchEvent::Error("Watch connection lost".into()));
+                let _ = tx.send(WatchEvent::Error {
+                    account_index,
+                    message: "Watch connection lost".into(),
+                });
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
         }
@@ -1119,17 +1198,17 @@ fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig) {
 // ---------------------------------------------------------------------------
 
 async fn lib_do_sync(
-    global_config: &crate::config::GlobalConfig,
+    account_config: &AccountConfig,
     imap_config: &ImapConfig,
     limit: usize,
     reconcile: bool,
 ) -> anyhow::Result<String> {
-    let targets: Vec<SyncTarget> = all_configured_mailboxes(global_config)
+    let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
         .iter()
         .map(|(role, mapping)| SyncTarget {
             role: role.clone(),
             server_name: mapping.server.clone(),
-            local_dir: resolve_mailbox_local_path(global_config, mapping),
+            local_dir: resolve_mailbox_local_path(account_config, mapping),
             status: mailbox_status(role).to_string(),
         })
         .collect();
@@ -1148,6 +1227,51 @@ async fn lib_do_sync(
         }
     }
     Ok(msg)
+}
+
+// ---------------------------------------------------------------------------
+// Account resolution for Send
+// ---------------------------------------------------------------------------
+
+/// Resolve which account to use for sending based on the draft's `from:` field.
+/// Falls back to the active account if no match is found.
+fn resolve_send_account(
+    app: &App,
+    draft_path: &Path,
+) -> (
+    usize,
+    Option<crate::config::SmtpConfig>,
+    Option<crate::config::ImapConfig>,
+    AccountConfig,
+    Option<String>,
+    Option<PathBuf>,
+) {
+    // Try to read the from: field from the draft
+    if let Ok(draft) = parse_email_draft(draft_path) {
+        let from = draft.frontmatter.from.unwrap_or_default().to_lowercase();
+        for (i, acct) in app.accounts.iter().enumerate() {
+            if from.contains(&acct.account_config.default_from.to_lowercase()) {
+                return (
+                    i,
+                    acct.smtp_config.clone(),
+                    acct.imap_config.clone(),
+                    acct.account_config.clone(),
+                    acct.signature_content.clone(),
+                    acct.sent_dir.clone(),
+                );
+            }
+        }
+    }
+    // Fallback to active account
+    let acct = &app.accounts[app.active_account];
+    (
+        app.active_account,
+        acct.smtp_config.clone(),
+        acct.imap_config.clone(),
+        acct.account_config.clone(),
+        acct.signature_content.clone(),
+        acct.sent_dir.clone(),
+    )
 }
 
 // ---------------------------------------------------------------------------

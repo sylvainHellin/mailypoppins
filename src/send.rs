@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::config::{GlobalConfig, SmtpConfig};
+use crate::config::{EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ impl SendResult {
 
 pub fn markdown_to_html(
     markdown: &str,
-    config: &GlobalConfig,
+    config: &EmailSettings,
     signature: Option<&str>,
     quoted_html: Option<&str>,
 ) -> String {
@@ -139,8 +139,8 @@ blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; 
 {body}
 </body>
 </html>"#,
-        font_family = config.email.font_family,
-        font_size = config.email.font_size,
+        font_family = config.font_family,
+        font_size = config.font_size,
         body = body,
     )
 }
@@ -148,7 +148,7 @@ blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; 
 pub async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
-    email_config: &GlobalConfig,
+    email_config: &EmailSettings,
     signature: Option<&str>,
 ) -> Result<(SendResult, Vec<u8>, Option<String>)> {
     // Check status
@@ -330,11 +330,27 @@ pub async fn send_email(
     // Create SMTP transport
     let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
 
-    let mailer: AsyncSmtpTransport<Tokio1Executor> =
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?
-            .port(smtp_config.port)
-            .credentials(creds)
-            .build();
+    let mailer: AsyncSmtpTransport<Tokio1Executor> = if smtp_config.port == 465 {
+        // Implicit TLS (SMTPS)
+        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_config.host)?;
+        if smtp_config.accept_invalid_certs {
+            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(true)
+                .build()?;
+            transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
+        }
+        transport.port(smtp_config.port).credentials(creds).build()
+    } else {
+        // STARTTLS
+        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?;
+        if smtp_config.accept_invalid_certs {
+            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(true)
+                .build()?;
+            transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
+        }
+        transport.port(smtp_config.port).credentials(creds).build()
+    };
 
     // Send to each recipient individually
     let mut results = Vec::with_capacity(recipients.len());

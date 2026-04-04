@@ -189,15 +189,100 @@ fn resolve_date(
 // App types and state
 // ---------------------------------------------------------------------------
 
+/// Per-account TUI state (config, caches, cursor positions).
+pub struct AccountState {
+    pub account_config: crate::config::AccountConfig,
+    pub imap_config: Option<crate::config::ImapConfig>,
+    pub smtp_config: Option<crate::config::SmtpConfig>,
+    pub signature_content: Option<String>,
+    pub sent_dir: Option<PathBuf>,
+    pub archive_dir: Option<PathBuf>,
+    pub archive_server_name: String,
+    pub drafts_dir: Option<PathBuf>,
+    pub inbox_dir: Option<PathBuf>,
+    pub mailboxes: Vec<MailboxInfo>,
+    pub mailbox_counts: Vec<usize>,
+    pub email_cache: Vec<Option<Vec<EmailEntry>>>,
+    pub sidebar_index: usize,
+    pub active_mailbox: usize,
+    pub list_index: usize,
+    pub headers_scroll: u16,
+    pub preview_scroll: u16,
+    pub selection: HashSet<PathBuf>,
+    pub search_query: String,
+    pub search_includes_body: bool,
+    pub bg_mutations: usize,
+    pub watcher_active: bool,
+    pub has_unseen: bool,
+}
+
+impl AccountState {
+    pub fn new(
+        account_config: crate::config::AccountConfig,
+        email_settings: &crate::config::EmailSettings,
+    ) -> Self {
+        let imap_config = crate::config::ImapConfig::load(&account_config).ok();
+        let smtp_config = crate::config::SmtpConfig::load(&account_config).ok();
+
+        let signature_content = if email_settings.include_signature {
+            crate::config::load_signature(&account_config, None)
+        } else {
+            None
+        };
+
+        let sent_dir = account_config.mailboxes.sent.as_ref()
+            .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
+        let archive_dir = account_config.mailboxes.archive.as_ref()
+            .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
+        let archive_server_name = account_config.mailboxes.archive.as_ref()
+            .map(|m| m.server.as_str())
+            .unwrap_or("Archive")
+            .to_string();
+        let drafts_dir = crate::config::resolve_drafts_dir_from_config(&account_config);
+        let inbox_dir = account_config.mailboxes.inbox.as_ref()
+            .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
+
+        let mailboxes = build_mailboxes(&account_config);
+        let n = mailboxes.len();
+        let counts = count_all_emails(&mailboxes);
+
+        Self {
+            account_config,
+            imap_config,
+            smtp_config,
+            signature_content,
+            sent_dir,
+            archive_dir,
+            archive_server_name,
+            drafts_dir,
+            inbox_dir,
+            mailboxes,
+            mailbox_counts: counts,
+            email_cache: vec![None; n],
+            sidebar_index: 0,
+            active_mailbox: 0,
+            list_index: 0,
+            headers_scroll: 0,
+            preview_scroll: 0,
+            selection: HashSet::new(),
+            search_query: String::new(),
+            search_includes_body: false,
+            bg_mutations: 0,
+            watcher_active: false,
+            has_unseen: false,
+        }
+    }
+}
+
 /// Result from a background CLI operation.
 #[derive(Debug)]
 pub enum BgResult {
-    Fetch { result: Result<String, String> },
-    Sync { result: Result<String, String> },
-    Send { result: Result<String, String> },
-    SendApproved { result: Result<String, String> },
-    Archive { result: Result<String, String> },
-    Delete { result: Result<String, String> },
+    Fetch { account_index: usize, result: Result<String, String> },
+    Sync { account_index: usize, result: Result<String, String> },
+    Send { account_index: usize, result: Result<String, String> },
+    SendApproved { account_index: usize, result: Result<String, String> },
+    Archive { account_index: usize, result: Result<String, String> },
+    Delete { account_index: usize, result: Result<String, String> },
     ServerSearch { result: Result<Vec<SearchHit>, String> },
 }
 
@@ -253,8 +338,8 @@ pub enum Message {
     Key(KeyEvent),
     Resize(u16, u16),
     Quit,
-    /// Background watcher detected new mail.
-    MailboxChanged,
+    /// Background watcher detected new mail for a given account.
+    MailboxChanged { account_index: usize },
 }
 
 /// Behavioral kind of a mailbox (used for action differentiation).
@@ -356,33 +441,47 @@ pub struct App {
     pub terminal_width: u16,
     pub terminal_height: u16,
 
+    // Multi-account
+    pub accounts: Vec<AccountState>,
+    pub active_account: usize,
+
+    // --- Fields proxied from active account (kept in sync) ---
     pub mailboxes: Vec<MailboxInfo>,
     pub sidebar_index: usize,
     pub active_mailbox: usize,
     pub mailbox_counts: Vec<usize>,
-
     pub emails: Vec<EmailEntry>,
     pub list_index: usize,
     pub g_pending: bool,
     pub headers_scroll: u16,
     pub preview_scroll: u16,
     pub selection: HashSet<PathBuf>,
-    email_cache: Vec<Option<Vec<EmailEntry>>>,
+    pub email_cache: Vec<Option<Vec<EmailEntry>>>,
+    pub search_query: String,
+    pub search_includes_body: bool,
+    pub watcher_active: bool,
+    pub bg_mutations: usize,
+    pub imap_config: Option<crate::config::ImapConfig>,
+    pub smtp_config: Option<crate::config::SmtpConfig>,
+    pub signature_content: Option<String>,
+    pub sent_dir: Option<PathBuf>,
+    pub archive_dir: Option<PathBuf>,
+    pub archive_server_name: String,
+    pub drafts_dir: Option<PathBuf>,
+    pub inbox_dir: Option<PathBuf>,
+    pub account_config: crate::config::AccountConfig,
 
+    // --- Global state ---
     pub pending_action: Option<Action>,
     pub confirm_dialog: Option<ConfirmDialog>,
     pub status_message: Option<String>,
     pub status_ticks: u8,
-    pub search_query: String,
-    pub search_includes_body: bool,
     pub show_help: bool,
     pub help_scroll: u16,
     pub help_filter: String,
     pub help_filter_active: bool,
-    pub watcher_active: bool,
 
     pub bg_count: usize,
-    pub bg_mutations: usize,
     pub bg_spin_tick: usize,
     pub queued_action: Option<Action>,
     pub persistent_error: Option<PersistentError>,
@@ -405,14 +504,6 @@ pub struct App {
 
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
-    pub imap_config: Option<crate::config::ImapConfig>,
-    pub smtp_config: Option<crate::config::SmtpConfig>,
-    pub signature_content: Option<String>,
-    pub sent_dir: Option<PathBuf>,
-    pub archive_dir: Option<PathBuf>,
-    pub archive_server_name: String,
-    pub drafts_dir: Option<PathBuf>,
-    pub inbox_dir: Option<PathBuf>,
 }
 
 impl Default for App {
@@ -424,71 +515,54 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         let global_config = crate::config::load_global_config().unwrap_or_default();
-        let imap_config = crate::config::ImapConfig::load(&global_config).ok();
-        let smtp_config = crate::config::SmtpConfig::load(&global_config).ok();
 
-        let signature_content = if global_config.email.include_signature {
-            crate::config::load_signature(&global_config, None)
-        } else {
-            None
-        };
+        let accounts: Vec<AccountState> = global_config
+            .accounts
+            .iter()
+            .map(|ac| AccountState::new(ac.clone(), &global_config.email))
+            .collect();
 
-        let sent_dir = global_config.mailboxes.sent.as_ref()
-            .map(|m| crate::config::resolve_mailbox_local_path(&global_config, m));
-        let archive_dir = global_config.mailboxes.archive.as_ref()
-            .map(|m| crate::config::resolve_mailbox_local_path(&global_config, m));
-        let archive_server_name = global_config.mailboxes.archive.as_ref()
-            .map(|m| m.server.as_str())
-            .unwrap_or("Archive")
-            .to_string();
-        let drafts_dir = crate::config::resolve_drafts_dir_from_config(&global_config);
-        let inbox_dir = global_config.mailboxes.inbox.as_ref()
-            .map(|m| crate::config::resolve_mailbox_local_path(&global_config, m));
-
-        let mailboxes = build_mailboxes(&global_config);
-        let n = mailboxes.len();
-        let counts = count_all_emails(&mailboxes);
-
-        let emails = if !mailboxes.is_empty() {
-            load_emails(&mailboxes[0].dir)
-        } else {
-            Vec::new()
-        };
-
-        let mut cache: Vec<Option<Vec<EmailEntry>>> = vec![None; n];
-        if !cache.is_empty() {
-            cache[0] = Some(emails.clone());
-        }
-
-        Self {
+        let mut app = Self {
             focus: Focus::List,
             running: true,
             terminal_width: 0,
             terminal_height: 0,
-            mailboxes,
+            accounts,
+            active_account: 0,
+            // These will be populated by load_from_account
+            mailboxes: Vec::new(),
             sidebar_index: 0,
             active_mailbox: 0,
-            mailbox_counts: counts,
-            emails,
+            mailbox_counts: Vec::new(),
+            emails: Vec::new(),
             list_index: 0,
             g_pending: false,
             headers_scroll: 0,
             preview_scroll: 0,
             selection: HashSet::new(),
-            email_cache: cache,
+            email_cache: Vec::new(),
+            search_query: String::new(),
+            search_includes_body: false,
+            watcher_active: false,
+            bg_mutations: 0,
+            imap_config: None,
+            smtp_config: None,
+            signature_content: None,
+            sent_dir: None,
+            archive_dir: None,
+            archive_server_name: "Archive".to_string(),
+            drafts_dir: None,
+            inbox_dir: None,
+            account_config: crate::config::AccountConfig::default(),
             pending_action: None,
             confirm_dialog: None,
             status_message: None,
             status_ticks: 0,
-            search_query: String::new(),
-            search_includes_body: false,
             show_help: false,
             help_scroll: 0,
             help_filter: String::new(),
             help_filter_active: false,
-            watcher_active: false,
             bg_count: 0,
-            bg_mutations: 0,
             bg_spin_tick: 0,
             queued_action: None,
             persistent_error: None,
@@ -506,16 +580,71 @@ impl App {
             server_search_status: None,
             server_search_scope_label: "All".to_string(),
             global_config,
-            imap_config,
-            smtp_config,
-            signature_content,
-            sent_dir,
-            archive_dir,
-            archive_server_name,
-            drafts_dir,
-            inbox_dir,
+        };
+
+        // Load the first account's state
+        app.load_from_account(0);
+        // Load emails for the first mailbox
+        if !app.mailboxes.is_empty() {
+            let loaded = load_emails(&app.mailboxes[0].dir);
+            app.email_cache[0] = Some(loaded.clone());
+            app.emails = loaded;
+        }
+
+        app
+    }
+
+    // ---------------------------------------------------------------
+    // Account state sync
+    // ---------------------------------------------------------------
+
+    /// Save current proxy fields back into the active AccountState.
+    fn save_to_account(&mut self) {
+        if let Some(acct) = self.accounts.get_mut(self.active_account) {
+            acct.sidebar_index = self.sidebar_index;
+            acct.active_mailbox = self.active_mailbox;
+            acct.mailbox_counts = self.mailbox_counts.clone();
+            acct.list_index = self.list_index;
+            acct.headers_scroll = self.headers_scroll;
+            acct.preview_scroll = self.preview_scroll;
+            acct.selection = self.selection.clone();
+            acct.email_cache = self.email_cache.clone();
+            acct.search_query = self.search_query.clone();
+            acct.search_includes_body = self.search_includes_body;
+            acct.bg_mutations = self.bg_mutations;
+            acct.watcher_active = self.watcher_active;
         }
     }
+
+    /// Load proxy fields from an AccountState.
+    fn load_from_account(&mut self, idx: usize) {
+        if let Some(acct) = self.accounts.get(idx) {
+            self.mailboxes = acct.mailboxes.clone();
+            self.sidebar_index = acct.sidebar_index;
+            self.active_mailbox = acct.active_mailbox;
+            self.mailbox_counts = acct.mailbox_counts.clone();
+            self.list_index = acct.list_index;
+            self.headers_scroll = acct.headers_scroll;
+            self.preview_scroll = acct.preview_scroll;
+            self.selection = acct.selection.clone();
+            self.email_cache = acct.email_cache.clone();
+            self.search_query = acct.search_query.clone();
+            self.search_includes_body = acct.search_includes_body;
+            self.watcher_active = acct.watcher_active;
+            self.bg_mutations = acct.bg_mutations;
+            self.imap_config = acct.imap_config.clone();
+            self.smtp_config = acct.smtp_config.clone();
+            self.signature_content = acct.signature_content.clone();
+            self.sent_dir = acct.sent_dir.clone();
+            self.archive_dir = acct.archive_dir.clone();
+            self.archive_server_name = acct.archive_server_name.clone();
+            self.drafts_dir = acct.drafts_dir.clone();
+            self.inbox_dir = acct.inbox_dir.clone();
+            self.account_config = acct.account_config.clone();
+        }
+    }
+
+
 
     pub fn active_kind(&self) -> MailboxKind {
         self.mailboxes.get(self.active_mailbox)
@@ -538,6 +667,21 @@ impl App {
             .get(self.active_mailbox)
             .and_then(|m| m.server_name.clone())
             .unwrap_or_else(|| "INBOX".to_string())
+    }
+
+    /// Account name for display.
+    pub fn account_name(&self) -> &str {
+        &self.account_config.name
+    }
+
+    /// Find the account index whose `default_from` matches the given from address.
+    /// Falls back to `active_account` if no match.
+    pub fn account_index_by_from(&self, from: &str) -> usize {
+        let lower = from.to_lowercase();
+        self.accounts
+            .iter()
+            .position(|acct| lower.contains(&acct.account_config.default_from.to_lowercase()))
+            .unwrap_or(self.active_account)
     }
 
     /// All mailboxes that have a server name (excludes Drafts).
@@ -579,6 +723,33 @@ impl App {
         self.mailboxes.iter().position(|m| m.kind == kind)
     }
 
+    /// Switch to a different account by index.
+    pub fn switch_account(&mut self, idx: usize) {
+        if idx >= self.accounts.len() || idx == self.active_account {
+            return;
+        }
+        // Save current account state
+        self.save_to_account();
+        self.active_account = idx;
+        self.accounts[idx].has_unseen = false;
+        // Load new account state
+        self.load_from_account(idx);
+        // Ensure emails are loaded from cache or disk
+        let am = self.active_mailbox;
+        if let Some(cached) = self.email_cache.get(am).and_then(|c| c.as_ref()) {
+            self.emails = cached.clone();
+        } else if let Some(mb) = self.mailboxes.get(am) {
+            let loaded = load_emails(&mb.dir);
+            if let Some(slot) = self.email_cache.get_mut(am) {
+                *slot = Some(loaded.clone());
+            }
+            self.emails = loaded;
+        } else {
+            self.emails = Vec::new();
+        }
+        self.focus = Focus::List;
+    }
+
     pub fn update(&mut self, msg: Message) -> Option<Message> {
         match msg {
             Message::Key(key) => self.handle_key(key),
@@ -587,8 +758,12 @@ impl App {
                 self.terminal_height = h;
                 None
             }
-            Message::MailboxChanged => {
-                self.pending_action = Some(Action::Fetch);
+            Message::MailboxChanged { account_index } => {
+                if account_index == self.active_account {
+                    self.pending_action = Some(Action::Fetch);
+                } else if let Some(acct) = self.accounts.get_mut(account_index) {
+                    acct.has_unseen = true;
+                }
                 None
             }
             Message::Quit => {
@@ -645,6 +820,7 @@ impl App {
         if self.emails.is_empty() {
             return None;
         }
+        
         let path = self.emails[self.list_index].path.clone();
         self.emails.remove(self.list_index);
 
@@ -677,6 +853,7 @@ impl App {
 
         self.emails.retain(|e| !paths.contains(&e.path));
 
+        
         if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
             cached.retain(|e| !paths.contains(&e.path));
         }
@@ -707,24 +884,47 @@ impl App {
         }
     }
 
+    /// Invalidate a cache slot on a specific account (for BgResult routing).
+    pub fn invalidate_cache_idx_on(&mut self, account_index: usize, mailbox_idx: usize) {
+        if let Some(acct) = self.accounts.get_mut(account_index) {
+            if let Some(slot) = acct.email_cache.get_mut(mailbox_idx) {
+                *slot = None;
+            }
+        }
+    }
+
     pub fn invalidate_all_caches(&mut self) {
         for slot in &mut self.email_cache {
             *slot = None;
         }
     }
 
+    /// Invalidate all caches on a specific account.
+    pub fn invalidate_all_caches_on(&mut self, account_index: usize) {
+        if let Some(acct) = self.accounts.get_mut(account_index) {
+            for slot in &mut acct.email_cache {
+                *slot = None;
+            }
+        }
+    }
+
     pub fn reload_current_mailbox(&mut self) {
-        self.invalidate_cache_idx(self.active_mailbox);
-        self.switch_mailbox(self.active_mailbox);
+        let am = self.active_mailbox;
+        self.invalidate_cache_idx(am);
+        self.switch_mailbox(am);
+        
         if !self.emails.is_empty() {
             self.list_index = self.list_index.min(self.emails.len() - 1);
         } else {
             self.list_index = 0;
         }
-        self.mailbox_counts = count_all_emails(&self.mailboxes);
+        let mailboxes = &self.mailboxes;
+        let counts = count_all_emails(mailboxes);
+        self.mailbox_counts = counts;
     }
 
     fn switch_mailbox(&mut self, idx: usize) {
+        
         let changing = self.active_mailbox != idx;
         self.active_mailbox = idx;
         if changing {
@@ -737,6 +937,7 @@ impl App {
             self.emails = cached.clone();
         } else if let Some(mb) = self.mailboxes.get(idx) {
             let loaded = load_emails(&mb.dir);
+            
             if let Some(slot) = self.email_cache.get_mut(idx) {
                 *slot = Some(loaded.clone());
             }
@@ -745,6 +946,7 @@ impl App {
             self.emails = Vec::new();
         }
 
+        
         if let Some(count) = self.mailbox_counts.get_mut(idx) {
             *count = self.emails.len();
         }
@@ -776,6 +978,27 @@ impl App {
 
         if self.focus == Focus::Search {
             return self.handle_search_key(key);
+        }
+
+        // Account switching (only when >1 account)
+        if self.accounts.len() > 1 {
+            if key.code == KeyCode::Char('`') {
+                self.g_pending = false;
+                let next = (self.active_account + 1) % self.accounts.len();
+                self.switch_account(next);
+                return None;
+            }
+            // Ctrl+1 through Ctrl+9 for direct account jump
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.accounts.len() {
+                        self.g_pending = false;
+                        self.switch_account(idx);
+                        return None;
+                    }
+                }
+            }
         }
 
         match key.code {
@@ -1556,7 +1779,7 @@ fn kind_to_status(kind: MailboxKind) -> String {
     }
 }
 
-fn build_mailboxes(config: &crate::config::GlobalConfig) -> Vec<MailboxInfo> {
+pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo> {
     let root = crate::config::resolve_root_dir(config)
         .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/notes/email").into_owned()));
 

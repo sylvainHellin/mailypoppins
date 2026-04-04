@@ -1,11 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 use async_imap::extensions::idle::IdleResponse;
+use futures::io::{AsyncRead, AsyncWrite};
 use futures::TryStreamExt;
 use gray_matter::{engine::YAML, Matter};
 use log::{info, warn};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 
 use crate::config::ImapConfig;
 use crate::parse::{
@@ -15,7 +20,89 @@ use crate::parse::{
 use crate::sync::reconcile_local_files;
 use crate::types::InboxFrontmatter;
 
-pub type ImapSession = async_imap::Session<async_native_tls::TlsStream<async_std::net::TcpStream>>;
+pub type ImapSession = async_imap::Session<ImapStream>;
+
+// ---------------------------------------------------------------------------
+// Stream wrapper for STARTTLS support
+// ---------------------------------------------------------------------------
+
+/// A wrapper around a TLS stream that optionally injects a fake IMAP greeting.
+///
+/// After a STARTTLS upgrade the server does *not* resend a greeting, but
+/// `async_imap::Client` expects to read one before sending commands.
+/// For implicit-TLS connections the prefix is empty and all reads pass
+/// straight through to the inner stream.
+pub struct ImapStream {
+    prefix: Vec<u8>,
+    prefix_pos: usize,
+    inner: async_native_tls::TlsStream<async_std::net::TcpStream>,
+}
+
+impl ImapStream {
+    /// Passthrough -- no fake greeting (for implicit TLS on port 993).
+    fn passthrough(inner: async_native_tls::TlsStream<async_std::net::TcpStream>) -> Self {
+        Self {
+            prefix: Vec::new(),
+            prefix_pos: 0,
+            inner,
+        }
+    }
+
+    /// Inject a fake IMAP greeting before the real stream data (for STARTTLS).
+    fn with_greeting(inner: async_native_tls::TlsStream<async_std::net::TcpStream>) -> Self {
+        Self {
+            prefix: b"* OK STARTTLS ready\r\n".to_vec(),
+            prefix_pos: 0,
+            inner,
+        }
+    }
+}
+
+impl AsyncRead for ImapStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        // Serve the fake greeting prefix first, then delegate to inner stream.
+        if self.prefix_pos < self.prefix.len() {
+            let remaining = &self.prefix[self.prefix_pos..];
+            let n = remaining.len().min(buf.len());
+            buf[..n].copy_from_slice(&remaining[..n]);
+            self.prefix_pos += n;
+            return Poll::Ready(Ok(n));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ImapStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
+impl Unpin for ImapStream {}
+
+impl fmt::Debug for ImapStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImapStream")
+            .field("prefix_remaining", &(self.prefix.len() - self.prefix_pos))
+            .finish()
+    }
+}
 
 /// A mailbox target for the unified sync operation.
 pub struct SyncTarget {
@@ -34,26 +121,85 @@ pub struct SyncResult {
 }
 
 pub async fn open_imap_session(imap_config: &ImapConfig) -> Result<ImapSession> {
-    let tls = async_native_tls::TlsConnector::new();
+    use futures::io::{AsyncReadExt, AsyncWriteExt};
+
+    let tls = async_native_tls::TlsConnector::new()
+        .danger_accept_invalid_certs(imap_config.accept_invalid_certs);
     let addr = format!("{}:{}", imap_config.host, imap_config.port);
 
-    let tcp_stream = async_std::net::TcpStream::connect(&addr)
+    let mut tcp_stream = async_std::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
 
-    let tls_stream = tls
-        .connect(&imap_config.host, tcp_stream)
-        .await
-        .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
+    if imap_config.port == 993 {
+        // Implicit TLS (IMAPS): TLS from the start
+        let tls_stream = tls
+            .connect(&imap_config.host, tcp_stream)
+            .await
+            .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
 
-    let client = async_imap::Client::new(tls_stream);
+        let client = async_imap::Client::new(ImapStream::passthrough(tls_stream));
 
-    let session = client
-        .login(&imap_config.username, &imap_config.password)
-        .await
-        .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+        let session = client
+            .login(&imap_config.username, &imap_config.password)
+            .await
+            .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
 
-    Ok(session)
+        Ok(session)
+    } else {
+        // STARTTLS: negotiate on plaintext, then upgrade to TLS
+        info!("IMAP STARTTLS: connecting to {} (plaintext first)", addr);
+
+        // Read server greeting
+        let mut buf = [0u8; 4096];
+        let n = tcp_stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| anyhow!("Failed to read IMAP greeting: {}", e))?;
+        let greeting = String::from_utf8_lossy(&buf[..n]);
+        if !greeting.starts_with("* ") {
+            return Err(anyhow!("Unexpected IMAP greeting: {}", greeting.trim()));
+        }
+        info!("IMAP STARTTLS: got greeting, sending STARTTLS");
+
+        // Send STARTTLS command
+        tcp_stream
+            .write_all(b"a0 STARTTLS\r\n")
+            .await
+            .map_err(|e| anyhow!("Failed to send STARTTLS: {}", e))?;
+        tcp_stream
+            .flush()
+            .await
+            .map_err(|e| anyhow!("Failed to flush STARTTLS: {}", e))?;
+
+        // Read STARTTLS response
+        let n = tcp_stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| anyhow!("Failed to read STARTTLS response: {}", e))?;
+        let response = String::from_utf8_lossy(&buf[..n]);
+        if !response.contains("OK") {
+            return Err(anyhow!("STARTTLS rejected by server: {}", response.trim()));
+        }
+        info!("IMAP STARTTLS: upgrading to TLS");
+
+        // Upgrade connection to TLS
+        let tls_stream = tls
+            .connect(&imap_config.host, tcp_stream)
+            .await
+            .map_err(|e| anyhow!("STARTTLS TLS handshake failed: {}", e))?;
+
+        // Wrap with a fake greeting so async_imap's Client can proceed
+        // (the real greeting was consumed during the plaintext phase)
+        let client = async_imap::Client::new(ImapStream::with_greeting(tls_stream));
+
+        let session = client
+            .login(&imap_config.username, &imap_config.password)
+            .await
+            .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+
+        Ok(session)
+    }
 }
 
 pub struct FetchCriteria {

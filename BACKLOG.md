@@ -19,8 +19,6 @@ Queued up, will pick from here when Now is clear.
 ## Later
 
 Ideas and longer-term improvements. Not committed to yet.
-
-- **Multiple accounts** -- support more than one SMTP/IMAP account. Requires config restructuring and per-account credential storage.
 - **Contact autocomplete** -- address book from sent/received history, autocomplete when editing draft frontmatter.
 - **Inline image rendering** -- render inline images in terminal preview (sixel, iTerm2 protocol, or Kitty graphics).
 - **CI / release pipeline** -- GitHub Actions for build, test, and binary release on tag push.

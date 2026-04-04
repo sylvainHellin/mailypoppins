@@ -35,6 +35,10 @@ struct Cli {
     /// Skip signature entirely
     #[arg(long, global = true)]
     no_signature: bool,
+
+    /// Account to use (default: first in config)
+    #[arg(short = 'A', long, global = true)]
+    account: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -192,7 +196,14 @@ enum ConfigAction {
     SetPassword {
         /// Which password to set: "smtp" or "imap"
         which: String,
+        /// Account name (required if multiple accounts)
+        #[arg(long)]
+        account: Option<String>,
     },
+    /// Add a new account to the existing config
+    AddAccount,
+    /// Migrate old single-account config to new [[accounts]] format
+    Migrate,
     /// Print config file path
     Path,
 }
@@ -230,8 +241,21 @@ async fn main() -> Result<()> {
         GlobalConfig::default()
     });
 
-    // Load SMTP config from global config + keyring
-    let smtp_config = SmtpConfig::load(&global_config).unwrap_or_else(|e| {
+    // Resolve which account to use
+    let account_config: email::config::AccountConfig = if let Some(ref name) = cli.account {
+        global_config.accounts.iter()
+            .find(|a| a.name == *name)
+            .cloned()
+            .unwrap_or_else(|| {
+                eprintln!("{} Account '{}' not found in config", "⚠".yellow(), name);
+                email::config::AccountConfig::default()
+            })
+    } else {
+        global_config.accounts.first().cloned().unwrap_or_default()
+    };
+
+    // Load SMTP config from account config + keyring
+    let smtp_config = SmtpConfig::load(&account_config).unwrap_or_else(|e| {
         eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
         eprintln!("  Some commands may not work without proper configuration.");
         SmtpConfig {
@@ -240,6 +264,7 @@ async fn main() -> Result<()> {
             username: String::new(),
             password: String::new(),
             default_from: "user@example.com".to_string(),
+            accept_invalid_certs: false,
         }
     });
 
@@ -247,22 +272,22 @@ async fn main() -> Result<()> {
     let signature_content: Option<String> = if cli.no_signature {
         None
     } else if global_config.email.include_signature {
-        load_signature(&global_config, cli.signature.as_deref())
+        load_signature(&account_config, cli.signature.as_deref())
     } else {
         // include_signature is false, but user can override with --signature
         cli.signature
             .as_deref()
-            .and_then(|s| load_signature(&global_config, Some(s)))
+            .and_then(|s| load_signature(&account_config, Some(s)))
     };
 
     // Resolve directories from config (mailbox-based)
-    let sent_dir: Option<PathBuf> = global_config.mailboxes.sent.as_ref()
-        .map(|m| resolve_mailbox_local_path(&global_config, m));
-    let drafts_dir: Option<PathBuf> = resolve_drafts_dir_from_config(&global_config);
-    let inbox_dir: Option<PathBuf> = global_config.mailboxes.inbox.as_ref()
-        .map(|m| resolve_mailbox_local_path(&global_config, m));
-    let archive_dir: Option<PathBuf> = global_config.mailboxes.archive.as_ref()
-        .map(|m| resolve_mailbox_local_path(&global_config, m));
+    let sent_dir: Option<PathBuf> = account_config.mailboxes.sent.as_ref()
+        .map(|m| resolve_mailbox_local_path(&account_config, m));
+    let drafts_dir: Option<PathBuf> = resolve_drafts_dir_from_config(&account_config);
+    let inbox_dir: Option<PathBuf> = account_config.mailboxes.inbox.as_ref()
+        .map(|m| resolve_mailbox_local_path(&account_config, m));
+    let archive_dir: Option<PathBuf> = account_config.mailboxes.archive.as_ref()
+        .map(|m| resolve_mailbox_local_path(&account_config, m));
 
     match cli.command {
         Some(Commands::Send { file, yes }) => {
@@ -272,7 +297,7 @@ async fn main() -> Result<()> {
             preview_draft(
                 &draft,
                 &smtp_config,
-                &global_config,
+                &global_config.email,
                 signature_content.as_deref(),
                 false,
             )?;
@@ -286,7 +311,7 @@ async fn main() -> Result<()> {
             let (send_result, raw_message, message_id) = send_email(
                 &draft,
                 &smtp_config,
-                &global_config,
+                &global_config.email,
                 signature_content.as_deref(),
             )
             .await?;
@@ -315,8 +340,8 @@ async fn main() -> Result<()> {
                 info!("Email marked as sent: {}", draft.path.display());
 
                 // IMAP APPEND to Sent folder (best-effort)
-                if let Ok(imap_config) = ImapConfig::load(&global_config) {
-                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                    let sent_mailbox = resolve_sent_mailbox(&account_config);
                     if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                         warn!("Failed to append to Sent folder: {}", e);
                         println!(
@@ -341,8 +366,8 @@ async fn main() -> Result<()> {
                 );
 
                 // IMAP APPEND to Sent folder (best-effort)
-                if let Ok(imap_config) = ImapConfig::load(&global_config) {
-                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                    let sent_mailbox = resolve_sent_mailbox(&account_config);
                     if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                         warn!("Failed to append to Sent folder: {}", e);
                         println!(
@@ -404,7 +429,7 @@ async fn main() -> Result<()> {
                 match send_email(
                     &draft,
                     &smtp_config,
-                    &global_config,
+                    &global_config.email,
                     signature_content.as_deref(),
                 )
                 .await
@@ -415,8 +440,8 @@ async fn main() -> Result<()> {
                                 println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
                             } else {
                                 // IMAP APPEND to Sent folder (best-effort)
-                                if let Ok(imap_config) = ImapConfig::load(&global_config) {
-                                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                                if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                                    let sent_mailbox = resolve_sent_mailbox(&account_config);
                                     if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
@@ -430,8 +455,8 @@ async fn main() -> Result<()> {
                                 println!("{} (partial send, failed to update status: {})", "⚠".yellow(), e);
                             } else {
                                 // IMAP APPEND to Sent folder (best-effort)
-                                if let Ok(imap_config) = ImapConfig::load(&global_config) {
-                                    let sent_mailbox = resolve_sent_mailbox(&global_config);
+                                if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                                    let sent_mailbox = resolve_sent_mailbox(&account_config);
                                     if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
@@ -685,7 +710,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::ListMailboxes) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
             let mailboxes = list_mailboxes(&imap_config).await?;
 
             println!("{} Available mailboxes:", "ℹ".blue());
@@ -706,7 +731,7 @@ async fn main() -> Result<()> {
             full,
             mailbox,
         }) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
             let criteria = FetchCriteria {
                 from,
                 to,
@@ -725,7 +750,7 @@ async fn main() -> Result<()> {
             display_fetched_emails(&emails, full);
 
             // Determine save directory and status from the mailbox
-            let (save_dir, status) = match resolve_mailbox_dir(&global_config, &mailbox_for_save) {
+            let (save_dir, status) = match resolve_mailbox_dir(&account_config, &mailbox_for_save) {
                 Ok(dir) => {
                     (Some(dir), mailbox_status(&mailbox_for_save))
                 }
@@ -771,24 +796,24 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Sync { limit, mailbox, reconcile }) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
 
             let targets: Vec<imap_client::SyncTarget> = if let Some(ref user_mailboxes) = mailbox {
                 user_mailboxes.iter().map(|mb| {
                     imap_client::SyncTarget {
                         role: mb.clone(),
-                        server_name: find_server_name_for_role(&global_config, mb),
-                        local_dir: resolve_mailbox_dir(&global_config, mb)
+                        server_name: find_server_name_for_role(&account_config, mb),
+                        local_dir: resolve_mailbox_dir(&account_config, mb)
                             .unwrap_or_else(|_| PathBuf::from(mb)),
                         status: mailbox_status(mb).to_string(),
                     }
                 }).collect()
             } else {
-                all_configured_mailboxes(&global_config).iter().map(|(role, mapping)| {
+                all_configured_mailboxes(&account_config).iter().map(|(role, mapping)| {
                     imap_client::SyncTarget {
                         role: role.clone(),
                         server_name: mapping.server.clone(),
-                        local_dir: resolve_mailbox_local_path(&global_config, mapping),
+                        local_dir: resolve_mailbox_local_path(&account_config, mapping),
                         status: mailbox_status(role).to_string(),
                     }
                 }).collect()
@@ -826,7 +851,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Watch { mailbox, timeout }) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
             println!("Watching {} for changes...", mailbox);
             let exit_code = watch_mailbox(&imap_config, &mailbox, timeout).await?;
 
@@ -842,11 +867,11 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Archive { file }) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
             let dir = archive_dir.as_ref().ok_or_else(|| {
                 anyhow!("Archive mailbox not configured. Check [mailboxes.archive] in {}", config_path().display())
             })?;
-            let archive_server_name = global_config.mailboxes.archive.as_ref()
+            let archive_server_name = account_config.mailboxes.archive.as_ref()
                 .map(|m| m.server.as_str())
                 .unwrap_or("Archive");
             match archive_email_locally(&imap_config, dir, &file, archive_server_name).await {
@@ -870,7 +895,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Delete { file }) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
             match delete_email_locally(&imap_config, &file).await {
                 Ok(()) => {
                     println!("{} Deleted: {}", "✓".green(), file.display());
@@ -919,7 +944,7 @@ async fn main() -> Result<()> {
             limit,
             full,
         }) => {
-            let imap_config = ImapConfig::load(&global_config)?;
+            let imap_config = ImapConfig::load(&account_config)?;
             let mut criteria = parse_search_query(&query);
 
             // Resolve mailbox scope: --mailbox flag > in: prefix > all
@@ -938,7 +963,7 @@ async fn main() -> Result<()> {
                 }
             } else {
                 // Search all configured mailboxes
-                let configured = all_configured_mailboxes(&global_config);
+                let configured = all_configured_mailboxes(&account_config);
                 let mut session = imap_client::open_imap_session(&imap_config).await?;
                 let per_mb = (limit / configured.len().max(1)).max(5);
                 let mut total = 0usize;
@@ -987,7 +1012,15 @@ async fn main() -> Result<()> {
             match action {
                 ConfigAction::Init => cmd_config_init()?,
                 ConfigAction::Show => cmd_config_show()?,
-                ConfigAction::SetPassword { which } => cmd_set_password(&which)?,
+                ConfigAction::SetPassword { which, account } => {
+                    let acct_name = account
+                        .or_else(|| cli.account.clone())
+                        .or_else(|| global_config.accounts.first().map(|a| a.name.clone()))
+                        .unwrap_or_else(|| "main".to_string());
+                    cmd_set_password(&which, &acct_name)?;
+                }
+                ConfigAction::AddAccount => cmd_config_add_account()?,
+                ConfigAction::Migrate => cmd_config_migrate()?,
                 ConfigAction::Path => cmd_config_path(),
             }
         }
@@ -999,7 +1032,7 @@ async fn main() -> Result<()> {
                 preview_draft(
                     &draft,
                     &smtp_config,
-                    &global_config,
+                    &global_config.email,
                     signature_content.as_deref(),
                     true,
                 )?;
