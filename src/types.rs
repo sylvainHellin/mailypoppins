@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Collapse consecutive hyphens and trim leading/trailing hyphens.
+/// Used by slugify functions across multiple modules.
+pub(crate) fn collapse_hyphens(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut prev_hyphen = false;
+    for c in input.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            prev_hyphen = false;
+            result.push(c);
+        }
+    }
+    result.trim_matches('-').to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmailStatus {
@@ -66,6 +85,25 @@ pub struct InboxFrontmatter {
     pub message_id: Option<String>,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+}
+
+/// Frontmatter used when saving fetched emails to disk.
+/// Produced via serde_yaml::to_string() to ensure correct quoting of special characters.
+#[derive(Debug, Serialize)]
+pub struct SaveFrontmatter {
+    pub from: String,
+    pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<String>,
+    pub subject: String,
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub status: String,
+    pub has_attachments: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<String>>,
+    pub fetched_at: String,
 }
 
 #[cfg(test)]

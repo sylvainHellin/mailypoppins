@@ -296,21 +296,7 @@ pub fn slugify_subject(subject: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join("");
-    // Collapse consecutive hyphens
-    let mut result = String::new();
-    let mut prev_hyphen = false;
-    for c in slug.chars() {
-        if c == '-' {
-            if !prev_hyphen {
-                result.push(c);
-            }
-            prev_hyphen = true;
-        } else {
-            prev_hyphen = false;
-            result.push(c);
-        }
-    }
-    let result = result.trim_matches('-').to_string();
+    let result = crate::types::collapse_hyphens(&slug);
     if result.len() > 40 {
         // Truncate at nearest char boundary <= 40 bytes
         let end = floor_char_boundary(&result, 40);
@@ -345,21 +331,7 @@ pub fn slugify_sender(from: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
-    // Collapse consecutive hyphens and trim
-    let mut result = String::new();
-    let mut prev_hyphen = false;
-    for c in slug.chars() {
-        if c == '-' {
-            if !prev_hyphen {
-                result.push(c);
-            }
-            prev_hyphen = true;
-        } else {
-            prev_hyphen = false;
-            result.push(c);
-        }
-    }
-    result.trim_matches('-').to_string()
+    crate::types::collapse_hyphens(&slug)
 }
 
 pub fn extract_email_address(raw: &str) -> String {
@@ -380,9 +352,10 @@ pub fn parse_email_date_prefix(date_str: &str) -> String {
     Utc::now().format("%Y-%m-%d-%H%M").to_string()
 }
 
-/// Scan a directory for .md files and collect their message_ids into a HashSet.
-pub fn scan_existing_message_ids(dir: &Path) -> Result<HashSet<String>> {
-    let mut ids = HashSet::new();
+/// Low-level scanner: walks a mailbox directory and extracts message_id from frontmatter.
+/// Returns {message_id -> file_path}. Used as the canonical base for all scanning.
+pub(crate) fn scan_mailbox_message_ids(dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
+    let mut ids = std::collections::HashMap::new();
     if !dir.exists() {
         return Ok(ids);
     }
@@ -407,7 +380,7 @@ pub fn scan_existing_message_ids(dir: &Path) -> Result<HashSet<String>> {
                     if in_frontmatter && line.starts_with("message_id:") {
                         let id = line.trim_start_matches("message_id:").trim().trim_matches('"');
                         if !id.is_empty() {
-                            ids.insert(id.to_string());
+                            ids.insert(id.to_string(), path.to_path_buf());
                         }
                         break;
                     }
@@ -416,6 +389,12 @@ pub fn scan_existing_message_ids(dir: &Path) -> Result<HashSet<String>> {
         }
     }
     Ok(ids)
+}
+
+/// Scan a directory for .md files and collect their message_ids into a HashSet.
+/// Delegates to scan_mailbox_message_ids to deduplicate the low-level scanning logic.
+pub fn scan_existing_message_ids(dir: &Path) -> Result<HashSet<String>> {
+    Ok(scan_mailbox_message_ids(dir)?.into_keys().collect())
 }
 
 pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
@@ -470,22 +449,22 @@ pub fn save_fetched_emails_with_known_ids(
             }
         }
 
-        // Build frontmatter
+        // Build frontmatter via serde for correct quoting
         let fetched_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let mut frontmatter = String::from("---\n");
-        frontmatter.push_str(&format!("from: \"{}\"\n", email.from.replace('"', "\\\"")));
-        frontmatter.push_str(&format!("to: \"{}\"\n", email.to.replace('"', "\\\"")));
-        if let Some(ref cc) = email.cc {
-            frontmatter.push_str(&format!("cc: \"{}\"\n", cc.replace('"', "\\\"")));
-        }
-        frontmatter.push_str(&format!("subject: \"{}\"\n", email.subject.replace('"', "\\\"")));
-        frontmatter.push_str(&format!("date: \"{}\"\n", email.date.replace('"', "\\\"")));
-        if let Some(ref mid) = email.message_id {
-            frontmatter.push_str(&format!("message_id: \"{}\"\n", mid.replace('"', "\\\"")));
-        }
-        frontmatter.push_str(&format!("status: {}\n", status));
-        frontmatter.push_str(&format!("has_attachments: {}\n", email.has_attachments));
-        // Save attachment files and record filenames in frontmatter
+        let fm = crate::types::SaveFrontmatter {
+            from: email.from.clone(),
+            to: email.to.clone(),
+            cc: email.cc.clone(),
+            subject: email.subject.clone(),
+            date: email.date.clone(),
+            message_id: email.message_id.clone(),
+            status: status.to_string(),
+            has_attachments: email.has_attachments,
+            attachments: None, // filled below after saving attachment files
+            fetched_at: fetched_at.clone(),
+        };
+
+        // Save attachment files and record filenames
         let mut saved_filenames: Vec<String> = Vec::new();
         if !email.attachments.is_empty() {
             let att_dir = attachments_dir_for(&dest);
@@ -518,14 +497,16 @@ pub fn save_fetched_emails_with_known_ids(
                 saved_filenames.push(name);
             }
         }
-        if !saved_filenames.is_empty() {
-            frontmatter.push_str("attachments:\n");
-            for name in &saved_filenames {
-                frontmatter.push_str(&format!("  - \"{}\"\n", name.replace('"', "\\\"")));
-            }
-        }
-        frontmatter.push_str(&format!("fetched_at: \"{}\"\n", fetched_at));
-        frontmatter.push_str("---\n\n");
+
+        // Build frontmatter with attachment info
+        let fm = crate::types::SaveFrontmatter {
+            attachments: if saved_filenames.is_empty() { None } else { Some(saved_filenames) },
+            ..fm
+        };
+        let mut frontmatter = serde_yaml::to_string(&fm)?;
+        // serde_yaml 0.9 does not add document markers.
+        // Wrap in "---\n...\n---\n\n" for valid frontmatter.
+        frontmatter = format!("---\n{}---\n\n", frontmatter);
 
         let content = format!("{}{}", frontmatter, email.body_text);
         fs::write(&dest, content)?;

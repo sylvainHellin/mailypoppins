@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.3] - 2026-04-04
+
+### Changed
+- Deduplicated message-ID scanning: canonical `scan_mailbox_message_ids` in `parse.rs`, both `scan_existing_message_ids` and `scan_local_message_ids` delegate to it
+- Replaced manual `format!()` YAML construction in `save_fetched_emails` with `SaveFrontmatter` struct + `serde_yaml` for correct special-character quoting
+- Extracted shared `collapse_hyphens` helper to `types.rs`, used by all three slugify functions
+- Email validation in `validate_draft` now uses `lettre::message::Mailbox` (RFC 5321) instead of naive `contains('@')` check
+- Added `#[derive(Default)]` to `FetchCriteria` for cleaner construction
+
+### Added
+- 28 new tests for `imap_client` submodules (search.rs: 22, fetch.rs: 6), restoring coverage lost during module split
+- `SaveFrontmatter` struct in `types.rs` for type-safe frontmatter serialization
+- `collapse_hyphens` helper in `types.rs`
+
+### Fixed
+- Sync now uses cross-directory dedup: emails already stored in any local mailbox
+  directory (e.g. Archive) are skipped when fetching from other mailboxes (e.g. INBOX).
+  This prevents re-downloading archived emails if they still exist on the server's INBOX.
+- Special characters in email subjects/senders no longer break frontmatter YAML
+- Added diagnostic logging to server search: logs which IMAP mailbox each query targets,
+  how many results each mailbox returns, and where search results are saved on disk.
+
 ## [0.7.2] - 2026-04-04
 
 ### Changed

@@ -397,7 +397,7 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     // Validate email format (basic check)
     for email in draft.frontmatter.to.split(',') {
         let email = email.trim();
-        if !email.contains('@') || !email.contains('.') {
+        if email.parse::<lettre::message::Mailbox>().is_err() {
             return Err(anyhow!("Invalid email address: {}", email));
         }
     }

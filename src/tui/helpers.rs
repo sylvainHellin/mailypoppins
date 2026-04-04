@@ -195,6 +195,10 @@ pub(super) async fn lib_do_multi_search(
             break;
         }
         let budget = per_mb.min(total_limit - total);
+        log::info!(
+            "Server search: querying mailbox '{}' (label={}, local_dir={}, status={})",
+            target.server_name, target.label, target.local_dir.display(), target.status,
+        );
         match fetch_emails_on_session(
             &mut session,
             &criteria,
@@ -204,6 +208,10 @@ pub(super) async fn lib_do_multi_search(
         .await
         {
             Ok(emails) => {
+                log::info!(
+                    "Server search: '{}' returned {} result(s)",
+                    target.server_name, emails.len(),
+                );
                 total += emails.len();
                 for fetched in emails {
                     let entry = fetched_to_email_entry(&fetched);
@@ -310,6 +318,14 @@ pub(super) fn ensure_search_result_saved(app: &mut App) -> Option<PathBuf> {
 
     let save_dir = result.source_local_dir.clone();
     let status = result.source_status.clone();
+
+    log::info!(
+        "Search result save: source_label={}, status={}, dir={}, subject={}",
+        result.source_label,
+        status,
+        save_dir.display(),
+        result.entry.subject,
+    );
 
     let fetched_clone = result.fetched.clone();
     let message_id = result.fetched.message_id.clone();

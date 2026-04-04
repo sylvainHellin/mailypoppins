@@ -2,8 +2,17 @@ use email::parse::{
     save_fetched_emails, scan_existing_message_ids, AttachmentData,
     FetchedEmail,
 };
+use email::types::InboxFrontmatter;
+use gray_matter::{engine::YAML, Matter};
 use std::fs;
 use tempfile::tempdir;
+
+/// Helper to parse frontmatter from a saved .md file.
+fn parse_frontmatter(content: &str) -> InboxFrontmatter {
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(content);
+    parsed.data.unwrap().deserialize().unwrap()
+}
 
 fn make_email(
     from: &str,
@@ -56,9 +65,10 @@ fn test_save_fetched_emails_basic() {
     assert_eq!(files.len(), 1);
 
     let content = fs::read_to_string(files[0].path()).unwrap();
-    assert!(content.contains("from: \"alice@example.com\""));
-    assert!(content.contains("subject: \"Hello\""));
-    assert!(content.contains("message_id: \"<msg1@example.com>\""));
+    let fm = parse_frontmatter(&content);
+    assert_eq!(fm.from, "alice@example.com");
+    assert_eq!(fm.subject, "Hello");
+    assert_eq!(fm.message_id, Some("<msg1@example.com>".to_string()));
     assert!(content.contains("status: inbox"));
     assert!(content.contains("Email body"));
 }

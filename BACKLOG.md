@@ -4,8 +4,7 @@
 
 Items to tackle in the current work cycle.
 
-- ~~**Unit & integration tests**~~ -- DONE. 139 tests across 11 modules. See [plan](docs/plans/tests.md).
-- ~~**Refactor large TUI modules**~~ -- DONE. Split `app.rs`, `ui.rs`, `mod.rs`, `imap_client.rs` into focused submodules. No file exceeds 824 lines. [plan](docs/plans/tui-refactor.md)
+(none -- all current items complete)
 
 ## Next
 

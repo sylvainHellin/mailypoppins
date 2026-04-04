@@ -26,7 +26,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 
 | File | Responsibility |
 |------|---------------|
-| `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
+| `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter`, `SaveFrontmatter`, `collapse_hyphens` |
 | `src/config.rs` | Config loading (`~/.config/email/config.toml`), keyring, mailbox/drafts dir resolution |
 | `src/config_cmd.rs` | Config subcommands: init wizard, add-account, show, set-password, migrate, path |
 | `src/parse.rs` | RFC822 parsing, saving emails to disk, attachment extraction, `open_file_with_system()` |
@@ -97,11 +97,11 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 
 ## Testing
 
-- **139 tests** (110 unit, 29 integration). All run offline in <0.5s. Run: `cargo test`
+- **151 tests** (122 unit, 29 integration). All run offline in <0.5s. Run: `cargo test`
 - Unit tests are inline `#[cfg(test)] mod tests` in each module
 - Integration tests live in `tests/` and use `tempfile::tempdir()` for isolation
 - `insta` snapshot tests for `markdown_to_html` output. Run `cargo insta review` to approve changes.
-- Some private helpers are `pub(crate)` for testability: `ensure_utf8_charset`, `sanitize_attachment_filename`, `floor_char_boundary`, `build_imap_search_query`, `parse_date_to_imap`, `parse_message_id_from_header_bytes`
+- Some private helpers are `pub(crate)` for testability: `ensure_utf8_charset`, `sanitize_attachment_filename`, `floor_char_boundary`, `build_imap_search_query`, `parse_date_to_imap`, `parse_message_id_from_header_bytes`, `scan_mailbox_message_ids`, `collapse_hyphens`
 - No IMAP/SMTP mock server yet -- only pure logic and filesystem tests
 
 ---

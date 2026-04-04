@@ -412,20 +412,7 @@ pub fn slugify_mailbox_name(name: &str) -> String {
             }
         })
         .collect();
-    let mut result = String::new();
-    let mut prev_hyphen = false;
-    for c in slug.chars() {
-        if c == '-' {
-            if !prev_hyphen {
-                result.push(c);
-            }
-            prev_hyphen = true;
-        } else {
-            prev_hyphen = false;
-            result.push(c);
-        }
-    }
-    result.trim_matches('-').to_string()
+    crate::types::collapse_hyphens(&slug)
 }
 
 // ---------------------------------------------------------------------------
