@@ -48,6 +48,23 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 
 ---
 
+## TUI Design
+
+- The TUI is a human-facing interface only. It must **never** implement email logic directly.
+- ALL email operations (send, fetch, archive, delete, move, search, etc.) must live in the library modules (`imap_client.rs`, `send.rs`, `draft.rs`, `sync.rs`, `parse.rs`). The TUI dispatches `Action` variants and handles `BgResult` callbacks -- it never calls IMAP/SMTP/MIME code inline.
+- No email protocol code (SMTP, IMAP, MIME, etc.) belongs in `tui/app.rs` or `tui/ui.rs`. If you find yourself writing email logic in a TUI component, stop and put it in the appropriate library module instead.
+- `tui/mod.rs::handle_action()` is the boundary: it may call library functions to perform side effects, but `app.rs` (state) and `ui.rs` (rendering) must stay pure.
+
+---
+
+## Planning
+
+- **[BACKLOG.md](BACKLOG.md)** -- prioritized work items in Now / Next / Later buckets. Check this at the start of each session.
+- **[docs/plans/](docs/plans/)** -- design briefs for non-trivial features. Read the relevant plan before starting work.
+- **[CHANGELOG.md](CHANGELOG.md)** -- what shipped, by version.
+
+---
+
 ## Instructions
 
 - **No emoji** in code, output, or UI. Use Unicode symbols or Nerd Font icons.
@@ -55,4 +72,5 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
   ```
   cargo install --path .
   ```
-- **Keep this file current.** When making architectural or design changes, update the relevant section of `agent.md` to reflect the new state.
+- **Keep this file current.** When making architectural or design changes, update the relevant section of `AGENTS.md` to reflect the new state.
+- **Keep BACKLOG.md current.** When completing a feature, move it out of the backlog and into CHANGELOG.md. When discovering new work, add it to the appropriate bucket.
