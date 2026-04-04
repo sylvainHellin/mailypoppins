@@ -4,8 +4,8 @@
 
 Items to tackle in the current work cycle.
 
-- **Unit & integration tests** -- no test coverage today. Start with `parse.rs`, `draft.rs`, `send.rs` (pure logic, easy to test). Then integration tests for IMAP sync with a mock server. [plan](docs/plans/tests.md)
-- **Refactor large TUI modules** -- `app.rs` (1640 lines) and `ui.rs` (1685 lines) are getting unwieldy. Split key handlers, mailbox logic, and rendering into focused submodules. [plan](docs/plans/tui-refactor.md)
+- ~~**Unit & integration tests**~~ -- DONE. 139 tests across 11 modules. See [plan](docs/plans/tests.md).
+- ~~**Refactor large TUI modules**~~ -- DONE. Split `app.rs`, `ui.rs`, `mod.rs`, `imap_client.rs` into focused submodules. No file exceeds 824 lines. [plan](docs/plans/tui-refactor.md)
 
 ## Next
 

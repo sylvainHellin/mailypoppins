@@ -30,14 +30,38 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 | `src/config.rs` | Config loading (`~/.config/email/config.toml`), keyring, mailbox/drafts dir resolution |
 | `src/config_cmd.rs` | Config subcommands: init wizard, add-account, show, set-password, migrate, path |
 | `src/parse.rs` | RFC822 parsing, saving emails to disk, attachment extraction, `open_file_with_system()` |
-| `src/imap_client.rs` | All IMAP operations: fetch, sync, watch (IDLE), archive, delete, search |
 | `src/draft.rs` | Draft parsing/validation, reply/forward creation, status transitions |
 | `src/send.rs` | `markdown_to_html`, per-recipient `send_email`, IMAP APPEND to Sent |
 | `src/sync.rs` | Local file scanning, mailbox dir resolution, reconciliation helpers |
-| `src/tui/mod.rs` | Event loop, action dispatcher, background threads, per-account IMAP watchers |
-| `src/tui/app.rs` | App state, TEA update cycle, key handlers |
-| `src/tui/ui.rs` | Rendering: sidebar, list, headers pane, preview pane, overlays |
-| `src/tui/theme.rs` | Catppuccin Mocha palette constants |
+| **`src/imap_client/`** | |
+| `mod.rs` | `ImapStream` wrapper, `open_imap_session()`, re-exports |
+| `fetch.rs` | `fetch_emails*`, `fetch_new_emails*`, `fetch_server_message_ids*` |
+| `sync.rs` | `sync_mailboxes()`, `list_mailboxes()`, `SyncTarget`, `SyncResult` |
+| `search.rs` | `parse_search_query()`, `build_imap_search_query()`, `FetchCriteria` |
+| `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
+| `ops.rs` | `archive_email_on_server/locally`, `delete_email_on_server/locally`, `append_to_sent_folder` |
+| `batch.rs` | `batch_archive_emails_locally`, `batch_delete_emails_locally` |
+| **`src/tui/`** | |
+| `mod.rs` | Event loop (`run_loop`), watcher spawn, bg result drain |
+| `actions.rs` | `handle_action()` -- side-effect dispatch for all `Action` variants |
+| `bg.rs` | `handle_bg_result()` -- process background task completions |
+| `helpers.rs` | Terminal suspend/resume, editor, clipboard, watcher loop, `lib_do_sync`, `resolve_send_account` |
+| `event.rs` | Crossterm event polling |
+| `theme.rs` | Catppuccin Mocha palette constants |
+| **`src/tui/app/`** | |
+| `mod.rs` | `App` struct, `new()`, `update()`, account sync, core state helpers |
+| `types.rs` | `EmailEntry`, `AccountState`, `BgResult`, `Action`, `Focus`, `MailboxKind`, mailbox builders |
+| `keys.rs` | `handle_key()` dispatch + all `handle_*_key()` methods |
+| **`src/tui/ui/`** | |
+| `mod.rs` | `view()` -- top-level layout dispatch |
+| `sidebar.rs` | `render_sidebar()`, `render_activity_log()` |
+| `list.rs` | `render_email_list()` |
+| `headers.rs` | `render_headers()`, `header_line()` |
+| `preview.rs` | `render_body()`, markdown parsing + word wrap |
+| `status.rs` | `render_status_bar()` |
+| `overlays.rs` | Confirm dialog, attachment picker, persistent error, help overlay |
+| `search.rs` | Server search overlay + sub-renderers |
+| `util.rs` | `pane_border_style`, `hint_span`, `desc_span`, `truncate` |
 
 ---
 
@@ -47,7 +71,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - **Signature placement:** Reply/forward drafts contain a `{{SIGNATURE}}` placeholder. `markdown_to_html` replaces it at send time. If removed, signature falls back to end of body.
 - **Sent folder dedup:** Sent `.md` files store `message_id` in frontmatter. Sync skips uploading emails already present on the server by Message-ID. The Sent directory is never reconciled -- local files are source of truth.
 - **Reconciliation scope:** Only INBOX and Archive participate in server-driven reconciliation. Sent is excluded.
-- **Send account resolution:** At send time, the draft's `from:` address is matched against each account's `default_from` to select the correct SMTP/IMAP config. This is done in `resolve_send_account()` in `tui/mod.rs`. Draft-creation commands (reply, forward, new) auto-insert the active account's `default_from`.
+- **Send account resolution:** At send time, the draft's `from:` address is matched against each account's `default_from` to select the correct SMTP/IMAP config. This is done in `resolve_send_account()` in `tui/helpers.rs`. Draft-creation commands (reply, forward, new) auto-insert the active account's `default_from`.
 - **Queued actions:** Fetch/sync are deferred while mutations are in-flight (`bg_mutations > 0`) and auto-triggered on completion.
 - **Per-account watchers:** One IMAP IDLE thread per account. All send events to a shared channel tagged with `account_index`. Non-active account changes set `has_unseen` (badge in status bar).
 - **Output style (CLI):** Use `colored` crate. `✓` success (green), `✗` error (red), `⚠` warning (yellow), `ℹ` info (blue). No emoji -- use Unicode or Nerd Font icons.
@@ -59,7 +83,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - The TUI is a human-facing interface only. It must **never** implement email logic directly.
 - ALL email operations (send, fetch, archive, delete, move, search, etc.) must live in the library modules (`imap_client.rs`, `send.rs`, `draft.rs`, `sync.rs`, `parse.rs`). The TUI dispatches `Action` variants and handles `BgResult` callbacks -- it never calls IMAP/SMTP/MIME code inline.
 - No email protocol code (SMTP, IMAP, MIME, etc.) belongs in `tui/app.rs` or `tui/ui.rs`. If you find yourself writing email logic in a TUI component, stop and put it in the appropriate library module instead.
-- `tui/mod.rs::handle_action()` is the boundary: it may call library functions to perform side effects, but `app.rs` (state) and `ui.rs` (rendering) must stay pure.
+- `tui/actions.rs::handle_action()` is the boundary: it may call library functions to perform side effects, but `app/` (state) and `ui/` (rendering) must stay pure.
 
 ---
 
@@ -68,6 +92,17 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - **[BACKLOG.md](BACKLOG.md)** -- prioritized work items in Now / Next / Later buckets. Check this at the start of each session.
 - **[docs/plans/](docs/plans/)** -- design briefs for non-trivial features. Read the relevant plan before starting work.
 - **[CHANGELOG.md](CHANGELOG.md)** -- what shipped, by version.
+
+---
+
+## Testing
+
+- **139 tests** (110 unit, 29 integration). All run offline in <0.5s. Run: `cargo test`
+- Unit tests are inline `#[cfg(test)] mod tests` in each module
+- Integration tests live in `tests/` and use `tempfile::tempdir()` for isolation
+- `insta` snapshot tests for `markdown_to_html` output. Run `cargo insta review` to approve changes.
+- Some private helpers are `pub(crate)` for testability: `ensure_utf8_charset`, `sanitize_attachment_filename`, `floor_char_boundary`, `build_imap_search_query`, `parse_date_to_imap`, `parse_message_id_from_header_bytes`
+- No IMAP/SMTP mock server yet -- only pure logic and filesystem tests
 
 ---
 

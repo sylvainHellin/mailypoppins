@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.2] - 2026-04-04
+
+### Changed
+- Refactored large TUI and IMAP modules into focused submodules:
+  - `src/tui/app.rs` (1863 lines) -> `src/tui/app/` with `mod.rs` (506), `types.rs` (616), `keys.rs` (824)
+  - `src/tui/ui.rs` (1634 lines) -> `src/tui/ui/` with 8 submodules (sidebar, list, headers, preview, status, overlays, search, util)
+  - `src/tui/mod.rs` (1304 lines) -> split into `mod.rs` (118), `actions.rs` (678), `bg.rs` (165), `helpers.rs` (367)
+  - `src/imap_client.rs` (1530 lines) -> `src/imap_client/` with 6 submodules (fetch, sync, search, watch, ops, batch)
+- No file exceeds 824 lines. Zero behavior change.
+
+## [0.7.1] - 2026-04-04
+
+### Added
+- Testing infrastructure: 139 tests (110 unit + 29 integration), all offline, <0.5s
+- Unit tests for: `parse.rs`, `types.rs`, `send.rs`, `draft.rs`, `config.rs`, `imap_client.rs`, `sync.rs`, `tui/app/types.rs`
+- Integration tests: `tests/draft_integration.rs`, `tests/sync_integration.rs`, `tests/save_emails_integration.rs`
+- Snapshot tests for `markdown_to_html` via `insta`
+- Dev-dependencies: `tempfile`, `insta`
+
 ## [0.7.0] - 2026-04-04
 
 ### Added
