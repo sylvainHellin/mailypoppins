@@ -584,6 +584,103 @@ pub fn find_drafts(dir: &Path, status_filter: Option<EmailStatus>) -> Result<Vec
     Ok(drafts)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus};
+    use std::path::PathBuf;
+
+    fn make_draft(to: &str, subject: &str, body: &str, status: EmailStatus) -> EmailDraft {
+        EmailDraft {
+            path: PathBuf::from("test.md"),
+            frontmatter: EmailFrontmatter {
+                to: to.to_string(),
+                cc: None,
+                bcc: None,
+                subject: subject.to_string(),
+                status,
+                from: Some("me@example.com".to_string()),
+                reply_to: None,
+                attachments: None,
+                sent_at: None,
+                sent_via: None,
+                message_id: None,
+            },
+            body_markdown: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_validate_draft_valid() {
+        let draft = make_draft("alice@example.com", "Hello", "Body text", EmailStatus::Draft);
+        let result = validate_draft(&draft);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_draft_missing_to() {
+        let draft = make_draft("", "Hello", "Body text", EmailStatus::Draft);
+        let result = validate_draft(&draft);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("to"));
+    }
+
+    #[test]
+    fn test_validate_draft_missing_subject() {
+        let draft = make_draft("alice@example.com", "", "Body text", EmailStatus::Draft);
+        let result = validate_draft(&draft);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("subject"));
+    }
+
+    #[test]
+    fn test_validate_draft_empty_body_warning() {
+        let draft = make_draft("alice@example.com", "Hello", "", EmailStatus::Draft);
+        let result = validate_draft(&draft);
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_draft_invalid_email() {
+        let draft = make_draft("not-an-email", "Hello", "Body", EmailStatus::Draft);
+        let result = validate_draft(&draft);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid email"));
+    }
+
+    #[test]
+    fn test_validate_draft_multiple_recipients_one_invalid() {
+        let draft = make_draft("alice@example.com, badaddr", "Hello", "Body", EmailStatus::Draft);
+        let result = validate_draft(&draft);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_drafts_dir_explicit_path() {
+        let result = resolve_drafts_dir(Path::new("/explicit/path"), &None);
+        assert_eq!(result, PathBuf::from("/explicit/path"));
+    }
+
+    #[test]
+    fn test_resolve_drafts_dir_config_fallback() {
+        // When cli_dir is ".", use config dir if it exists
+        // We can't easily test a real dir here, so test the default fallback
+        let result = resolve_drafts_dir(Path::new("."), &Some(PathBuf::from("/nonexistent")));
+        // /nonexistent doesn't exist as a dir, so should fall back to "."
+        assert_eq!(result, PathBuf::from("."));
+    }
+
+    #[test]
+    fn test_resolve_drafts_dir_default_fallback() {
+        let result = resolve_drafts_dir(Path::new("."), &None);
+        assert_eq!(result, PathBuf::from("."));
+    }
+}
+
 pub fn mark_as_approved(path: &Path) -> Result<String> {
     let draft = parse_email_draft(path)?;
 

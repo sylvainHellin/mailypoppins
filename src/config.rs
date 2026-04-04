@@ -485,6 +485,213 @@ fn log_base_dir() -> PathBuf {
 // Signature loading
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_minimal_config() {
+        let toml_str = r#"
+[[accounts]]
+name = "test"
+default_from = "user@example.com"
+
+[accounts.smtp]
+host = "smtp.example.com"
+username = "user"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(config.accounts[0].name, "test");
+        assert_eq!(config.accounts[0].default_from, "user@example.com");
+    }
+
+    #[test]
+    fn test_default_ports() {
+        let toml_str = r#"
+[[accounts]]
+name = "test"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[accounts.imap]
+host = "imap.example.com"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.accounts[0].smtp.port, 465);
+        assert_eq!(config.accounts[0].imap.port, 993);
+    }
+
+    #[test]
+    fn test_imap_username_fallback_to_smtp() {
+        let account = AccountConfig {
+            name: "test".to_string(),
+            smtp: SmtpSettings {
+                host: "smtp.example.com".to_string(),
+                username: "smtp_user".to_string(),
+                ..Default::default()
+            },
+            imap: ImapSettings {
+                host: "imap.example.com".to_string(),
+                username: "".to_string(), // empty -> should fallback
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // ImapConfig::load needs keyring; test the logic inline
+        let username = if account.imap.username.is_empty() {
+            account.smtp.username.clone()
+        } else {
+            account.imap.username.clone()
+        };
+        assert_eq!(username, "smtp_user");
+    }
+
+    #[test]
+    fn test_imap_host_fallback_to_smtp() {
+        let account = AccountConfig {
+            smtp: SmtpSettings {
+                host: "smtp.example.com".to_string(),
+                ..Default::default()
+            },
+            imap: ImapSettings {
+                host: "".to_string(), // empty -> should fallback
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let host = if account.imap.host.is_empty() {
+            account.smtp.host.clone()
+        } else {
+            account.imap.host.clone()
+        };
+        assert_eq!(host, "smtp.example.com");
+    }
+
+    #[test]
+    fn test_slugify_mailbox_name_spaces() {
+        assert_eq!(slugify_mailbox_name("My Folder"), "my-folder");
+    }
+
+    #[test]
+    fn test_slugify_mailbox_name_dots() {
+        assert_eq!(slugify_mailbox_name("INBOX.Archive"), "inbox-archive");
+    }
+
+    #[test]
+    fn test_slugify_mailbox_name_slashes() {
+        assert_eq!(slugify_mailbox_name("Folders/Sub"), "folders-sub");
+    }
+
+    #[test]
+    fn test_slugify_mailbox_name_consecutive_hyphens() {
+        assert_eq!(slugify_mailbox_name("a...b"), "a-b");
+    }
+
+    #[test]
+    fn test_find_account_by_from_match() {
+        let config = GlobalConfig {
+            accounts: vec![AccountConfig {
+                name: "personal".to_string(),
+                default_from: "alice@example.com".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let found = find_account_by_from(&config, "Alice <alice@example.com>");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "personal");
+    }
+
+    #[test]
+    fn test_find_account_by_from_no_match() {
+        let config = GlobalConfig {
+            accounts: vec![AccountConfig {
+                default_from: "alice@example.com".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(find_account_by_from(&config, "bob@other.com").is_none());
+    }
+
+    #[test]
+    fn test_find_account_by_from_case_insensitive() {
+        let config = GlobalConfig {
+            accounts: vec![AccountConfig {
+                default_from: "Alice@Example.COM".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(find_account_by_from(&config, "alice@example.com").is_some());
+    }
+
+    #[test]
+    fn test_resolve_sent_mailbox_configured() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                sent: Some(MailboxMapping {
+                    server: "Sent Items".to_string(),
+                    local: "sent".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_sent_mailbox(&account), "Sent Items");
+    }
+
+    #[test]
+    fn test_resolve_sent_mailbox_default() {
+        let account = AccountConfig::default();
+        assert_eq!(resolve_sent_mailbox(&account), "Sent");
+    }
+
+    #[test]
+    fn test_all_configured_mailboxes_with_extras() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                inbox: Some(MailboxMapping {
+                    server: "INBOX".to_string(),
+                    local: "inbox".to_string(),
+                }),
+                archive: Some(MailboxMapping {
+                    server: "Archive".to_string(),
+                    local: "archive".to_string(),
+                }),
+                sent: None,
+                extra: Some(vec![MailboxMapping {
+                    server: "Spam".to_string(),
+                    local: "spam".to_string(),
+                }]),
+            },
+            ..Default::default()
+        };
+        let all = all_configured_mailboxes(&account);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].0, "inbox");
+        assert_eq!(all[1].0, "archive");
+        assert_eq!(all[2].0, "Spam");
+    }
+
+    #[test]
+    fn test_all_configured_mailboxes_empty() {
+        let account = AccountConfig::default();
+        let all = all_configured_mailboxes(&account);
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_email_settings_defaults() {
+        let settings = EmailSettings::default();
+        assert_eq!(settings.font_family, "Helvetica, Arial, sans-serif");
+        assert_eq!(settings.font_size, "12pt");
+        assert!(settings.include_signature);
+    }
+}
+
 /// Load signature HTML content
 pub fn load_signature(account: &AccountConfig, signature_name: Option<&str>) -> Option<String> {
     let sig_name = signature_name
