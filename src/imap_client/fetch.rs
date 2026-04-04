@@ -248,3 +248,62 @@ pub async fn fetch_new_emails_on_session(
 
     Ok((emails, skipped))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_message_id_from_header_bytes_standard() {
+        let header = b"Message-ID: <abc123@mail.example.com>";
+        assert_eq!(
+            parse_message_id_from_header_bytes(header),
+            Some("<abc123@mail.example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_message_id_from_header_bytes_case_insensitive() {
+        let header = b"Message-Id: <def456@mail.example.com>\nOther: header";
+        assert_eq!(
+            parse_message_id_from_header_bytes(header),
+            Some("<def456@mail.example.com>".to_string())
+        );
+
+        let header = b"message-id: <xyz@mail.example.com>";
+        assert_eq!(
+            parse_message_id_from_header_bytes(header),
+            Some("<xyz@mail.example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_message_id_from_header_bytes_with_whitespace() {
+        let header = b"Message-ID:   <whitespace@mail.example.com>  ";
+        assert_eq!(
+            parse_message_id_from_header_bytes(header),
+            Some("<whitespace@mail.example.com>".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_message_id_from_header_bytes_not_found() {
+        let header = b"From: alice@example.com\nSubject: Test\nDate: Mon, 1 Jan 2024";
+        assert_eq!(parse_message_id_from_header_bytes(header), None);
+    }
+
+    #[test]
+    fn test_parse_message_id_from_header_bytes_empty_value() {
+        let header = b"Message-ID: ";
+        assert_eq!(parse_message_id_from_header_bytes(header), None);
+
+        let header = b"Message-ID:";
+        assert_eq!(parse_message_id_from_header_bytes(header), None);
+    }
+
+    #[test]
+    fn test_parse_message_id_from_header_bytes_utf8() {
+        let header = b"Message-ID: <utf8-test-\xc2\xb5@mail.example.com>";
+        assert!(parse_message_id_from_header_bytes(header).is_some());
+    }
+}

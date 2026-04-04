@@ -1,4 +1,5 @@
 /// Structured search criteria for IMAP queries.
+#[derive(Default)]
 pub struct FetchCriteria {
     pub from: Option<String>,
     pub to: Option<String>,
@@ -189,4 +190,197 @@ pub(crate) fn parse_date_to_imap(date_str: &str) -> Option<String> {
     };
     let day: u32 = parts[2].parse().ok()?;
     Some(format!("{}-{}-{}", day, month, year))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_date_to_imap_valid() {
+        assert_eq!(
+            parse_date_to_imap("2024-12-25"),
+            Some("25-Dec-2024".to_string())
+        );
+        assert_eq!(
+            parse_date_to_imap("2026-01-01"),
+            Some("1-Jan-2026".to_string())
+        );
+        assert_eq!(
+            parse_date_to_imap("2023-06-15"),
+            Some("15-Jun-2023".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_date_to_imap_invalid_format() {
+        assert_eq!(parse_date_to_imap("2024/12/25"), None);
+        assert_eq!(parse_date_to_imap("Dec 25 2024"), None);
+        assert_eq!(parse_date_to_imap("25-Dec-2024"), None);
+        assert_eq!(parse_date_to_imap("2024-1-5"), None);
+    }
+
+    #[test]
+    fn test_parse_date_to_imap_invalid_month() {
+        assert_eq!(parse_date_to_imap("2024-13-01"), None);
+        assert_eq!(parse_date_to_imap("2024-00-01"), None);
+        assert_eq!(parse_date_to_imap("2024-99-01"), None);
+    }
+
+    #[test]
+    fn test_parse_date_to_imap_invalid_day() {
+        // parse_date_to_imap only validates that day is a valid u32, not range.
+        // Invalid days will be rejected by the IMAP server at query time.
+        assert_eq!(parse_date_to_imap("2024-12-00"), Some("0-Dec-2024".to_string()));
+        assert_eq!(parse_date_to_imap("2024-12-32"), Some("32-Dec-2024".to_string()));
+        assert_eq!(parse_date_to_imap("2024-12-ab"), None);
+    }
+
+    #[test]
+    fn test_parse_date_to_imap_empty() {
+        assert_eq!(parse_date_to_imap(""), None);
+        assert_eq!(parse_date_to_imap("2024"), None);
+        assert_eq!(parse_date_to_imap("2024-12"), None);
+    }
+
+    #[test]
+    fn test_build_imap_search_query_empty() {
+        let criteria = FetchCriteria {
+            from: None,
+            to: None,
+            cc: None,
+            subject: None,
+            body: None,
+            since: None,
+            before: None,
+            text: None,
+            in_mailbox: None,
+        };
+        assert_eq!(build_imap_search_query(&criteria), "ALL");
+    }
+
+    #[test]
+    fn test_build_imap_search_query_single() {
+        let mut criteria = FetchCriteria::default();
+        criteria.from = Some("alice".to_string());
+        assert_eq!(build_imap_search_query(&criteria), "FROM \"alice\"");
+
+        let mut criteria = FetchCriteria::default();
+        criteria.subject = Some("invoice".to_string());
+        assert_eq!(
+            build_imap_search_query(&criteria),
+            "SUBJECT \"invoice\""
+        );
+    }
+
+    #[test]
+    fn test_build_imap_search_query_multiple() {
+        let mut criteria = FetchCriteria::default();
+        criteria.from = Some("alice".to_string());
+        criteria.to = Some("bob".to_string());
+        criteria.subject = Some("invoice".to_string());
+        let query = build_imap_search_query(&criteria);
+        assert!(query.contains("FROM \"alice\""));
+        assert!(query.contains("TO \"bob\""));
+        assert!(query.contains("SUBJECT \"invoice\""));
+        let parts: Vec<&str> = query.split(' ').collect();
+        assert_eq!(parts.len(), 6);
+    }
+
+    #[test]
+    fn test_build_imap_search_query_date_criteria() {
+        let mut criteria = FetchCriteria::default();
+        criteria.since = Some("2024-12-01".to_string());
+        criteria.before = Some("2024-12-31".to_string());
+        let query = build_imap_search_query(&criteria);
+        assert!(query.contains("SINCE 1-Dec-2024"));
+        assert!(query.contains("BEFORE 31-Dec-2024"));
+    }
+
+    #[test]
+    fn test_build_imap_search_query_text() {
+        let mut criteria = FetchCriteria::default();
+        criteria.text = Some("urgent meeting".to_string());
+        assert_eq!(
+            build_imap_search_query(&criteria),
+            "TEXT \"urgent meeting\""
+        );
+    }
+
+    #[test]
+    fn test_parse_search_query_from() {
+        let criteria = parse_search_query("from:alice@example.com");
+        assert_eq!(criteria.from, Some("alice@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_to() {
+        let criteria = parse_search_query("to:bob@example.org");
+        assert_eq!(criteria.to, Some("bob@example.org".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_cc() {
+        let criteria = parse_search_query("cc:secret@example.net");
+        assert_eq!(criteria.cc, Some("secret@example.net".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_subject() {
+        let criteria = parse_search_query("subject:invoice");
+        assert_eq!(criteria.subject, Some("invoice".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_body() {
+        let criteria = parse_search_query("body:contract");
+        assert_eq!(criteria.body, Some("contract".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_since_before() {
+        let criteria = parse_search_query("since:2024-12-01 before:2024-12-31");
+        assert_eq!(criteria.since, Some("2024-12-01".to_string()));
+        assert_eq!(criteria.before, Some("2024-12-31".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_in_mailbox() {
+        let criteria = parse_search_query("in:INBOX from:alice");
+        assert_eq!(criteria.in_mailbox, Some("INBOX".to_string()));
+        assert_eq!(criteria.from, Some("alice".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_bare_text() {
+        let criteria = parse_search_query("urgent meeting");
+        assert_eq!(criteria.text, Some("urgent meeting".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_quoted_value() {
+        let criteria = parse_search_query("from:\"Alice Smith\" subject:report");
+        assert_eq!(criteria.from, Some("Alice Smith".to_string()));
+        assert_eq!(criteria.subject, Some("report".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_case_insensitive_prefix() {
+        let criteria = parse_search_query("FROM:alice SUBJECT:report");
+        assert_eq!(criteria.from, Some("alice".to_string()));
+        assert_eq!(criteria.subject, Some("report".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_multiple_bare_words() {
+        let criteria = parse_search_query("urgent meeting notes");
+        assert_eq!(criteria.text, Some("urgent meeting notes".to_string()));
+    }
+
+    #[test]
+    fn test_parse_search_query_mixed_prefix_and_bare() {
+        let criteria = parse_search_query("from:alice urgent");
+        assert_eq!(criteria.from, Some("alice".to_string()));
+        assert_eq!(criteria.text, Some("urgent".to_string()));
+    }
 }

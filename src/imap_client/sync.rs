@@ -45,9 +45,21 @@ pub async fn sync_mailboxes(
     let mut total_saved = 0usize;
     let mut total_skipped = 0usize;
 
+    // Build a global known_ids set from ALL local directories.
+    // This prevents re-fetching an email to one mailbox if it's already
+    // stored in another local mailbox directory (e.g. archived locally but
+    // still in server INBOX, or found via search and saved to Archive).
+    let mut global_known_ids = std::collections::HashSet::new();
+    for target in targets {
+        if let Ok(ids) = scan_existing_message_ids(&target.local_dir) {
+            global_known_ids.extend(ids);
+        }
+    }
+
     // Phase 1: Additive sync with two-pass fetch
     for target in targets {
-        let mut known_ids = scan_existing_message_ids(&target.local_dir)?;
+        // Start from global known_ids so we skip emails already stored anywhere locally
+        let mut known_ids = global_known_ids.clone();
 
         match fetch_new_emails_on_session(
             &mut session,
