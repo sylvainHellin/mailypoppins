@@ -1,0 +1,220 @@
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::Frame;
+
+use super::super::app::{App, Focus};
+use super::super::theme;
+use super::util::{pane_border_style, truncate};
+
+pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
+    let border_style = pane_border_style(app.focus, Focus::List);
+    let title = if !app.search_query.is_empty() && app.focus != Focus::Search {
+        if app.search_includes_body {
+            format!(" {} (content search) ", app.active_label())
+        } else {
+            format!(" {} (filtered) ", app.active_label())
+        }
+    } else {
+        format!(" {} ", app.active_label())
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .style(Style::default().bg(theme::BASE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let search_visible = app.focus == Focus::Search || !app.search_query.is_empty();
+    let (search_area, list_area) = if search_visible {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, inner)
+    };
+
+    if let Some(search_rect) = search_area {
+        let prefix = if app.search_includes_body { "\\" } else { "/" };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(theme::BLUE)),
+            Span::styled(app.search_query.as_str(), Style::default().fg(theme::TEXT)),
+        ];
+        if app.focus == Focus::Search {
+            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::BLUE)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), search_rect);
+    }
+
+    if app.emails.is_empty() {
+        let msg = if !app.search_query.is_empty() {
+            "  No matching emails".to_string()
+        } else {
+            format!(
+                "\n  No emails in {}\n\n  Press f to fetch new emails",
+                app.active_label()
+            )
+        };
+        let empty = Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
+        frame.render_widget(empty, list_area);
+        return;
+    }
+
+    let available_width = list_area.width as usize;
+    let date_width = 10;
+    let spacing = 3;
+
+    let has_selection = !app.selection.is_empty();
+
+    if available_width > 45 {
+        let checkbox_extra: usize = if has_selection { 3 } else { 0 };
+        let effective_width = available_width.saturating_sub(checkbox_extra);
+        let contact_width = 15.min(effective_width.saturating_sub(date_width + spacing + 10));
+        let subject_width = effective_width.saturating_sub(date_width + contact_width + spacing);
+
+        let mut header_cells = Vec::new();
+        if has_selection {
+            header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
+        }
+        header_cells.push(Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)));
+        header_cells.push(Cell::from("CONTACT").style(Style::default().fg(theme::SUBTEXT0)));
+        header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
+        let header = Row::new(header_cells).height(1);
+
+        let rows: Vec<Row> = app
+            .emails
+            .iter()
+            .enumerate()
+            .map(|(i, email)| {
+                let is_cursor = i == app.list_index;
+                let is_in_selection = has_selection && app.selection.contains(&email.path);
+                let contact = truncate(email.display_contact(app.active_kind()), contact_width);
+                let subject_prefix = if email.has_attachments { "\u{f0c6} " } else { "" };
+                let subject = truncate(
+                    &format!("{}{}", subject_prefix, email.subject),
+                    subject_width,
+                );
+
+                let row_style = if is_cursor {
+                    Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
+                } else if is_in_selection {
+                    Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+
+                let mut cells = Vec::new();
+                if has_selection {
+                    let icon = if is_in_selection {
+                        Span::styled("\u{f0134}", Style::default().fg(theme::GREEN))
+                    } else {
+                        Span::styled("\u{f0131}", Style::default().fg(theme::OVERLAY0))
+                    };
+                    cells.push(Cell::from(icon));
+                }
+                cells.push(Cell::from(email.date_display.clone()));
+                cells.push(Cell::from(contact));
+                cells.push(Cell::from(subject));
+
+                Row::new(cells).style(row_style)
+            })
+            .collect();
+
+        let mut constraints = Vec::new();
+        if has_selection {
+            constraints.push(Constraint::Length(2));
+        }
+        constraints.push(Constraint::Length(date_width as u16));
+        constraints.push(Constraint::Length(contact_width as u16));
+        constraints.push(Constraint::Min(subject_width as u16));
+
+        let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme::SURFACE0)
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let mut state = TableState::default();
+        state.select(Some(app.list_index));
+        frame.render_stateful_widget(table, list_area, &mut state);
+    } else {
+        let checkbox_extra: usize = if has_selection { 3 } else { 0 };
+        let subject_width = available_width.saturating_sub(date_width + 2 + checkbox_extra);
+
+        let mut header_cells = Vec::new();
+        if has_selection {
+            header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
+        }
+        header_cells.push(Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)));
+        header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
+        let header = Row::new(header_cells).height(1);
+
+        let rows: Vec<Row> = app
+            .emails
+            .iter()
+            .enumerate()
+            .map(|(i, email)| {
+                let is_cursor = i == app.list_index;
+                let is_in_selection = has_selection && app.selection.contains(&email.path);
+                let subject_prefix = if email.has_attachments { "\u{f0c6} " } else { "" };
+                let subject = truncate(
+                    &format!("{}{}", subject_prefix, email.subject),
+                    subject_width,
+                );
+
+                let row_style = if is_cursor {
+                    Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
+                } else if is_in_selection {
+                    Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+
+                let mut cells = Vec::new();
+                if has_selection {
+                    let icon = if is_in_selection {
+                        Span::styled("\u{f0134}", Style::default().fg(theme::GREEN))
+                    } else {
+                        Span::styled("\u{f0131}", Style::default().fg(theme::OVERLAY0))
+                    };
+                    cells.push(Cell::from(icon));
+                }
+                cells.push(Cell::from(email.date_display.clone()));
+                cells.push(Cell::from(subject));
+
+                Row::new(cells).style(row_style)
+            })
+            .collect();
+
+        let mut constraints = Vec::new();
+        if has_selection {
+            constraints.push(Constraint::Length(2));
+        }
+        constraints.push(Constraint::Length(date_width as u16));
+        constraints.push(Constraint::Min(subject_width as u16));
+
+        let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme::SURFACE0)
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let mut state = TableState::default();
+        state.select(Some(app.list_index));
+        frame.render_stateful_widget(table, list_area, &mut state);
+    }
+}

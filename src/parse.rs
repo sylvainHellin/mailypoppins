@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 /// If a `<meta charset=...>` tag is already present, the HTML is returned as-is.
 /// Otherwise, the declaration is injected after `<head>` (or prepended if there
 /// is no `<head>` tag) so that browsers interpret the content correctly.
-fn ensure_utf8_charset(html: &str) -> String {
+pub(crate) fn ensure_utf8_charset(html: &str) -> String {
     let lower = html.to_lowercase();
     if lower.contains("charset") {
         return html.to_string();
@@ -30,7 +30,7 @@ fn ensure_utf8_charset(html: &str) -> String {
 }
 
 /// Find the largest byte index <= `max_bytes` that lies on a UTF-8 char boundary.
-fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     if max_bytes >= s.len() {
         return s.len();
     }
@@ -166,7 +166,7 @@ fn collect_attachments(
     }
 }
 
-fn sanitize_attachment_filename(name: &str) -> String {
+pub(crate) fn sanitize_attachment_filename(name: &str) -> String {
     let name = name.replace(['/', '\\', '\0'], "_");
     let name: String = name.chars().filter(|c| !c.is_control()).collect();
     let name = name.trim().to_string();
@@ -599,6 +599,266 @@ pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // ensure_utf8_charset
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ensure_utf8_charset_already_has_charset() {
+        let html = r#"<html><head><meta charset="UTF-8"></head><body>hi</body></html>"#;
+        assert_eq!(ensure_utf8_charset(html), html);
+    }
+
+    #[test]
+    fn test_ensure_utf8_charset_injects_after_head() {
+        let html = "<html><head><title>Test</title></head><body>hi</body></html>";
+        let result = ensure_utf8_charset(html);
+        assert!(result.contains("<meta charset=\"UTF-8\">"));
+        // Must appear right after <head>
+        assert!(result.contains("<head><meta charset=\"UTF-8\"><title>"));
+    }
+
+    #[test]
+    fn test_ensure_utf8_charset_html_without_head() {
+        let html = "<html><body>hi</body></html>";
+        let result = ensure_utf8_charset(html);
+        assert!(result.contains(r#"<meta charset="UTF-8">"#));
+        assert!(result.contains("<head>"));
+    }
+
+    #[test]
+    fn test_ensure_utf8_charset_bare_html() {
+        let html = "<div>hello</div>";
+        let result = ensure_utf8_charset(html);
+        assert!(result.starts_with(r#"<meta charset="UTF-8">"#));
+    }
+
+    // -----------------------------------------------------------------------
+    // compress_uid_set
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compress_uid_set_ranges() {
+        assert_eq!(compress_uid_set(&[1, 2, 3, 5, 7, 8, 9]), "1:3,5,7:9");
+    }
+
+    #[test]
+    fn test_compress_uid_set_empty() {
+        assert_eq!(compress_uid_set(&[]), "");
+    }
+
+    #[test]
+    fn test_compress_uid_set_single() {
+        assert_eq!(compress_uid_set(&[42]), "42");
+    }
+
+    #[test]
+    fn test_compress_uid_set_unsorted() {
+        assert_eq!(compress_uid_set(&[5, 3, 1, 2, 4]), "1:5");
+    }
+
+    #[test]
+    fn test_compress_uid_set_non_contiguous() {
+        assert_eq!(compress_uid_set(&[1, 3, 5]), "1,3,5");
+    }
+
+    // -----------------------------------------------------------------------
+    // slugify_subject
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_slugify_subject_normal() {
+        assert_eq!(slugify_subject("Hello World"), "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_subject_unicode() {
+        let result = slugify_subject("Prufung Ergebnis");
+        assert!(result.contains("prufung"));
+    }
+
+    #[test]
+    fn test_slugify_subject_empty() {
+        assert_eq!(slugify_subject(""), "");
+    }
+
+    #[test]
+    fn test_slugify_subject_long() {
+        let long = "a ".repeat(30);
+        let result = slugify_subject(&long);
+        assert!(result.len() <= 40);
+    }
+
+    #[test]
+    fn test_slugify_subject_special_chars() {
+        assert_eq!(slugify_subject("Re: Hello! @#$ World?"), "re-hello-world");
+    }
+
+    #[test]
+    fn test_slugify_subject_consecutive_hyphens() {
+        assert_eq!(slugify_subject("hello   world"), "hello-world");
+    }
+
+    // -----------------------------------------------------------------------
+    // slugify_sender
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_slugify_sender_display_name() {
+        assert_eq!(slugify_sender("John Doe <john@example.com>"), "john-doe");
+    }
+
+    #[test]
+    fn test_slugify_sender_bare_email() {
+        assert_eq!(slugify_sender("john@example.com"), "john");
+    }
+
+    #[test]
+    fn test_slugify_sender_no_display_name() {
+        assert_eq!(slugify_sender("<john@example.com>"), "john");
+    }
+
+    #[test]
+    fn test_slugify_sender_quoted_display_name() {
+        assert_eq!(slugify_sender("\"John Doe\" <john@example.com>"), "john-doe");
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_email_address
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_email_address_angle_brackets() {
+        assert_eq!(extract_email_address("John Doe <john@x.com>"), "john@x.com");
+    }
+
+    #[test]
+    fn test_extract_email_address_bare() {
+        assert_eq!(extract_email_address("john@x.com"), "john@x.com");
+    }
+
+    #[test]
+    fn test_extract_email_address_whitespace() {
+        assert_eq!(extract_email_address("  john@x.com  "), "john@x.com");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_email_date_prefix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_email_date_prefix_valid_rfc2822() {
+        let result = parse_email_date_prefix("Mon, 01 Jan 2024 12:00:00 +0000");
+        assert_eq!(result, "2024-01-01-1200");
+    }
+
+    #[test]
+    fn test_parse_email_date_prefix_invalid_fallback() {
+        let result = parse_email_date_prefix("not a date");
+        // Should fall back to current date - just verify it has the right format
+        assert!(result.len() >= 15); // YYYY-MM-DD-HHMM
+        assert_eq!(&result[4..5], "-");
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_attachment_filename
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sanitize_attachment_filename_normal() {
+        assert_eq!(sanitize_attachment_filename("report.pdf"), "report.pdf");
+    }
+
+    #[test]
+    fn test_sanitize_attachment_filename_slashes() {
+        assert_eq!(sanitize_attachment_filename("path/to/file.pdf"), "path_to_file.pdf");
+    }
+
+    #[test]
+    fn test_sanitize_attachment_filename_control_chars() {
+        assert_eq!(sanitize_attachment_filename("file\x00name.pdf"), "file_name.pdf");
+    }
+
+    #[test]
+    fn test_sanitize_attachment_filename_empty() {
+        assert_eq!(sanitize_attachment_filename(""), "attachment.bin");
+    }
+
+    #[test]
+    fn test_sanitize_attachment_filename_long() {
+        let long = "a".repeat(250);
+        let result = sanitize_attachment_filename(&long);
+        assert!(result.len() <= 200);
+    }
+
+    // -----------------------------------------------------------------------
+    // attachments_dir_for
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_attachments_dir_for_basic() {
+        let path = Path::new("/mail/inbox/email.md");
+        assert_eq!(attachments_dir_for(path), PathBuf::from("/mail/inbox/email_attachments"));
+    }
+
+    #[test]
+    fn test_attachments_dir_for_nested() {
+        let path = Path::new("a/b/c/test.md");
+        assert_eq!(attachments_dir_for(path), PathBuf::from("a/b/c/test_attachments"));
+    }
+
+    // -----------------------------------------------------------------------
+    // floor_char_boundary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_floor_char_boundary_ascii() {
+        assert_eq!(floor_char_boundary("hello", 3), 3);
+    }
+
+    #[test]
+    fn test_floor_char_boundary_multibyte() {
+        // "ae" is U+00E4, 2 bytes in UTF-8
+        let s = "\u{00E4}bc";
+        // Byte 1 is in the middle of the 2-byte char -> should clamp to 0
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        // Byte 2 is the start of 'b'
+        assert_eq!(floor_char_boundary(s, 2), 2);
+    }
+
+    #[test]
+    fn test_floor_char_boundary_exact() {
+        assert_eq!(floor_char_boundary("abc", 10), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_rfc822_to_fetched_email
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_rfc822_minimal() {
+        let raw = b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\nMessage-ID: <test123@example.com>\r\n\r\nHello world";
+        let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
+        assert_eq!(email.from, "alice@example.com");
+        assert_eq!(email.to, "bob@example.com");
+        assert_eq!(email.subject, "Test");
+        assert!(email.body_text.contains("Hello world"));
+        assert_eq!(email.message_id, Some("<test123@example.com>".to_string()));
+        assert!(!email.has_attachments);
+    }
+
+    #[test]
+    fn test_parse_rfc822_missing_fields() {
+        let raw = b"\r\nBody only";
+        let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
+        assert_eq!(email.from, "(unknown)");
+        assert_eq!(email.subject, "(no subject)");
+    }
+
+    // -----------------------------------------------------------------------
+    // html_to_plain (existing tests below)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_html_to_plain_preserves_paragraph_breaks() {

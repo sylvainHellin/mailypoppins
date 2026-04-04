@@ -1,0 +1,367 @@
+use std::io::{self, stdout};
+use std::panic;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+
+use anyhow::{Context, Result};
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{backend::CrosstermBackend, Terminal};
+
+use super::app::{App, EmailEntry, SearchHit, SearchTarget};
+
+use crate::config::{
+    all_configured_mailboxes, resolve_mailbox_local_path, AccountConfig, ImapConfig,
+};
+use crate::draft::parse_email_draft;
+use crate::imap_client::{fetch_emails_on_session, open_imap_session, parse_search_query, sync_mailboxes, SyncTarget};
+use crate::parse::FetchedEmail;
+use crate::sync::mailbox_status;
+
+// ---------------------------------------------------------------------------
+// Watcher
+// ---------------------------------------------------------------------------
+
+pub(super) enum WatchEvent {
+    Changed { account_index: usize },
+    Error { account_index: usize, message: String },
+}
+
+pub(super) fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig, account_index: usize) {
+    use crate::imap_client::watch_mailbox as imap_watch;
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => {
+            let _ = tx.send(WatchEvent::Error {
+                account_index,
+                message: "Failed to create async runtime".into(),
+            });
+            return;
+        }
+    };
+    loop {
+        match rt.block_on(imap_watch(&imap_config, "INBOX", Some(300))) {
+            Ok(0) => {
+                if tx.send(WatchEvent::Changed { account_index }).is_err() {
+                    break;
+                }
+            }
+            Ok(2) => continue, // timeout, re-idle
+            Ok(_) => {
+                let _ = tx.send(WatchEvent::Error {
+                    account_index,
+                    message: "Watch connection lost".into(),
+                });
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+            Err(_) => {
+                let _ = tx.send(WatchEvent::Error {
+                    account_index,
+                    message: "Watch connection lost".into(),
+                });
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal helpers
+// ---------------------------------------------------------------------------
+
+pub(super) fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+pub(super) fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+    Ok(())
+}
+
+pub(super) fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout());
+    let terminal = Terminal::new(backend)?;
+    Ok(terminal)
+}
+
+pub(super) fn restore_terminal() -> Result<()> {
+    execute!(stdout(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    Ok(())
+}
+
+pub(super) fn install_panic_hook() {
+    let original_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+        original_hook(panic_info);
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Editor / clipboard
+// ---------------------------------------------------------------------------
+
+fn editor() -> String {
+    std::env::var("EDITOR").unwrap_or_else(|_| "hx".to_string())
+}
+
+pub(super) fn edit_file(path: &Path) -> Result<()> {
+    let editor = editor();
+    let status = std::process::Command::new(&editor)
+        .arg(path)
+        .status()
+        .with_context(|| format!("Failed to launch editor: {}", editor))?;
+    if !status.success() {
+        anyhow::bail!("Editor exited with status: {}", status);
+    }
+    Ok(())
+}
+
+pub(super) fn copy_to_clipboard(text: &str) -> Result<()> {
+    let mut clipboard =
+        arboard::Clipboard::new().context("Failed to access clipboard")?;
+    clipboard
+        .set_text(text)
+        .context("Failed to copy to clipboard")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Library call helpers
+// ---------------------------------------------------------------------------
+
+pub(super) async fn lib_do_sync(
+    account_config: &AccountConfig,
+    imap_config: &ImapConfig,
+    limit: usize,
+    reconcile: bool,
+) -> anyhow::Result<String> {
+    let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
+        .iter()
+        .map(|(role, mapping)| SyncTarget {
+            role: role.clone(),
+            server_name: mapping.server.clone(),
+            local_dir: resolve_mailbox_local_path(account_config, mapping),
+            status: mailbox_status(role).to_string(),
+        })
+        .collect();
+
+    let result = sync_mailboxes(imap_config, &targets, limit, reconcile).await?;
+
+    let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
+    if reconcile {
+        if result.moved > 0 || result.removed > 0 {
+            msg.push_str(&format!(
+                " | Reconciled: {} moved, {} removed",
+                result.moved, result.removed
+            ));
+        } else {
+            msg.push_str(" | Already in sync");
+        }
+    }
+    Ok(msg)
+}
+
+pub(super) async fn lib_do_multi_search(
+    imap_config: &ImapConfig,
+    query: &str,
+    targets: &[SearchTarget],
+) -> anyhow::Result<Vec<SearchHit>> {
+    let mut criteria = parse_search_query(query);
+    criteria.in_mailbox = None;
+
+    let mut session = open_imap_session(imap_config).await?;
+    let total_limit = 50usize;
+    let per_mb = (total_limit / targets.len().max(1)).max(5);
+    let mut total = 0usize;
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+
+    for target in targets {
+        if total >= total_limit {
+            break;
+        }
+        let budget = per_mb.min(total_limit - total);
+        match fetch_emails_on_session(
+            &mut session,
+            &criteria,
+            &target.server_name,
+            Some(budget),
+        )
+        .await
+        {
+            Ok(emails) => {
+                total += emails.len();
+                for fetched in emails {
+                    let entry = fetched_to_email_entry(&fetched);
+                    hits.push(SearchHit {
+                        entry,
+                        fetched,
+                        source_label: target.label.clone(),
+                        source_local_dir: target.local_dir.clone(),
+                        source_status: target.status.clone(),
+                    });
+                }
+            }
+            Err(e) => {
+                log::warn!("Search in {} failed: {}", target.server_name, e);
+            }
+        }
+    }
+
+    session.logout().await.ok();
+
+    hits.sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
+
+    Ok(hits)
+}
+
+fn fetched_to_email_entry(fetched: &FetchedEmail) -> EmailEntry {
+    let (date_display, date_sort) = if let Ok(dt) =
+        chrono::DateTime::parse_from_rfc2822(&fetched.date)
+    {
+        (
+            dt.format("%Y-%m-%d").to_string(),
+            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        )
+    } else {
+        (fetched.date.chars().take(10).collect(), fetched.date.clone())
+    };
+
+    EmailEntry {
+        path: PathBuf::new(),
+        from: fetched.from.clone(),
+        to: fetched.to.clone(),
+        cc: fetched.cc.clone(),
+        subject: fetched.subject.clone(),
+        status: String::new(),
+        date_display,
+        date_sort,
+        body: fetched.body_text.clone(),
+        has_attachments: fetched.has_attachments,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Account resolution for Send
+// ---------------------------------------------------------------------------
+
+pub(super) fn resolve_send_account(
+    app: &App,
+    draft_path: &Path,
+) -> (
+    usize,
+    Option<crate::config::SmtpConfig>,
+    Option<crate::config::ImapConfig>,
+    AccountConfig,
+    Option<String>,
+    Option<PathBuf>,
+) {
+    if let Ok(draft) = parse_email_draft(draft_path) {
+        let from = draft.frontmatter.from.unwrap_or_default().to_lowercase();
+        for (i, acct) in app.accounts.iter().enumerate() {
+            if from.contains(&acct.account_config.default_from.to_lowercase()) {
+                return (
+                    i,
+                    acct.smtp_config.clone(),
+                    acct.imap_config.clone(),
+                    acct.account_config.clone(),
+                    acct.signature_content.clone(),
+                    acct.sent_dir.clone(),
+                );
+            }
+        }
+    }
+    let acct = &app.accounts[app.active_account];
+    (
+        app.active_account,
+        acct.smtp_config.clone(),
+        acct.imap_config.clone(),
+        acct.account_config.clone(),
+        acct.signature_content.clone(),
+        acct.sent_dir.clone(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Search result helpers
+// ---------------------------------------------------------------------------
+
+pub(super) fn ensure_search_result_saved(app: &mut App) -> Option<PathBuf> {
+    let idx = app.server_search_index;
+    let result = app.server_search_results.get(idx)?;
+
+    if let Some(ref path) = result.saved_path {
+        return Some(path.clone());
+    }
+
+    let save_dir = result.source_local_dir.clone();
+    let status = result.source_status.clone();
+
+    let fetched_clone = result.fetched.clone();
+    let message_id = result.fetched.message_id.clone();
+
+    let mut known_ids = crate::parse::scan_existing_message_ids(&save_dir).unwrap_or_default();
+    match crate::parse::save_fetched_emails_with_known_ids(
+        &[fetched_clone],
+        &save_dir,
+        &status,
+        &mut known_ids,
+    ) {
+        Ok((saved, _skipped)) => {
+            if saved > 0 {
+                if let Some(ref mid) = message_id {
+                    if let Some(path) = find_file_by_message_id(&save_dir, mid) {
+                        let result = app.server_search_results.get_mut(idx)?;
+                        result.saved_path = Some(path.clone());
+                        if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
+                            app.invalidate_cache_idx(cache_idx);
+                        }
+                        return Some(path);
+                    }
+                }
+                if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
+                    app.invalidate_cache_idx(cache_idx);
+                }
+                None
+            } else {
+                if let Some(ref mid) = message_id {
+                    if let Some(path) = find_file_by_message_id(&save_dir, mid) {
+                        let result = app.server_search_results.get_mut(idx)?;
+                        result.saved_path = Some(path.clone());
+                        return Some(path);
+                    }
+                }
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn find_file_by_message_id(dir: &Path, message_id: &str) -> Option<PathBuf> {
+    let walker = walkdir::WalkDir::new(dir).max_depth(1);
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        if entry.path().extension().is_some_and(|ext| ext == "md") {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if content.contains(message_id) {
+                    return Some(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    None
+}

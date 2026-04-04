@@ -183,3 +183,34 @@ pub fn mailbox_status(mailbox: &str) -> &'static str {
         "inbox"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mailbox_status_inbox() {
+        assert_eq!(mailbox_status("INBOX"), "inbox");
+        assert_eq!(mailbox_status("inbox"), "inbox");
+        assert_eq!(mailbox_status("Inbox"), "inbox");
+    }
+
+    #[test]
+    fn test_mailbox_status_archive() {
+        assert_eq!(mailbox_status("Archive"), "archived");
+        assert_eq!(mailbox_status("archive"), "archived");
+        assert_eq!(mailbox_status("ARCHIVE"), "archived");
+    }
+
+    #[test]
+    fn test_mailbox_status_sent() {
+        assert_eq!(mailbox_status("Sent"), "sent");
+        assert_eq!(mailbox_status("sent"), "sent");
+    }
+
+    #[test]
+    fn test_mailbox_status_unknown() {
+        assert_eq!(mailbox_status("Spam"), "inbox");
+        assert_eq!(mailbox_status("Trash"), "inbox");
+    }
+}

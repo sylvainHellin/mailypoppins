@@ -145,6 +145,73 @@ blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; 
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EmailSettings;
+    use insta::assert_snapshot;
+
+    fn default_settings() -> EmailSettings {
+        EmailSettings::default()
+    }
+
+    #[test]
+    fn test_markdown_to_html_basic_paragraph() {
+        let html = markdown_to_html("Hello **world**!\n\nSecond paragraph.", &default_settings(), None, None);
+        assert_snapshot!(html);
+    }
+
+    #[test]
+    fn test_markdown_to_html_with_signature_placeholder() {
+        let md = "My reply\n\n{{SIGNATURE}}\n\n> Original message";
+        let sig = "<p>-- Best, Alice</p>";
+        let html = markdown_to_html(md, &default_settings(), Some(sig), None);
+        assert_snapshot!(html);
+    }
+
+    #[test]
+    fn test_markdown_to_html_signature_with_quoted_html() {
+        let md = "My reply\n\n{{SIGNATURE}}\n\n> Quoted text";
+        let sig = "<p>-- Best, Alice</p>";
+        let quoted = "<p>Original HTML content</p>";
+        let html = markdown_to_html(md, &default_settings(), Some(sig), Some(quoted));
+        assert_snapshot!(html);
+    }
+
+    #[test]
+    fn test_markdown_to_html_signature_without_quoted_html() {
+        let md = "My reply\n\n{{SIGNATURE}}\n\n> Quoted text";
+        let sig = "<p>-- Best, Alice</p>";
+        let html = markdown_to_html(md, &default_settings(), Some(sig), None);
+        assert_snapshot!(html);
+    }
+
+    #[test]
+    fn test_markdown_to_html_tables_and_links() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |\n\n[Link](https://example.com)\n\n~~strikethrough~~";
+        let html = markdown_to_html(md, &default_settings(), None, None);
+        assert_snapshot!(html);
+    }
+
+    #[test]
+    fn test_markdown_to_html_empty_body() {
+        let html = markdown_to_html("", &default_settings(), None, None);
+        assert_snapshot!(html);
+    }
+
+    #[test]
+    fn test_markdown_to_html_custom_font() {
+        let settings = EmailSettings {
+            font_family: "Georgia, serif".to_string(),
+            font_size: "14px".to_string(),
+            include_signature: true,
+        };
+        let html = markdown_to_html("Hello", &settings, None, None);
+        assert!(html.contains("Georgia, serif"));
+        assert!(html.contains("14px"));
+    }
+}
+
 pub async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
