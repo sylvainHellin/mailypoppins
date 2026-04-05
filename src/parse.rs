@@ -904,4 +904,347 @@ mod tests {
         // Just verify it returns without panicking
         let _ = result;
     }
+
+    // -----------------------------------------------------------------------
+    // compress_uid_set -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compress_uid_set_duplicates() {
+        // compress_uid_set does not deduplicate; duplicates break ranges
+        assert_eq!(compress_uid_set(&[1, 1, 2, 2, 3]), "1,1:2,2:3");
+    }
+
+    #[test]
+    fn test_compress_uid_set_two_elements_contiguous() {
+        assert_eq!(compress_uid_set(&[10, 11]), "10:11");
+    }
+
+    #[test]
+    fn test_compress_uid_set_large_gap() {
+        assert_eq!(compress_uid_set(&[1, 1000]), "1,1000");
+    }
+
+    // -----------------------------------------------------------------------
+    // slugify_sender -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_slugify_sender_plain_name() {
+        assert_eq!(slugify_sender("Alice"), "alice");
+    }
+
+    #[test]
+    fn test_slugify_sender_empty() {
+        assert_eq!(slugify_sender(""), "");
+    }
+
+    #[test]
+    fn test_slugify_sender_email_only_angle_brackets_no_local() {
+        // Edge: angle brackets with empty local part
+        assert_eq!(slugify_sender("<@example.com>"), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // slugify_subject -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_slugify_subject_only_special_chars() {
+        assert_eq!(slugify_subject("!@#$%^&*()"), "");
+    }
+
+    #[test]
+    fn test_slugify_subject_leading_trailing_spaces() {
+        assert_eq!(slugify_subject("  hello world  "), "hello-world");
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_email_address -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_email_address_malformed_angle_brackets() {
+        // Only opening bracket, no closing
+        assert_eq!(extract_email_address("John <john@x.com"), "John <john@x.com");
+    }
+
+    #[test]
+    fn test_extract_email_address_empty() {
+        assert_eq!(extract_email_address(""), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // floor_char_boundary -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_floor_char_boundary_empty_string() {
+        assert_eq!(floor_char_boundary("", 5), 0);
+    }
+
+    #[test]
+    fn test_floor_char_boundary_zero() {
+        assert_eq!(floor_char_boundary("hello", 0), 0);
+    }
+
+    #[test]
+    fn test_floor_char_boundary_emoji() {
+        // Emoji is 4 bytes in UTF-8
+        let s = "\u{1F600}abc"; // grinning face + "abc"
+        assert_eq!(floor_char_boundary(s, 1), 0); // mid emoji
+        assert_eq!(floor_char_boundary(s, 4), 4); // exactly after emoji
+        assert_eq!(floor_char_boundary(s, 5), 5); // after 'a'
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_rfc822_to_fetched_email -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_rfc822_with_cc() {
+        let raw = b"From: a@x.com\r\nTo: b@x.com\r\nCc: c@x.com, d@x.com\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody";
+        let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
+        assert_eq!(email.cc, Some("c@x.com, d@x.com".to_string()));
+    }
+
+    #[test]
+    fn test_parse_rfc822_html_only() {
+        let raw = b"From: a@x.com\r\nTo: b@x.com\r\nSubject: HTML\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\nContent-Type: text/html\r\n\r\n<p>Hello</p>";
+        let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
+        assert!(email.html_body.is_some());
+        assert!(email.body_text.contains("Hello"));
+    }
+
+    #[test]
+    fn test_parse_rfc822_empty_body() {
+        let raw = b"From: a@x.com\r\nTo: b@x.com\r\nSubject: Empty\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\n";
+        let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
+        assert!(email.body_text.is_empty() || email.body_text.trim().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // scan_existing_message_ids (filesystem)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_scan_existing_message_ids_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = scan_existing_message_ids(dir.path()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_scan_existing_message_ids_nonexistent_dir() {
+        let ids = scan_existing_message_ids(Path::new("/nonexistent/path/12345")).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_scan_existing_message_ids_finds_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "---\nmessage_id: \"<abc@example.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(dir.path().join("email1.md"), content).unwrap();
+        let content2 = "---\nmessage_id: \"<def@example.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(dir.path().join("email2.md"), content2).unwrap();
+        // Non-md file should be ignored
+        std::fs::write(dir.path().join("notes.txt"), "---\nmessage_id: \"<skip>\"\n---\n").unwrap();
+
+        let ids = scan_existing_message_ids(dir.path()).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("<abc@example.com>"));
+        assert!(ids.contains("<def@example.com>"));
+    }
+
+    #[test]
+    fn test_scan_existing_message_ids_no_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "---\nstatus: inbox\n---\n\nBody without message_id";
+        std::fs::write(dir.path().join("email.md"), content).unwrap();
+
+        let ids = scan_existing_message_ids(dir.path()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // list_attachments (filesystem)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_list_attachments_no_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("email.md");
+        let files = list_attachments(&md_path).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_list_attachments_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let md_path = dir.path().join("email.md");
+        let att_dir = dir.path().join("email_attachments");
+        std::fs::create_dir(&att_dir).unwrap();
+        std::fs::write(att_dir.join("doc.pdf"), b"pdf data").unwrap();
+        std::fs::write(att_dir.join("img.png"), b"png data").unwrap();
+
+        let files = list_attachments(&md_path).unwrap();
+        assert_eq!(files.len(), 2);
+        // Should be sorted by filename
+        assert!(files[0].file_name().unwrap().to_str().unwrap() == "doc.pdf");
+        assert!(files[1].file_name().unwrap().to_str().unwrap() == "img.png");
+    }
+
+    // -----------------------------------------------------------------------
+    // save_fetched_emails (filesystem)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_save_fetched_emails_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let emails = vec![FetchedEmail {
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            cc: None,
+            subject: "Test Subject".to_string(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".to_string(),
+            body_text: "Hello world".to_string(),
+            html_body: None,
+            has_attachments: false,
+            message_id: Some("<test1@example.com>".to_string()),
+            attachments: vec![],
+        }];
+
+        let (saved, skipped) = save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
+        assert_eq!(saved, 1);
+        assert_eq!(skipped, 0);
+
+        // Verify file was created
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        assert_eq!(files.len(), 1);
+
+        let content = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(content.contains("message_id:"));
+        assert!(content.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_save_fetched_emails_dedup_by_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let email = FetchedEmail {
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            cc: None,
+            subject: "Dup Test".to_string(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".to_string(),
+            body_text: "Body".to_string(),
+            html_body: None,
+            has_attachments: false,
+            message_id: Some("<dup@example.com>".to_string()),
+            attachments: vec![],
+        };
+
+        // Save once
+        let (saved1, _) = save_fetched_emails(&[email.clone()], dir.path(), "inbox").unwrap();
+        assert_eq!(saved1, 1);
+
+        // Save again -- should be skipped
+        let (saved2, skipped2) = save_fetched_emails(&[email], dir.path(), "inbox").unwrap();
+        assert_eq!(saved2, 0);
+        assert_eq!(skipped2, 1);
+    }
+
+    #[test]
+    fn test_save_fetched_emails_with_html_companion() {
+        let dir = tempfile::tempdir().unwrap();
+        let emails = vec![FetchedEmail {
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            cc: None,
+            subject: "HTML Email".to_string(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".to_string(),
+            body_text: "Plain text".to_string(),
+            html_body: Some("<p>Rich text</p>".to_string()),
+            has_attachments: false,
+            message_id: Some("<html@example.com>".to_string()),
+            attachments: vec![],
+        }];
+
+        save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
+
+        let html_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
+            .collect();
+        assert_eq!(html_files.len(), 1);
+        let html_content = std::fs::read_to_string(html_files[0].path()).unwrap();
+        assert!(html_content.contains("Rich text"));
+    }
+
+    #[test]
+    fn test_save_fetched_emails_with_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let emails = vec![FetchedEmail {
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            cc: None,
+            subject: "Attachment Email".to_string(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".to_string(),
+            body_text: "See attached".to_string(),
+            html_body: None,
+            has_attachments: true,
+            message_id: Some("<att@example.com>".to_string()),
+            attachments: vec![
+                AttachmentData {
+                    filename: "report.pdf".to_string(),
+                    content: b"pdf content".to_vec(),
+                },
+                AttachmentData {
+                    filename: "image.png".to_string(),
+                    content: b"png content".to_vec(),
+                },
+            ],
+        }];
+
+        save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
+
+        // Find the md file and check its attachments dir
+        let md_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        assert_eq!(md_files.len(), 1);
+
+        let att_dir = attachments_dir_for(&md_files[0].path());
+        assert!(att_dir.is_dir());
+        assert!(att_dir.join("report.pdf").exists());
+        assert!(att_dir.join("image.png").exists());
+        assert_eq!(
+            std::fs::read(att_dir.join("report.pdf")).unwrap(),
+            b"pdf content"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_utf8_charset -- additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ensure_utf8_charset_case_insensitive_check() {
+        let html = r#"<html><head><meta CHARSET="utf-8"></head><body>hi</body></html>"#;
+        assert_eq!(ensure_utf8_charset(html), html);
+    }
+
+    #[test]
+    fn test_ensure_utf8_charset_html_with_attributes() {
+        let html = r#"<html lang="en"><body>hi</body></html>"#;
+        let result = ensure_utf8_charset(html);
+        assert!(result.contains("<head>"));
+        assert!(result.contains(r#"<meta charset="UTF-8">"#));
+    }
 }

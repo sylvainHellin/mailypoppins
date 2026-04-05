@@ -137,6 +137,59 @@ pub fn reconcile_local_files(
     Ok((moved, removed))
 }
 
+/// Dry-run reconciliation: counts what *would* be moved or removed without changing any files.
+pub fn dry_run_reconcile(
+    server_ids: &HashMap<String, HashSet<String>>,
+    local_dirs: &HashMap<String, PathBuf>,
+) -> Result<(usize, usize)> {
+    let mut would_move = 0;
+    let mut would_remove = 0;
+
+    let reconcile_mailboxes = ["INBOX", "Archive"];
+
+    for mb in &reconcile_mailboxes {
+        let Some(local_dir) = local_dirs.get(*mb) else { continue };
+        let Some(server_set) = server_ids.get(*mb) else { continue };
+
+        let local_ids = scan_local_message_ids(local_dir)?;
+
+        for (mid, file_path) in &local_ids {
+            if server_set.contains(mid) {
+                continue;
+            }
+
+            let mut found_in: Option<&str> = None;
+            for other_mb in &reconcile_mailboxes {
+                if *other_mb == *mb {
+                    continue;
+                }
+                if let Some(other_set) = server_ids.get(*other_mb) {
+                    if other_set.contains(mid) {
+                        found_in = Some(other_mb);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(target_mb) = found_in {
+                info!(
+                    "dry-run: would move from {} to {}: {}",
+                    mb, target_mb, file_path.display()
+                );
+                would_move += 1;
+            } else {
+                info!(
+                    "dry-run: would remove (no longer on server): {}",
+                    file_path.display()
+                );
+                would_remove += 1;
+            }
+        }
+    }
+
+    Ok((would_move, would_remove))
+}
+
 /// Map a mailbox name to the corresponding email status string (case-insensitive).
 pub fn mailbox_status(mailbox: &str) -> &'static str {
     if mailbox.eq_ignore_ascii_case("inbox") {
@@ -178,5 +231,274 @@ mod tests {
     fn test_mailbox_status_unknown() {
         assert_eq!(mailbox_status("Spam"), "inbox");
         assert_eq!(mailbox_status("Trash"), "inbox");
+    }
+
+    // -----------------------------------------------------------------------
+    // move_local_email (filesystem)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_move_local_email_basic() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+
+        let content = "---\nstatus: inbox\n---\n\nEmail body";
+        let src_file = src_dir.path().join("email.md");
+        std::fs::write(&src_file, content).unwrap();
+
+        move_local_email(&src_file, dst_dir.path(), "inbox", "archived").unwrap();
+
+        assert!(!src_file.exists());
+        let moved_file = dst_dir.path().join("email.md");
+        assert!(moved_file.exists());
+        let new_content = std::fs::read_to_string(&moved_file).unwrap();
+        assert!(new_content.contains("status: archived"));
+        assert!(!new_content.contains("status: inbox"));
+    }
+
+    #[test]
+    fn test_move_local_email_with_html_companion() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+
+        let src_md = src_dir.path().join("email.md");
+        let src_html = src_dir.path().join("email.html");
+        std::fs::write(&src_md, "---\nstatus: inbox\n---\n\nBody").unwrap();
+        std::fs::write(&src_html, "<p>HTML body</p>").unwrap();
+
+        move_local_email(&src_md, dst_dir.path(), "inbox", "archived").unwrap();
+
+        assert!(!src_md.exists());
+        assert!(!src_html.exists());
+        assert!(dst_dir.path().join("email.md").exists());
+        assert!(dst_dir.path().join("email.html").exists());
+    }
+
+    #[test]
+    fn test_move_local_email_with_attachments_dir() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+
+        let src_md = src_dir.path().join("email.md");
+        std::fs::write(&src_md, "---\nstatus: inbox\n---\n\nBody").unwrap();
+        let att_dir = src_dir.path().join("email_attachments");
+        std::fs::create_dir(&att_dir).unwrap();
+        std::fs::write(att_dir.join("doc.pdf"), b"pdf").unwrap();
+
+        move_local_email(&src_md, dst_dir.path(), "inbox", "archived").unwrap();
+
+        assert!(!att_dir.exists());
+        let moved_att = dst_dir.path().join("email_attachments");
+        assert!(moved_att.is_dir());
+        assert!(moved_att.join("doc.pdf").exists());
+    }
+
+    #[test]
+    fn test_move_local_email_creates_target_dir() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let dst_dir = base.path().join("nested").join("archive");
+
+        let src_file = src_dir.path().join("email.md");
+        std::fs::write(&src_file, "---\nstatus: inbox\n---\n\nBody").unwrap();
+
+        move_local_email(&src_file, &dst_dir, "inbox", "archived").unwrap();
+
+        assert!(dst_dir.join("email.md").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // reconcile_local_files (filesystem)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reconcile_nothing_to_do() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        // Email in INBOX, also on server in INBOX
+        let content = "---\nmessage_id: \"<a@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("email.md"), content).unwrap();
+
+        let mut server_ids = HashMap::new();
+        let mut inbox_ids = std::collections::HashSet::new();
+        inbox_ids.insert("<a@x.com>".to_string());
+        server_ids.insert("INBOX".to_string(), inbox_ids);
+        server_ids.insert("Archive".to_string(), std::collections::HashSet::new());
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs).unwrap();
+        assert_eq!(moved, 0);
+        assert_eq!(removed, 0);
+        assert!(inbox_dir.path().join("email.md").exists());
+    }
+
+    #[test]
+    fn test_reconcile_removes_deleted_email() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        // Email exists locally but NOT on server anywhere
+        let content = "---\nmessage_id: \"<gone@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("email.md"), content).unwrap();
+
+        let mut server_ids = HashMap::new();
+        server_ids.insert("INBOX".to_string(), std::collections::HashSet::new());
+        server_ids.insert("Archive".to_string(), std::collections::HashSet::new());
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs).unwrap();
+        assert_eq!(moved, 0);
+        assert_eq!(removed, 1);
+        assert!(!inbox_dir.path().join("email.md").exists());
+    }
+
+    #[test]
+    fn test_reconcile_detects_move_to_archive() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        // Email in local INBOX, but on server only in Archive
+        let content = "---\nmessage_id: \"<moved@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("email.md"), content).unwrap();
+
+        let mut server_ids = HashMap::new();
+        server_ids.insert("INBOX".to_string(), std::collections::HashSet::new());
+        let mut archive_ids = std::collections::HashSet::new();
+        archive_ids.insert("<moved@x.com>".to_string());
+        server_ids.insert("Archive".to_string(), archive_ids);
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs).unwrap();
+        assert_eq!(moved, 1);
+        assert_eq!(removed, 0);
+        assert!(!inbox_dir.path().join("email.md").exists());
+        assert!(archive_dir.path().join("email.md").exists());
+        let new_content = std::fs::read_to_string(archive_dir.path().join("email.md")).unwrap();
+        assert!(new_content.contains("status: archived"));
+    }
+
+    #[test]
+    fn test_reconcile_removes_stale_copy_when_already_in_target() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        // Email in both local INBOX and local Archive, server says it's in Archive only
+        let content_inbox = "---\nmessage_id: \"<dup@x.com>\"\nstatus: inbox\n---\n\nOld copy";
+        std::fs::write(inbox_dir.path().join("email.md"), content_inbox).unwrap();
+        let content_archive = "---\nmessage_id: \"<dup@x.com>\"\nstatus: archived\n---\n\nNew copy";
+        std::fs::write(archive_dir.path().join("email.md"), content_archive).unwrap();
+
+        let mut server_ids = HashMap::new();
+        server_ids.insert("INBOX".to_string(), std::collections::HashSet::new());
+        let mut archive_ids = std::collections::HashSet::new();
+        archive_ids.insert("<dup@x.com>".to_string());
+        server_ids.insert("Archive".to_string(), archive_ids);
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs).unwrap();
+        assert_eq!(moved, 1); // counted as moved
+        assert_eq!(removed, 0);
+        // Stale copy in inbox should be gone, archive copy remains
+        assert!(!inbox_dir.path().join("email.md").exists());
+        assert!(archive_dir.path().join("email.md").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // dry_run_reconcile (filesystem)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dry_run_reconcile_counts_moves_and_removes() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        // Email 1: in local INBOX, on server only in Archive -> would move
+        let c1 = "---\nmessage_id: \"<move@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("e1.md"), c1).unwrap();
+
+        // Email 2: in local INBOX, not on server anywhere -> would remove
+        let c2 = "---\nmessage_id: \"<gone@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("e2.md"), c2).unwrap();
+
+        let mut server_ids = HashMap::new();
+        server_ids.insert("INBOX".to_string(), std::collections::HashSet::new());
+        let mut archive_ids = std::collections::HashSet::new();
+        archive_ids.insert("<move@x.com>".to_string());
+        server_ids.insert("Archive".to_string(), archive_ids);
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        let (would_move, would_remove) = dry_run_reconcile(&server_ids, &local_dirs).unwrap();
+        assert_eq!(would_move, 1);
+        assert_eq!(would_remove, 1);
+
+        // Files should NOT have been modified
+        assert!(inbox_dir.path().join("e1.md").exists());
+        assert!(inbox_dir.path().join("e2.md").exists());
+    }
+
+    #[test]
+    fn test_dry_run_reconcile_no_changes_needed() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        let c = "---\nmessage_id: \"<ok@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("e.md"), c).unwrap();
+
+        let mut server_ids = HashMap::new();
+        let mut inbox_ids = std::collections::HashSet::new();
+        inbox_ids.insert("<ok@x.com>".to_string());
+        server_ids.insert("INBOX".to_string(), inbox_ids);
+        server_ids.insert("Archive".to_string(), std::collections::HashSet::new());
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        let (would_move, would_remove) = dry_run_reconcile(&server_ids, &local_dirs).unwrap();
+        assert_eq!(would_move, 0);
+        assert_eq!(would_remove, 0);
+    }
+
+    #[test]
+    fn test_reconcile_deletes_html_companion_and_attachments() {
+        let inbox_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+
+        let content = "---\nmessage_id: \"<cleanup@x.com>\"\nstatus: inbox\n---\n\nBody";
+        std::fs::write(inbox_dir.path().join("email.md"), content).unwrap();
+        std::fs::write(inbox_dir.path().join("email.html"), "<p>HTML</p>").unwrap();
+        let att_dir = inbox_dir.path().join("email_attachments");
+        std::fs::create_dir(&att_dir).unwrap();
+        std::fs::write(att_dir.join("file.pdf"), b"data").unwrap();
+
+        let mut server_ids = HashMap::new();
+        server_ids.insert("INBOX".to_string(), std::collections::HashSet::new());
+        server_ids.insert("Archive".to_string(), std::collections::HashSet::new());
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.path().to_path_buf());
+        local_dirs.insert("Archive".to_string(), archive_dir.path().to_path_buf());
+
+        reconcile_local_files(&server_ids, &local_dirs).unwrap();
+
+        assert!(!inbox_dir.path().join("email.md").exists());
+        assert!(!inbox_dir.path().join("email.html").exists());
+        assert!(!att_dir.exists());
     }
 }

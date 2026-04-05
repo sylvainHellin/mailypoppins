@@ -159,7 +159,7 @@ pub(super) async fn lib_do_sync(
         })
         .collect();
 
-    let result = sync_mailboxes(imap_config, &targets, limit, reconcile).await?;
+    let result = sync_mailboxes(imap_config, &targets, limit, reconcile, false).await?;
 
     let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
     if reconcile {

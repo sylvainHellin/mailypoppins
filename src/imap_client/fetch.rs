@@ -9,7 +9,7 @@ use crate::config::ImapConfig;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 
 /// Extract Message-ID from raw header bytes (from BODY.PEEK[HEADER.FIELDS (Message-ID)]).
-fn parse_message_id_from_header_bytes(header_bytes: &[u8]) -> Option<String> {
+pub(super) fn parse_message_id_from_header_bytes(header_bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(header_bytes).ok()?;
     for line in text.lines() {
         let trimmed = line.trim();

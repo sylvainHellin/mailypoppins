@@ -140,6 +140,9 @@ enum Commands {
         /// Reconcile local files against server (detect moves/deletes)
         #[arg(long)]
         reconcile: bool,
+        /// Show what would change without making any modifications
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Watch a mailbox for changes using IMAP IDLE
     Watch {
@@ -797,7 +800,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Sync { limit, mailbox, reconcile }) => {
+        Some(Commands::Sync { limit, mailbox, reconcile, dry_run }) => {
             let imap_config = ImapConfig::load(&account_config)?;
 
             let targets: Vec<imap_client::SyncTarget> = if let Some(ref user_mailboxes) = mailbox {
@@ -821,33 +824,41 @@ async fn main() -> Result<()> {
                 }).collect()
             };
 
-            let result = sync_mailboxes(&imap_config, &targets, limit, reconcile).await?;
+            let result = sync_mailboxes(&imap_config, &targets, limit, reconcile, dry_run).await?;
+
+            let prefix = if dry_run { "[dry-run] " } else { "" };
 
             if result.skipped > 0 {
                 println!(
-                    "{} Synced: {} new, {} already present",
+                    "{} {}Synced: {} new, {} already present",
                     "✓".green(),
+                    prefix,
                     result.saved,
                     result.skipped,
                 );
             } else {
                 println!(
-                    "{} Synced: {} email(s) saved",
+                    "{} {}Synced: {} email(s) {}",
                     "✓".green(),
+                    prefix,
                     result.saved,
+                    if dry_run { "to download" } else { "saved" },
                 );
             }
 
             if reconcile {
                 if result.moved > 0 || result.removed > 0 {
                     println!(
-                        "{} Reconciled: {} moved, {} removed",
+                        "{} {}Reconciled: {} {}, {} {}",
                         "ℹ".blue(),
+                        prefix,
                         result.moved,
+                        if dry_run { "to move" } else { "moved" },
                         result.removed,
+                        if dry_run { "to remove" } else { "removed" },
                     );
                 } else {
-                    println!("{} Reconciled: already in sync", "✓".green());
+                    println!("{} {}Reconciled: already in sync", "✓".green(), prefix);
                 }
             }
         }
