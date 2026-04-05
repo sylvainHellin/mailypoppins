@@ -251,7 +251,7 @@ impl App {
             .iter()
             .filter(|m| m.server_name.is_some())
             .map(|m| SearchTarget {
-                server_name: m.server_name.clone().unwrap(),
+                server_name: m.server_name.clone().expect("filtered for is_some"),
                 local_dir: m.dir.clone(),
                 status: kind_to_status(m.kind),
                 label: m.label.clone(),

@@ -32,7 +32,7 @@ async fn archive_single_on_session(
         return Ok(());
     }
 
-    let uid = *uids.iter().next().unwrap();
+    let uid = *uids.iter().next().expect("uids verified non-empty");
     let uid_str = uid.to_string();
 
     session
@@ -71,7 +71,7 @@ async fn delete_single_on_session(
         return Ok(());
     }
 
-    let uid = *uids.iter().next().unwrap();
+    let uid = *uids.iter().next().expect("uids verified non-empty");
     let uid_str = uid.to_string();
 
     session

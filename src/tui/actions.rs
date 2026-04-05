@@ -105,7 +105,7 @@ pub(super) fn handle_action(
                 app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = (|| -> anyhow::Result<String> {
                         let draft = parse_email_draft(&path)?;
                         validate_draft(&draft)?;
@@ -173,7 +173,7 @@ pub(super) fn handle_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = (|| -> anyhow::Result<String> {
                         let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
                         if drafts.is_empty() {
@@ -295,7 +295,7 @@ pub(super) fn handle_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = rt.block_on(archive_email_locally(
                         &imap_config,
                         &archive_dir,
@@ -327,7 +327,7 @@ pub(super) fn handle_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = rt.block_on(delete_email_locally(&imap_config, &path))
                         .map(|()| String::new())
                         .map_err(|e| e.to_string());
@@ -365,7 +365,7 @@ pub(super) fn handle_action(
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                 let results = rt.block_on(batch_archive_emails_locally(
                     &imap_config,
                     &archive_dir,
@@ -402,7 +402,7 @@ pub(super) fn handle_action(
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                 let results = rt.block_on(batch_delete_emails_locally(&imap_config, &paths));
                 for (_path, result) in results {
                     let _ = tx.send(BgResult::Delete {
@@ -470,7 +470,7 @@ pub(super) fn handle_action(
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                 let result =
                     rt.block_on(super::helpers::lib_do_sync(&account_config, &imap_config, 10, false))
                         .map_err(|e| e.to_string());
@@ -492,7 +492,7 @@ pub(super) fn handle_action(
             app.bg_count += 1;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                 let result =
                     rt.block_on(super::helpers::lib_do_multi_search(&imap_config, &query, &targets));
                 let _ = tx.send(BgResult::ServerSearch {
@@ -531,7 +531,7 @@ pub(super) fn handle_action(
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                 let result = rt
                     .block_on(super::helpers::lib_do_sync(&account_config, &imap_config, 50, true))
                     .map_err(|e| e.to_string());
@@ -655,7 +655,7 @@ fn handle_search_result_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = rt
                         .block_on(archive_email_locally(
                             &imap_config,

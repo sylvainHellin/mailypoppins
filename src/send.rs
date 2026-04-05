@@ -210,6 +210,117 @@ mod tests {
         assert!(html.contains("Georgia, serif"));
         assert!(html.contains("14px"));
     }
+
+    // -----------------------------------------------------------------------
+    // SendResult methods
+    // -----------------------------------------------------------------------
+
+    fn make_result(successes: &[&str], failures: &[&str]) -> SendResult {
+        let mut results = Vec::new();
+        for addr in successes {
+            results.push(RecipientResult {
+                address: addr.to_string(),
+                role: RecipientRole::To,
+                success: true,
+                error: None,
+            });
+        }
+        for addr in failures {
+            results.push(RecipientResult {
+                address: addr.to_string(),
+                role: RecipientRole::To,
+                success: false,
+                error: Some("SMTP error".to_string()),
+            });
+        }
+        SendResult { results }
+    }
+
+    #[test]
+    fn test_send_result_all_succeeded() {
+        let r = make_result(&["a@example.com", "b@example.com"], &[]);
+        assert!(r.all_succeeded());
+        assert!(r.any_succeeded());
+        assert_eq!(r.succeeded().len(), 2);
+        assert!(r.failed().is_empty());
+    }
+
+    #[test]
+    fn test_send_result_partial_failure() {
+        let r = make_result(&["a@example.com"], &["b@example.com"]);
+        assert!(!r.all_succeeded());
+        assert!(r.any_succeeded());
+        assert_eq!(r.succeeded().len(), 1);
+        assert_eq!(r.failed().len(), 1);
+    }
+
+    #[test]
+    fn test_send_result_all_failed() {
+        let r = make_result(&[], &["a@example.com", "b@example.com"]);
+        assert!(!r.all_succeeded());
+        assert!(!r.any_succeeded());
+        assert!(r.succeeded().is_empty());
+        assert_eq!(r.failed().len(), 2);
+    }
+
+    #[test]
+    fn test_send_result_empty() {
+        let r = SendResult { results: vec![] };
+        assert!(r.all_succeeded()); // vacuously true
+        assert!(!r.any_succeeded());
+    }
+
+    // -----------------------------------------------------------------------
+    // RecipientRole display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_recipient_role_display() {
+        assert_eq!(format!("{}", RecipientRole::To), "To");
+        assert_eq!(format!("{}", RecipientRole::Cc), "Cc");
+        assert_eq!(format!("{}", RecipientRole::Bcc), "Bcc");
+    }
+
+    // -----------------------------------------------------------------------
+    // markdown_to_html edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_markdown_to_html_signature_appended_without_placeholder() {
+        let sig = "<p>-- Best, Alice</p>";
+        let html = markdown_to_html("Hello world", &default_settings(), Some(sig), None);
+        // Without placeholder, signature is appended after the body
+        assert!(html.contains("<p>Hello world</p>"));
+        assert!(html.contains("-- Best, Alice"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_no_signature() {
+        let html = markdown_to_html("Hello", &default_settings(), None, None);
+        assert!(html.contains("<p>Hello</p>"));
+        // Should still be valid HTML
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_code_block() {
+        let md = "```rust\nfn main() {}\n```";
+        let html = markdown_to_html(md, &default_settings(), None, None);
+        assert!(html.contains("<code"));
+        assert!(html.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_with_quoted_html_replaces_blockquotes() {
+        let md = "Reply\n\n{{SIGNATURE}}\n\n> original";
+        let sig = "<p>sig</p>";
+        let quoted = "<p>Original HTML</p>";
+        let html = markdown_to_html(md, &default_settings(), Some(sig), Some(quoted));
+        // When quoted_html is provided, it should be used instead of markdown blockquotes
+        assert!(html.contains("Original HTML"));
+        assert!(html.contains("sig"));
+    }
 }
 
 pub async fn send_email(
@@ -364,7 +475,9 @@ pub async fn send_email(
                     .first_or_octet_stream()
                     .to_string();
 
-                let attachment = Attachment::new(filename).body(file_content, content_type.parse().unwrap());
+                let content_type_parsed = content_type.parse()
+                    .unwrap_or_else(|_| "application/octet-stream".parse().expect("static MIME type"));
+                let attachment = Attachment::new(filename).body(file_content, content_type_parsed);
                 mixed = mixed.singlepart(attachment);
             }
 

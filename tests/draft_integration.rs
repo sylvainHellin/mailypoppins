@@ -275,3 +275,237 @@ fn test_find_drafts_with_status_filter() {
     assert_eq!(approved_only.len(), 1);
     assert_eq!(approved_only[0].frontmatter.to, "bob@example.com");
 }
+
+#[test]
+fn test_find_drafts_empty_dir() {
+    let tmp = tempdir().unwrap();
+    let drafts = find_drafts(tmp.path(), None).unwrap();
+    assert!(drafts.is_empty());
+}
+
+#[test]
+fn test_find_drafts_ignores_non_md_files() {
+    let tmp = tempdir().unwrap();
+    write_draft(tmp.path(), "a.md", "alice@example.com", "Draft", "Body", "draft");
+    fs::write(tmp.path().join("notes.txt"), "not a draft").unwrap();
+    fs::write(tmp.path().join("data.html"), "<p>html</p>").unwrap();
+
+    let drafts = find_drafts(tmp.path(), None).unwrap();
+    assert_eq!(drafts.len(), 1);
+}
+
+// -----------------------------------------------------------------------
+// update_status_to_sent edge cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_update_status_to_sent_in_place() {
+    let tmp = tempdir().unwrap();
+    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let draft = parse_email_draft(&path).unwrap();
+
+    // No sent_dir: update in place
+    update_status_to_sent(&draft, None, Some("<msg@example.com>")).unwrap();
+
+    assert!(path.exists());
+    let updated = parse_email_draft(&path).unwrap();
+    assert_eq!(updated.frontmatter.status, EmailStatus::Sent);
+    assert!(updated.frontmatter.sent_at.is_some());
+    assert_eq!(updated.frontmatter.message_id, Some("<msg@example.com>".to_string()));
+}
+
+#[test]
+fn test_update_status_to_sent_without_message_id() {
+    let tmp = tempdir().unwrap();
+    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let draft = parse_email_draft(&path).unwrap();
+
+    update_status_to_sent(&draft, None, None).unwrap();
+
+    let updated = parse_email_draft(&path).unwrap();
+    assert_eq!(updated.frontmatter.status, EmailStatus::Sent);
+    assert!(updated.frontmatter.message_id.is_none());
+}
+
+#[test]
+fn test_update_status_to_sent_cleans_companion_html() {
+    let tmp = tempdir().unwrap();
+    let drafts = tmp.path().join("drafts");
+    let sent = tmp.path().join("sent");
+    fs::create_dir_all(&drafts).unwrap();
+
+    let path = write_draft(&drafts, "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let html_path = drafts.join("draft.html");
+    fs::write(&html_path, "<p>companion</p>").unwrap();
+
+    let draft = parse_email_draft(&path).unwrap();
+    update_status_to_sent(&draft, Some(sent.as_path()), None).unwrap();
+
+    // Companion HTML should be cleaned up
+    assert!(!html_path.exists());
+}
+
+// -----------------------------------------------------------------------
+// parse_email_draft error cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_parse_email_draft_missing_file() {
+    let result = parse_email_draft(std::path::Path::new("/nonexistent/file.md"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_parse_email_draft_no_frontmatter() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("plain.md");
+    fs::write(&path, "Just a plain markdown file with no frontmatter").unwrap();
+
+    let result = parse_email_draft(&path);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("frontmatter"));
+}
+
+// -----------------------------------------------------------------------
+// Forward draft edge cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_forward_draft_already_fwd_prefix() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+    let drafts = tmp.path().join("drafts");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::create_dir_all(&drafts).unwrap();
+
+    let source = write_inbox_email(&inbox, "email.md", "alice@example.com", "Fwd: Original", "Body");
+    let draft_path = create_forward_draft(&source, "me@example.com", Some(drafts.as_path())).unwrap();
+
+    let content = fs::read_to_string(&draft_path).unwrap();
+    // Should not double the Fwd: prefix
+    assert!(content.contains("subject: \"Fwd: Original\""));
+    assert!(!content.contains("Fwd: Fwd:"));
+}
+
+#[test]
+fn test_forward_draft_with_companion_html() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+    let drafts = tmp.path().join("drafts");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::create_dir_all(&drafts).unwrap();
+
+    let source = write_inbox_email(&inbox, "email.md", "alice@example.com", "Hello", "Body");
+    let html_path = inbox.join("email.html");
+    fs::write(&html_path, "<p>Rich content</p>").unwrap();
+
+    let draft_path = create_forward_draft(&source, "me@example.com", Some(drafts.as_path())).unwrap();
+
+    let draft_html = draft_path.with_extension("html");
+    assert!(draft_html.exists());
+    let html = fs::read_to_string(&draft_html).unwrap();
+    assert!(html.contains("Rich content"));
+    assert!(html.contains("Forwarded message"));
+}
+
+// -----------------------------------------------------------------------
+// Reply edge cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_reply_all_excludes_self_from_cc() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+    let drafts = tmp.path().join("drafts");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::create_dir_all(&drafts).unwrap();
+
+    // All recipients are self -- CC should be absent
+    let path = inbox.join("email.md");
+    let content = "---\nfrom: \"alice@example.com\"\nto: \"me@example.com\"\nsubject: \"Solo\"\ndate: \"Mon, 01 Jan 2024 12:00:00 +0000\"\nmessage_id: \"<solo@example.com>\"\nstatus: inbox\nhas_attachments: false\n---\n\nBody";
+    fs::write(&path, content).unwrap();
+
+    let draft_path = create_reply_draft(&path, true, "me@example.com", Some(drafts.as_path())).unwrap();
+    let draft_content = fs::read_to_string(&draft_path).unwrap();
+
+    // No cc line should appear since the only other recipient is self
+    assert!(!draft_content.contains("cc:"));
+}
+
+#[test]
+fn test_reply_deduplicates_cc_addresses() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+    let drafts = tmp.path().join("drafts");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::create_dir_all(&drafts).unwrap();
+
+    // bob appears in both To and CC
+    let path = inbox.join("email.md");
+    let content = "---\nfrom: \"alice@example.com\"\nto: \"me@example.com, bob@example.com\"\ncc: \"bob@example.com, carol@example.com\"\nsubject: \"Dupes\"\ndate: \"Mon, 01 Jan 2024 12:00:00 +0000\"\nmessage_id: \"<dupes@example.com>\"\nstatus: inbox\nhas_attachments: false\n---\n\nBody";
+    fs::write(&path, content).unwrap();
+
+    let draft_path = create_reply_draft(&path, true, "me@example.com", Some(drafts.as_path())).unwrap();
+    let draft_content = fs::read_to_string(&draft_path).unwrap();
+
+    // bob should appear only once in cc
+    let bob_count = draft_content.matches("bob@example.com").count();
+    assert_eq!(bob_count, 1, "bob should appear exactly once in CC");
+}
+
+// -----------------------------------------------------------------------
+// validate_draft with attachments
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_validate_draft_missing_attachment_warning() {
+    let draft = email::types::EmailDraft {
+        path: std::path::PathBuf::from("test.md"),
+        frontmatter: email::types::EmailFrontmatter {
+            to: "alice@example.com".to_string(),
+            cc: None,
+            bcc: None,
+            subject: "Test".to_string(),
+            status: EmailStatus::Draft,
+            from: Some("me@example.com".to_string()),
+            reply_to: None,
+            attachments: Some(vec!["/nonexistent/file.pdf".to_string()]),
+            sent_at: None,
+            sent_via: None,
+            message_id: None,
+        },
+        body_markdown: "Body".to_string(),
+    };
+
+    let warnings = validate_draft(&draft).unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("Attachment not found"));
+}
+
+#[test]
+fn test_validate_draft_existing_attachment_no_warning() {
+    let tmp = tempdir().unwrap();
+    let att_path = tmp.path().join("doc.pdf");
+    fs::write(&att_path, b"fake pdf").unwrap();
+
+    let draft = email::types::EmailDraft {
+        path: std::path::PathBuf::from("test.md"),
+        frontmatter: email::types::EmailFrontmatter {
+            to: "alice@example.com".to_string(),
+            cc: None,
+            bcc: None,
+            subject: "Test".to_string(),
+            status: EmailStatus::Draft,
+            from: Some("me@example.com".to_string()),
+            reply_to: None,
+            attachments: Some(vec![att_path.to_string_lossy().to_string()]),
+            sent_at: None,
+            sent_via: None,
+            message_id: None,
+        },
+        body_markdown: "Body".to_string(),
+    };
+
+    let warnings = validate_draft(&draft).unwrap();
+    assert!(warnings.is_empty());
+}

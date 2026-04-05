@@ -515,7 +515,9 @@ pub fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>, messag
     let dest_path = if let Some(sent_dir) = sent_dir {
         fs::create_dir_all(sent_dir)?;
         // Keep the original filename (already includes date-time prefix)
-        let original_name = draft.path.file_name().unwrap().to_string_lossy();
+        let original_name = draft.path.file_name()
+            .ok_or_else(|| anyhow!("Draft path has no filename: {}", draft.path.display()))?
+            .to_string_lossy();
         sent_dir.join(original_name.as_ref())
     } else {
         draft.path.clone()

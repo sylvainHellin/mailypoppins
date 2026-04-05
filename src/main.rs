@@ -219,10 +219,12 @@ fn sort_fetched_by_date(emails: &mut [FetchedEmail]) {
 
 fn prompt_confirmation(message: &str) -> bool {
     print!("{} [y/N] ", message);
-    io::stdout().flush().unwrap();
+    let _ = io::stdout().flush();
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
 
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
@@ -409,7 +411,7 @@ async fn main() -> Result<()> {
             for draft in &drafts {
                 println!(
                     "  {} → {}",
-                    draft.path.file_name().unwrap().to_string_lossy(),
+                    draft.path.file_name().unwrap_or_default().to_string_lossy(),
                     draft.frontmatter.to
                 );
             }
@@ -546,7 +548,7 @@ async fn main() -> Result<()> {
                 println!(
                     "[{}] {} → {}",
                     status_colored,
-                    draft.path.file_name().unwrap().to_string_lossy(),
+                    draft.path.file_name().unwrap_or_default().to_string_lossy(),
                     draft.frontmatter.to
                 );
             }
@@ -919,7 +921,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             let path = if attachments.len() == 1 {
-                attachments.into_iter().next().unwrap()
+                attachments.into_iter().next().expect("non-empty verified above")
             } else {
                 let display_items: Vec<String> = attachments
                     .iter()

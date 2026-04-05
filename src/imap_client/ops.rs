@@ -48,7 +48,7 @@ pub async fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str,
         ));
     }
 
-    let uid = *uids.iter().next().unwrap();
+    let uid = *uids.iter().next().expect("uids verified non-empty");
     let uid_str = uid.to_string();
 
     session
@@ -160,7 +160,7 @@ pub async fn delete_email_on_server(imap_config: &ImapConfig, message_id: &str) 
         ));
     }
 
-    let uid = *uids.iter().next().unwrap();
+    let uid = *uids.iter().next().expect("uids verified non-empty");
     let uid_str = uid.to_string();
 
     session

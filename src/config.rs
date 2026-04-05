@@ -677,6 +677,281 @@ host = "imap.example.com"
         assert_eq!(settings.font_size, "12pt");
         assert!(settings.include_signature);
     }
+
+    // -----------------------------------------------------------------------
+    // resolve_mailbox_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_mailbox_dir_by_role_name() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                inbox: Some(MailboxMapping {
+                    server: "INBOX".to_string(),
+                    local: "inbox".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // "inbox" (role name) should resolve
+        let result = resolve_mailbox_dir(&account, "inbox");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_mailbox_dir_by_server_name() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                inbox: Some(MailboxMapping {
+                    server: "INBOX".to_string(),
+                    local: "inbox".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // "INBOX" (server name) should also resolve
+        let result = resolve_mailbox_dir(&account, "INBOX");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_mailbox_dir_case_insensitive() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                archive: Some(MailboxMapping {
+                    server: "Archive".to_string(),
+                    local: "archive".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(resolve_mailbox_dir(&account, "archive").is_ok());
+        assert!(resolve_mailbox_dir(&account, "ARCHIVE").is_ok());
+        assert!(resolve_mailbox_dir(&account, "Archive").is_ok());
+    }
+
+    #[test]
+    fn test_resolve_mailbox_dir_unknown_mailbox() {
+        let account = AccountConfig::default();
+        let result = resolve_mailbox_dir(&account, "NonExistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_mailbox_dir_extra_mailbox() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                extra: Some(vec![MailboxMapping {
+                    server: "Spam".to_string(),
+                    local: "spam".to_string(),
+                }]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(resolve_mailbox_dir(&account, "Spam").is_ok());
+        assert!(resolve_mailbox_dir(&account, "spam").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_server_name_for_role
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_server_name_for_role_mapped() {
+        let account = AccountConfig {
+            mailboxes: MailboxesConfig {
+                inbox: Some(MailboxMapping {
+                    server: "INBOX".to_string(),
+                    local: "inbox".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(find_server_name_for_role(&account, "inbox"), "INBOX");
+    }
+
+    #[test]
+    fn test_find_server_name_for_role_unmapped() {
+        let account = AccountConfig::default();
+        // Unknown role falls through to the name itself
+        assert_eq!(find_server_name_for_role(&account, "Junk"), "Junk");
+    }
+
+    // -----------------------------------------------------------------------
+    // find_account_by_from edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_account_by_from_multiple_accounts() {
+        let config = GlobalConfig {
+            accounts: vec![
+                AccountConfig {
+                    name: "work".to_string(),
+                    default_from: "alice@work.com".to_string(),
+                    ..Default::default()
+                },
+                AccountConfig {
+                    name: "personal".to_string(),
+                    default_from: "alice@home.com".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let found = find_account_by_from(&config, "alice@home.com");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "personal");
+    }
+
+    #[test]
+    fn test_find_account_by_from_with_display_name() {
+        let config = GlobalConfig {
+            accounts: vec![AccountConfig {
+                name: "test".to_string(),
+                default_from: "alice@example.com".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Should match even when wrapped in a display name
+        assert!(find_account_by_from(&config, "Alice Smith <alice@example.com>").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_mailbox_local_path with root
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_mailbox_local_path_relative_to_root() {
+        let account = AccountConfig {
+            directories: DirectorySettings {
+                root: Some("/home/user/email".to_string()),
+                drafts: None,
+            },
+            ..Default::default()
+        };
+        let mapping = MailboxMapping {
+            server: "INBOX".to_string(),
+            local: "inbox".to_string(),
+        };
+        let result = resolve_mailbox_local_path(&account, &mapping);
+        assert_eq!(result, PathBuf::from("/home/user/email/inbox"));
+    }
+
+    #[test]
+    fn test_resolve_mailbox_local_path_absolute() {
+        let account = AccountConfig {
+            directories: DirectorySettings {
+                root: Some("/home/user/email".to_string()),
+                drafts: None,
+            },
+            ..Default::default()
+        };
+        let mapping = MailboxMapping {
+            server: "INBOX".to_string(),
+            local: "/absolute/inbox".to_string(),
+        };
+        let result = resolve_mailbox_local_path(&account, &mapping);
+        assert_eq!(result, PathBuf::from("/absolute/inbox"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Config deserialization edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_config_with_custom_email_settings() {
+        let toml_str = r#"
+[email]
+font_family = "Georgia, serif"
+font_size = "14px"
+include_signature = false
+
+[[accounts]]
+name = "test"
+
+[accounts.smtp]
+host = "smtp.example.com"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.email.font_family, "Georgia, serif");
+        assert_eq!(config.email.font_size, "14px");
+        assert!(!config.email.include_signature);
+    }
+
+    #[test]
+    fn test_parse_config_with_extra_mailboxes() {
+        let toml_str = r#"
+[[accounts]]
+name = "test"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+local = "inbox"
+
+[[accounts.mailboxes.extra]]
+server = "Spam"
+local = "spam"
+
+[[accounts.mailboxes.extra]]
+server = "Newsletters"
+local = "newsletters"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        let extras = config.accounts[0].mailboxes.extra.as_ref().unwrap();
+        assert_eq!(extras.len(), 2);
+        assert_eq!(extras[0].server, "Spam");
+        assert_eq!(extras[1].server, "Newsletters");
+    }
+
+    #[test]
+    fn test_default_account() {
+        let config = GlobalConfig {
+            accounts: vec![
+                AccountConfig { name: "first".to_string(), ..Default::default() },
+                AccountConfig { name: "second".to_string(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(default_account(&config).unwrap().name, "first");
+    }
+
+    #[test]
+    fn test_default_account_empty() {
+        let config = GlobalConfig::default();
+        assert!(default_account(&config).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_drafts_dir_from_config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_drafts_dir_from_config_with_root() {
+        let account = AccountConfig {
+            directories: DirectorySettings {
+                root: Some("/home/user/email".to_string()),
+                drafts: Some("drafts".to_string()),
+            },
+            ..Default::default()
+        };
+        let result = resolve_drafts_dir_from_config(&account);
+        assert_eq!(result, Some(PathBuf::from("/home/user/email/drafts")));
+    }
+
+    #[test]
+    fn test_resolve_drafts_dir_from_config_none() {
+        let account = AccountConfig::default();
+        assert!(resolve_drafts_dir_from_config(&account).is_none());
+    }
 }
 
 /// Load signature HTML content
