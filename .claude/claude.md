@@ -35,7 +35,7 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The lib
 | `src/main.rs` | CLI definition (`Cli`, `Commands`), `main()`, command dispatch; launches TUI when no args given |
 | `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter` |
 | `src/config.rs` | Global config loading (`~/.config/email/config.toml`), keyring integration, mailbox resolution, logging. All config types derive `Clone` for TUI thread sharing. |
-| `src/config_cmd.rs` | Config subcommands: init wizard (credential testing, mailbox discovery), show, set-password, path |
+| `src/config_cmd/` | Config subcommands module: `show.rs` (show, path), `password.rs` (set-password), `init.rs` (init wizard, add-account, TOML builders), `migrate.rs` (old-to-new format migration), `helpers.rs` (prompt_input, select_mailbox, connection tests) |
 | `src/parse.rs` | Email body parsing, slugifying, `FetchedEmail`, RFC822 parsing, attachment extraction, save/display, local message-ID scanning, `list_attachments()`, `open_file_with_system()` |
 | `src/imap_client.rs` | All IMAP operations: fetch, list, append, watch, archive, delete, unified `sync_mailboxes()` orchestrator with two-pass fetch |
 | `src/draft.rs` | Draft parsing, validation, preview, reply/forward creation, status updates |
@@ -57,7 +57,7 @@ imap_client --> config, parse, sync, types
 draft       --> config, parse, types
 send        --> config, types
 sync        --> parse
-config_cmd  --> config, imap_client
+config_cmd/ --> config, imap_client
 tui         --> config, draft, imap_client, parse, send, sync, types
 main        --> all modules (via lib)
 ```
@@ -78,7 +78,7 @@ main        --> all modules (via lib)
 | `email forward [file]` | Create a forward draft from a received email |
 | `email list-mailboxes` | List available IMAP mailboxes |
 | `email fetch [filters]` | Fetch emails via IMAP |
-| `email sync [--limit N] [--mailbox ...] [--reconcile]` | Additive sync (Message-ID dedup); `--reconcile` detects server moves/deletes |
+| `email sync [--limit N] [--mailbox ...] [--reconcile] [--dry-run]` | Additive sync (Message-ID dedup); `--reconcile` detects server moves/deletes; `--dry-run` shows what would change without modifying files |
 | `email watch [--mailbox] [--timeout]` | Watch mailbox for changes via IMAP IDLE |
 | `email archive <file>` | Archive an inbox email (server + local) |
 | `email delete <file>` | Delete an inbox email (server + local) |
