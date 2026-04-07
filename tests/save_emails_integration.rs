@@ -32,6 +32,7 @@ fn make_email(
         has_attachments: false,
         message_id: message_id.map(|s| s.to_string()),
         attachments: Vec::new(),
+        is_read: false,
     }
 }
 
@@ -166,6 +167,7 @@ fn test_save_fetched_emails_with_attachments() {
                 content: b"fake png content".to_vec(),
             },
         ],
+        is_read: false,
     };
 
     let (saved, _) = save_fetched_emails(&[email], &inbox, "inbox").unwrap();
@@ -226,6 +228,7 @@ fn test_save_fetched_emails_attachment_dedup() {
                 content: b"content 2".to_vec(),
             },
         ],
+        is_read: false,
     };
 
     let (saved, _) = save_fetched_emails(&[email], &inbox, "inbox").unwrap();
@@ -285,6 +288,7 @@ fn test_save_with_html_body_has_charset() {
         has_attachments: false,
         message_id: Some("<html@example.com>".to_string()),
         attachments: Vec::new(),
+        is_read: false,
     };
 
     let (saved, _) = save_fetched_emails(&[email], &inbox, "inbox").unwrap();

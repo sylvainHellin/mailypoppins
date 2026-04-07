@@ -20,6 +20,8 @@ use crate::draft::{
 use crate::imap_client::{
     append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
     batch_delete_emails_locally, delete_email_locally,
+    get_message_id_from_file, mark_read_on_server, mark_unread_on_server,
+    update_read_status_locally,
 };
 use crate::send::send_email;
 use crate::types::EmailStatus;
@@ -32,7 +34,9 @@ pub(super) fn handle_action(
 ) -> Result<()> {
     match action {
         Action::EditCurrent => {
-            if let Some(path) = app.selected_email_path() {
+            if let Some(email) = app.selected_email() {
+                let path = email.path.clone();
+                let was_unread = !email.read;
                 suspend_terminal(terminal)?;
                 let result = edit_file(&path);
                 resume_terminal(terminal)?;
@@ -41,6 +45,10 @@ pub(super) fn handle_action(
                     Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
                 }
                 app.reload_current_mailbox();
+                // Auto-mark as read after opening in editor
+                if was_unread {
+                    app.pending_action = Some(Action::MarkAsRead);
+                }
             }
         }
 
@@ -411,6 +419,150 @@ pub(super) fn handle_action(
                     });
                 }
             });
+        }
+
+        Action::ToggleRead => {
+            if let Some(email) = app.selected_email() {
+                let new_read = !email.read;
+                let path = email.path.clone();
+                let message_id = get_message_id_from_file(&path);
+
+                // Optimistic local update
+                update_read_status_locally(&path, new_read).ok();
+                if let Some(entry) = app.emails.get_mut(app.list_index) {
+                    entry.read = new_read;
+                }
+                if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
+                    if let Some(ce) = cached.iter_mut().find(|e| e.path == path) {
+                        ce.read = new_read;
+                    }
+                }
+
+                let label = if new_read { "Marked as read" } else { "Marked as unread" };
+                app.set_status(label.to_string());
+
+                // Async server update
+                if let (Some(mid), Some(imap_config)) = (message_id, app.imap_config.clone()) {
+                    let mailbox = app.active_server_mailbox();
+                    let acct_idx = app.active_account;
+                    let path_clone = path.clone();
+                    app.bg_count += 1;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                        let result = if new_read {
+                            rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox))
+                        } else {
+                            rt.block_on(mark_unread_on_server(&imap_config, &mid, &mailbox))
+                        };
+                        let _ = tx.send(BgResult::ToggleRead {
+                            account_index: acct_idx,
+                            path: path_clone,
+                            new_read_state: new_read,
+                            result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                        });
+                    });
+                }
+            }
+        }
+
+        Action::MarkAsRead => {
+            if let Some(email) = app.selected_email() {
+                if email.read {
+                    return Ok(()); // Already read, no-op
+                }
+                let path = email.path.clone();
+                let message_id = get_message_id_from_file(&path);
+
+                // Optimistic local update (silent)
+                update_read_status_locally(&path, true).ok();
+                if let Some(entry) = app.emails.get_mut(app.list_index) {
+                    entry.read = true;
+                }
+                if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
+                    if let Some(ce) = cached.iter_mut().find(|e| e.path == path) {
+                        ce.read = true;
+                    }
+                }
+
+                // Async server update (no status message for auto-mark)
+                if let (Some(mid), Some(imap_config)) = (message_id, app.imap_config.clone()) {
+                    let mailbox = app.active_server_mailbox();
+                    let acct_idx = app.active_account;
+                    let path_clone = path.clone();
+                    app.bg_count += 1;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                        let result = rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox));
+                        let _ = tx.send(BgResult::ToggleRead {
+                            account_index: acct_idx,
+                            path: path_clone,
+                            new_read_state: true,
+                            result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                        });
+                    });
+                }
+            }
+        }
+
+        Action::BatchToggleRead(paths) => {
+            // If any selected email is unread, mark all as read; otherwise mark all as unread
+            let any_unread = paths.iter().any(|p| {
+                app.emails.iter().any(|e| e.path == *p && !e.read)
+            });
+            let new_read = any_unread;
+
+            // Optimistic local update
+            for path in &paths {
+                update_read_status_locally(path, new_read).ok();
+                if let Some(entry) = app.emails.iter_mut().find(|e| &e.path == path) {
+                    entry.read = new_read;
+                }
+                if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
+                    if let Some(ce) = cached.iter_mut().find(|e| &e.path == path) {
+                        ce.read = new_read;
+                    }
+                }
+            }
+            app.selection.clear();
+
+            let label = if new_read {
+                format!("Marked {} as read", paths.len())
+            } else {
+                format!("Marked {} as unread", paths.len())
+            };
+            app.set_status(label);
+
+            // Async server update
+            if let Some(imap_config) = app.imap_config.clone() {
+                let mailbox = app.active_server_mailbox();
+                let acct_idx = app.active_account;
+                app.bg_count += 1;
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    for path in &paths {
+                        if let Some(mid) = get_message_id_from_file(path) {
+                            let result = if new_read {
+                                rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox))
+                            } else {
+                                rt.block_on(mark_unread_on_server(&imap_config, &mid, &mailbox))
+                            };
+                            if let Err(e) = result {
+                                log::warn!("Failed to toggle read for {}: {}", mid, e);
+                            }
+                        }
+                    }
+                    // Send a single result for the batch
+                    let _ = tx.send(BgResult::ToggleRead {
+                        account_index: acct_idx,
+                        path: paths.first().cloned().unwrap_or_default(),
+                        new_read_state: new_read,
+                        result: Ok(String::new()),
+                    });
+                });
+            }
         }
 
         Action::CopyPath => {

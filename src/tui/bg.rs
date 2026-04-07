@@ -1,4 +1,5 @@
 use super::app::{App, BgResult, MailboxKind, SearchOverlayFocus, SearchResultEntry, StatusLevel};
+use crate::imap_client::update_read_status_locally;
 
 /// Decrement bg_mutations on the correct account.
 fn decrement_mutations(app: &mut App, account_index: usize) {
@@ -125,6 +126,29 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                     }
                 }
                 Err(e) => app.set_status_level(format!("Sync failed: {e}"), StatusLevel::Error),
+            }
+        }
+
+        BgResult::ToggleRead { account_index, path, new_read_state, result } => {
+            // ToggleRead does NOT use bg_mutations -- it doesn't block fetch/sync
+            match result {
+                Ok(_) => { /* Server confirmed, local already updated optimistically */ }
+                Err(e) => {
+                    // Rollback local state
+                    let reverted = !new_read_state;
+                    update_read_status_locally(&path, reverted).ok();
+                    if account_index == app.active_account {
+                        if let Some(entry) = app.emails.iter_mut().find(|e| e.path == path) {
+                            entry.read = reverted;
+                        }
+                        if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
+                            if let Some(ce) = cached.iter_mut().find(|e| e.path == path) {
+                                ce.read = reverted;
+                            }
+                        }
+                    }
+                    app.push_status(format!("Read status sync failed: {e}"), StatusLevel::Warning);
+                }
             }
         }
 

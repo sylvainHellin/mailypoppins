@@ -26,6 +26,7 @@ pub struct EmailEntry {
     pub date_sort: String,
     pub body: String,
     pub has_attachments: bool,
+    pub read: bool,
 }
 
 impl EmailEntry {
@@ -52,6 +53,7 @@ struct Frontmatter {
     has_attachments: Option<bool>,
     #[allow(dead_code)]
     attachments: Option<Vec<String>>,
+    read: Option<bool>,
 }
 
 /// Load all emails from a directory.
@@ -110,6 +112,7 @@ fn parse_email(path: &Path) -> Result<EmailEntry> {
         date_sort,
         body,
         has_attachments: fm.has_attachments.unwrap_or(false),
+        read: fm.read.unwrap_or(false),
     })
 }
 
@@ -281,6 +284,12 @@ pub enum BgResult {
     SendApproved { account_index: usize, result: Result<String, String> },
     Archive { account_index: usize, result: Result<String, String> },
     Delete { account_index: usize, result: Result<String, String> },
+    ToggleRead {
+        account_index: usize,
+        path: PathBuf,
+        new_read_state: bool,
+        result: Result<String, String>,
+    },
     ServerSearch { result: Result<Vec<SearchHit>, String> },
 }
 
@@ -374,6 +383,9 @@ pub enum Action {
     Delete,
     BatchArchive(Vec<PathBuf>),
     BatchDelete(Vec<PathBuf>),
+    ToggleRead,
+    MarkAsRead,
+    BatchToggleRead(Vec<PathBuf>),
     CopyPath,
     OpenAttachment(PathBuf),
     Fetch,

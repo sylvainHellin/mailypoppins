@@ -53,6 +53,7 @@ pub struct FetchedEmail {
     pub has_attachments: bool,
     pub message_id: Option<String>,
     pub attachments: Vec<AttachmentData>,
+    pub is_read: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +251,7 @@ pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail>
         has_attachments: has_att,
         message_id,
         attachments: att_data,
+        is_read: false,
     })
 }
 
@@ -461,6 +463,7 @@ pub fn save_fetched_emails_with_known_ids(
             status: status.to_string(),
             has_attachments: email.has_attachments,
             attachments: None, // filled below after saving attachment files
+            read: email.is_read,
             fetched_at: fetched_at.clone(),
         };
 
@@ -1112,6 +1115,7 @@ mod tests {
             has_attachments: false,
             message_id: Some("<test1@example.com>".to_string()),
             attachments: vec![],
+            is_read: false,
         }];
 
         let (saved, skipped) = save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
@@ -1145,6 +1149,7 @@ mod tests {
             has_attachments: false,
             message_id: Some("<dup@example.com>".to_string()),
             attachments: vec![],
+            is_read: false,
         };
 
         // Save once
@@ -1171,6 +1176,7 @@ mod tests {
             has_attachments: false,
             message_id: Some("<html@example.com>".to_string()),
             attachments: vec![],
+            is_read: false,
         }];
 
         save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
@@ -1208,6 +1214,7 @@ mod tests {
                     content: b"png content".to_vec(),
                 },
             ],
+            is_read: false,
         }];
 
         save_fetched_emails(&emails, dir.path(), "inbox").unwrap();

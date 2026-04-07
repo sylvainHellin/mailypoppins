@@ -162,6 +162,9 @@ pub(super) async fn lib_do_sync(
     let result = sync_mailboxes(imap_config, &targets, limit, reconcile, false).await?;
 
     let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
+    if result.read_updated > 0 {
+        msg.push_str(&format!(", {} read status updated", result.read_updated));
+    }
     if reconcile {
         if result.moved > 0 || result.removed > 0 {
             msg.push_str(&format!(
@@ -260,6 +263,7 @@ fn fetched_to_email_entry(fetched: &FetchedEmail) -> EmailEntry {
         date_sort,
         body: fetched.body_text.clone(),
         has_attachments: fetched.has_attachments,
+        read: fetched.is_read,
     }
 }
 

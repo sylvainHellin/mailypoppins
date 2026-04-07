@@ -11,12 +11,18 @@ use super::util::{desc_span, hint_span};
 pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let total = app.mailbox_counts[app.active_mailbox];
     let shown = app.emails.len();
+    let unread_count = app.emails.iter().filter(|e| !e.read).count();
     let any_watching = app.accounts.iter().any(|a| a.watcher_active);
     let watch_prefix = if any_watching { "WATCHING " } else { "" };
     let sel_text = if app.selection.is_empty() {
         String::new()
     } else {
         format!("{} sel | ", app.selection.len())
+    };
+    let unread_text = if unread_count > 0 {
+        format!("{} unread | ", unread_count)
+    } else {
+        String::new()
     };
     let mailbox_text = if shown == 0 {
         format!("{} 0 ", app.active_label())
@@ -31,7 +37,7 @@ pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         format!("{} {}/{} ", app.active_label(), app.list_index + 1, shown)
     };
-    let right_len = (sel_text.len() + watch_prefix.len() + mailbox_text.len() + 1) as u16;
+    let right_len = (sel_text.len() + unread_text.len() + watch_prefix.len() + mailbox_text.len() + 1) as u16;
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -87,6 +93,9 @@ pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let mut right_spans = vec![Span::styled(" ", Style::default())];
     if !sel_text.is_empty() {
         right_spans.push(Span::styled(sel_text, Style::default().fg(theme::YELLOW)));
+    }
+    if !unread_text.is_empty() {
+        right_spans.push(Span::styled(unread_text, Style::default().fg(theme::PEACH)));
     }
     if any_watching {
         right_spans.push(Span::styled(watch_prefix, Style::default().fg(theme::TEAL)));

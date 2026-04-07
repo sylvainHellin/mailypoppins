@@ -6,8 +6,9 @@ use log::{info, warn};
 
 use super::fetch::{fetch_new_emails_on_session, fetch_server_message_ids_on_session};
 use super::open_imap_session;
+use super::ops::update_read_status_locally;
 use crate::config::ImapConfig;
-use crate::parse::{save_fetched_emails_with_known_ids, scan_existing_message_ids};
+use crate::parse::{save_fetched_emails_with_known_ids, scan_existing_message_ids, scan_mailbox_message_ids};
 use crate::sync::reconcile_local_files;
 
 /// A mailbox target for the unified sync operation.
@@ -24,6 +25,7 @@ pub struct SyncResult {
     pub skipped: usize,
     pub moved: usize,
     pub removed: usize,
+    pub read_updated: usize,
 }
 
 /// Unified sync orchestrator: fetches all mailboxes using a single IMAP connection,
@@ -49,6 +51,7 @@ pub async fn sync_mailboxes(
     let mut session = open_imap_session(imap_config).await?;
     let mut total_saved = 0usize;
     let mut total_skipped = 0usize;
+    let mut total_read_updated = 0usize;
 
     // Build a global known_ids set from ALL local directories.
     // This prevents re-fetching an email to one mailbox if it's already
@@ -96,7 +99,7 @@ pub async fn sync_mailboxes(
             )
             .await
             {
-                Ok((new_emails, skipped)) => {
+                Ok((new_emails, skipped, known_read_flags)) => {
                     total_skipped += skipped;
                     if !new_emails.is_empty() {
                         let (saved, _dup) = save_fetched_emails_with_known_ids(
@@ -106,6 +109,13 @@ pub async fn sync_mailboxes(
                             &mut known_ids,
                         )?;
                         total_saved += saved;
+                    }
+                    // Sync read status from server for existing local emails
+                    if !known_read_flags.is_empty() {
+                        total_read_updated += sync_local_read_flags(
+                            &target.local_dir,
+                            &known_read_flags,
+                        );
                     }
                 }
                 Err(e) => {
@@ -177,7 +187,56 @@ pub async fn sync_mailboxes(
         skipped: total_skipped,
         moved: total_moved,
         removed: total_removed,
+        read_updated: total_read_updated,
     })
+}
+
+/// Update local emails' `read:` frontmatter to match server \Seen flags.
+/// Returns the number of files updated.
+fn sync_local_read_flags(
+    local_dir: &std::path::Path,
+    server_flags: &HashMap<String, bool>,
+) -> usize {
+    let local_ids = match scan_mailbox_message_ids(local_dir) {
+        Ok(ids) => ids,
+        Err(_) => return 0,
+    };
+
+    let mut updated = 0usize;
+    for (message_id, is_seen) in server_flags {
+        if let Some(file_path) = local_ids.get(message_id) {
+            // Read current local status from frontmatter
+            let local_read = read_local_read_status(file_path);
+            if local_read != *is_seen {
+                if update_read_status_locally(file_path, *is_seen).is_ok() {
+                    updated += 1;
+                }
+            }
+        }
+    }
+    updated
+}
+
+/// Read the `read:` field from a frontmatter file. Returns false if missing or unreadable.
+fn read_local_read_status(path: &std::path::Path) -> bool {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let mut in_frontmatter = false;
+        for line in content.lines() {
+            if line == "---" {
+                if !in_frontmatter {
+                    in_frontmatter = true;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            if in_frontmatter && line.starts_with("read:") {
+                let val = line.trim_start_matches("read:").trim();
+                return val == "true";
+            }
+        }
+    }
+    false
 }
 
 /// Lightweight pass-1-only check: counts how many new emails exist on the server
@@ -261,4 +320,89 @@ pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
 
     session.logout().await.ok();
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_read_local_read_status_true() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nread: true\nstatus: inbox\n---\n\nBody").unwrap();
+        assert!(read_local_read_status(&path));
+    }
+
+    #[test]
+    fn test_read_local_read_status_false() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nread: false\nstatus: inbox\n---\n\nBody").unwrap();
+        assert!(!read_local_read_status(&path));
+    }
+
+    #[test]
+    fn test_read_local_read_status_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nstatus: inbox\n---\n\nBody").unwrap();
+        assert!(!read_local_read_status(&path));
+    }
+
+    #[test]
+    fn test_sync_local_read_flags_updates_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: false\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), true);
+
+        let updated = sync_local_read_flags(dir.path(), &flags);
+        assert_eq!(updated, 1);
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: true"));
+    }
+
+    #[test]
+    fn test_sync_local_read_flags_no_change_needed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: true\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), true);
+
+        let updated = sync_local_read_flags(dir.path(), &flags);
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn test_sync_local_read_flags_marks_unread() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: true\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), false);
+
+        let updated = sync_local_read_flags(dir.path(), &flags);
+        assert_eq!(updated, 1);
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: false"));
+    }
 }

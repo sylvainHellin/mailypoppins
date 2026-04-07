@@ -39,7 +39,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 | `sync.rs` | `sync_mailboxes()`, `list_mailboxes()`, `SyncTarget`, `SyncResult` |
 | `search.rs` | `parse_search_query()`, `build_imap_search_query()`, `FetchCriteria` |
 | `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
-| `ops.rs` | `archive_email_on_server/locally`, `delete_email_on_server/locally`, `append_to_sent_folder` |
+| `ops.rs` | `archive_email_on_server/locally`, `delete_email_on_server/locally`, `append_to_sent_folder`, `mark_read/unread_on_server`, `update_read_status_locally`, `get_message_id_from_file` |
 | `batch.rs` | `batch_archive_emails_locally`, `batch_delete_emails_locally` |
 | **`src/tui/`** | |
 | `mod.rs` | Event loop (`run_loop`), watcher spawn, bg result drain |
@@ -97,11 +97,12 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 
 ## Testing
 
-- **151 tests** (122 unit, 29 integration). All run offline in <0.5s. Run: `cargo test`
+- **252 tests** (210 unit, 42 integration). All run offline in <0.5s. Run: `cargo test`
 - Unit tests are inline `#[cfg(test)] mod tests` in each module
 - Integration tests live in `tests/` and use `tempfile::tempdir()` for isolation
 - `insta` snapshot tests for `markdown_to_html` output. Run `cargo insta review` to approve changes.
 - Some private helpers are `pub(crate)` for testability: `ensure_utf8_charset`, `sanitize_attachment_filename`, `floor_char_boundary`, `build_imap_search_query`, `parse_date_to_imap`, `parse_message_id_from_header_bytes`, `scan_mailbox_message_ids`, `collapse_hyphens`
+- `update_read_status_locally`, `get_message_id_from_file` are `pub` for TUI use and tested directly
 - No IMAP/SMTP mock server yet -- only pure logic and filesystem tests
 
 ---

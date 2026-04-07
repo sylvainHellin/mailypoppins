@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use futures::TryStreamExt;
@@ -115,7 +115,7 @@ pub async fn fetch_emails_on_session(
     let uid_set = compress_uid_set(&selected_uids);
 
     let fetched: Vec<_> = session
-        .uid_fetch(&uid_set, "BODY.PEEK[]")
+        .uid_fetch(&uid_set, "(BODY.PEEK[] FLAGS)")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
         .try_collect()
@@ -125,7 +125,8 @@ pub async fn fetch_emails_on_session(
     let mut emails = Vec::new();
     for msg in fetched.iter() {
         let body_raw = msg.body().unwrap_or_default();
-        if let Some(email) = parse_rfc822_to_fetched_email(body_raw) {
+        if let Some(mut email) = parse_rfc822_to_fetched_email(body_raw) {
+            email.is_read = msg.flags().any(|f| matches!(f, async_imap::types::Flag::Seen));
             emails.push(email);
         }
     }
@@ -150,15 +151,17 @@ pub async fn fetch_emails(
     Ok(emails)
 }
 
-/// Two-pass fetch: first fetch Message-ID headers (lightweight), then only download
-/// full RFC822 for emails not already present locally.
-/// Returns (new_emails, num_already_known_in_window).
+/// Two-pass fetch: first fetch Message-ID headers + FLAGS (lightweight), then only
+/// download full RFC822 for emails not already present locally.
+/// Returns (new_emails, num_already_known_in_window, read_flags_for_known_emails).
+/// The third element maps message_id -> is_seen for emails that already exist locally,
+/// enabling the caller to sync read status from the server.
 pub async fn fetch_new_emails_on_session(
     session: &mut ImapSession,
     mailbox: &str,
     limit: Option<usize>,
     known_ids: &HashSet<String>,
-) -> Result<(Vec<FetchedEmail>, usize)> {
+) -> Result<(Vec<FetchedEmail>, usize, HashMap<String, bool>)> {
     session
         .select(mailbox)
         .await
@@ -170,7 +173,7 @@ pub async fn fetch_new_emails_on_session(
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), 0, HashMap::new()));
     }
 
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
@@ -181,23 +184,25 @@ pub async fn fetch_new_emails_on_session(
     };
 
     if selected_uids.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), 0, HashMap::new()));
     }
 
     let checked_count = selected_uids.len();
 
-    // Pass 1: Fetch only Message-ID headers (~50 bytes/msg)
+    // Pass 1: Fetch Message-ID headers + FLAGS (~100 bytes/msg)
     let uid_set = compress_uid_set(&selected_uids);
     let header_fetched: Vec<_> = session
-        .uid_fetch(&uid_set, "(UID BODY.PEEK[HEADER.FIELDS (Message-ID)])")
+        .uid_fetch(&uid_set, "(UID BODY.PEEK[HEADER.FIELDS (Message-ID)] FLAGS)")
         .await
         .map_err(|e| anyhow!("Failed to fetch Message-ID headers: {}", e))?
         .try_collect()
         .await
         .map_err(|e| anyhow!("Failed to collect Message-ID headers: {}", e))?;
 
-    // Identify UIDs whose Message-ID is not in known_ids
+    // Identify UIDs whose Message-ID is not in known_ids,
+    // and collect \Seen flags for known emails.
     let mut new_uids: Vec<u32> = Vec::new();
+    let mut known_flags: HashMap<String, bool> = HashMap::new();
     for msg in header_fetched.iter() {
         let uid = match msg.uid {
             Some(u) => u,
@@ -206,7 +211,9 @@ pub async fn fetch_new_emails_on_session(
         let mid = msg.header().and_then(parse_message_id_from_header_bytes);
         match mid {
             Some(ref id) if known_ids.contains(id) => {
-                // Already known locally, skip
+                // Already known locally -- capture \Seen flag for read status sync
+                let is_seen = msg.flags().any(|f| matches!(f, async_imap::types::Flag::Seen));
+                known_flags.insert(id.clone(), is_seen);
             }
             _ => {
                 new_uids.push(uid);
@@ -217,7 +224,7 @@ pub async fn fetch_new_emails_on_session(
     let skipped = checked_count - new_uids.len();
 
     if new_uids.is_empty() {
-        return Ok((Vec::new(), skipped));
+        return Ok((Vec::new(), skipped, known_flags));
     }
 
     info!(
@@ -231,7 +238,7 @@ pub async fn fetch_new_emails_on_session(
     // Pass 2: Fetch full message body only for genuinely new messages
     let new_uid_set = compress_uid_set(&new_uids);
     let fetched: Vec<_> = session
-        .uid_fetch(&new_uid_set, "BODY.PEEK[]")
+        .uid_fetch(&new_uid_set, "(BODY.PEEK[] FLAGS)")
         .await
         .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
         .try_collect()
@@ -241,12 +248,13 @@ pub async fn fetch_new_emails_on_session(
     let mut emails = Vec::new();
     for msg in fetched.iter() {
         let body_raw = msg.body().unwrap_or_default();
-        if let Some(email) = parse_rfc822_to_fetched_email(body_raw) {
+        if let Some(mut email) = parse_rfc822_to_fetched_email(body_raw) {
+            email.is_read = msg.flags().any(|f| matches!(f, async_imap::types::Flag::Seen));
             emails.push(email);
         }
     }
 
-    Ok((emails, skipped))
+    Ok((emails, skipped, known_flags))
 }
 
 #[cfg(test)]

@@ -72,9 +72,12 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
 
     let has_selection = !app.selection.is_empty();
 
+    // Unread indicator column is always present (2 chars)
+    let unread_col_width: usize = 2;
+
     if available_width > 45 {
         let checkbox_extra: usize = if has_selection { 3 } else { 0 };
-        let effective_width = available_width.saturating_sub(checkbox_extra);
+        let effective_width = available_width.saturating_sub(checkbox_extra + unread_col_width + 1);
         let contact_width = 15.min(effective_width.saturating_sub(date_width + spacing + 10));
         let subject_width = effective_width.saturating_sub(date_width + contact_width + spacing);
 
@@ -82,6 +85,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         if has_selection {
             header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
         }
+        header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
         header_cells.push(Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)));
         header_cells.push(Cell::from("CONTACT").style(Style::default().fg(theme::SUBTEXT0)));
         header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
@@ -105,8 +109,10 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                     Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
                 } else if is_in_selection {
                     Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
+                } else if !email.read {
+                    Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme::SUBTEXT0)
                 };
 
                 let mut cells = Vec::new();
@@ -118,6 +124,13 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                     };
                     cells.push(Cell::from(icon));
                 }
+                // Unread indicator
+                let marker = if email.read {
+                    Span::styled(" ", Style::default())
+                } else {
+                    Span::styled("\u{f444}", Style::default().fg(theme::BLUE))
+                };
+                cells.push(Cell::from(marker));
                 cells.push(Cell::from(email.date_display.clone()));
                 cells.push(Cell::from(contact));
                 cells.push(Cell::from(subject));
@@ -130,6 +143,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         if has_selection {
             constraints.push(Constraint::Length(2));
         }
+        constraints.push(Constraint::Length(unread_col_width as u16));
         constraints.push(Constraint::Length(date_width as u16));
         constraints.push(Constraint::Length(contact_width as u16));
         constraints.push(Constraint::Min(subject_width as u16));
@@ -149,12 +163,13 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         frame.render_stateful_widget(table, list_area, &mut state);
     } else {
         let checkbox_extra: usize = if has_selection { 3 } else { 0 };
-        let subject_width = available_width.saturating_sub(date_width + 2 + checkbox_extra);
+        let subject_width = available_width.saturating_sub(date_width + 2 + checkbox_extra + unread_col_width + 1);
 
         let mut header_cells = Vec::new();
         if has_selection {
             header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
         }
+        header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
         header_cells.push(Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)));
         header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
         let header = Row::new(header_cells).height(1);
@@ -176,8 +191,10 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                     Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
                 } else if is_in_selection {
                     Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
+                } else if !email.read {
+                    Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme::SUBTEXT0)
                 };
 
                 let mut cells = Vec::new();
@@ -189,6 +206,13 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                     };
                     cells.push(Cell::from(icon));
                 }
+                // Unread indicator
+                let marker = if email.read {
+                    Span::styled(" ", Style::default())
+                } else {
+                    Span::styled("\u{f444}", Style::default().fg(theme::BLUE))
+                };
+                cells.push(Cell::from(marker));
                 cells.push(Cell::from(email.date_display.clone()));
                 cells.push(Cell::from(subject));
 
@@ -200,6 +224,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         if has_selection {
             constraints.push(Constraint::Length(2));
         }
+        constraints.push(Constraint::Length(unread_col_width as u16));
         constraints.push(Constraint::Length(date_width as u16));
         constraints.push(Constraint::Min(subject_width as u16));
 

@@ -85,6 +85,8 @@ pub struct InboxFrontmatter {
     pub message_id: Option<String>,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+    #[serde(default)]
+    pub read: Option<bool>,
 }
 
 /// Frontmatter used when saving fetched emails to disk.
@@ -103,6 +105,7 @@ pub struct SaveFrontmatter {
     pub has_attachments: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
+    pub read: bool,
     pub fetched_at: String,
 }
 
@@ -195,5 +198,59 @@ subject: "Hi"
         assert!(fm.date.is_none());
         assert!(fm.message_id.is_none());
         assert!(fm.attachments.is_none());
+    }
+
+    #[test]
+    fn test_inbox_frontmatter_read_true() {
+        let yaml = r#"
+from: "alice@example.com"
+to: "bob@example.com"
+subject: "Hi"
+read: true
+"#;
+        let fm: InboxFrontmatter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(fm.read, Some(true));
+    }
+
+    #[test]
+    fn test_inbox_frontmatter_read_false() {
+        let yaml = r#"
+from: "alice@example.com"
+to: "bob@example.com"
+subject: "Hi"
+read: false
+"#;
+        let fm: InboxFrontmatter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(fm.read, Some(false));
+    }
+
+    #[test]
+    fn test_inbox_frontmatter_read_missing_is_none() {
+        let yaml = r#"
+from: "alice@example.com"
+to: "bob@example.com"
+subject: "Hi"
+"#;
+        let fm: InboxFrontmatter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(fm.read, None);
+    }
+
+    #[test]
+    fn test_save_frontmatter_serializes_read() {
+        let fm = SaveFrontmatter {
+            from: "alice@example.com".to_string(),
+            to: "bob@example.com".to_string(),
+            cc: None,
+            subject: "Test".to_string(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".to_string(),
+            message_id: None,
+            status: "inbox".to_string(),
+            has_attachments: false,
+            attachments: None,
+            read: false,
+            fetched_at: "2024-01-01T12:00:00Z".to_string(),
+        };
+        let yaml = serde_yaml::to_string(&fm).unwrap();
+        assert!(yaml.contains("read: false"));
     }
 }

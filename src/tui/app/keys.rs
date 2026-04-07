@@ -406,6 +406,15 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('m') => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let paths: Vec<PathBuf> = self.selection.iter().cloned().collect();
+                    self.pending_action = Some(Action::BatchToggleRead(paths));
+                } else {
+                    self.pending_action = Some(Action::ToggleRead);
+                }
+            }
             KeyCode::Char(' ') => {
                 self.g_pending = false;
                 if let Some(path) = self.selected_email_path() {

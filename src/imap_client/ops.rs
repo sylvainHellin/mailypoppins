@@ -5,7 +5,6 @@ use anyhow::{anyhow, Context, Result};
 use futures::TryStreamExt;
 use gray_matter::{engine::YAML, Matter};
 use log::info;
-
 use super::open_imap_session;
 use crate::config::ImapConfig;
 use crate::parse::attachments_dir_for;
@@ -240,4 +239,195 @@ pub async fn delete_email_locally(imap_config: &ImapConfig, file_path: &Path) ->
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Read / unread (\Seen flag)
+// ---------------------------------------------------------------------------
+
+/// Mark an email as read (\Seen) on the IMAP server.
+pub async fn mark_read_on_server(
+    imap_config: &ImapConfig,
+    message_id: &str,
+    mailbox: &str,
+) -> Result<()> {
+    info!("Marking email as read on server: Message-ID={}", message_id);
+    let mut session = open_imap_session(imap_config).await?;
+
+    session
+        .select(mailbox)
+        .await
+        .map_err(|e| anyhow!("Failed to select {}: {}", mailbox, e))?;
+
+    let query = format!("HEADER Message-ID \"{}\"", message_id);
+    let uids = session
+        .uid_search(&query)
+        .await
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        session.logout().await.ok();
+        return Ok(()); // Not found on server -- not an error
+    }
+
+    let uid = *uids.iter().next().expect("uids verified non-empty");
+    session
+        .uid_store(&uid.to_string(), "+FLAGS (\\Seen)")
+        .await
+        .map_err(|e| anyhow!("Failed to set \\Seen flag: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
+
+    session.logout().await.ok();
+    Ok(())
+}
+
+/// Mark an email as unread (remove \Seen) on the IMAP server.
+pub async fn mark_unread_on_server(
+    imap_config: &ImapConfig,
+    message_id: &str,
+    mailbox: &str,
+) -> Result<()> {
+    info!("Marking email as unread on server: Message-ID={}", message_id);
+    let mut session = open_imap_session(imap_config).await?;
+
+    session
+        .select(mailbox)
+        .await
+        .map_err(|e| anyhow!("Failed to select {}: {}", mailbox, e))?;
+
+    let query = format!("HEADER Message-ID \"{}\"", message_id);
+    let uids = session
+        .uid_search(&query)
+        .await
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    if uids.is_empty() {
+        session.logout().await.ok();
+        return Ok(());
+    }
+
+    let uid = *uids.iter().next().expect("uids verified non-empty");
+    session
+        .uid_store(&uid.to_string(), "-FLAGS (\\Seen)")
+        .await
+        .map_err(|e| anyhow!("Failed to remove \\Seen flag: {}", e))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
+
+    session.logout().await.ok();
+    Ok(())
+}
+
+/// Update the `read:` field in an email's YAML frontmatter on disk.
+pub fn update_read_status_locally(file_path: &Path, read: bool) -> Result<()> {
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+
+    // Try replacing existing `read: true` or `read: false` line
+    let new_content = if content.contains("\nread: true\n") || content.contains("\nread: false\n") {
+        content
+            .replacen("\nread: true\n", &format!("\nread: {}\n", read), 1)
+            .replacen("\nread: false\n", &format!("\nread: {}\n", read), 1)
+    } else {
+        // Insert `read:` before the closing `---` of frontmatter
+        if let Some(first) = content.find("---") {
+            if let Some(second_offset) = content[first + 3..].find("---") {
+                let insert_pos = first + 3 + second_offset;
+                format!(
+                    "{}read: {}\n{}",
+                    &content[..insert_pos],
+                    read,
+                    &content[insert_pos..]
+                )
+            } else {
+                content
+            }
+        } else {
+            content
+        }
+    };
+
+    fs::write(file_path, new_content)?;
+    Ok(())
+}
+
+/// Extract message_id from a frontmatter file.
+pub fn get_message_id_from_file(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(&content);
+    let fm: InboxFrontmatter = parsed.data?.deserialize().ok()?;
+    fm.message_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_update_read_status_locally_toggle_false_to_true() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nread: false\nstatus: inbox\n---\n\nBody").unwrap();
+
+        update_read_status_locally(&path, true).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\nread: true\n"));
+        assert!(!content.contains("read: false"));
+    }
+
+    #[test]
+    fn test_update_read_status_locally_toggle_true_to_false() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nread: true\nstatus: inbox\n---\n\nBody").unwrap();
+
+        update_read_status_locally(&path, false).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\nread: false\n"));
+        assert!(!content.contains("read: true"));
+    }
+
+    #[test]
+    fn test_update_read_status_locally_insert_when_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nstatus: inbox\n---\n\nBody").unwrap();
+
+        update_read_status_locally(&path, true).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: true"));
+        // Should still have valid frontmatter
+        assert!(content.contains("---"));
+    }
+
+    #[test]
+    fn test_get_message_id_from_file_found() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nto: b@x.com\nsubject: test\nmessage_id: \"<abc@x.com>\"\n---\n\nBody").unwrap();
+
+        let mid = get_message_id_from_file(&path);
+        assert_eq!(mid, Some("<abc@x.com>".to_string()));
+    }
+
+    #[test]
+    fn test_get_message_id_from_file_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(&path, "---\nfrom: a@x.com\nto: b@x.com\nsubject: test\n---\n\nBody").unwrap();
+
+        let mid = get_message_id_from_file(&path);
+        assert_eq!(mid, None);
+    }
+
+    #[test]
+    fn test_get_message_id_from_file_nonexistent() {
+        let mid = get_message_id_from_file(Path::new("/nonexistent/path/email.md"));
+        assert_eq!(mid, None);
+    }
 }

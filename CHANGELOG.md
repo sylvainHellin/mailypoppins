@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.4] - 2026-04-05
+
+### Added
+- Mark as read / unread: persistent local tracking via `read` field in frontmatter, synced with IMAP `\Seen` flag
+- Auto-mark-as-read when previewing emails (cursor moves to a new email in Inbox/Archive/Extra mailboxes)
+- Manual toggle with `m` key (single email or batch selection)
+- Unread indicator in email list: blue `\u{f444}` dot for unread, bold text for unread, dimmed text for read
+- Unread count shown in status bar (e.g. "3 unread")
+- IMAP fetch now captures FLAGS alongside body (`BODY.PEEK[] FLAGS`), preserving server-side read status
+- Bidirectional read status sync: server `\Seen` flag synced to local `read:` frontmatter on each fetch
+- `mark_read_on_server()` / `mark_unread_on_server()` IMAP operations
+- `update_read_status_locally()` for frontmatter file updates
+- `sync_local_read_flags()` updates existing local emails' read status from server during fetch/sync
+- 16 new tests for read/unread functionality (types, ops, sync, frontmatter)
+
+### Changed
+- Existing emails without `read:` field default to unread (backward compatible)
+- Optimistic updates: local state updates immediately, server follows async with rollback on failure
+- Pass 1 of two-pass fetch now also retrieves FLAGS, enabling read status sync for existing emails
+
 ## [0.7.3] - 2026-04-04
 
 ### Changed

@@ -13,6 +13,8 @@ pub use fetch::{
 pub use ops::{
     append_to_sent_folder, archive_email_locally, archive_email_on_server,
     delete_email_locally, delete_email_on_server,
+    mark_read_on_server, mark_unread_on_server, update_read_status_locally,
+    get_message_id_from_file,
 };
 pub use search::{parse_search_query, FetchCriteria};
 pub use sync::{list_mailboxes, sync_mailboxes, SyncResult, SyncTarget};
