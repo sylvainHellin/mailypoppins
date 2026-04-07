@@ -395,6 +395,7 @@ pub enum Action {
     SearchResultReply(bool),
     SearchResultForward,
     SearchResultArchive,
+    SearchResultOpenInBrowser,
     OpenHtmlInBrowser(PathBuf),
 }
 

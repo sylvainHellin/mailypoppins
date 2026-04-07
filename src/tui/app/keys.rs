@@ -569,18 +569,7 @@ impl App {
                 self.pending_action = Some(Action::SearchResultArchive);
             }
             KeyCode::Char('b') => {
-                if let Some(result) = self.server_search_results.get(self.server_search_index) {
-                    if let Some(ref saved) = result.saved_path {
-                        let html_path = saved.with_extension("html");
-                        if html_path.exists() {
-                            self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
-                        } else {
-                            self.set_status("No HTML version available".to_string());
-                        }
-                    } else {
-                        self.set_status("Save email first to open HTML".to_string());
-                    }
-                }
+                self.pending_action = Some(Action::SearchResultOpenInBrowser);
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.server_search_focus = SearchOverlayFocus::Input;

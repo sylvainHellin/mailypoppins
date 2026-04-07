@@ -656,7 +656,8 @@ pub(super) fn handle_action(
         Action::SearchResultOpen
         | Action::SearchResultReply(_)
         | Action::SearchResultForward
-        | Action::SearchResultArchive => {
+        | Action::SearchResultArchive
+        | Action::SearchResultOpenInBrowser => {
             handle_search_result_action(app, terminal, action, bg_tx)?;
         }
 
@@ -713,6 +714,28 @@ fn handle_search_result_action(
                 }
             } else {
                 app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+            }
+        }
+
+        Action::SearchResultOpenInBrowser => {
+            if let Some(path) = ensure_search_result_saved(app) {
+                let html_path = path.with_extension("html");
+                if html_path.exists() {
+                    match crate::parse::open_file_with_system(&html_path) {
+                        Ok(()) => app.set_status("Opened in browser".to_string()),
+                        Err(e) => app.set_status_level(
+                            format!("Open failed: {e}"),
+                            StatusLevel::Error,
+                        ),
+                    }
+                } else {
+                    app.set_status("No HTML version available".to_string());
+                }
+            } else {
+                app.set_status_level(
+                    "Failed to save email locally".to_string(),
+                    StatusLevel::Error,
+                );
             }
         }
 
