@@ -8,7 +8,9 @@ use super::fetch::{fetch_new_emails_on_session, fetch_server_message_ids_on_sess
 use super::open_imap_session;
 use super::ops::update_read_status_locally;
 use crate::config::ImapConfig;
-use crate::parse::{save_fetched_emails_with_known_ids, scan_existing_message_ids, scan_mailbox_message_ids};
+use crate::parse::{
+    save_fetched_emails_with_known_ids, scan_existing_message_ids, scan_mailbox_message_ids,
+};
 use crate::sync::reconcile_local_files;
 
 /// A mailbox target for the unified sync operation.
@@ -19,6 +21,19 @@ pub struct SyncTarget {
     pub status: String,
 }
 
+/// One fresh address observation captured from a newly-downloaded email.
+/// Consumed by the contacts-index hook after a successful sync.
+#[derive(Debug, Clone)]
+pub struct FreshObservation {
+    /// Mailbox role this email was saved under: "inbox", "archive", "sent", or "extra".
+    pub role: String,
+    pub from: String,
+    pub to: String,
+    pub cc: Option<String>,
+    /// RFC-2822 date header from the email, or empty if unavailable.
+    pub date: String,
+}
+
 /// Results from a `sync_mailboxes` operation.
 pub struct SyncResult {
     pub saved: usize,
@@ -26,6 +41,9 @@ pub struct SyncResult {
     pub moved: usize,
     pub removed: usize,
     pub read_updated: usize,
+    /// Address observations from newly-saved emails, ready to be merged
+    /// into the contacts index by the caller. Empty on `dry_run`.
+    pub fresh_observations: Vec<FreshObservation>,
 }
 
 /// Unified sync orchestrator: fetches all mailboxes using a single IMAP connection,
@@ -52,6 +70,7 @@ pub async fn sync_mailboxes(
     let mut total_saved = 0usize;
     let mut total_skipped = 0usize;
     let mut total_read_updated = 0usize;
+    let mut fresh_observations: Vec<FreshObservation> = Vec::new();
 
     // Build a global known_ids set from ALL local directories.
     // This prevents re-fetching an email to one mailbox if it's already
@@ -109,13 +128,22 @@ pub async fn sync_mailboxes(
                             &mut known_ids,
                         )?;
                         total_saved += saved;
+                        // Collect fresh-contact observations from the new emails
+                        // so the caller can merge them into the contacts index.
+                        for e in &new_emails {
+                            fresh_observations.push(FreshObservation {
+                                role: target.role.clone(),
+                                from: e.from.clone(),
+                                to: e.to.clone(),
+                                cc: e.cc.clone(),
+                                date: e.date.clone(),
+                            });
+                        }
                     }
                     // Sync read status from server for existing local emails
                     if !known_read_flags.is_empty() {
-                        total_read_updated += sync_local_read_flags(
-                            &target.local_dir,
-                            &known_read_flags,
-                        );
+                        total_read_updated +=
+                            sync_local_read_flags(&target.local_dir, &known_read_flags);
                     }
                 }
                 Err(e) => {
@@ -188,6 +216,7 @@ pub async fn sync_mailboxes(
         moved: total_moved,
         removed: total_removed,
         read_updated: total_read_updated,
+        fresh_observations,
     })
 }
 
@@ -207,10 +236,8 @@ fn sync_local_read_flags(
         if let Some(file_path) = local_ids.get(message_id) {
             // Read current local status from frontmatter
             let local_read = read_local_read_status(file_path);
-            if local_read != *is_seen {
-                if update_read_status_locally(file_path, *is_seen).is_ok() {
-                    updated += 1;
-                }
+            if local_read != *is_seen && update_read_status_locally(file_path, *is_seen).is_ok() {
+                updated += 1;
             }
         }
     }
@@ -247,8 +274,8 @@ async fn count_new_emails_on_session(
     limit: Option<usize>,
     known_ids: &std::collections::HashSet<String>,
 ) -> Result<(usize, usize)> {
-    use anyhow::anyhow;
     use crate::parse::compress_uid_set;
+    use anyhow::anyhow;
     use futures::TryStreamExt;
 
     session
@@ -303,8 +330,8 @@ async fn count_new_emails_on_session(
 }
 
 pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
-    use futures::TryStreamExt;
     use anyhow::anyhow;
+    use futures::TryStreamExt;
 
     let mut session = open_imap_session(imap_config).await?;
 
@@ -332,7 +359,11 @@ mod tests {
     fn test_read_local_read_status_true() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("email.md");
-        fs::write(&path, "---\nfrom: a@x.com\nread: true\nstatus: inbox\n---\n\nBody").unwrap();
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nread: true\nstatus: inbox\n---\n\nBody",
+        )
+        .unwrap();
         assert!(read_local_read_status(&path));
     }
 
@@ -340,7 +371,11 @@ mod tests {
     fn test_read_local_read_status_false() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("email.md");
-        fs::write(&path, "---\nfrom: a@x.com\nread: false\nstatus: inbox\n---\n\nBody").unwrap();
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nread: false\nstatus: inbox\n---\n\nBody",
+        )
+        .unwrap();
         assert!(!read_local_read_status(&path));
     }
 

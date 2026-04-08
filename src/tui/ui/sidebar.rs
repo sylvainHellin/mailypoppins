@@ -65,8 +65,7 @@ pub(super) fn render_activity_log(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 
     if app.status_log.is_empty() {
-        let empty = Paragraph::new("  No activity yet")
-            .style(Style::default().fg(theme::SUBTEXT0));
+        let empty = Paragraph::new("  No activity yet").style(Style::default().fg(theme::SUBTEXT0));
         frame.render_widget(empty, inner);
         return;
     }

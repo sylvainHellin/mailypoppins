@@ -74,6 +74,9 @@ pub struct App {
     pub server_search_status: Option<String>,
     pub server_search_scope_label: String,
 
+    // Compose wizard overlay
+    pub compose_wizard: Option<ComposeWizard>,
+
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
 }
@@ -150,6 +153,7 @@ impl App {
             server_search_loading: false,
             server_search_status: None,
             server_search_scope_label: "All".to_string(),
+            compose_wizard: None,
             global_config,
         };
 
@@ -212,13 +216,15 @@ impl App {
     }
 
     pub fn active_kind(&self) -> MailboxKind {
-        self.mailboxes.get(self.active_mailbox)
+        self.mailboxes
+            .get(self.active_mailbox)
             .map(|m| m.kind)
             .unwrap_or(MailboxKind::Inbox)
     }
 
     pub fn active_label(&self) -> &str {
-        self.mailboxes.get(self.active_mailbox)
+        self.mailboxes
+            .get(self.active_mailbox)
             .map(|m| m.label.as_str())
             .unwrap_or("Mail")
     }
@@ -261,17 +267,22 @@ impl App {
 
     pub fn search_target_by_name(&self, name: &str) -> Option<SearchTarget> {
         let lower = name.to_lowercase();
-        self.mailboxes.iter().find(|m| {
-            m.server_name.as_ref().is_some_and(|s| s.to_lowercase() == lower)
-                || m.label.to_lowercase() == lower
-        }).and_then(|m| {
-            Some(SearchTarget {
-                server_name: m.server_name.clone()?,
-                local_dir: m.dir.clone(),
-                status: kind_to_status(m.kind),
-                label: m.label.clone(),
+        self.mailboxes
+            .iter()
+            .find(|m| {
+                m.server_name
+                    .as_ref()
+                    .is_some_and(|s| s.to_lowercase() == lower)
+                    || m.label.to_lowercase() == lower
             })
-        })
+            .and_then(|m| {
+                Some(SearchTarget {
+                    server_name: m.server_name.clone()?,
+                    local_dir: m.dir.clone(),
+                    status: kind_to_status(m.kind),
+                    label: m.label.clone(),
+                })
+            })
     }
 
     pub fn mailbox_index_for_dir(&self, dir: &Path) -> Option<usize> {
@@ -400,7 +411,8 @@ impl App {
     }
 
     pub fn remove_selected_from_list_batch(&mut self, paths: &HashSet<PathBuf>) -> Vec<PathBuf> {
-        let removed: Vec<PathBuf> = self.emails
+        let removed: Vec<PathBuf> = self
+            .emails
             .iter()
             .filter(|e| paths.contains(&e.path))
             .map(|e| e.path.clone())

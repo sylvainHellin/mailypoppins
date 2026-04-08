@@ -184,7 +184,10 @@ pub fn create_reply_draft(
             let name = if subject_slug.is_empty() {
                 format!("{}_{}_email-{}.md", date_prefix, sender_slug, counter)
             } else {
-                format!("{}_{}_{}-{}.md", date_prefix, sender_slug, subject_slug, counter)
+                format!(
+                    "{}_{}_{}-{}.md",
+                    date_prefix, sender_slug, subject_slug, counter
+                )
             };
             dest = output_dir.join(&name);
             if !dest.exists() {
@@ -217,6 +220,24 @@ pub fn create_reply_draft(
     Ok(dest)
 }
 
+/// Compute the `Fwd: ...` subject that would be used for a forward draft of
+/// the given source email, without writing the draft file.
+/// Used by the TUI compose wizard to pre-populate the Subject field.
+pub fn fwd_subject_from_source(source_path: &Path) -> Result<String> {
+    let content = fs::read_to_string(source_path)?;
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(&content);
+    let inbox: InboxFrontmatter = parsed
+        .data
+        .ok_or_else(|| anyhow!("No frontmatter found"))?
+        .deserialize()?;
+    if inbox.subject.to_lowercase().starts_with("fwd: ") {
+        Ok(inbox.subject)
+    } else {
+        Ok(format!("Fwd: {}", inbox.subject))
+    }
+}
+
 pub fn create_forward_draft(
     source_path: &Path,
     default_from: &str,
@@ -246,7 +267,10 @@ pub fn create_forward_draft(
             .filter_map(|name| {
                 let abs_path = att_dir.join(name);
                 if abs_path.exists() {
-                    abs_path.canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+                    abs_path
+                        .canonicalize()
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
                 } else {
                     None
                 }
@@ -317,7 +341,10 @@ pub fn create_forward_draft(
             let name = if subject_slug.is_empty() {
                 format!("{}_{}_email-{}.md", date_prefix, sender_slug, counter)
             } else {
-                format!("{}_{}_{}-{}.md", date_prefix, sender_slug, subject_slug, counter)
+                format!(
+                    "{}_{}_{}-{}.md",
+                    date_prefix, sender_slug, subject_slug, counter
+                )
             };
             dest = output_dir.join(&name);
             if !dest.exists() {
@@ -497,7 +524,11 @@ pub fn preview_draft(
     Ok(())
 }
 
-pub fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>, message_id: Option<&str>) -> Result<()> {
+pub fn update_status_to_sent(
+    draft: &EmailDraft,
+    sent_dir: Option<&Path>,
+    message_id: Option<&str>,
+) -> Result<()> {
     info!("Updating status to sent: {}", draft.path.display());
     let mut frontmatter = draft.frontmatter.clone();
     frontmatter.status = EmailStatus::Sent;
@@ -515,7 +546,9 @@ pub fn update_status_to_sent(draft: &EmailDraft, sent_dir: Option<&Path>, messag
     let dest_path = if let Some(sent_dir) = sent_dir {
         fs::create_dir_all(sent_dir)?;
         // Keep the original filename (already includes date-time prefix)
-        let original_name = draft.path.file_name()
+        let original_name = draft
+            .path
+            .file_name()
             .ok_or_else(|| anyhow!("Draft path has no filename: {}", draft.path.display()))?
             .to_string_lossy();
         sent_dir.join(original_name.as_ref())
@@ -614,7 +647,12 @@ mod tests {
 
     #[test]
     fn test_validate_draft_valid() {
-        let draft = make_draft("alice@example.com", "Hello", "Body text", EmailStatus::Draft);
+        let draft = make_draft(
+            "alice@example.com",
+            "Hello",
+            "Body text",
+            EmailStatus::Draft,
+        );
         let result = validate_draft(&draft);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -656,7 +694,12 @@ mod tests {
 
     #[test]
     fn test_validate_draft_multiple_recipients_one_invalid() {
-        let draft = make_draft("alice@example.com, badaddr", "Hello", "Body", EmailStatus::Draft);
+        let draft = make_draft(
+            "alice@example.com, badaddr",
+            "Hello",
+            "Body",
+            EmailStatus::Draft,
+        );
         let result = validate_draft(&draft);
         assert!(result.is_err());
     }

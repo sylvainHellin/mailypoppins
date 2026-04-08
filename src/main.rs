@@ -187,6 +187,41 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Contact index operations
+    Contacts {
+        #[command(subcommand)]
+        action: ContactsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactsAction {
+    /// Search the contact index
+    Search {
+        /// Query string (fuzzy-matched against name and email)
+        query: Option<String>,
+        /// Emit tab-delimited `email\tname` lines (for mutt/aerc/vim integration)
+        #[arg(long)]
+        parsable: bool,
+        /// Max number of results
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+        /// Account name (default: first configured account)
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Rebuild the contact index from local mailbox files
+    Rebuild {
+        /// Account name (default: all configured accounts)
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Show index statistics
+    Stats {
+        /// Account name (default: first configured account)
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -356,6 +391,9 @@ async fn main() -> Result<()> {
                     }
                 }
 
+                // Incremental contacts-index update (best-effort, no-op if no cache)
+                email::contacts::hooks::bump_after_send(&account_config, &draft);
+
                 println!(
                     "{} Email sent successfully to all {} recipient(s)",
                     "✓".green().bold(),
@@ -381,6 +419,9 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
+
+                // Incremental contacts-index update (best-effort)
+                email::contacts::hooks::bump_after_send(&account_config, &draft);
 
                 println!(
                     "{} Partial send: {} succeeded, {} failed (marked as sent -- see logs for details)",
@@ -451,6 +492,8 @@ async fn main() -> Result<()> {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
                                 }
+                                // Incremental contacts-index update (best-effort)
+                                email::contacts::hooks::bump_after_send(&account_config, &draft);
                                 println!("{}", "✓".green());
                             }
                             sent_count += 1;
@@ -466,6 +509,8 @@ async fn main() -> Result<()> {
                                         warn!("Failed to append to Sent folder: {}", e);
                                     }
                                 }
+                                // Incremental contacts-index update (best-effort)
+                                email::contacts::hooks::bump_after_send(&account_config, &draft);
                                 println!(
                                     "{} (partial: {}/{} recipients)",
                                     "⚠".yellow(),
@@ -826,6 +871,14 @@ async fn main() -> Result<()> {
 
             let result = sync_mailboxes(&imap_config, &targets, limit, reconcile, dry_run).await?;
 
+            // Incremental contacts-index update (best-effort, no-op on dry_run).
+            if !dry_run {
+                email::contacts::hooks::bump_after_sync(
+                    &account_config,
+                    &result.fresh_observations,
+                );
+            }
+
             let prefix = if dry_run { "[dry-run] " } else { "" };
 
             if result.skipped > 0 {
@@ -1017,6 +1070,29 @@ async fn main() -> Result<()> {
                     println!("{}", "No results found".yellow());
                 } else {
                     display_fetched_emails(&all_emails, full);
+                }
+            }
+        }
+
+        Some(Commands::Contacts { action }) => {
+            match action {
+                ContactsAction::Search { query, parsable, limit, account } => {
+                    let acct = account.or_else(|| cli.account.clone());
+                    email::contacts_cmd::handle_search(
+                        &global_config,
+                        query,
+                        parsable,
+                        limit,
+                        acct,
+                    )?;
+                }
+                ContactsAction::Rebuild { account } => {
+                    let acct = account.or_else(|| cli.account.clone());
+                    email::contacts_cmd::handle_rebuild(&global_config, acct)?;
+                }
+                ContactsAction::Stats { account } => {
+                    let acct = account.or_else(|| cli.account.clone());
+                    email::contacts_cmd::handle_stats(&global_config, acct)?;
                 }
             }
         }

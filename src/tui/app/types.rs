@@ -64,10 +64,7 @@ pub fn load_emails(dir: &Path) -> Vec<EmailEntry> {
         .max_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path().extension().is_some_and(|ext| ext == "md")
-        });
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "md"));
 
     for entry in walker {
         match parse_email(entry.path()) {
@@ -170,12 +167,7 @@ pub fn resolve_date(
             if filename.len() >= 15 && filename.as_bytes()[10] == b'-' {
                 let time_part = &filename[11..15];
                 if time_part.chars().all(|c| c.is_ascii_digit()) && time_part.len() == 4 {
-                    let sort = format!(
-                        "{}T{}:{}:00",
-                        date_part,
-                        &time_part[..2],
-                        &time_part[2..4]
-                    );
+                    let sort = format!("{}T{}:{}:00", date_part, &time_part[..2], &time_part[2..4]);
                     return (date_part.to_string(), sort);
                 }
             }
@@ -231,16 +223,28 @@ impl AccountState {
             None
         };
 
-        let sent_dir = account_config.mailboxes.sent.as_ref()
+        let sent_dir = account_config
+            .mailboxes
+            .sent
+            .as_ref()
             .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
-        let archive_dir = account_config.mailboxes.archive.as_ref()
+        let archive_dir = account_config
+            .mailboxes
+            .archive
+            .as_ref()
             .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
-        let archive_server_name = account_config.mailboxes.archive.as_ref()
+        let archive_server_name = account_config
+            .mailboxes
+            .archive
+            .as_ref()
             .map(|m| m.server.as_str())
             .unwrap_or("Archive")
             .to_string();
         let drafts_dir = crate::config::resolve_drafts_dir_from_config(&account_config);
-        let inbox_dir = account_config.mailboxes.inbox.as_ref()
+        let inbox_dir = account_config
+            .mailboxes
+            .inbox
+            .as_ref()
             .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
 
         let mailboxes = build_mailboxes(&account_config);
@@ -278,19 +282,39 @@ impl AccountState {
 /// Result from a background CLI operation.
 #[derive(Debug)]
 pub enum BgResult {
-    Fetch { account_index: usize, result: Result<String, String> },
-    Sync { account_index: usize, result: Result<String, String> },
-    Send { account_index: usize, result: Result<String, String> },
-    SendApproved { account_index: usize, result: Result<String, String> },
-    Archive { account_index: usize, result: Result<String, String> },
-    Delete { account_index: usize, result: Result<String, String> },
+    Fetch {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    Sync {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    Send {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    SendApproved {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    Archive {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    Delete {
+        account_index: usize,
+        result: Result<String, String>,
+    },
     ToggleRead {
         account_index: usize,
         path: PathBuf,
         new_read_state: bool,
         result: Result<String, String>,
     },
-    ServerSearch { result: Result<Vec<SearchHit>, String> },
+    ServerSearch {
+        result: Result<Vec<SearchHit>, String>,
+    },
 }
 
 /// A mailbox target for server search.
@@ -329,6 +353,88 @@ pub enum SearchOverlayFocus {
     List,
 }
 
+// ---------------------------------------------------------------------------
+// Compose wizard
+// ---------------------------------------------------------------------------
+
+/// Which field of the compose wizard is currently focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeField {
+    To,
+    Cc,
+    Bcc,
+    Subject,
+}
+
+impl ComposeField {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ComposeField::To => "To",
+            ComposeField::Cc => "Cc",
+            ComposeField::Bcc => "Bcc",
+            ComposeField::Subject => "Subject",
+        }
+    }
+
+    pub fn is_address(&self) -> bool {
+        matches!(
+            self,
+            ComposeField::To | ComposeField::Cc | ComposeField::Bcc
+        )
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            ComposeField::To => ComposeField::Cc,
+            ComposeField::Cc => ComposeField::Bcc,
+            ComposeField::Bcc => ComposeField::Subject,
+            ComposeField::Subject => ComposeField::To,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            ComposeField::To => ComposeField::Subject,
+            ComposeField::Cc => ComposeField::To,
+            ComposeField::Bcc => ComposeField::Cc,
+            ComposeField::Subject => ComposeField::Bcc,
+        }
+    }
+}
+
+/// Wizard mode: blank new draft vs. forward from an existing email.
+#[derive(Debug, Clone)]
+pub enum ComposeMode {
+    New,
+    Forward { source_path: PathBuf },
+}
+
+/// A fuzzy-matched contact suggestion under the focused address field.
+#[derive(Debug, Clone)]
+pub struct ComposeSuggestion {
+    pub address: String,
+    pub display_name: String,
+    /// Tier marker for visual: 0=received, 1=sent-cc, 2=sent-to.
+    pub tier: u8,
+}
+
+/// State for the compose wizard overlay.
+pub struct ComposeWizard {
+    pub mode: ComposeMode,
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+    pub focus: ComposeField,
+    /// Fuzzy-matched suggestions for the currently-focused field
+    /// (empty for Subject or when no cache exists).
+    pub suggestions: Vec<ComposeSuggestion>,
+    pub suggestion_idx: usize,
+    /// The contact index for the active account, loaded once when the
+    /// wizard opens. `None` means "no cache yet — run rebuild first".
+    pub contacts: Option<crate::contacts::ContactIndex>,
+}
+
 /// Which pane currently has focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -337,6 +443,7 @@ pub enum Focus {
     Headers,
     Preview,
     Search,
+    ComposeWizard,
 }
 
 /// Messages that drive state transitions (TEA pattern).
@@ -346,7 +453,9 @@ pub enum Message {
     Resize(u16, u16),
     Quit,
     /// Background watcher detected new mail for a given account.
-    MailboxChanged { account_index: usize },
+    MailboxChanged {
+        account_index: usize,
+    },
 }
 
 /// Behavioral kind of a mailbox (used for action differentiation).
@@ -390,13 +499,22 @@ pub enum Action {
     OpenAttachment(PathBuf),
     Fetch,
     Sync,
-    ServerSearch { query: String, targets: Vec<SearchTarget> },
+    ServerSearch {
+        query: String,
+        targets: Vec<SearchTarget>,
+    },
     SearchResultOpen,
     SearchResultReply(bool),
     SearchResultForward,
     SearchResultArchive,
     SearchResultOpenInBrowser,
     OpenHtmlInBrowser(PathBuf),
+    /// Open the compose wizard overlay (new or forward).
+    OpenComposeWizard(ComposeMode),
+    /// Commit the wizard: write the draft file and launch $EDITOR.
+    ComposeWizardSubmit,
+    /// Close the wizard without writing anything.
+    ComposeWizardCancel,
 }
 
 /// Which destructive action a confirmation dialog is guarding.
@@ -467,7 +585,10 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
 
     let mut result = Vec::new();
 
-    let inbox_dir = config.mailboxes.inbox.as_ref()
+    let inbox_dir = config
+        .mailboxes
+        .inbox
+        .as_ref()
         .map(|m| crate::config::resolve_mailbox_local_path(config, m))
         .unwrap_or_else(|| root.join("inbox"));
     result.push(MailboxInfo {
@@ -486,7 +607,10 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
         server_name: None,
     });
 
-    let sent_dir = config.mailboxes.sent.as_ref()
+    let sent_dir = config
+        .mailboxes
+        .sent
+        .as_ref()
         .map(|m| crate::config::resolve_mailbox_local_path(config, m))
         .unwrap_or_else(|| root.join("sent"));
     result.push(MailboxInfo {
@@ -497,7 +621,10 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
         server_name: config.mailboxes.sent.as_ref().map(|m| m.server.clone()),
     });
 
-    let archive_dir = config.mailboxes.archive.as_ref()
+    let archive_dir = config
+        .mailboxes
+        .archive
+        .as_ref()
         .map(|m| crate::config::resolve_mailbox_local_path(config, m))
         .unwrap_or_else(|| root.join("archive"));
     result.push(MailboxInfo {
@@ -524,21 +651,24 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
 }
 
 pub fn count_all_emails(mailboxes: &[MailboxInfo]) -> Vec<usize> {
-    mailboxes.iter().map(|mb| {
-        if mb.dir.is_dir() {
-            walkdir::WalkDir::new(&mb.dir)
-                .max_depth(1)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().is_some_and(|ext| ext == "md")
-                })
-                .count()
-        } else {
-            0
-        }
-    }).collect()
+    mailboxes
+        .iter()
+        .map(|mb| {
+            if mb.dir.is_dir() {
+                walkdir::WalkDir::new(&mb.dir)
+                    .max_depth(1)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_type().is_file()
+                            && e.path().extension().is_some_and(|ext| ext == "md")
+                    })
+                    .count()
+            } else {
+                0
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -567,7 +697,10 @@ mod tests {
 
     #[test]
     fn test_extract_display_name_quoted() {
-        assert_eq!(extract_display_name("\"John Doe\" <john@x.com>"), "John Doe");
+        assert_eq!(
+            extract_display_name("\"John Doe\" <john@x.com>"),
+            "John Doe"
+        );
     }
 
     #[test]
