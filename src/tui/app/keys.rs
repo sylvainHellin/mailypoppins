@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    Action, App, AttachmentPicker, ConfirmAction, ConfirmDialog, Focus, Message,
-    SearchOverlayFocus,
+    Action, App, AttachmentPicker, ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard,
+    ConfirmAction, ConfirmDialog, Focus, Message, SearchOverlayFocus,
 };
 
 impl App {
@@ -27,6 +27,10 @@ impl App {
 
         if self.show_search_overlay {
             return self.handle_search_overlay_key(key);
+        }
+
+        if self.compose_wizard.is_some() {
+            return self.handle_compose_wizard_key(key);
         }
 
         if self.focus == Focus::Search {
@@ -111,6 +115,7 @@ impl App {
                     Focus::Preview => Focus::Headers,
                     Focus::Headers => Focus::Sidebar,
                     Focus::Search => Focus::List,
+                    Focus::ComposeWizard => Focus::ComposeWizard,
                 };
                 return None;
             }
@@ -122,6 +127,7 @@ impl App {
                     Focus::Preview => Focus::List,
                     Focus::List => Focus::Sidebar,
                     Focus::Search => Focus::List,
+                    Focus::ComposeWizard => Focus::ComposeWizard,
                 };
                 return None;
             }
@@ -134,6 +140,7 @@ impl App {
             Focus::Headers => self.handle_headers_key(key),
             Focus::Preview => self.handle_preview_key(key),
             Focus::Search => unreachable!(),
+            Focus::ComposeWizard => unreachable!("handled above via compose_wizard.is_some()"),
         }
     }
 
@@ -209,7 +216,8 @@ impl App {
                             self.set_status("No attachments".to_string());
                         }
                         Ok(files) if files.len() == 1 => {
-                            self.pending_action = Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                            self.pending_action =
+                                Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
                         }
                         Ok(files) => {
                             self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
@@ -242,7 +250,9 @@ impl App {
             match key.code {
                 KeyCode::Char('f') => self.pending_action = Some(Action::Fetch),
                 KeyCode::Char('F') => self.pending_action = Some(Action::Sync),
-                KeyCode::Char('n') => self.pending_action = Some(Action::NewDraft),
+                KeyCode::Char('n') => {
+                    self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::New));
+                }
                 _ => {}
             }
             return None;
@@ -287,7 +297,11 @@ impl App {
             }
             KeyCode::Char('w') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Forward);
+                if let Some(path) = self.selected_email_path() {
+                    self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::Forward {
+                        source_path: path,
+                    }));
+                }
             }
             KeyCode::Char('a') => {
                 self.g_pending = false;
@@ -353,7 +367,7 @@ impl App {
             }
             KeyCode::Char('n') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::NewDraft);
+                self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::New));
             }
             KeyCode::Char('f') => {
                 self.g_pending = false;
@@ -384,7 +398,8 @@ impl App {
                             self.set_status("No attachments".to_string());
                         }
                         Ok(files) if files.len() == 1 => {
-                            self.pending_action = Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                            self.pending_action =
+                                Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
                         }
                         Ok(files) => {
                             self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
@@ -465,16 +480,14 @@ impl App {
             }
             KeyCode::Enter => {
                 if !self.server_search_query.is_empty() {
-                    let criteria = crate::imap_client::parse_search_query(
-                        &self.server_search_query,
-                    );
+                    let criteria =
+                        crate::imap_client::parse_search_query(&self.server_search_query);
                     let (targets, scope_label) = if let Some(ref name) = criteria.in_mailbox {
                         if let Some(target) = self.search_target_by_name(name) {
                             let label = target.label.clone();
                             (vec![target], label)
                         } else {
-                            self.server_search_status =
-                                Some(format!("Unknown mailbox: {}", name));
+                            self.server_search_status = Some(format!("Unknown mailbox: {}", name));
                             return None;
                         }
                     } else {
@@ -583,6 +596,185 @@ impl App {
         None
     }
 
+    // -----------------------------------------------------------------
+    // Compose wizard
+    // -----------------------------------------------------------------
+
+    fn handle_compose_wizard_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let wizard = self.compose_wizard.as_mut()?;
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::Esc => {
+                self.pending_action = Some(Action::ComposeWizardCancel);
+                return None;
+            }
+            KeyCode::Tab => {
+                wizard.focus = wizard.focus.next();
+                wizard.suggestion_idx = 0;
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::BackTab => {
+                wizard.focus = wizard.focus.prev();
+                wizard.suggestion_idx = 0;
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::Up => {
+                if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx > 0
+                {
+                    wizard.suggestion_idx -= 1;
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx + 1 < wizard.suggestions.len()
+                {
+                    wizard.suggestion_idx += 1;
+                }
+                return None;
+            }
+            KeyCode::Char('g') if ctrl => {
+                // Force-submit from any field.
+                self.pending_action = Some(Action::ComposeWizardSubmit);
+                return None;
+            }
+            KeyCode::Char('n') if ctrl => {
+                if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx + 1 < wizard.suggestions.len()
+                {
+                    wizard.suggestion_idx += 1;
+                }
+                return None;
+            }
+            KeyCode::Char('p') if ctrl => {
+                if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx > 0
+                {
+                    wizard.suggestion_idx -= 1;
+                }
+                return None;
+            }
+            KeyCode::Char('u') if ctrl => {
+                // Clear the current field.
+                current_field_mut(wizard).clear();
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::Enter => {
+                // On an address field with a highlighted suggestion, accept it.
+                if wizard.focus.is_address() && !wizard.suggestions.is_empty() {
+                    let sug = wizard.suggestions[wizard.suggestion_idx].clone();
+                    accept_suggestion(current_field_mut(wizard), &sug);
+                    // After accepting, clear the suggestion list so another
+                    // Enter moves on rather than re-appending the same contact.
+                    wizard.suggestions.clear();
+                    wizard.suggestion_idx = 0;
+                    return None;
+                }
+                // On subject (or an empty-suggestion address field), submit.
+                if wizard.focus == ComposeField::Subject || !wizard.subject.trim().is_empty() {
+                    self.pending_action = Some(Action::ComposeWizardSubmit);
+                    return None;
+                }
+                // Otherwise cycle to the next field.
+                wizard.focus = wizard.focus.next();
+                wizard.suggestion_idx = 0;
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::Backspace => {
+                current_field_mut(wizard).pop();
+                if wizard.focus.is_address() {
+                    wizard.suggestion_idx = 0;
+                    self.recompute_compose_suggestions();
+                }
+                return None;
+            }
+            KeyCode::Char(c) => {
+                // Ctrl-prefixed chars not handled above are ignored.
+                if ctrl {
+                    return None;
+                }
+                let _ = shift; // Shift+letter is just the uppercase char.
+                current_field_mut(wizard).push(c);
+                if wizard.focus.is_address() {
+                    wizard.suggestion_idx = 0;
+                    self.recompute_compose_suggestions();
+                }
+                return None;
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    pub(crate) fn recompute_compose_suggestions(&mut self) {
+        let Some(wizard) = self.compose_wizard.as_mut() else {
+            return;
+        };
+        if !wizard.focus.is_address() {
+            wizard.suggestions.clear();
+            wizard.suggestion_idx = 0;
+            return;
+        }
+        let field_value = match wizard.focus {
+            ComposeField::To => &wizard.to,
+            ComposeField::Cc => &wizard.cc,
+            ComposeField::Bcc => &wizard.bcc,
+            ComposeField::Subject => {
+                wizard.suggestions.clear();
+                return;
+            }
+        };
+        let query = field_value
+            .rsplit(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let Some(index) = wizard.contacts.as_ref() else {
+            wizard.suggestions.clear();
+            return;
+        };
+
+        // Don't flood with N untyped entries — only show suggestions
+        // once the user has typed at least 1 char of the partial.
+        if query.is_empty() {
+            wizard.suggestions.clear();
+            wizard.suggestion_idx = 0;
+            return;
+        }
+
+        let results = crate::contacts::search(index, &query, 12);
+        wizard.suggestions = results
+            .into_iter()
+            .map(|r| ComposeSuggestion {
+                address: r.contact.address.clone(),
+                display_name: r.contact.display_name.clone(),
+                tier: if r.contact.sent_to > 0 {
+                    2
+                } else if r.contact.sent_cc > 0 {
+                    1
+                } else {
+                    0
+                },
+            })
+            .collect();
+        wizard.suggestion_idx = 0;
+    }
+
     fn handle_preview_key(&mut self, key: KeyEvent) -> Option<Message> {
         self.g_pending = false;
         match key.code {
@@ -609,7 +801,8 @@ impl App {
                             self.set_status("No attachments".to_string());
                         }
                         Ok(files) if files.len() == 1 => {
-                            self.pending_action = Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                            self.pending_action =
+                                Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
                         }
                         Ok(files) => {
                             self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
@@ -781,7 +974,9 @@ impl App {
     pub(crate) fn apply_search_filter(&mut self) {
         self.selection.clear();
         let idx = self.active_mailbox;
-        let all_emails = self.email_cache.get(idx)
+        let all_emails = self
+            .email_cache
+            .get(idx)
             .and_then(|c| c.as_ref())
             .cloned()
             .unwrap_or_default();
@@ -819,4 +1014,45 @@ impl App {
         self.headers_scroll = 0;
         self.preview_scroll = 0;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Compose wizard free helpers
+// ---------------------------------------------------------------------------
+
+fn current_field_mut(wizard: &mut ComposeWizard) -> &mut String {
+    match wizard.focus {
+        ComposeField::To => &mut wizard.to,
+        ComposeField::Cc => &mut wizard.cc,
+        ComposeField::Bcc => &mut wizard.bcc,
+        ComposeField::Subject => &mut wizard.subject,
+    }
+}
+
+/// Aerc-style suggestion acceptance: replace the trailing partial
+/// (everything after the last comma) with the suggestion's address,
+/// then append `, ` so the user can keep typing more recipients.
+fn accept_suggestion(field: &mut String, suggestion: &ComposeSuggestion) {
+    let prefix_end = field.rfind(',').map(|i| i + 1).unwrap_or(0);
+    field.truncate(prefix_end);
+    if prefix_end > 0 && !field.ends_with(' ') {
+        field.push(' ');
+    }
+    // If we have a display name, render "Name <addr>, ". Otherwise just "addr, ".
+    if suggestion.display_name.is_empty() {
+        field.push_str(&suggestion.address);
+    } else {
+        // Quote the display name if it contains commas.
+        if suggestion.display_name.contains(',') {
+            field.push('"');
+            field.push_str(&suggestion.display_name);
+            field.push('"');
+        } else {
+            field.push_str(&suggestion.display_name);
+        }
+        field.push_str(" <");
+        field.push_str(&suggestion.address);
+        field.push('>');
+    }
+    field.push_str(", ");
 }

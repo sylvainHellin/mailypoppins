@@ -12,7 +12,9 @@ pub(super) fn header_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
     Line::from(vec![
         Span::styled(
             format!(" {label}: "),
-            Style::default().fg(theme::MAUVE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::MAUVE)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(value, Style::default().fg(theme::TEXT)),
     ])

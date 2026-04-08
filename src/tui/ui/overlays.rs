@@ -89,13 +89,16 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
     let mut lines = vec![
         Line::from(Span::styled(
             "Select Attachment",
-            Style::default().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::PEACH)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
 
     for (i, path) in picker.files.iter().enumerate() {
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
         let display = if name.len() > inner_width {
@@ -151,9 +154,7 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
     let mut lines = vec![
         Line::from(Span::styled(
             "Error",
-            Style::default()
-                .fg(theme::RED)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -179,55 +180,67 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
 
 pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     vec![
-        ("GLOBAL", vec![
-            ("q", "Quit"),
-            ("`", "Switch account"),
-            ("Ctrl+1-9", "Jump to account"),
-            ("1-9", "Jump to mailbox"),
-            ("s", "Focus sidebar"),
-            ("Tab", "Cycle focus forward"),
-            ("Shift+Tab", "Cycle focus backward"),
-            ("/", "Filter by metadata"),
-            ("\\", "Search email content"),
-            ("?", "Toggle this help"),
-            ("!", "Toggle activity log"),
-        ]),
-        ("SIDEBAR", vec![
-            ("j/k", "Navigate mailboxes"),
-            ("Enter/l", "Select mailbox"),
-            ("Esc/h", "Return to list"),
-        ]),
-        ("EMAIL LIST", vec![
-            ("j/k", "Navigate emails"),
-            ("gg / G", "Jump to top / bottom"),
-            ("Space", "Toggle selection"),
-            ("Ctrl+a", "Select all visible"),
-            ("Esc", "Clear selection"),
-            ("h / l", "Focus sidebar / body"),
-            ("Enter / e", "Open in editor"),
-            ("r / R", "Reply / Reply-all"),
-            ("w", "Forward"),
-            ("a", "Archive"),
-            ("d", "Delete"),
-            ("m", "Toggle read/unread"),
-            ("A", "Approve draft"),
-            ("x / X", "Send / Send all approved"),
-            ("y", "Copy file path"),
-            ("o", "Open attachment"),
-            ("b", "Open HTML in browser"),
-            ("n", "New draft"),
-            ("f / F", "Fetch / Sync"),
-            ("S", "Server search (IMAP)"),
-        ]),
-        ("HEADERS", vec![
-            ("j/k", "Scroll headers"),
-            ("h / l", "Back to list / body"),
-        ]),
-        ("BODY", vec![
-            ("j/k", "Scroll line by line"),
-            ("d/u", "Half-page down / up"),
-            ("Esc/h", "Return to list"),
-        ]),
+        (
+            "GLOBAL",
+            vec![
+                ("q", "Quit"),
+                ("`", "Switch account"),
+                ("Ctrl+1-9", "Jump to account"),
+                ("1-9", "Jump to mailbox"),
+                ("s", "Focus sidebar"),
+                ("Tab", "Cycle focus forward"),
+                ("Shift+Tab", "Cycle focus backward"),
+                ("/", "Filter by metadata"),
+                ("\\", "Search email content"),
+                ("?", "Toggle this help"),
+                ("!", "Toggle activity log"),
+            ],
+        ),
+        (
+            "SIDEBAR",
+            vec![
+                ("j/k", "Navigate mailboxes"),
+                ("Enter/l", "Select mailbox"),
+                ("Esc/h", "Return to list"),
+            ],
+        ),
+        (
+            "EMAIL LIST",
+            vec![
+                ("j/k", "Navigate emails"),
+                ("gg / G", "Jump to top / bottom"),
+                ("Space", "Toggle selection"),
+                ("Ctrl+a", "Select all visible"),
+                ("Esc", "Clear selection"),
+                ("h / l", "Focus sidebar / body"),
+                ("Enter / e", "Open in editor"),
+                ("r / R", "Reply / Reply-all"),
+                ("w", "Forward"),
+                ("a", "Archive"),
+                ("d", "Delete"),
+                ("m", "Toggle read/unread"),
+                ("A", "Approve draft"),
+                ("x / X", "Send / Send all approved"),
+                ("y", "Copy file path"),
+                ("o", "Open attachment"),
+                ("b", "Open HTML in browser"),
+                ("n", "New draft"),
+                ("f / F", "Fetch / Sync"),
+                ("S", "Server search (IMAP)"),
+            ],
+        ),
+        (
+            "HEADERS",
+            vec![("j/k", "Scroll headers"), ("h / l", "Back to list / body")],
+        ),
+        (
+            "BODY",
+            vec![
+                ("j/k", "Scroll line by line"),
+                ("d/u", "Half-page down / up"),
+                ("Esc/h", "Return to list"),
+            ],
+        ),
     ]
 }
 
@@ -274,9 +287,12 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
         let matched: Vec<_> = if filter.is_empty() {
             entries.iter().collect()
         } else {
-            entries.iter().filter(|(key, desc)| {
-                key.to_lowercase().contains(&filter) || desc.to_lowercase().contains(&filter)
-            }).collect()
+            entries
+                .iter()
+                .filter(|(key, desc)| {
+                    key.to_lowercase().contains(&filter) || desc.to_lowercase().contains(&filter)
+                })
+                .collect()
         };
 
         if matched.is_empty() {
@@ -303,7 +319,11 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
 
     let show_filter_bar = app.help_filter_active || !app.help_filter.is_empty();
     let inner_height = help_area.height.saturating_sub(2);
-    let filter_bar_height: u16 = if show_filter_bar && inner_height >= 3 { 1 } else { 0 };
+    let filter_bar_height: u16 = if show_filter_bar && inner_height >= 3 {
+        1
+    } else {
+        0
+    };
     let visible_height = inner_height.saturating_sub(filter_bar_height);
 
     let max_scroll = content_height.saturating_sub(visible_height);
@@ -348,7 +368,6 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
         block_inner
     };
 
-    let help = Paragraph::new(lines)
-        .scroll((app.help_scroll, 0));
+    let help = Paragraph::new(lines).scroll((app.help_scroll, 0));
     frame.render_widget(help, content_area);
 }

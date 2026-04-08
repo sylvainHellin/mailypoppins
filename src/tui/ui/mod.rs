@@ -1,3 +1,4 @@
+mod compose;
 mod headers;
 mod list;
 mod overlays;
@@ -109,6 +110,10 @@ pub fn view(app: &mut App, frame: &mut Frame) {
 
     if app.show_search_overlay {
         search::render_search_overlay(app, frame, area);
+    }
+
+    if app.compose_wizard.is_some() {
+        compose::render_compose_wizard(app, frame, area);
     }
 
     if let Some(error) = &app.persistent_error {

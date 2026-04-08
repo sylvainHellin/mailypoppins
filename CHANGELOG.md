@@ -4,17 +4,78 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-08
+
 ### Added
-- `scripts/install.sh` and `scripts/codesign-macos.sh` for stable macOS code
-  signing during local development. After one-time setup of a self-signed
-  cert (see CONTRIBUTING.md), the Keychain no longer re-prompts on every
-  `cargo install --path .` rebuild.
+- **Contact autocomplete**: mine `from:`/`to:`/`cc:` headers from each
+  account's local mail archive, filter noreply/bulk-domain noise, rank
+  contacts with a tiered comparator (`sent_to` > `sent_cc` > `received`)
+  and a 180-day-half-life frecency tiebreaker. Cached per account at
+  `<root>/.contacts-cache.json`.
+- New `email contacts` CLI subcommand tree:
+  - `rebuild` (re)builds the index from local mail for one or all
+    accounts.
+  - `stats` shows totals and the top 10 ranked contacts for an account.
+  - `search <query>` returns ranked fuzzy matches. `--parsable` emits
+    tab-delimited `email\tname` lines compatible with mutt
+    `query_command`, aerc `address-book-cmd`, himalaya-vim, and
+    vim `completefunc` completion sources.
+- **TUI compose wizard overlay** triggered by `n` (new) and `w`
+  (forward), with a four-field form (`To`/`Cc`/`Bcc`/`Subject`), live
+  fuzzy-matched suggestions under the focused address field, Tab
+  cycling, Ctrl+g force-submit, Ctrl+u clear-field, and Esc cancel.
+  Reply keys `r`/`R` stay direct-to-editor as before. Aerc-style split
+  on the last comma so multi-recipient fields work naturally; accepted
+  suggestions render as `"Display Name" <addr>, ` so the user can keep
+  typing. Once submitted, the draft file is written with a populated
+  frontmatter block and then handed off to `$EDITOR`.
+- Incremental contacts-index hooks: every successful send (CLI or TUI)
+  bumps the recipients' `sent_to`/`sent_cc` counters, and every sync
+  merges freshly-fetched email headers into the active account's index,
+  preserving historical `first_seen` dates. Both hooks are best-effort
+  and no-op when no `.contacts-cache.json` exists yet.
+- `scripts/install.sh` and `scripts/codesign-macos.sh` for stable macOS
+  code signing during local development. After one-time setup of a
+  self-signed cert (see `CONTRIBUTING.md`), the Keychain no longer
+  re-prompts on every `cargo install --path .` rebuild.
 - `CONTRIBUTING.md` with build instructions, the macOS keychain setup
   walkthrough, and troubleshooting notes.
+- `src/contacts/` module (`types`, `filter`, `rank`, `extractor`,
+  `matcher`, `cache`, `hooks`) built on `nucleo-matcher` for fuzzy
+  matching and `mailparse::addrparse` for robust multi-recipient
+  header parsing.
+- 47 new unit tests across filter, rank, extractor, matcher, hooks,
+  and the wizard recipient-field normalizer (total now 236).
 
 ### Changed
-- `AGENTS.md` instructions now point at `./scripts/install.sh` as the
-  canonical install command.
+- `AGENTS.md` and project `CLAUDE.md` both now point at
+  `./scripts/install.sh` as the canonical install command.
+- TUI `n` key now opens the compose wizard instead of writing a
+  skeleton directly. `Action::NewDraft` is kept as a dead-code
+  fallback path.
+- TUI `w` key now opens the wizard with the `Fwd:` subject
+  pre-populated and attachments preserved through
+  `create_forward_draft` before the frontmatter is patched with the
+  wizard's edits.
+- `cargo clippy -- -D warnings` is clean again: collapsed a nested
+  `if` in `src/imap_client/sync.rs` that was already failing the lint.
+
+### Fixed
+- Creating a new email via the TUI `n` key now writes a fully populated
+  frontmatter block (`to`/`cc`/`bcc`/`subject`/`from`/`date`) instead
+  of an empty skeleton. Closes the "data is not added to the
+  frontmatter" bug noted in `roadmap.md`.
+- Wizard now strips trailing commas and whitespace from the
+  `to`/`cc`/`bcc` fields before writing the draft, so contacts with
+  display names that contain a comma (for example
+  `"Hellin, Sylvain" <addr>`) no longer break
+  `mailparse::addrparse` and fail the subsequent send.
+
+### Dependencies
+- New: `nucleo-matcher = "0.3"`, `regex = "1"`, `serde_json = "1"` (the
+  last one was already a transitive dep).
+- Avoided `once_cell` as a direct dep by using `std::sync::LazyLock`
+  (Rust 1.80+).
 
 ## [0.7.4] - 2026-04-05
 

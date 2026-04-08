@@ -328,4 +328,4 @@ Pass `--reconcile` to also detect server-side moves and deletes (uses the same s
 ## After Each Change
 
 1. **Test the app** — Run the binary yourself to verify the change works as expected.
-2. **Update the binary** — If it works, install the updated binary via `cargo install --path .` so it's available at `~/.cargo/bin/email`.
+2. **Update the binary** — If it works, install the updated binary via **`./scripts/install.sh`** (NOT `cargo install --path .` directly). The wrapper runs `cargo install` and then re-signs the binary with a stable dev cert so the Keychain stops re-prompting for every `smtp-password-*` / `imap-password-*` entry at TUI startup. On Linux/Windows the codesign step is a no-op. See `CONTRIBUTING.md` for the one-time Keychain setup. Extra args are forwarded to cargo (e.g. `./scripts/install.sh --locked`).

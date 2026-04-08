@@ -16,7 +16,9 @@ use crate::config::{
     all_configured_mailboxes, resolve_mailbox_local_path, AccountConfig, ImapConfig,
 };
 use crate::draft::parse_email_draft;
-use crate::imap_client::{fetch_emails_on_session, open_imap_session, parse_search_query, sync_mailboxes, SyncTarget};
+use crate::imap_client::{
+    fetch_emails_on_session, open_imap_session, parse_search_query, sync_mailboxes, SyncTarget,
+};
 use crate::parse::FetchedEmail;
 use crate::sync::mailbox_status;
 
@@ -25,11 +27,20 @@ use crate::sync::mailbox_status;
 // ---------------------------------------------------------------------------
 
 pub(super) enum WatchEvent {
-    Changed { account_index: usize },
-    Error { account_index: usize, message: String },
+    Changed {
+        account_index: usize,
+    },
+    Error {
+        account_index: usize,
+        message: String,
+    },
 }
 
-pub(super) fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig, account_index: usize) {
+pub(super) fn watcher_loop(
+    tx: mpsc::Sender<WatchEvent>,
+    imap_config: ImapConfig,
+    account_index: usize,
+) {
     use crate::imap_client::watch_mailbox as imap_watch;
 
     let rt = match tokio::runtime::Runtime::new() {
@@ -72,7 +83,9 @@ pub(super) fn watcher_loop(tx: mpsc::Sender<WatchEvent>, imap_config: ImapConfig
 // Terminal helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+pub(super) fn suspend_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -131,8 +144,7 @@ pub(super) fn edit_file(path: &Path) -> Result<()> {
 }
 
 pub(super) fn copy_to_clipboard(text: &str) -> Result<()> {
-    let mut clipboard =
-        arboard::Clipboard::new().context("Failed to access clipboard")?;
+    let mut clipboard = arboard::Clipboard::new().context("Failed to access clipboard")?;
     clipboard
         .set_text(text)
         .context("Failed to copy to clipboard")?;
@@ -160,6 +172,9 @@ pub(super) async fn lib_do_sync(
         .collect();
 
     let result = sync_mailboxes(imap_config, &targets, limit, reconcile, false).await?;
+
+    // Incremental contacts-index update (best-effort, no-op if no cache).
+    crate::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
 
     let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
     if result.read_updated > 0 {
@@ -200,20 +215,19 @@ pub(super) async fn lib_do_multi_search(
         let budget = per_mb.min(total_limit - total);
         log::info!(
             "Server search: querying mailbox '{}' (label={}, local_dir={}, status={})",
-            target.server_name, target.label, target.local_dir.display(), target.status,
+            target.server_name,
+            target.label,
+            target.local_dir.display(),
+            target.status,
         );
-        match fetch_emails_on_session(
-            &mut session,
-            &criteria,
-            &target.server_name,
-            Some(budget),
-        )
-        .await
+        match fetch_emails_on_session(&mut session, &criteria, &target.server_name, Some(budget))
+            .await
         {
             Ok(emails) => {
                 log::info!(
                     "Server search: '{}' returned {} result(s)",
-                    target.server_name, emails.len(),
+                    target.server_name,
+                    emails.len(),
                 );
                 total += emails.len();
                 for fetched in emails {
@@ -241,16 +255,18 @@ pub(super) async fn lib_do_multi_search(
 }
 
 fn fetched_to_email_entry(fetched: &FetchedEmail) -> EmailEntry {
-    let (date_display, date_sort) = if let Ok(dt) =
-        chrono::DateTime::parse_from_rfc2822(&fetched.date)
-    {
-        (
-            dt.format("%Y-%m-%d").to_string(),
-            dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        )
-    } else {
-        (fetched.date.chars().take(10).collect(), fetched.date.clone())
-    };
+    let (date_display, date_sort) =
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&fetched.date) {
+            (
+                dt.format("%Y-%m-%d").to_string(),
+                dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            )
+        } else {
+            (
+                fetched.date.chars().take(10).collect(),
+                fetched.date.clone(),
+            )
+        };
 
     EmailEntry {
         path: PathBuf::new(),

@@ -6,9 +6,12 @@ use std::sync::mpsc;
 use anyhow::Result;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use super::app::{Action, App, BgResult, MailboxKind, StatusLevel};
+use super::app::{
+    Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus, MailboxKind,
+    StatusLevel,
+};
 use super::helpers::{
-    edit_file, ensure_search_result_saved, resolve_send_account, suspend_terminal, resume_terminal,
+    edit_file, ensure_search_result_saved, resolve_send_account, resume_terminal, suspend_terminal,
 };
 use super::ui;
 
@@ -19,9 +22,8 @@ use crate::draft::{
 };
 use crate::imap_client::{
     append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
-    batch_delete_emails_locally, delete_email_locally,
-    get_message_id_from_file, mark_read_on_server, mark_unread_on_server,
-    update_read_status_locally,
+    batch_delete_emails_locally, delete_email_locally, get_message_id_from_file,
+    mark_read_on_server, mark_unread_on_server, update_read_status_locally,
 };
 use crate::send::send_email;
 use crate::types::EmailStatus;
@@ -54,7 +56,9 @@ pub(super) fn handle_action(
 
         Action::Reply(reply_all) => {
             if let Some(path) = app.selected_email_path() {
-                let default_from = app.smtp_config.as_ref()
+                let default_from = app
+                    .smtp_config
+                    .as_ref()
                     .map(|s| s.default_from.clone())
                     .unwrap_or_default();
                 let drafts_dir = app.drafts_dir.clone();
@@ -68,7 +72,9 @@ pub(super) fn handle_action(
                             app.invalidate_cache_idx(idx);
                         }
                     }
-                    Err(e) => app.set_status_level(format!("Reply failed: {e}"), StatusLevel::Error),
+                    Err(e) => {
+                        app.set_status_level(format!("Reply failed: {e}"), StatusLevel::Error)
+                    }
                 }
                 app.reload_current_mailbox();
             }
@@ -76,7 +82,9 @@ pub(super) fn handle_action(
 
         Action::Forward => {
             if let Some(path) = app.selected_email_path() {
-                let default_from = app.smtp_config.as_ref()
+                let default_from = app
+                    .smtp_config
+                    .as_ref()
                     .map(|s| s.default_from.clone())
                     .unwrap_or_default();
                 let drafts_dir = app.drafts_dir.clone();
@@ -90,7 +98,9 @@ pub(super) fn handle_action(
                             app.invalidate_cache_idx(idx);
                         }
                     }
-                    Err(e) => app.set_status_level(format!("Forward failed: {e}"), StatusLevel::Error),
+                    Err(e) => {
+                        app.set_status_level(format!("Forward failed: {e}"), StatusLevel::Error)
+                    }
                 }
                 app.reload_current_mailbox();
             }
@@ -113,14 +123,18 @@ pub(super) fn handle_action(
                 app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = (|| -> anyhow::Result<String> {
                         let draft = parse_email_draft(&path)?;
                         validate_draft(&draft)?;
 
-                        let (send_result, raw_message, message_id) = rt.block_on(
-                            send_email(&draft, &smtp_config, &email_settings, signature.as_deref()),
-                        )?;
+                        let (send_result, raw_message, message_id) = rt.block_on(send_email(
+                            &draft,
+                            &smtp_config,
+                            &email_settings,
+                            signature.as_deref(),
+                        ))?;
 
                         if send_result.all_succeeded() || send_result.any_succeeded() {
                             update_status_to_sent(
@@ -130,10 +144,14 @@ pub(super) fn handle_action(
                             )?;
                             if let Some(ref imap_cfg) = imap_config {
                                 let sent_mailbox = resolve_sent_mailbox(&account_config);
-                                let _ = rt.block_on(
-                                    append_to_sent_folder(imap_cfg, &raw_message, &sent_mailbox),
-                                );
+                                let _ = rt.block_on(append_to_sent_folder(
+                                    imap_cfg,
+                                    &raw_message,
+                                    &sent_mailbox,
+                                ));
                             }
+                            // Incremental contacts-index update (best-effort)
+                            crate::contacts::hooks::bump_after_send(&account_config, &draft);
                             if send_result.all_succeeded() {
                                 Ok(format!(
                                     "Sent to {} recipient(s)",
@@ -181,7 +199,8 @@ pub(super) fn handle_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = (|| -> anyhow::Result<String> {
                         let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
                         if drafts.is_empty() {
@@ -214,6 +233,11 @@ pub(super) fn handle_action(
                                                 &sent_mailbox,
                                             ));
                                         }
+                                        // Incremental contacts-index update (best-effort)
+                                        crate::contacts::hooks::bump_after_send(
+                                            &account_config,
+                                            draft,
+                                        );
                                         sent += 1;
                                     } else {
                                         failed += 1;
@@ -234,7 +258,9 @@ pub(super) fn handle_action(
         }
 
         Action::NewDraft => {
-            let name = chrono::Local::now().format("draft-%Y%m%d-%H%M%S").to_string();
+            let name = chrono::Local::now()
+                .format("draft-%Y%m%d-%H%M%S")
+                .to_string();
             let file_name = format!("{name}.md");
             let dir = app
                 .find_mailbox_by_kind(MailboxKind::Drafts)
@@ -247,7 +273,11 @@ pub(super) fn handle_action(
                 app.set_status(format!("File already exists: {}", path.display()));
             } else {
                 let now = chrono::Utc::now().to_rfc2822();
-                let from = app.smtp_config.as_ref().map(|s| s.default_from.as_str()).unwrap_or("");
+                let from = app
+                    .smtp_config
+                    .as_ref()
+                    .map(|s| s.default_from.as_str())
+                    .unwrap_or("");
                 let skeleton = format!("---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom: {from}\ndate: {now}\nreply_to:\nattachments: []\n---\n\n");
                 match std::fs::write(&path, skeleton) {
                     Ok(()) => {
@@ -260,7 +290,9 @@ pub(super) fn handle_action(
                         }
                         app.reload_current_mailbox();
                     }
-                    Err(e) => app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error),
+                    Err(e) => {
+                        app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error)
+                    }
                 }
             }
         }
@@ -272,7 +304,9 @@ pub(super) fn handle_action(
                         app.set_status(msg);
                         app.reload_current_mailbox();
                     }
-                    Err(e) => app.set_status_level(format!("Approve failed: {e}"), StatusLevel::Error),
+                    Err(e) => {
+                        app.set_status_level(format!("Approve failed: {e}"), StatusLevel::Error)
+                    }
                 }
             }
         }
@@ -289,7 +323,10 @@ pub(super) fn handle_action(
                 let archive_dir = match app.archive_dir.clone() {
                     Some(d) => d,
                     None => {
-                        app.set_status_level("Archive directory not configured".to_string(), StatusLevel::Error);
+                        app.set_status_level(
+                            "Archive directory not configured".to_string(),
+                            StatusLevel::Error,
+                        );
                         return Ok(());
                     }
                 };
@@ -303,16 +340,21 @@ pub(super) fn handle_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = rt.block_on(archive_email_locally(
-                        &imap_config,
-                        &archive_dir,
-                        &path,
-                        &archive_server_name,
-                    ))
-                    .map(|()| String::new())
-                    .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Archive { account_index: acct_idx, result });
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(archive_email_locally(
+                            &imap_config,
+                            &archive_dir,
+                            &path,
+                            &archive_server_name,
+                        ))
+                        .map(|()| String::new())
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Archive {
+                        account_index: acct_idx,
+                        result,
+                    });
                 });
             }
         }
@@ -335,11 +377,16 @@ pub(super) fn handle_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = rt.block_on(delete_email_locally(&imap_config, &path))
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(delete_email_locally(&imap_config, &path))
                         .map(|()| String::new())
                         .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Delete { account_index: acct_idx, result });
+                    let _ = tx.send(BgResult::Delete {
+                        account_index: acct_idx,
+                        result,
+                    });
                 });
             }
         }
@@ -355,7 +402,10 @@ pub(super) fn handle_action(
             let archive_dir = match app.archive_dir.clone() {
                 Some(d) => d,
                 None => {
-                    app.set_status_level("Archive directory not configured".to_string(), StatusLevel::Error);
+                    app.set_status_level(
+                        "Archive directory not configured".to_string(),
+                        StatusLevel::Error,
+                    );
                     return Ok(());
                 }
             };
@@ -367,7 +417,10 @@ pub(super) fn handle_action(
             let count = paths.len();
             app.bg_count += count;
             app.bg_mutations += count;
-            app.set_status_level(format!("Archiving {} emails...", count), StatusLevel::Progress);
+            app.set_status_level(
+                format!("Archiving {} emails...", count),
+                StatusLevel::Progress,
+            );
             terminal.draw(|frame| ui::view(app, frame))?;
 
             let acct_idx = app.active_account;
@@ -404,7 +457,10 @@ pub(super) fn handle_action(
             let count = paths.len();
             app.bg_count += count;
             app.bg_mutations += count;
-            app.set_status_level(format!("Deleting {} emails...", count), StatusLevel::Progress);
+            app.set_status_level(
+                format!("Deleting {} emails...", count),
+                StatusLevel::Progress,
+            );
             terminal.draw(|frame| ui::view(app, frame))?;
 
             let acct_idx = app.active_account;
@@ -438,7 +494,11 @@ pub(super) fn handle_action(
                     }
                 }
 
-                let label = if new_read { "Marked as read" } else { "Marked as unread" };
+                let label = if new_read {
+                    "Marked as read"
+                } else {
+                    "Marked as unread"
+                };
                 app.set_status(label.to_string());
 
                 // Async server update
@@ -449,7 +509,8 @@ pub(super) fn handle_action(
                     app.bg_count += 1;
                     let tx = bg_tx.clone();
                     std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                        let rt =
+                            tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                         let result = if new_read {
                             rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox))
                         } else {
@@ -493,7 +554,8 @@ pub(super) fn handle_action(
                     app.bg_count += 1;
                     let tx = bg_tx.clone();
                     std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                        let rt =
+                            tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                         let result = rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox));
                         let _ = tx.send(BgResult::ToggleRead {
                             account_index: acct_idx,
@@ -508,9 +570,9 @@ pub(super) fn handle_action(
 
         Action::BatchToggleRead(paths) => {
             // If any selected email is unread, mark all as read; otherwise mark all as unread
-            let any_unread = paths.iter().any(|p| {
-                app.emails.iter().any(|e| e.path == *p && !e.read)
-            });
+            let any_unread = paths
+                .iter()
+                .any(|p| app.emails.iter().any(|e| e.path == *p && !e.read));
             let new_read = any_unread;
 
             // Optimistic local update
@@ -541,7 +603,8 @@ pub(super) fn handle_action(
                 app.bg_count += 1;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     for path in &paths {
                         if let Some(mid) = get_message_id_from_file(path) {
                             let result = if new_read {
@@ -574,38 +637,32 @@ pub(super) fn handle_action(
             }
         }
 
-        Action::OpenAttachment(path) => {
-            match crate::parse::open_file_with_system(&path) {
-                Ok(()) => {
-                    let name = path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.display().to_string());
-                    app.set_status(format!("Opened: {name}"));
-                }
-                Err(e) => {
-                    app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
-                }
+        Action::OpenAttachment(path) => match crate::parse::open_file_with_system(&path) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                app.set_status(format!("Opened: {name}"));
             }
-        }
+            Err(e) => {
+                app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+            }
+        },
 
-        Action::OpenHtmlInBrowser(path) => {
-            match crate::parse::open_file_with_system(&path) {
-                Ok(()) => {
-                    app.set_status("Opened in browser".to_string());
-                }
-                Err(e) => {
-                    app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
-                }
+        Action::OpenHtmlInBrowser(path) => match crate::parse::open_file_with_system(&path) {
+            Ok(()) => {
+                app.set_status("Opened in browser".to_string());
             }
-        }
+            Err(e) => {
+                app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+            }
+        },
 
         Action::Fetch => {
             if app.bg_count > 0 {
                 app.queued_action = Some(Action::Fetch);
-                app.set_status(format!(
-                    "Fetch queued ({} ops pending...)",
-                    app.bg_count
-                ));
+                app.set_status(format!("Fetch queued ({} ops pending...)", app.bg_count));
                 return Ok(());
             }
             let imap_config = match app.imap_config.clone() {
@@ -623,10 +680,18 @@ pub(super) fn handle_action(
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let result =
-                    rt.block_on(super::helpers::lib_do_sync(&account_config, &imap_config, 10, false))
-                        .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Fetch { account_index: acct_idx, result });
+                let result = rt
+                    .block_on(super::helpers::lib_do_sync(
+                        &account_config,
+                        &imap_config,
+                        10,
+                        false,
+                    ))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(BgResult::Fetch {
+                    account_index: acct_idx,
+                    result,
+                });
             });
         }
 
@@ -645,8 +710,11 @@ pub(super) fn handle_action(
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let result =
-                    rt.block_on(super::helpers::lib_do_multi_search(&imap_config, &query, &targets));
+                let result = rt.block_on(super::helpers::lib_do_multi_search(
+                    &imap_config,
+                    &query,
+                    &targets,
+                ));
                 let _ = tx.send(BgResult::ServerSearch {
                     result: result.map_err(|e| e.to_string()),
                 });
@@ -664,10 +732,7 @@ pub(super) fn handle_action(
         Action::Sync => {
             if app.bg_count > 0 {
                 app.queued_action = Some(Action::Sync);
-                app.set_status(format!(
-                    "Sync queued ({} ops pending...)",
-                    app.bg_count
-                ));
+                app.set_status(format!("Sync queued ({} ops pending...)", app.bg_count));
                 return Ok(());
             }
             let imap_config = match app.imap_config.clone() {
@@ -686,14 +751,338 @@ pub(super) fn handle_action(
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                 let result = rt
-                    .block_on(super::helpers::lib_do_sync(&account_config, &imap_config, 50, true))
+                    .block_on(super::helpers::lib_do_sync(
+                        &account_config,
+                        &imap_config,
+                        50,
+                        true,
+                    ))
                     .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Sync { account_index: acct_idx, result });
+                let _ = tx.send(BgResult::Sync {
+                    account_index: acct_idx,
+                    result,
+                });
             });
+        }
+
+        Action::OpenComposeWizard(mode) => {
+            open_compose_wizard(app, mode);
+        }
+
+        Action::ComposeWizardCancel => {
+            app.compose_wizard = None;
+            app.focus = Focus::List;
+            app.set_status("Compose cancelled".to_string());
+        }
+
+        Action::ComposeWizardSubmit => {
+            submit_compose_wizard(app, terminal)?;
         }
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Compose wizard handlers
+// ---------------------------------------------------------------------------
+
+fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
+    // Load contact cache (if any) for the active account.
+    let contacts = crate::config::resolve_root_dir(&app.account_config)
+        .and_then(|root| crate::contacts::load_cache(&root).ok().flatten());
+
+    let (to, cc, bcc, subject) = match &mode {
+        ComposeMode::New => (String::new(), String::new(), String::new(), String::new()),
+        ComposeMode::Forward { source_path } => {
+            let subject = crate::draft::fwd_subject_from_source(source_path)
+                .unwrap_or_else(|_| String::from("Fwd: "));
+            (String::new(), String::new(), String::new(), subject)
+        }
+    };
+
+    app.compose_wizard = Some(ComposeWizard {
+        mode,
+        to,
+        cc,
+        bcc,
+        subject,
+        focus: ComposeField::To,
+        suggestions: Vec::new(),
+        suggestion_idx: 0,
+        contacts,
+    });
+    app.focus = Focus::ComposeWizard;
+    // No suggestions shown until the user types (see recompute_compose_suggestions).
+}
+
+fn submit_compose_wizard(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let Some(mut wizard) = app.compose_wizard.take() else {
+        return Ok(());
+    };
+    app.focus = Focus::List;
+
+    // Normalize the address fields: strip the trailing `, ` that
+    // `accept_suggestion` leaves behind for further typing, plus any other
+    // trailing separators. Otherwise mailparse::addrparse sees an empty
+    // entry at the end and the send fails.
+    wizard.to = normalize_recipient_field(&wizard.to);
+    wizard.cc = normalize_recipient_field(&wizard.cc);
+    wizard.bcc = normalize_recipient_field(&wizard.bcc);
+    wizard.subject = wizard.subject.trim().to_string();
+
+    // Basic validation: must have a `to` address.
+    if wizard.to.is_empty() {
+        app.set_status_level(
+            "Cannot submit: `to:` is empty".to_string(),
+            StatusLevel::Error,
+        );
+        // Re-open the wizard so the user can fix the field.
+        app.compose_wizard = Some(wizard);
+        app.focus = Focus::ComposeWizard;
+        return Ok(());
+    }
+
+    let draft_result = match &wizard.mode {
+        ComposeMode::New => write_new_draft_from_wizard(app, &wizard),
+        ComposeMode::Forward { source_path } => {
+            write_forward_draft_from_wizard(app, source_path, &wizard)
+        }
+    };
+
+    let path = match draft_result {
+        Ok(p) => p,
+        Err(e) => {
+            app.set_status_level(format!("Draft creation failed: {e}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
+
+    // Invalidate drafts-mailbox cache so the list reloads on next render.
+    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+        app.invalidate_cache_idx(idx);
+    }
+
+    // Hand off to $EDITOR.
+    suspend_terminal(terminal)?;
+    let edit_result = edit_file(&path);
+    resume_terminal(terminal)?;
+    match edit_result {
+        Ok(()) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            app.set_status(format!("Created: {}", name));
+        }
+        Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
+    }
+    app.reload_current_mailbox();
+    Ok(())
+}
+
+fn write_new_draft_from_wizard(app: &App, wizard: &ComposeWizard) -> Result<PathBuf> {
+    let dir = app
+        .find_mailbox_by_kind(MailboxKind::Drafts)
+        .map(|i| app.mailboxes[i].dir.clone())
+        .or_else(|| app.drafts_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir)?;
+
+    let from = app
+        .smtp_config
+        .as_ref()
+        .map(|s| s.default_from.as_str())
+        .unwrap_or("");
+    let now = chrono::Utc::now().to_rfc2822();
+
+    // Build a unique filename from the subject slug (fall back to timestamp).
+    let slug = slugify_subject_for_filename(&wizard.subject);
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+    let base_name = if slug.is_empty() {
+        format!("draft-{timestamp}.md")
+    } else {
+        format!("draft-{timestamp}-{slug}.md")
+    };
+    let mut path = dir.join(&base_name);
+    let mut counter = 1usize;
+    while path.exists() {
+        let name = if slug.is_empty() {
+            format!("draft-{timestamp}-{counter}.md")
+        } else {
+            format!("draft-{timestamp}-{slug}-{counter}.md")
+        };
+        path = dir.join(name);
+        counter += 1;
+    }
+
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("to: {}\n", yaml_escape(&wizard.to)));
+    if !wizard.cc.trim().is_empty() {
+        fm.push_str(&format!("cc: {}\n", yaml_escape(&wizard.cc)));
+    } else {
+        fm.push_str("cc:\n");
+    }
+    if !wizard.bcc.trim().is_empty() {
+        fm.push_str(&format!("bcc: {}\n", yaml_escape(&wizard.bcc)));
+    } else {
+        fm.push_str("bcc:\n");
+    }
+    fm.push_str(&format!("subject: {}\n", yaml_escape(&wizard.subject)));
+    fm.push_str("status: draft\n");
+    fm.push_str(&format!("from: \"{from}\"\n"));
+    fm.push_str(&format!("date: {now}\n"));
+    fm.push_str("reply_to:\n");
+    fm.push_str("attachments: []\n");
+    fm.push_str("---\n\n");
+
+    std::fs::write(&path, fm)?;
+    Ok(path)
+}
+
+fn write_forward_draft_from_wizard(
+    app: &App,
+    source_path: &std::path::Path,
+    wizard: &ComposeWizard,
+) -> Result<PathBuf> {
+    // Reuse the full forward-skeleton machinery (body + attachments),
+    // then patch the frontmatter with the user's to/cc/bcc/subject edits.
+    let default_from = app
+        .smtp_config
+        .as_ref()
+        .map(|s| s.default_from.as_str())
+        .unwrap_or("");
+    let drafts_dir = app
+        .find_mailbox_by_kind(MailboxKind::Drafts)
+        .map(|i| app.mailboxes[i].dir.clone())
+        .or_else(|| app.drafts_dir.clone());
+    let path = create_forward_draft(source_path, default_from, drafts_dir.as_deref())?;
+
+    // Patch the frontmatter fields in place.
+    patch_draft_frontmatter(&path, wizard)?;
+    Ok(path)
+}
+
+fn patch_draft_frontmatter(path: &std::path::Path, wizard: &ComposeWizard) -> Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let mut lines = content.lines();
+
+    // Expect the file to start with `---`.
+    let Some(first) = lines.next() else {
+        return Ok(());
+    };
+    if first.trim() != "---" {
+        return Ok(());
+    }
+
+    // Collect frontmatter lines until the closing `---`.
+    let mut fm_lines: Vec<String> = Vec::new();
+    let mut body_lines: Vec<String> = Vec::new();
+    let mut in_body = false;
+    for line in lines {
+        if !in_body {
+            if line.trim() == "---" {
+                in_body = true;
+                continue;
+            }
+            fm_lines.push(line.to_string());
+        } else {
+            body_lines.push(line.to_string());
+        }
+    }
+
+    // Rewrite to/cc/bcc/subject; leave everything else alone.
+    // Simple single-line field rewriter: replace `key:` lines if found,
+    // otherwise append them before the closing `---`.
+    let mut rewrote_to = false;
+    let mut rewrote_cc = false;
+    let mut rewrote_bcc = false;
+    let mut rewrote_subject = false;
+    for line in fm_lines.iter_mut() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("to:") {
+            *line = format!("to: {}", yaml_escape(&wizard.to));
+            rewrote_to = true;
+        } else if trimmed.starts_with("cc:") {
+            if wizard.cc.trim().is_empty() {
+                *line = "cc:".to_string();
+            } else {
+                *line = format!("cc: {}", yaml_escape(&wizard.cc));
+            }
+            rewrote_cc = true;
+        } else if trimmed.starts_with("bcc:") {
+            if wizard.bcc.trim().is_empty() {
+                *line = "bcc:".to_string();
+            } else {
+                *line = format!("bcc: {}", yaml_escape(&wizard.bcc));
+            }
+            rewrote_bcc = true;
+        } else if trimmed.starts_with("subject:") {
+            *line = format!("subject: {}", yaml_escape(&wizard.subject));
+            rewrote_subject = true;
+        }
+    }
+    if !rewrote_to {
+        fm_lines.push(format!("to: {}", yaml_escape(&wizard.to)));
+    }
+    if !rewrote_cc && !wizard.cc.trim().is_empty() {
+        fm_lines.push(format!("cc: {}", yaml_escape(&wizard.cc)));
+    }
+    if !rewrote_bcc && !wizard.bcc.trim().is_empty() {
+        fm_lines.push(format!("bcc: {}", yaml_escape(&wizard.bcc)));
+    }
+    if !rewrote_subject {
+        fm_lines.push(format!("subject: {}", yaml_escape(&wizard.subject)));
+    }
+
+    let mut rebuilt = String::from("---\n");
+    for line in fm_lines {
+        rebuilt.push_str(&line);
+        rebuilt.push('\n');
+    }
+    rebuilt.push_str("---\n");
+    for line in body_lines {
+        rebuilt.push_str(&line);
+        rebuilt.push('\n');
+    }
+    std::fs::write(path, rebuilt)?;
+    Ok(())
+}
+
+/// Normalize a recipient-list field on wizard submit:
+/// - trim leading/trailing whitespace,
+/// - strip trailing commas and whitespace left behind by the
+///   "accept suggestion + continue typing" flow,
+/// - collapse whitespace inside the separators between recipients.
+///
+/// Leaves the interior of each recipient alone (including display-name
+/// quoting), so `"Hellin, Sylvain" <addr>, bob@x.com, ` becomes
+/// `"Hellin, Sylvain" <addr>, bob@x.com`.
+fn normalize_recipient_field(s: &str) -> String {
+    let trimmed = s.trim();
+    // Repeatedly strip any trailing `,` or whitespace chars.
+    let cleaned = trimmed.trim_end_matches(|c: char| c == ',' || c.is_whitespace());
+    cleaned.to_string()
+}
+
+/// YAML double-quote escape for a scalar string value.
+fn yaml_escape(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+fn slugify_subject_for_filename(subject: &str) -> String {
+    let slug: String = subject
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = crate::types::collapse_hyphens(&slug);
+    // Trim to a reasonable length so filenames don't blow up.
+    slug.chars().take(40).collect()
 }
 
 fn handle_search_result_action(
@@ -713,7 +1102,10 @@ fn handle_search_result_action(
                     Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
                 }
             } else {
-                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+                app.set_status_level(
+                    "Failed to save email locally".to_string(),
+                    StatusLevel::Error,
+                );
             }
         }
 
@@ -723,10 +1115,9 @@ fn handle_search_result_action(
                 if html_path.exists() {
                     match crate::parse::open_file_with_system(&html_path) {
                         Ok(()) => app.set_status("Opened in browser".to_string()),
-                        Err(e) => app.set_status_level(
-                            format!("Open failed: {e}"),
-                            StatusLevel::Error,
-                        ),
+                        Err(e) => {
+                            app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error)
+                        }
                     }
                 } else {
                     app.set_status("No HTML version available".to_string());
@@ -762,7 +1153,10 @@ fn handle_search_result_action(
                     }
                 }
             } else {
-                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+                app.set_status_level(
+                    "Failed to save email locally".to_string(),
+                    StatusLevel::Error,
+                );
             }
         }
 
@@ -789,7 +1183,10 @@ fn handle_search_result_action(
                     }
                 }
             } else {
-                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+                app.set_status_level(
+                    "Failed to save email locally".to_string(),
+                    StatusLevel::Error,
+                );
             }
         }
 
@@ -798,10 +1195,7 @@ fn handle_search_result_action(
                 let imap_config = match app.imap_config.clone() {
                     Some(c) => c,
                     None => {
-                        app.set_status_level(
-                            "IMAP not configured".to_string(),
-                            StatusLevel::Error,
-                        );
+                        app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
                         return Ok(());
                     }
                 };
@@ -830,7 +1224,8 @@ fn handle_search_result_action(
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
                     let result = rt
                         .block_on(archive_email_locally(
                             &imap_config,
@@ -840,14 +1235,106 @@ fn handle_search_result_action(
                         ))
                         .map(|()| String::new())
                         .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Archive { account_index: acct_idx, result });
+                    let _ = tx.send(BgResult::Archive {
+                        account_index: acct_idx,
+                        result,
+                    });
                 });
             } else {
-                app.set_status_level("Failed to save email locally".to_string(), StatusLevel::Error);
+                app.set_status_level(
+                    "Failed to save email locally".to_string(),
+                    StatusLevel::Error,
+                );
             }
         }
 
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_trailing_comma_and_space() {
+        // The exact case the user reported: wizard leaves `, ` dangling after
+        // an accepted suggestion.
+        let input = "\"Hellin, Sylvain\" <sylvain.hellin@hines.com>, ";
+        let out = normalize_recipient_field(input);
+        assert_eq!(out, "\"Hellin, Sylvain\" <sylvain.hellin@hines.com>");
+    }
+
+    #[test]
+    fn normalize_strips_multiple_trailing_separators() {
+        assert_eq!(normalize_recipient_field("a@x.com,,  "), "a@x.com");
+        assert_eq!(normalize_recipient_field("a@x.com  , "), "a@x.com");
+        assert_eq!(normalize_recipient_field("a@x.com"), "a@x.com");
+    }
+
+    #[test]
+    fn normalize_preserves_multi_recipient_list() {
+        assert_eq!(
+            normalize_recipient_field("alice@x.com, bob@x.com, "),
+            "alice@x.com, bob@x.com"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_interior_commas_in_quoted_names() {
+        let input = "\"Doe, Jane\" <jane@x.com>, \"Roe, John\" <john@x.com>, ";
+        let out = normalize_recipient_field(input);
+        assert_eq!(
+            out,
+            "\"Doe, Jane\" <jane@x.com>, \"Roe, John\" <john@x.com>"
+        );
+    }
+
+    #[test]
+    fn normalize_empty_and_whitespace_only() {
+        assert_eq!(normalize_recipient_field(""), "");
+        assert_eq!(normalize_recipient_field("   "), "");
+        assert_eq!(normalize_recipient_field(", ,  "), "");
+    }
+
+    /// End-to-end guarantee: the normalized output must round-trip
+    /// through `mailparse::addrparse` without leaving an empty entry,
+    /// since that's what actually triggered the send failure in the
+    /// bug report.
+    #[test]
+    fn normalized_field_parses_cleanly_with_mailparse() {
+        let cases = [
+            "\"Hellin, Sylvain\" <sylvain.hellin@hines.com>, ",
+            "alice@x.com, bob@x.com, ",
+            "Alice <alice@x.com>,",
+        ];
+        for raw in cases {
+            let cleaned = normalize_recipient_field(raw);
+            let parsed = mailparse::addrparse(&cleaned)
+                .unwrap_or_else(|e| panic!("addrparse failed for {cleaned:?}: {e}"));
+            assert!(
+                parsed.iter().next().is_some(),
+                "no recipients parsed from {cleaned:?}"
+            );
+            for info in parsed.iter() {
+                match info {
+                    mailparse::MailAddr::Single(s) => {
+                        assert!(
+                            !s.addr.trim().is_empty(),
+                            "empty address from {cleaned:?}"
+                        );
+                    }
+                    mailparse::MailAddr::Group(g) => {
+                        for s in &g.addrs {
+                            assert!(
+                                !s.addr.trim().is_empty(),
+                                "empty group address from {cleaned:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

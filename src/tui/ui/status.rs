@@ -37,7 +37,8 @@ pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         format!("{} {}/{} ", app.active_label(), app.list_index + 1, shown)
     };
-    let right_len = (sel_text.len() + unread_text.len() + watch_prefix.len() + mailbox_text.len() + 1) as u16;
+    let right_len =
+        (sel_text.len() + unread_text.len() + watch_prefix.len() + mailbox_text.len() + 1) as u16;
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -45,7 +46,9 @@ pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         .split(area);
 
     let left_content = if app.bg_count > 0 {
-        let frames = ['\u{280b}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}'];
+        let frames = [
+            '\u{280b}', '\u{2819}', '\u{2838}', '\u{2834}', '\u{2826}', '\u{2807}',
+        ];
         let spinner = frames[app.bg_spin_tick % frames.len()];
         let label = app.status_message.as_deref().unwrap_or("Working...");
         let text = if app.bg_count > 1 {

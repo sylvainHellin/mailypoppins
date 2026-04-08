@@ -1,7 +1,9 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
+};
 use ratatui::Frame;
 
 use super::super::app::{App, SearchOverlayFocus};
@@ -10,8 +12,12 @@ use super::headers::header_line;
 use super::util::truncate;
 
 pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect) {
-    let overlay_width = (area.width * 9 / 10).max(40).min(area.width.saturating_sub(4));
-    let overlay_height = (area.height * 85 / 100).max(15).min(area.height.saturating_sub(2));
+    let overlay_width = (area.width * 9 / 10)
+        .max(40)
+        .min(area.width.saturating_sub(4));
+    let overlay_height = (area.height * 85 / 100)
+        .max(15)
+        .min(area.height.saturating_sub(2));
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
@@ -55,10 +61,7 @@ pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
     let search_area = chunks[0];
@@ -89,10 +92,7 @@ pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect
 
         let right_panels = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(6),
-                Constraint::Min(0),
-            ])
+            .constraints([Constraint::Length(6), Constraint::Min(0)])
             .split(cols[1]);
         render_search_result_headers(app, frame, right_panels[0]);
         render_search_result_body(app, frame, right_panels[1]);
@@ -143,7 +143,11 @@ fn render_search_results_list(app: &App, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(if list_focus { theme::TEAL } else { theme::OVERLAY0 }));
+        .border_style(Style::default().fg(if list_focus {
+            theme::TEAL
+        } else {
+            theme::OVERLAY0
+        }));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -152,12 +156,11 @@ fn render_search_results_list(app: &App, frame: &mut Frame, area: Rect) {
     let date_width = 10;
     let mb_width = if show_mailbox_col { 8 } else { 0 };
     let contact_width = 15.min(available_width.saturating_sub(date_width + mb_width + 10));
-    let subject_width =
-        available_width.saturating_sub(date_width + mb_width + contact_width + 2 + if show_mailbox_col { 1 } else { 0 });
+    let subject_width = available_width.saturating_sub(
+        date_width + mb_width + contact_width + 2 + if show_mailbox_col { 1 } else { 0 },
+    );
 
-    let mut header_cells = vec![
-        Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)),
-    ];
+    let mut header_cells = vec![Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0))];
     if show_mailbox_col {
         header_cells.push(Cell::from("MAILBOX").style(Style::default().fg(theme::SUBTEXT0)));
     }

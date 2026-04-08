@@ -75,6 +75,10 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 
 ## Backlog
 
+### Bug to fix
+
+- german char are not properly rendered in the browser when opening an email with `b`
+
 ### TUI enhancements
 
 *Ported from the beautifulmail roadmap after the v0.5.0 merge.*

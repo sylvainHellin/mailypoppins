@@ -99,7 +99,11 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.selection.contains(&email.path);
                 let contact = truncate(email.display_contact(app.active_kind()), contact_width);
-                let subject_prefix = if email.has_attachments { "\u{f0c6} " } else { "" };
+                let subject_prefix = if email.has_attachments {
+                    "\u{f0c6} "
+                } else {
+                    ""
+                };
                 let subject = truncate(
                     &format!("{}{}", subject_prefix, email.subject),
                     subject_width,
@@ -110,7 +114,9 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 } else if is_in_selection {
                     Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
                 } else if !email.read {
-                    Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme::SUBTEXT0)
                 };
@@ -149,21 +155,22 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         constraints.push(Constraint::Min(subject_width as u16));
 
         let table = Table::new(rows, constraints)
-        .header(header)
-        .column_spacing(1)
-        .row_highlight_style(
-            Style::default()
-                .bg(theme::SURFACE0)
-                .fg(theme::GREEN)
-                .add_modifier(Modifier::BOLD),
-        );
+            .header(header)
+            .column_spacing(1)
+            .row_highlight_style(
+                Style::default()
+                    .bg(theme::SURFACE0)
+                    .fg(theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let mut state = TableState::default();
         state.select(Some(app.list_index));
         frame.render_stateful_widget(table, list_area, &mut state);
     } else {
         let checkbox_extra: usize = if has_selection { 3 } else { 0 };
-        let subject_width = available_width.saturating_sub(date_width + 2 + checkbox_extra + unread_col_width + 1);
+        let subject_width =
+            available_width.saturating_sub(date_width + 2 + checkbox_extra + unread_col_width + 1);
 
         let mut header_cells = Vec::new();
         if has_selection {
@@ -181,7 +188,11 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .map(|(i, email)| {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.selection.contains(&email.path);
-                let subject_prefix = if email.has_attachments { "\u{f0c6} " } else { "" };
+                let subject_prefix = if email.has_attachments {
+                    "\u{f0c6} "
+                } else {
+                    ""
+                };
                 let subject = truncate(
                     &format!("{}{}", subject_prefix, email.subject),
                     subject_width,
@@ -192,7 +203,9 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 } else if is_in_selection {
                     Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
                 } else if !email.read {
-                    Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme::SUBTEXT0)
                 };
@@ -229,14 +242,14 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         constraints.push(Constraint::Min(subject_width as u16));
 
         let table = Table::new(rows, constraints)
-        .header(header)
-        .column_spacing(1)
-        .row_highlight_style(
-            Style::default()
-                .bg(theme::SURFACE0)
-                .fg(theme::GREEN)
-                .add_modifier(Modifier::BOLD),
-        );
+            .header(header)
+            .column_spacing(1)
+            .row_highlight_style(
+                Style::default()
+                    .bg(theme::SURFACE0)
+                    .fg(theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let mut state = TableState::default();
         state.select(Some(app.list_index));
