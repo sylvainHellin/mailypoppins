@@ -112,7 +112,13 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - **No emoji** in code, output, or UI. Use Unicode symbols or Nerd Font icons.
 - **After every code change:** verify it works, then install the updated binary:
   ```
-  cargo install --path .
+  ./scripts/install.sh
   ```
+  The wrapper runs `cargo install --path .` and, on macOS, re-signs the
+  binary with a stable self-signed identity so the Keychain doesn't
+  re-prompt for SMTP/IMAP password access on every rebuild. See
+  [CONTRIBUTING.md](CONTRIBUTING.md) for the one-time keychain setup.
+  Linux/Windows can keep using `cargo install --path .` directly -- the
+  codesign step is a no-op there.
 - **Keep this file current.** When making architectural or design changes, update the relevant section of `AGENTS.md` to reflect the new state.
 - **Keep BACKLOG.md current.** When completing a feature, move it out of the backlog and into CHANGELOG.md. When discovering new work, add it to the appropriate bucket.

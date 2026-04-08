@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+- `scripts/install.sh` and `scripts/codesign-macos.sh` for stable macOS code
+  signing during local development. After one-time setup of a self-signed
+  cert (see CONTRIBUTING.md), the Keychain no longer re-prompts on every
+  `cargo install --path .` rebuild.
+- `CONTRIBUTING.md` with build instructions, the macOS keychain setup
+  walkthrough, and troubleshooting notes.
+
+### Changed
+- `AGENTS.md` instructions now point at `./scripts/install.sh` as the
+  canonical install command.
+
 ## [0.7.4] - 2026-04-05
 
 ### Added
