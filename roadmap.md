@@ -77,7 +77,9 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 
 ### Bug to fix
 
-- german char are not properly rendered in the browser when opening an email with `b`
+- ~~german char are not properly rendered in the browser when opening an email with `b`. Images are also not rendered.~~ Fixed: `ensure_utf8_charset` now replaces stale charset declarations (e.g. `iso-8859-1`) instead of keeping them; inline images with `Content-ID` headers are extracted and `cid:` references in HTML are rewritten to local `file://` paths.
+- something is wrong with the install script and self signed certificate - I am still asked for my password after each update (despite installing with the script)
+- in draft, when I select multiple emails (with the space bar), I cannot bulk mark approve (only the highlighted one will change status), whereas I can bulk archive them and bulk delete them
 
 ### TUI enhancements
 

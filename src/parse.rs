@@ -7,26 +7,62 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// Ensure an HTML string contains a UTF-8 charset declaration.
-/// If a `<meta charset=...>` tag is already present, the HTML is returned as-is.
-/// Otherwise, the declaration is injected after `<head>` (or prepended if there
-/// is no `<head>` tag) so that browsers interpret the content correctly.
+/// Ensure an HTML string declares UTF-8 charset.
+/// `mailparse` already decodes bodies to UTF-8, but the original HTML may still
+/// carry a different charset declaration (e.g. `charset=iso-8859-1`). If the
+/// browser honours that stale declaration it will misrender non-ASCII characters.
+/// This function *replaces* any existing charset with UTF-8, or inserts one if
+/// none is present.
 pub(crate) fn ensure_utf8_charset(html: &str) -> String {
-    let lower = html.to_lowercase();
-    if lower.contains("charset") {
-        return html.to_string();
-    }
+    use regex::Regex;
+
     let meta = r#"<meta charset="UTF-8">"#;
+
+    // Replace <meta charset="..."> (HTML5 form)
+    let re_meta = Regex::new(r#"(?i)<meta\s+charset\s*=\s*"[^"]*"\s*/?>"#).unwrap();
+    if re_meta.is_match(html) {
+        return re_meta.replace(html, meta).into_owned();
+    }
+
+    // Replace <meta http-equiv="Content-Type" content="text/html; charset=...">
+    let re_http =
+        Regex::new(r#"(?i)<meta\s+http-equiv\s*=\s*"Content-Type"\s+content\s*=\s*"[^"]*"\s*/?>"#)
+            .unwrap();
+    if re_http.is_match(html) {
+        return re_http.replace(html, meta).into_owned();
+    }
+
+    // No charset declaration found -- inject one.
+    let lower = html.to_lowercase();
     if let Some(pos) = lower.find("<head>") {
         let insert = pos + "<head>".len();
         format!("{}{}{}", &html[..insert], meta, &html[insert..])
     } else if let Some(pos) = lower.find("<html") {
-        // Insert a minimal <head> block right after the opening <html ...> tag.
         let tag_end = html[pos..].find('>').map(|i| pos + i + 1).unwrap_or(pos + 6);
         format!("{}<head>{}</head>{}", &html[..tag_end], meta, &html[tag_end..])
     } else {
         format!("{}{}", meta, html)
     }
+}
+
+/// Rewrite `cid:` references in HTML to point to local attachment files.
+/// `attachments` is the list of extracted attachments (with Content-ID populated for
+/// inline images). `att_dir` is the directory where the files were saved.
+pub(crate) fn rewrite_cid_references(
+    html: &str,
+    attachments: &[AttachmentData],
+    att_dir: &Path,
+) -> String {
+    let mut result = html.to_string();
+    for att in attachments {
+        if let Some(ref cid) = att.content_id {
+            let local_path = att_dir.join(&att.filename);
+            let local_url = format!("file://{}", local_path.display());
+            // Replace both quoted and unquoted cid: references
+            result = result.replace(&format!("cid:{}", cid), &local_url);
+        }
+    }
+    result
 }
 
 /// Find the largest byte index <= `max_bytes` that lies on a UTF-8 char boundary.
@@ -60,6 +96,8 @@ pub struct FetchedEmail {
 pub struct AttachmentData {
     pub filename: String,
     pub content: Vec<u8>,
+    /// Content-ID (from the `Content-ID` header), used for inline images (`cid:` references).
+    pub content_id: Option<String>,
 }
 
 pub fn html_to_plain(html: &str) -> String {
@@ -147,7 +185,12 @@ fn collect_attachments(
     counter: &mut usize,
 ) {
     let disposition = parsed.get_content_disposition();
-    if disposition.disposition == mailparse::DispositionType::Attachment {
+    let is_attachment = disposition.disposition == mailparse::DispositionType::Attachment;
+    // Inline images referenced via Content-ID (cid:) in the HTML body.
+    let is_inline_image = disposition.disposition == mailparse::DispositionType::Inline
+        && parsed.ctype.mimetype.starts_with("image/");
+
+    if is_attachment || is_inline_image {
         let filename = disposition
             .params
             .get("filename")
@@ -155,15 +198,42 @@ fn collect_attachments(
             .cloned()
             .unwrap_or_else(|| {
                 *counter += 1;
-                format!("attachment-{}.bin", counter)
+                let ext = mime_ext_for(&parsed.ctype.mimetype);
+                format!("inline-{}.{}", counter, ext)
             });
         let filename = sanitize_attachment_filename(&filename);
+        let content_id = parsed
+            .headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case("Content-ID"))
+            .and_then(|h| {
+                let val = h.get_value();
+                // Strip angle brackets: <id@host> -> id@host
+                Some(val.trim_start_matches('<').trim_end_matches('>').to_string())
+            });
         if let Ok(content) = parsed.get_body_raw() {
-            attachments.push(AttachmentData { filename, content });
+            attachments.push(AttachmentData {
+                filename,
+                content,
+                content_id,
+            });
         }
     }
     for sub in &parsed.subparts {
         collect_attachments(sub, attachments, counter);
+    }
+}
+
+/// Map a MIME type to a reasonable file extension.
+fn mime_ext_for(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        _ => "bin",
     }
 }
 
@@ -517,7 +587,9 @@ pub fn save_fetched_emails_with_known_ids(
         // Save companion HTML file if available
         if let Some(ref html) = email.html_body {
             let html_path = dest.with_extension("html");
-            fs::write(&html_path, ensure_utf8_charset(html))?;
+            let att_dir = attachments_dir_for(&dest);
+            let html = rewrite_cid_references(html, &email.attachments, &att_dir);
+            fs::write(&html_path, ensure_utf8_charset(&html))?;
         }
 
         // Track the new message_id to prevent duplicates within the same batch
@@ -1208,10 +1280,12 @@ mod tests {
                 AttachmentData {
                     filename: "report.pdf".to_string(),
                     content: b"pdf content".to_vec(),
+                    content_id: None,
                 },
                 AttachmentData {
                     filename: "image.png".to_string(),
                     content: b"png content".to_vec(),
+                    content_id: None,
                 },
             ],
             is_read: false,
@@ -1242,9 +1316,28 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_ensure_utf8_charset_case_insensitive_check() {
+    fn test_ensure_utf8_charset_replaces_existing() {
+        // An existing charset (even UTF-8) gets normalized to our canonical form.
         let html = r#"<html><head><meta CHARSET="utf-8"></head><body>hi</body></html>"#;
-        assert_eq!(ensure_utf8_charset(html), html);
+        let result = ensure_utf8_charset(html);
+        assert!(result.contains(r#"<meta charset="UTF-8">"#));
+    }
+
+    #[test]
+    fn test_ensure_utf8_charset_replaces_wrong_charset() {
+        let html =
+            r#"<html><head><meta charset="iso-8859-1"></head><body>Gr&uuml;&szlig;e</body></html>"#;
+        let result = ensure_utf8_charset(html);
+        assert!(result.contains(r#"<meta charset="UTF-8">"#));
+        assert!(!result.contains("iso-8859-1"));
+    }
+
+    #[test]
+    fn test_ensure_utf8_charset_replaces_http_equiv() {
+        let html = r#"<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252"></head><body>hi</body></html>"#;
+        let result = ensure_utf8_charset(html);
+        assert!(result.contains(r#"<meta charset="UTF-8">"#));
+        assert!(!result.contains("windows-1252"));
     }
 
     #[test]

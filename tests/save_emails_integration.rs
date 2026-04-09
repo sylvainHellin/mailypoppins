@@ -161,10 +161,12 @@ fn test_save_fetched_emails_with_attachments() {
             AttachmentData {
                 filename: "report.pdf".to_string(),
                 content: b"fake pdf content".to_vec(),
+                content_id: None,
             },
             AttachmentData {
                 filename: "image.png".to_string(),
                 content: b"fake png content".to_vec(),
+                content_id: None,
             },
         ],
         is_read: false,
@@ -222,10 +224,12 @@ fn test_save_fetched_emails_attachment_dedup() {
             AttachmentData {
                 filename: "file.pdf".to_string(),
                 content: b"content 1".to_vec(),
+                content_id: None,
             },
             AttachmentData {
                 filename: "file.pdf".to_string(),
                 content: b"content 2".to_vec(),
+                content_id: None,
             },
         ],
         is_read: false,
