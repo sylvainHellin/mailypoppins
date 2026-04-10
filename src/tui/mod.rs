@@ -75,6 +75,18 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
                     current_msg = app.update(m);
                 }
             }
+            Ok(WatchEvent::Reconnected { account_index }) => {
+                let acct_name = app.accounts.get(account_index)
+                    .map(|a| a.account_config.name.clone())
+                    .unwrap_or_default();
+                app.set_status(format!("Watch ({}): reconnected", acct_name));
+                if let Some(acct) = app.accounts.get_mut(account_index) {
+                    acct.watcher_active = true;
+                }
+                if account_index == app.active_account {
+                    app.watcher_active = true;
+                }
+            }
             Ok(WatchEvent::Error { account_index, message }) => {
                 let acct_name = app.accounts.get(account_index)
                     .map(|a| a.account_config.name.clone())
