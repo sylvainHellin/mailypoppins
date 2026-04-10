@@ -164,6 +164,12 @@ pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
         if disposition.disposition == mailparse::DispositionType::Attachment {
             return true;
         }
+        // Inline images referenced via Content-ID (cid:) in the HTML body.
+        if disposition.disposition == mailparse::DispositionType::Inline
+            && sub.ctype.mimetype.starts_with("image/")
+        {
+            return true;
+        }
         if has_attachments(sub) {
             return true;
         }
