@@ -78,8 +78,10 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 ### Bug to fix
 
 - ~~german char are not properly rendered in the browser when opening an email with `b`. Images are also not rendered.~~ Fixed: `ensure_utf8_charset` now replaces stale charset declarations (e.g. `iso-8859-1`) instead of keeping them; inline images with `Content-ID` headers are extracted and `cid:` references in HTML are rewritten to local `file://` paths.
+- imgs are not showed as attachment (missing the paperclip icon), but I can still open them with `o`
 - something is wrong with the install script and self signed certificate - I am still asked for my password after each update (despite installing with the script)
-- in draft, when I select multiple emails (with the space bar), I cannot bulk mark approve (only the highlighted one will change status), whereas I can bulk archive them and bulk delete them
+- ~~in draft, when I select multiple emails (with the space bar), I cannot bulk mark approve (only the highlighted one will change status), whereas I can bulk archive them and bulk delete them~~ Fixed: `A` now operates on all selected drafts with a confirmation dialog, consistent with bulk archive/delete.
+- when internet connection is lost, the status bar is spamming these 'watch connection...' /var/folders/m0/w_6t9ynx6_12x74bhq6ldlwr0000gn/T/clipboard-2026-04-09-163640-7539D95D.png - shouldn't there be a sleep between retries?
 
 ### TUI enhancements
 
@@ -102,7 +104,9 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 
 ### CLI
 
+- accept invitations. I regularly receive calendar invitation per mail, and in other clients I can accept/tentative/reject - would be nice to have something in the same vein here.
 - **Delete draft command**: `email delete` currently only works for inbox emails (requires `message_id` for server-side deletion). Drafts are local-only, so deleting them should just remove the local `.md` and companion `.html` files without any IMAP operation.
+- add an option to save the attachments (with a path picker). right now, only possible to open them, but does not work well for things like .zip files
 
 ---
 

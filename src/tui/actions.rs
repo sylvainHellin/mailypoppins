@@ -311,6 +311,31 @@ pub(super) fn handle_action(
             }
         }
 
+        Action::BatchApprove(paths) => {
+            let total = paths.len();
+            let mut succeeded = 0usize;
+            let mut failed = 0usize;
+            for path in &paths {
+                match mark_as_approved(path) {
+                    Ok(_) => succeeded += 1,
+                    Err(e) => {
+                        log::warn!("Approve failed for {}: {e}", path.display());
+                        failed += 1;
+                    }
+                }
+            }
+            if failed == 0 {
+                app.set_status(format!("Approved {} drafts", succeeded));
+            } else {
+                app.set_status_level(
+                    format!("Approved {}/{} drafts ({} failed)", succeeded, total, failed),
+                    StatusLevel::Warning,
+                );
+            }
+            app.selection.clear();
+            app.reload_current_mailbox();
+        }
+
         Action::Archive => {
             if let Some(path) = app.selected_email_path() {
                 let imap_config = match app.imap_config.clone() {
