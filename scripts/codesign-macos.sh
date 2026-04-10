@@ -62,3 +62,82 @@ echo "codesign-macos: signed $BINARY"
 if [[ -n "$DR" ]]; then
     echo "  $DR"
 fi
+
+# ---------------------------------------------------------------------------
+# Reset Keychain ACLs for email-cli items.
+#
+# Problem: every time the user clicks "Always Allow" in the Keychain prompt,
+# macOS stores the binary's cdhash (unique per build) rather than the
+# certificate-based designated requirement.  After the next rebuild the
+# cdhash no longer matches and the prompt returns.
+#
+# Fix: delete each email-cli item and re-create it with
+#   security add-generic-password -T <signed-binary>
+# When -T is used programmatically, macOS records the binary's designated
+# requirement (certificate-based, stable across rebuilds).  We also add
+# -T /usr/bin/security so that future resets can read without prompting.
+#
+# First run after applying this fix may show one Keychain prompt per item
+# (to let /usr/bin/security read the current value).  After that, all
+# subsequent installs are fully silent.
+#
+# Set EMAIL_SKIP_KEYCHAIN_RESET=1 to skip this step.
+# ---------------------------------------------------------------------------
+if [[ "${EMAIL_SKIP_KEYCHAIN_RESET:-}" == "1" ]]; then
+    exit 0
+fi
+
+SERVICE="email-cli"
+
+# Collect account names for email-cli items from the login keychain.
+# In the dump format, 0x00000007 holds the service name and appears right
+# before the "acct" line within the same item block.
+accounts=$(security dump-keychain 2>/dev/null | awk '
+    /0x00000007 <blob>="email-cli"/ { found = 1; next }
+    found && /"acct"<blob>="/ {
+        gsub(/.*"acct"<blob>="/, "")
+        gsub(/".*/, "")
+        print
+        found = 0
+    }
+')
+
+if [[ -z "$accounts" ]]; then
+    exit 0
+fi
+
+reset=0
+skipped=0
+while IFS= read -r acct; do
+    # Try to read the current password.  On the very first run this may
+    # trigger a Keychain prompt for /usr/bin/security.
+    pw=$(security find-generic-password -s "$SERVICE" -a "$acct" -w 2>/dev/null) || {
+        skipped=$((skipped + 1))
+        continue
+    }
+
+    # Delete the item (removes all stale cdhash ACL entries).
+    security delete-generic-password -s "$SERVICE" -a "$acct" >/dev/null 2>&1 || {
+        skipped=$((skipped + 1))
+        continue
+    }
+
+    # Re-create with the signed binary and /usr/bin/security as trusted apps.
+    # -T records the designated requirement (cert-based, stable across rebuilds).
+    if security add-generic-password \
+            -s "$SERVICE" -a "$acct" -w "$pw" \
+            -T "$BINARY" -T "/usr/bin/security" 2>/dev/null; then
+        reset=$((reset + 1))
+    else
+        # Fallback: re-create without app restriction so the password isn't lost.
+        security add-generic-password -s "$SERVICE" -a "$acct" -w "$pw" -A 2>/dev/null || true
+        skipped=$((skipped + 1))
+    fi
+done <<< "$accounts"
+
+if [[ $reset -gt 0 ]]; then
+    echo "codesign-macos: reset Keychain ACL for $reset item(s)"
+fi
+if [[ $skipped -gt 0 ]]; then
+    echo "codesign-macos: skipped $skipped item(s) (run again after granting access)"
+fi
