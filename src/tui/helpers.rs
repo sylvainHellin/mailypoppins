@@ -30,6 +30,9 @@ pub(super) enum WatchEvent {
     Changed {
         account_index: usize,
     },
+    Reconnected {
+        account_index: usize,
+    },
     Error {
         account_index: usize,
         message: String,
@@ -43,6 +46,9 @@ pub(super) fn watcher_loop(
 ) {
     use crate::imap_client::watch_mailbox as imap_watch;
 
+    const BASE_BACKOFF_SECS: u64 = 30;
+    const MAX_BACKOFF_SECS: u64 = 300;
+
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(_) => {
@@ -53,27 +59,39 @@ pub(super) fn watcher_loop(
             return;
         }
     };
+
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         match rt.block_on(imap_watch(&imap_config, "INBOX", Some(300))) {
             Ok(0) => {
+                if consecutive_failures > 0 {
+                    consecutive_failures = 0;
+                    let _ = tx.send(WatchEvent::Reconnected { account_index });
+                }
                 if tx.send(WatchEvent::Changed { account_index }).is_err() {
                     break;
                 }
             }
-            Ok(2) => continue, // timeout, re-idle
-            Ok(_) => {
-                let _ = tx.send(WatchEvent::Error {
-                    account_index,
-                    message: "Watch connection lost".into(),
-                });
-                std::thread::sleep(std::time::Duration::from_secs(30));
+            Ok(2) => {
+                if consecutive_failures > 0 {
+                    consecutive_failures = 0;
+                    let _ = tx.send(WatchEvent::Reconnected { account_index });
+                }
+                continue; // timeout, re-idle
             }
-            Err(_) => {
-                let _ = tx.send(WatchEvent::Error {
-                    account_index,
-                    message: "Watch connection lost".into(),
-                });
-                std::thread::sleep(std::time::Duration::from_secs(30));
+            Ok(_) | Err(_) => {
+                // Only notify the UI on the first failure; subsequent retries are silent.
+                if consecutive_failures == 0 {
+                    let _ = tx.send(WatchEvent::Error {
+                        account_index,
+                        message: "Watch connection lost, retrying with backoff...".into(),
+                    });
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let backoff = (BASE_BACKOFF_SECS * 2u64.saturating_pow(consecutive_failures - 1))
+                    .min(MAX_BACKOFF_SECS);
+                std::thread::sleep(std::time::Duration::from_secs(backoff));
             }
         }
     }
