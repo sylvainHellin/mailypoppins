@@ -149,6 +149,10 @@ impl App {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if let Some(dialog) = self.confirm_dialog.take() {
                     match dialog.action {
+                        ConfirmAction::Approve if !self.selection.is_empty() => {
+                            let paths: Vec<PathBuf> = self.selection.drain().collect();
+                            self.pending_action = Some(Action::BatchApprove(paths));
+                        }
                         ConfirmAction::Archive if !self.selection.is_empty() => {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
                             self.pending_action = Some(Action::BatchArchive(paths));
@@ -159,6 +163,7 @@ impl App {
                         }
                         _ => {
                             self.pending_action = Some(match dialog.action {
+                                ConfirmAction::Approve => Action::Approve,
                                 ConfirmAction::Archive => Action::Archive,
                                 ConfirmAction::Delete => Action::Delete,
                                 ConfirmAction::Send => Action::Send,
@@ -341,7 +346,16 @@ impl App {
             }
             KeyCode::Char('A') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Approve);
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.confirm_dialog = Some(ConfirmDialog {
+                        title: format!("Approve {} drafts?", count),
+                        detail: format!("{} selected drafts", count),
+                        action: ConfirmAction::Approve,
+                    });
+                } else {
+                    self.pending_action = Some(Action::Approve);
+                }
             }
             KeyCode::Char('x') => {
                 self.g_pending = false;

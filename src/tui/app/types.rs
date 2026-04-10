@@ -488,6 +488,7 @@ pub enum Action {
     SendApproved,
     NewDraft,
     Approve,
+    BatchApprove(Vec<PathBuf>),
     Archive,
     Delete,
     BatchArchive(Vec<PathBuf>),
@@ -520,6 +521,7 @@ pub enum Action {
 /// Which destructive action a confirmation dialog is guarding.
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    Approve,
     Archive,
     Delete,
     Send,
