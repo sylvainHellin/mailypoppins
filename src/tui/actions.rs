@@ -675,6 +675,33 @@ pub(super) fn handle_action(
             }
         },
 
+        Action::SaveAttachments { sources, dest_dir } => {
+            let mut saved = 0usize;
+            let mut failed = 0usize;
+            for source in &sources {
+                match crate::parse::save_attachment(source, &dest_dir) {
+                    Ok(_) => saved += 1,
+                    Err(e) => {
+                        log::warn!("Save attachment failed for {}: {e}", source.display());
+                        failed += 1;
+                    }
+                }
+            }
+            app.last_save_dir = Some(dest_dir.clone());
+            if failed == 0 {
+                let dir_display = dest_dir.display();
+                app.set_status_level(
+                    format!("Saved {} file(s) to {dir_display}", saved),
+                    StatusLevel::Success,
+                );
+            } else {
+                app.set_status_level(
+                    format!("Saved {}/{} file(s) ({} failed)", saved, saved + failed, failed),
+                    StatusLevel::Warning,
+                );
+            }
+        }
+
         Action::OpenHtmlInBrowser(path) => match crate::parse::open_file_with_system(&path) {
             Ok(()) => {
                 app.set_status("Opened in browser".to_string());

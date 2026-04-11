@@ -83,6 +83,7 @@ main        --> all modules (via lib)
 | `email archive <file>` | Archive an inbox email (server + local) |
 | `email delete <file>` | Delete an inbox email (server + local) |
 | `email open <file>` | Open an attachment from an email in the default application (fuzzy-select if multiple) |
+| `email save <file> [--output <dir>]` | Save attachment(s) from an email to a directory (multi-select, default: current dir) |
 | `email search <query>` | Search emails on the IMAP server; supports `from:`, `to:`, `subject:`, `body:`, `since:`, `before:`, `in:` prefixes; `--mailbox`, `--limit` (`-n`), `--full` flags |
 | `email config init` | Interactive setup wizard with credential testing |
 | `email config show` | Show current configuration (passwords masked) |
@@ -231,6 +232,7 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 | `s` | Focus sidebar |
 | `1`-`9` | Jump to mailbox by index |
 | `o` | Open attachment(s) of the selected email in the default application |
+| `O` | Save attachment(s) to a chosen directory (multi-select + dir picker with zoxide/browser) |
 | `b` | Open the HTML version of the selected email in the browser |
 | `S` | Open server search overlay |
 | `!` | Toggle activity log panel |
@@ -272,7 +274,21 @@ Quoted values are supported (e.g., `from:"John Doe"`). The `in:` prefix matches 
 
 When an email has multiple attachments and `o` is pressed, an `AttachmentPicker` overlay appears listing all files in the `_attachments/` directory. Navigate with `j`/`k`, confirm with `Enter`, dismiss with `Esc`/`q`. For a single attachment, the file is opened immediately without the overlay. Uses `parse::list_attachments()` and `parse::open_file_with_system()` (macOS `open`).
 
-`o` is available in List focus, List-with-sidebar focus, and Preview focus.
+`o` is available in List focus, Headers focus, and Preview focus.
+
+### Save Attachment Flow
+
+Press `O` on an email with attachments to save them to disk. The flow is:
+
+1. **Attachment picker (save mode)**: Multi-select with `Space` (checkbox icons), `Ctrl+a` to toggle all, `Enter` to confirm. For a single attachment, skips directly to the dir picker.
+2. **Directory picker**: Two modes toggled with `Tab`:
+   - **Zoxide mode** (default if `zoxide` is installed): Type to search, results from `zoxide query --list`, `Down`/`Up` to navigate, `Enter` to confirm.
+   - **Browser mode**: Navigate filesystem directories. `j`/`k` to move, `Enter` on `[ Save here ]` to confirm, `Enter` on a directory to descend, `h`/`Backspace` to go up, `~` for home.
+3. Files are copied via `parse::save_attachment()` which handles filename conflicts by appending `_1`, `_2`, etc.
+
+Last-used directory is remembered for the session (pre-filled next time). Default: `~/Downloads/`.
+
+`O` is available in List focus, Headers focus, and Preview focus.
 
 ### Open HTML in Browser
 
@@ -327,5 +343,6 @@ Pass `--reconcile` to also detect server-side moves and deletes (uses the same s
 
 ## After Each Change
 
-1. **Test the app** — Run the binary yourself to verify the change works as expected.
-2. **Update the binary** — If it works, install the updated binary via **`./scripts/install.sh`** (NOT `cargo install --path .` directly). The wrapper runs `cargo install` and then re-signs the binary with a stable dev cert so the Keychain stops re-prompting for every `smtp-password-*` / `imap-password-*` entry at TUI startup. On Linux/Windows the codesign step is a no-op. See `CONTRIBUTING.md` for the one-time Keychain setup. Extra args are forwarded to cargo (e.g. `./scripts/install.sh --locked`).
+1. **Test the app** -- Run the binary yourself to verify the change works as expected.
+2. **Update the binary** -- If it works, install the updated binary via **`./scripts/install.sh`** (NOT `cargo install --path .` directly). The wrapper runs `cargo install` and then re-signs the binary with a stable dev cert so the Keychain stops re-prompting for every `smtp-password-*` / `imap-password-*` entry at TUI startup. On Linux/Windows the codesign step is a no-op. See `CONTRIBUTING.md` for the one-time Keychain setup. Extra args are forwarded to cargo (e.g. `./scripts/install.sh --locked`).
+3. **Update `roadmap.md`** -- After every code change, update the roadmap: move completed items from the backlog to the resolved section, strike through done items, and remove entries that are no longer relevant. Keep the backlog accurate and current.

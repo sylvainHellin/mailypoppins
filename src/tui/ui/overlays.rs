@@ -4,7 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::super::app::{App, AttachmentPicker, ConfirmDialog, PersistentError};
+use super::super::app::{
+    App, AttachmentPicker, AttachmentPickerMode, ConfirmDialog, DirPicker, DirPickerMode,
+    PersistentError,
+};
 use super::super::theme;
 use super::util::truncate;
 
@@ -79,6 +82,8 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
     let dialog_area = vertical[0];
     frame.render_widget(Clear, dialog_area);
 
+    let is_save = picker.mode == AttachmentPickerMode::Save;
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -86,9 +91,14 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         .style(Style::default().bg(theme::BASE));
 
     let inner_width = dialog_width.saturating_sub(4) as usize;
+    let title = if is_save {
+        "Save Attachments"
+    } else {
+        "Select Attachment"
+    };
     let mut lines = vec![
         Line::from(Span::styled(
-            "Select Attachment",
+            title,
             Style::default()
                 .fg(theme::PEACH)
                 .add_modifier(Modifier::BOLD),
@@ -96,32 +106,240 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         Line::from(""),
     ];
 
+    // Reserve space for checkbox prefix in save mode
+    let name_width = if is_save {
+        inner_width.saturating_sub(4)
+    } else {
+        inner_width
+    };
+
     for (i, path) in picker.files.iter().enumerate() {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
-        let display = if name.len() > inner_width {
-            format!("{}...", &name[..inner_width.saturating_sub(3)])
+        let display = if name.len() > name_width {
+            format!("{}...", &name[..name_width.saturating_sub(3)])
         } else {
             name
         };
-        let style = if i == picker.selected {
+        let cursor_style = if i == picker.selected {
             Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
         } else {
             Style::default().fg(theme::TEXT)
         };
-        lines.push(Line::from(Span::styled(display, style)));
+
+        if is_save {
+            let check = if picker.selected_set.contains(&i) {
+                "\u{f0132} " // nf-md-checkbox_marked
+            } else {
+                "\u{f0131} " // nf-md-checkbox_blank_outline
+            };
+            let check_style = if picker.selected_set.contains(&i) {
+                Style::default().fg(theme::GREEN)
+            } else {
+                Style::default().fg(theme::OVERLAY0)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(check, check_style),
+                Span::styled(display, cursor_style),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(display, cursor_style)));
+        }
     }
 
     lines.push(Line::from(""));
+    let footer = if is_save {
+        "j/k nav  Space sel  ^a all  Enter confirm  Esc cancel"
+    } else {
+        "j/k nav  Enter open  Esc cancel"
+    };
     lines.push(Line::from(Span::styled(
-        "j/k nav  Enter open  Esc cancel",
+        footer,
         Style::default().fg(theme::SUBTEXT0),
     )));
 
     let content = Paragraph::new(lines).block(block);
     frame.render_widget(content, dialog_area);
+}
+
+pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rect) {
+    let dialog_width = 60u16.min(area.width.saturating_sub(4));
+    let dialog_height = 20u16.min(area.height.saturating_sub(2));
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(dialog_width)])
+        .flex(Flex::Center)
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(dialog_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+
+    let dialog_area = vertical[0];
+    frame.render_widget(Clear, dialog_area);
+
+    let mode_label = match picker.mode {
+        DirPickerMode::Zoxide => "zoxide",
+        DirPickerMode::Browser => "browse",
+    };
+    let title = format!(" Save to ({mode_label}) ");
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::GREEN))
+        .style(Style::default().bg(theme::BASE));
+
+    let block_inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let inner_width = block_inner.width.saturating_sub(2) as usize;
+
+    match picker.mode {
+        DirPickerMode::Zoxide => {
+            // Input line + results + footer
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // query input
+                    Constraint::Min(0),    // results
+                    Constraint::Length(1), // footer
+                ])
+                .split(block_inner);
+
+            // Query input
+            let input_spans = vec![
+                Span::styled("> ", Style::default().fg(theme::GREEN)),
+                Span::styled(&picker.query, Style::default().fg(theme::TEXT)),
+                Span::styled("\u{2588}", Style::default().fg(theme::GREEN)),
+            ];
+            frame.render_widget(Paragraph::new(Line::from(input_spans)), chunks[0]);
+
+            // Results
+            let mut result_lines: Vec<Line> = Vec::new();
+            if picker.zoxide_results.is_empty() {
+                if !picker.zoxide_available {
+                    result_lines.push(Line::from(Span::styled(
+                        "zoxide not found -- press Tab to browse",
+                        Style::default().fg(theme::OVERLAY0),
+                    )));
+                } else if picker.query.is_empty() {
+                    result_lines.push(Line::from(Span::styled(
+                        "Type to search directories...",
+                        Style::default().fg(theme::OVERLAY0),
+                    )));
+                } else {
+                    result_lines.push(Line::from(Span::styled(
+                        "No matches",
+                        Style::default().fg(theme::OVERLAY0),
+                    )));
+                }
+            } else {
+                for (i, path) in picker.zoxide_results.iter().enumerate() {
+                    let display = path.display().to_string();
+                    let display = truncate(&display, inner_width);
+                    let style = if i == picker.selected {
+                        Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
+                    } else {
+                        Style::default().fg(theme::TEXT)
+                    };
+                    result_lines.push(Line::from(Span::styled(display, style)));
+                }
+            }
+            frame.render_widget(Paragraph::new(result_lines), chunks[1]);
+
+            // Footer
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "Tab browse  Enter save  Esc cancel",
+                    Style::default().fg(theme::SUBTEXT0),
+                ))),
+                chunks[2],
+            );
+        }
+        DirPickerMode::Browser => {
+            // Header (current path) + entries + footer
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // current path
+                    Constraint::Min(0),    // entries
+                    Constraint::Length(1), // footer
+                ])
+                .split(block_inner);
+
+            // Current path
+            let path_str = picker.current_dir.display().to_string();
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate(&path_str, inner_width),
+                    Style::default()
+                        .fg(theme::BLUE)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                chunks[0],
+            );
+
+            // Entries: index 0 = "[ Save here ]", then directories
+            let mut entry_lines: Vec<Line> = Vec::new();
+            let save_here_style = if picker.selected == 0 {
+                Style::default()
+                    .fg(theme::GREEN)
+                    .bg(theme::SURFACE0)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::GREEN)
+            };
+            entry_lines.push(Line::from(Span::styled("[ Save here ]", save_here_style)));
+
+            for (i, dir) in picker.dir_entries.iter().enumerate() {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| dir.display().to_string());
+                let display = format!("\u{f024b} {}", truncate(&name, inner_width.saturating_sub(2)));
+                let style = if i + 1 == picker.selected {
+                    Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+                entry_lines.push(Line::from(Span::styled(display, style)));
+            }
+
+            // Scroll the list if it's too tall
+            let visible_height = chunks[1].height as usize;
+            let scroll_offset = if picker.selected >= visible_height {
+                picker.selected.saturating_sub(visible_height / 2)
+            } else {
+                0
+            };
+
+            frame.render_widget(
+                Paragraph::new(entry_lines).scroll((scroll_offset as u16, 0)),
+                chunks[1],
+            );
+
+            // Footer
+            let footer_text = if picker.zoxide_available {
+                "Tab zoxide  Enter open/save  h up  ~ home  Esc cancel"
+            } else {
+                "Enter open/save  h up  ~ home  Esc cancel"
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    footer_text,
+                    Style::default().fg(theme::SUBTEXT0),
+                ))),
+                chunks[2],
+            );
+        }
+    }
 }
 
 pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame, area: Rect) {
@@ -223,6 +441,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("x / X", "Send / Send all approved"),
                 ("y", "Copy file path"),
                 ("o", "Open attachment"),
+                ("O", "Save attachment to disk"),
                 ("b", "Open HTML in browser"),
                 ("n", "New draft"),
                 ("f / F", "Fetch / Sync"),

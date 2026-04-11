@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -498,6 +499,10 @@ pub enum Action {
     BatchToggleRead(Vec<PathBuf>),
     CopyPath,
     OpenAttachment(PathBuf),
+    SaveAttachments {
+        sources: Vec<PathBuf>,
+        dest_dir: PathBuf,
+    },
     Fetch,
     Sync,
     ServerSearch {
@@ -541,10 +546,46 @@ pub struct PersistentError {
     pub message: String,
 }
 
+/// Whether the attachment picker is opening or saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentPickerMode {
+    Open,
+    Save,
+}
+
 /// Overlay state for choosing among multiple attachments.
 pub struct AttachmentPicker {
     pub files: Vec<PathBuf>,
     pub selected: usize,
+    pub mode: AttachmentPickerMode,
+    /// Set of selected indices (used in Save mode for multi-select).
+    pub selected_set: HashSet<usize>,
+}
+
+/// Whether the directory picker is in zoxide or browser mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirPickerMode {
+    Zoxide,
+    Browser,
+}
+
+/// Overlay for picking a target directory (for saving attachments).
+pub struct DirPicker {
+    pub mode: DirPickerMode,
+    /// Text input for zoxide query.
+    pub query: String,
+    /// Results from `zoxide query --list`.
+    pub zoxide_results: Vec<PathBuf>,
+    /// Whether zoxide is available on this system.
+    pub zoxide_available: bool,
+    /// Current directory in browser mode.
+    pub current_dir: PathBuf,
+    /// Subdirectories of `current_dir` (browser mode listing).
+    pub dir_entries: Vec<PathBuf>,
+    /// Cursor position in the result/entry list.
+    pub selected: usize,
+    /// The attachment files to save (carried from the attachment picker).
+    pub sources: Vec<PathBuf>,
 }
 
 pub const STATUS_LOG_CAPACITY: usize = 100;

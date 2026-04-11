@@ -292,6 +292,35 @@ pub fn open_file_with_system(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copy an attachment file to `dest_dir`, returning the final path.
+/// If a file with the same name already exists, appends `_1`, `_2`, etc.
+pub fn save_attachment(source: &Path, dest_dir: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(dest_dir)?;
+
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Source has no file name"))?
+        .to_string_lossy();
+    let stem = source
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let ext = source
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    let mut dest = dest_dir.join(file_name.as_ref());
+    let mut counter = 1u32;
+    while dest.exists() {
+        dest = dest_dir.join(format!("{stem}_{counter}{ext}"));
+        counter += 1;
+    }
+
+    fs::copy(source, &dest)?;
+    Ok(dest)
+}
+
 /// Parse raw RFC822 bytes into a FetchedEmail struct.
 pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail> {
     let parsed = parse_mail(rfc822_body).ok()?;
@@ -1173,6 +1202,68 @@ mod tests {
         // Should be sorted by filename
         assert!(files[0].file_name().unwrap().to_str().unwrap() == "doc.pdf");
         assert!(files[1].file_name().unwrap().to_str().unwrap() == "img.png");
+    }
+
+    // -----------------------------------------------------------------------
+    // save_attachment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_save_attachment_basic() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source = src_dir.path().join("report.pdf");
+        std::fs::write(&source, b"pdf data").unwrap();
+
+        let result = save_attachment(&source, dest_dir.path()).unwrap();
+        assert_eq!(result, dest_dir.path().join("report.pdf"));
+        assert_eq!(std::fs::read(&result).unwrap(), b"pdf data");
+    }
+
+    #[test]
+    fn test_save_attachment_conflict_appends_suffix() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source = src_dir.path().join("report.pdf");
+        std::fs::write(&source, b"original").unwrap();
+        // Pre-create a file with the same name
+        std::fs::write(dest_dir.path().join("report.pdf"), b"existing").unwrap();
+
+        let result = save_attachment(&source, dest_dir.path()).unwrap();
+        assert_eq!(result, dest_dir.path().join("report_1.pdf"));
+        assert_eq!(std::fs::read(&result).unwrap(), b"original");
+        // Original file should be untouched
+        assert_eq!(
+            std::fs::read(dest_dir.path().join("report.pdf")).unwrap(),
+            b"existing"
+        );
+    }
+
+    #[test]
+    fn test_save_attachment_creates_dest_dir() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dest_subdir = dest_dir.path().join("nested").join("sub");
+        let source = src_dir.path().join("file.txt");
+        std::fs::write(&source, b"data").unwrap();
+
+        let result = save_attachment(&source, &dest_subdir).unwrap();
+        assert!(result.exists());
+        assert_eq!(std::fs::read(&result).unwrap(), b"data");
+    }
+
+    #[test]
+    fn test_save_attachment_no_extension() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source = src_dir.path().join("Makefile");
+        std::fs::write(&source, b"data").unwrap();
+        // Pre-create a conflict
+        std::fs::write(dest_dir.path().join("Makefile"), b"existing").unwrap();
+
+        let result = save_attachment(&source, dest_dir.path()).unwrap();
+        assert_eq!(result, dest_dir.path().join("Makefile_1"));
+        assert_eq!(std::fs::read(&result).unwrap(), b"data");
     }
 
     // -----------------------------------------------------------------------

@@ -58,6 +58,8 @@ pub struct App {
     pub queued_action: Option<Action>,
     pub persistent_error: Option<PersistentError>,
     pub attachment_picker: Option<AttachmentPicker>,
+    pub dir_picker: Option<DirPicker>,
+    pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
     pub show_activity_log: bool,
@@ -141,6 +143,8 @@ impl App {
             queued_action: None,
             persistent_error: None,
             attachment_picker: None,
+            dir_picker: None,
+            last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
             show_search_overlay: false,
