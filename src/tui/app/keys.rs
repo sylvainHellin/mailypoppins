@@ -1,10 +1,12 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    Action, App, AttachmentPicker, ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard,
-    ConfirmAction, ConfirmDialog, Focus, Message, SearchOverlayFocus,
+    Action, App, AttachmentPicker, AttachmentPickerMode, ComposeField, ComposeMode,
+    ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
+    Focus, Message, SearchOverlayFocus,
 };
 
 impl App {
@@ -15,6 +17,10 @@ impl App {
 
         if self.persistent_error.is_some() {
             return self.handle_persistent_error_key(key);
+        }
+
+        if self.dir_picker.is_some() {
+            return self.handle_dir_picker_key(key);
         }
 
         if self.attachment_picker.is_some() {
@@ -215,23 +221,11 @@ impl App {
                 None
             }
             KeyCode::Char('o') => {
-                if let Some(email) = self.selected_email() {
-                    match crate::parse::list_attachments(&email.path) {
-                        Ok(files) if files.is_empty() => {
-                            self.set_status("No attachments".to_string());
-                        }
-                        Ok(files) if files.len() == 1 => {
-                            self.pending_action =
-                                Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
-                        }
-                        Ok(files) => {
-                            self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Attachments error: {e}"));
-                        }
-                    }
-                }
+                self.open_attachment_picker(AttachmentPickerMode::Open);
+                None
+            }
+            KeyCode::Char('O') => {
+                self.open_attachment_picker(AttachmentPickerMode::Save);
                 None
             }
             KeyCode::Char('b') => {
@@ -406,23 +400,11 @@ impl App {
 
             KeyCode::Char('o') => {
                 self.g_pending = false;
-                if let Some(email) = self.selected_email() {
-                    match crate::parse::list_attachments(&email.path) {
-                        Ok(files) if files.is_empty() => {
-                            self.set_status("No attachments".to_string());
-                        }
-                        Ok(files) if files.len() == 1 => {
-                            self.pending_action =
-                                Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
-                        }
-                        Ok(files) => {
-                            self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Attachments error: {e}"));
-                        }
-                    }
-                }
+                self.open_attachment_picker(AttachmentPickerMode::Open);
+            }
+            KeyCode::Char('O') => {
+                self.g_pending = false;
+                self.open_attachment_picker(AttachmentPickerMode::Save);
             }
             KeyCode::Char('b') => {
                 self.g_pending = false;
@@ -809,23 +791,11 @@ impl App {
                 None
             }
             KeyCode::Char('o') => {
-                if let Some(email) = self.selected_email() {
-                    match crate::parse::list_attachments(&email.path) {
-                        Ok(files) if files.is_empty() => {
-                            self.set_status("No attachments".to_string());
-                        }
-                        Ok(files) if files.len() == 1 => {
-                            self.pending_action =
-                                Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
-                        }
-                        Ok(files) => {
-                            self.attachment_picker = Some(AttachmentPicker { files, selected: 0 });
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Attachments error: {e}"));
-                        }
-                    }
-                }
+                self.open_attachment_picker(AttachmentPickerMode::Open);
+                None
+            }
+            KeyCode::Char('O') => {
+                self.open_attachment_picker(AttachmentPickerMode::Save);
                 None
             }
             KeyCode::Char('b') => {
@@ -849,26 +819,272 @@ impl App {
 
     fn handle_attachment_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
         let picker = self.attachment_picker.as_mut().unwrap();
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if picker.selected < picker.files.len().saturating_sub(1) {
-                    picker.selected += 1;
+        match picker.mode {
+            AttachmentPickerMode::Open => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if picker.selected < picker.files.len().saturating_sub(1) {
+                        picker.selected += 1;
+                    }
                 }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                picker.selected = picker.selected.saturating_sub(1);
-            }
-            KeyCode::Enter => {
-                let picker = self.attachment_picker.take().unwrap();
-                let path = picker.files[picker.selected].clone();
-                self.pending_action = Some(Action::OpenAttachment(path));
-            }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.attachment_picker = None;
-            }
-            _ => {}
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    let picker = self.attachment_picker.take().unwrap();
+                    let path = picker.files[picker.selected].clone();
+                    self.pending_action = Some(Action::OpenAttachment(path));
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.attachment_picker = None;
+                }
+                _ => {}
+            },
+            AttachmentPickerMode::Save => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if picker.selected < picker.files.len().saturating_sub(1) {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Char(' ') => {
+                    let idx = picker.selected;
+                    if picker.selected_set.contains(&idx) {
+                        picker.selected_set.remove(&idx);
+                    } else {
+                        picker.selected_set.insert(idx);
+                    }
+                    // Advance cursor
+                    if picker.selected < picker.files.len().saturating_sub(1) {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if picker.selected_set.len() == picker.files.len() {
+                        picker.selected_set.clear();
+                    } else {
+                        picker.selected_set = (0..picker.files.len()).collect();
+                    }
+                }
+                KeyCode::Enter => {
+                    let picker = self.attachment_picker.take().unwrap();
+                    // Collect selected files, or cursor item if none selected
+                    let sources: Vec<PathBuf> = if picker.selected_set.is_empty() {
+                        vec![picker.files[picker.selected].clone()]
+                    } else {
+                        let mut indices: Vec<usize> =
+                            picker.selected_set.iter().copied().collect();
+                        indices.sort();
+                        indices
+                            .iter()
+                            .filter_map(|&i| picker.files.get(i).cloned())
+                            .collect()
+                    };
+                    self.open_dir_picker(sources);
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.attachment_picker = None;
+                }
+                _ => {}
+            },
         }
         None
+    }
+
+    fn handle_dir_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let picker = match self.dir_picker.as_mut() {
+            Some(p) => p,
+            None => return None,
+        };
+
+        match picker.mode {
+            DirPickerMode::Zoxide => match key.code {
+                KeyCode::Down => {
+                    if !picker.zoxide_results.is_empty()
+                        && picker.selected < picker.zoxide_results.len().saturating_sub(1)
+                    {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Backspace => {
+                    picker.query.pop();
+                    picker.selected = 0;
+                    refresh_zoxide_results(picker);
+                }
+                KeyCode::Tab => {
+                    // Switch to browser mode. Use highlighted result or default dir.
+                    let start_dir = picker
+                        .zoxide_results
+                        .get(picker.selected)
+                        .cloned()
+                        .unwrap_or_else(|| picker.current_dir.clone());
+                    picker.mode = DirPickerMode::Browser;
+                    picker.current_dir = start_dir;
+                    picker.selected = 0;
+                    refresh_browser_entries(picker);
+                }
+                KeyCode::Enter => {
+                    if let Some(dir) = picker.zoxide_results.get(picker.selected).cloned() {
+                        let sources = picker.sources.clone();
+                        self.dir_picker = None;
+                        self.pending_action = Some(Action::SaveAttachments {
+                            sources,
+                            dest_dir: dir,
+                        });
+                    }
+                }
+                KeyCode::Esc => {
+                    self.dir_picker = None;
+                }
+                KeyCode::Char(c) => {
+                    picker.query.push(c);
+                    picker.selected = 0;
+                    refresh_zoxide_results(picker);
+                }
+                _ => {}
+            },
+            DirPickerMode::Browser => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let max = picker.dir_entries.len(); // entry 0 = [ Save here ]
+                    if picker.selected < max {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    picker.selected = 0;
+                }
+                KeyCode::Char('G') => {
+                    picker.selected = picker.dir_entries.len(); // last entry (save-here is 0)
+                }
+                KeyCode::Char('~') => {
+                    let home =
+                        PathBuf::from(shellexpand::tilde("~").into_owned());
+                    picker.current_dir = home;
+                    picker.selected = 0;
+                    refresh_browser_entries(picker);
+                }
+                KeyCode::Char('h') | KeyCode::Backspace => {
+                    if let Some(parent) = picker.current_dir.parent() {
+                        picker.current_dir = parent.to_path_buf();
+                        picker.selected = 0;
+                        refresh_browser_entries(picker);
+                    }
+                }
+                KeyCode::Char('l') => {
+                    // Descend into selected directory (no-op on "[ Save here ]")
+                    if picker.selected > 0 {
+                        let idx = picker.selected - 1;
+                        if let Some(dir) = picker.dir_entries.get(idx).cloned() {
+                            picker.current_dir = dir;
+                            picker.selected = 0;
+                            refresh_browser_entries(picker);
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if picker.selected == 0 {
+                        // "[ Save here ]" -- confirm
+                        let sources = picker.sources.clone();
+                        let dest_dir = picker.current_dir.clone();
+                        self.dir_picker = None;
+                        self.pending_action = Some(Action::SaveAttachments {
+                            sources,
+                            dest_dir,
+                        });
+                    } else {
+                        // Descend into selected directory
+                        let idx = picker.selected - 1;
+                        if let Some(dir) = picker.dir_entries.get(idx).cloned() {
+                            picker.current_dir = dir;
+                            picker.selected = 0;
+                            refresh_browser_entries(picker);
+                        }
+                    }
+                }
+                KeyCode::Tab => {
+                    picker.mode = DirPickerMode::Zoxide;
+                    picker.selected = 0;
+                    refresh_zoxide_results(picker);
+                }
+                KeyCode::Esc => {
+                    self.dir_picker = None;
+                }
+                _ => {}
+            },
+        }
+        None
+    }
+
+    /// Helper to open the attachment picker in the given mode.
+    fn open_attachment_picker(&mut self, mode: AttachmentPickerMode) {
+        if let Some(email) = self.selected_email() {
+            match crate::parse::list_attachments(&email.path) {
+                Ok(files) if files.is_empty() => {
+                    self.set_status("No attachments".to_string());
+                }
+                Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Open => {
+                    self.pending_action =
+                        Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                }
+                Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Save => {
+                    // Single file in save mode -- skip picker, go straight to dir picker
+                    let sources = files;
+                    self.open_dir_picker(sources);
+                }
+                Ok(files) => {
+                    self.attachment_picker = Some(AttachmentPicker {
+                        files,
+                        selected: 0,
+                        mode,
+                        selected_set: HashSet::new(),
+                    });
+                }
+                Err(e) => {
+                    self.set_status(format!("Attachments error: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Open the directory picker overlay with the given source files.
+    fn open_dir_picker(&mut self, sources: Vec<PathBuf>) {
+        let default_dir = self
+            .last_save_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/Downloads").into_owned()));
+
+        let zoxide_available = which_zoxide();
+        let start_mode = if zoxide_available {
+            DirPickerMode::Zoxide
+        } else {
+            DirPickerMode::Browser
+        };
+
+        let mut picker = DirPicker {
+            mode: start_mode,
+            query: String::new(),
+            zoxide_results: Vec::new(),
+            zoxide_available,
+            current_dir: default_dir,
+            dir_entries: Vec::new(),
+            selected: 0,
+            sources,
+        };
+
+        if zoxide_available {
+            refresh_zoxide_results(&mut picker);
+        } else {
+            refresh_browser_entries(&mut picker);
+        }
+
+        self.dir_picker = Some(picker);
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) -> Option<Message> {
@@ -1069,4 +1285,78 @@ fn accept_suggestion(field: &mut String, suggestion: &ComposeSuggestion) {
         field.push('>');
     }
     field.push_str(", ");
+}
+
+// ---------------------------------------------------------------------------
+// Directory picker helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether `zoxide` is available on PATH.
+fn which_zoxide() -> bool {
+    std::process::Command::new("zoxide")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Run `zoxide query --list <terms>` and populate `picker.zoxide_results`.
+fn refresh_zoxide_results(picker: &mut DirPicker) {
+    if !picker.zoxide_available {
+        picker.zoxide_results.clear();
+        return;
+    }
+
+    let mut cmd = std::process::Command::new("zoxide");
+    cmd.arg("query").arg("--list");
+    if !picker.query.is_empty() {
+        // Split query on whitespace so "no do" becomes two positional args
+        for term in picker.query.split_whitespace() {
+            cmd.arg(term);
+        }
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+
+    picker.zoxide_results = match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .filter(|l| !l.is_empty())
+                .take(20)
+                .map(|l| PathBuf::from(l.trim()))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+}
+
+/// Scan `picker.current_dir` for sub-directories and populate `picker.dir_entries`.
+fn refresh_browser_entries(picker: &mut DirPicker) {
+    picker.dir_entries = match std::fs::read_dir(&picker.current_dir) {
+        Ok(rd) => {
+            let mut dirs: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+                .filter(|e| {
+                    // Hide dotfiles
+                    e.file_name()
+                        .to_str()
+                        .map(|s| !s.starts_with('.'))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+                .collect();
+            dirs.sort_by(|a, b| {
+                a.file_name()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
+            });
+            dirs
+        }
+        Err(_) => Vec::new(),
+    };
 }

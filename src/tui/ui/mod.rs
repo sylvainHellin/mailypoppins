@@ -104,6 +104,10 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         overlays::render_attachment_picker(picker, frame, area);
     }
 
+    if let Some(picker) = &app.dir_picker {
+        overlays::render_dir_picker(picker, frame, area);
+    }
+
     if app.show_help {
         overlays::render_help_overlay(app, frame, area);
     }

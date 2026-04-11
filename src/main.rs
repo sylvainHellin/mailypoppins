@@ -168,6 +168,14 @@ enum Commands {
         /// Path to the email file
         file: PathBuf,
     },
+    /// Save an email's attachment(s) to a directory
+    Save {
+        /// Path to the email file
+        file: PathBuf,
+        /// Output directory (default: current directory)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Search emails on the IMAP server
     Search {
         /// Search query (supports from:, to:, subject:, body:, since:, before:, in: prefixes)
@@ -1002,6 +1010,54 @@ async fn main() -> Result<()> {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             println!("Opening: {name}");
             open_file_with_system(&path)?;
+        }
+
+        Some(Commands::Save { file, output }) => {
+            let attachments = list_attachments(&file)?;
+            if attachments.is_empty() {
+                println!("No attachments found for {}", file.display());
+                return Ok(());
+            }
+            let dest_dir = output.unwrap_or_else(|| PathBuf::from("."));
+
+            // Multi-select attachments
+            let display_items: Vec<String> = attachments
+                .iter()
+                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .collect();
+
+            let selections = if attachments.len() == 1 {
+                vec![0]
+            } else {
+                let sel = dialoguer::MultiSelect::new()
+                    .with_prompt("Select attachment(s) to save")
+                    .items(&display_items)
+                    .interact()
+                    .map_err(|e| anyhow!("Selection cancelled: {e}"))?;
+                if sel.is_empty() {
+                    println!("No attachments selected.");
+                    return Ok(());
+                }
+                sel
+            };
+
+            for idx in &selections {
+                let source = &attachments[*idx];
+                match email::parse::save_attachment(source, &dest_dir) {
+                    Ok(dest) => {
+                        println!(
+                            "  {} Saved: {} -> {}",
+                            "\u{2713}".green(),
+                            source.file_name().unwrap_or_default().to_string_lossy(),
+                            dest.display()
+                        );
+                    }
+                    Err(e) => {
+                        let name = source.file_name().unwrap_or_default().to_string_lossy();
+                        println!("  {} Failed to save {}: {}", "\u{2717}".red(), name, e);
+                    }
+                }
+            }
         }
 
         Some(Commands::Search {
