@@ -71,6 +71,20 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - `config_cmd.rs` test connection uses `async-imap` with `block_on`
 - Eliminated `imap-proto v0.10.2` Rust compatibility warning
 
+### OAuth2 / Exchange Online Support (v0.8.0)
+
+- Added `auth_method = "oauth2"` and `[accounts.oauth2]` config section for Microsoft 365 / Exchange Online accounts
+- OAuth2 Device Code Flow via `email config oauth2-login` command (acquires and caches tokens)
+- Token cache at `~/.email-cli/tokens/<account>.json` with automatic refresh on expiry
+- IMAP XOAUTH2 authentication branch in `open_imap_session()` (via `async_imap::Authenticator` trait)
+- SMTP XOAUTH2 authentication branch in `send_email()` (via `lettre::Mechanism::Xoauth2`)
+- Config init wizard updated with "Microsoft 365 / Exchange Online" provider option
+- `email config show` displays OAuth2 config and token cache status
+- Exchange setup guide at `docs/exchange-setup.md`
+- New module: `src/oauth2.rs` (device code flow, token cache, refresh, XOAUTH2 string builder)
+- New module: `src/config_cmd/oauth2.rs` (oauth2-login command)
+- New dependencies: `base64`, `reqwest` (for OAuth2 HTTP requests)
+
 ---
 
 ## Backlog
@@ -106,4 +120,4 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 ---
 
 - **Thread/conversation grouping** -- Group related emails by `In-Reply-To`/`References` headers. (moved from TUI enhancements -- uncertain if needed)
-- add a way to have multiple accounts (another pane to navigate between accounts?)
+- ~~add a way to have multiple accounts~~ -- Done: multi-account support via `[[accounts]]` in config.toml + sidebar account switching in TUI.

@@ -12,6 +12,7 @@ fn test_build_init_toml_basic() {
         "Sent", "sent",
         &[],
         None,
+        None,
     );
 
     assert!(toml.contains("[email]"));
@@ -47,6 +48,7 @@ fn test_build_init_toml_proton_bridge() {
         "Sent", "sent",
         &[],
         None,
+        None,
     );
 
     assert!(toml.contains("accept_invalid_certs = true"));
@@ -71,6 +73,7 @@ fn test_build_init_toml_imap_host_omitted_when_empty() {
         "Sent", "sent",
         &[],
         None,
+        None,
     );
 
     // IMAP section should NOT have a host line (falls back to SMTP)
@@ -93,6 +96,7 @@ fn test_build_init_toml_with_extra_mailboxes() {
         "Sent", "sent",
         &extras,
         None,
+        None,
     );
 
     assert!(toml.contains("[[accounts.mailboxes.extra]]"));
@@ -113,6 +117,7 @@ fn test_build_init_toml_parseable() {
         "Archive", "archive",
         "Sent", "sent",
         &[],
+        None,
         None,
     );
 
@@ -136,6 +141,7 @@ fn test_build_add_account_toml_basic() {
         "Archive", "archive",
         "Sent", "sent",
         &[],
+        None,
     );
 
     assert!(block.starts_with("\n[[accounts]]"));
@@ -158,6 +164,7 @@ fn test_build_add_account_toml_appended_is_valid() {
         "Sent", "sent",
         &[],
         None,
+        None,
     );
 
     // Build second account
@@ -170,6 +177,7 @@ fn test_build_add_account_toml_appended_is_valid() {
         "Archive", "archive",
         "Sent", "sent",
         &[],
+        None,
     );
 
     let combined = format!("{}{}", base, addition);
@@ -178,4 +186,61 @@ fn test_build_add_account_toml_appended_is_valid() {
     assert_eq!(config.accounts.len(), 2);
     assert_eq!(config.accounts[0].name, "main");
     assert_eq!(config.accounts[1].name, "work");
+}
+
+#[test]
+fn test_build_init_toml_oauth2_exchange() {
+    let toml_str = build_init_toml(
+        "hines", "user@example.com",
+        "smtp.office365.com", 587, "user@example.com", false,
+        "outlook.office365.com", 993, "",
+        "~/notes/email/hines", "drafts",
+        "INBOX", "inbox",
+        "Archive", "archive",
+        "Sent Items", "sent-items",
+        &[],
+        None,
+        Some(("test-client-id", "test-tenant-id")),
+    );
+
+    assert!(toml_str.contains("auth_method = \"oauth2\""));
+    assert!(toml_str.contains("[accounts.oauth2]"));
+    assert!(toml_str.contains("client_id = \"test-client-id\""));
+    assert!(toml_str.contains("tenant_id = \"test-tenant-id\""));
+    assert!(toml_str.contains("host = \"smtp.office365.com\""));
+    assert!(toml_str.contains("host = \"outlook.office365.com\""));
+    assert!(toml_str.contains("port = 587"));
+
+    // Verify parseable
+    let config: crate::config::GlobalConfig = toml::from_str(&toml_str)
+        .expect("OAuth2 TOML should be parseable");
+    assert_eq!(config.accounts[0].name, "hines");
+    assert_eq!(config.accounts[0].auth_method, crate::config::AuthMethod::OAuth2);
+    let oauth2 = config.accounts[0].oauth2.as_ref().unwrap();
+    assert_eq!(oauth2.client_id, "test-client-id");
+    assert_eq!(oauth2.tenant_id, "test-tenant-id");
+}
+
+#[test]
+fn test_build_init_toml_password_no_oauth2_section() {
+    let toml_str = build_init_toml(
+        "test", "test@example.com",
+        "smtp.example.com", 465, "test@example.com", false,
+        "", 993, "",
+        "~/mail", "drafts",
+        "INBOX", "inbox",
+        "Archive", "archive",
+        "Sent", "sent",
+        &[],
+        None,
+        None,
+    );
+
+    assert!(!toml_str.contains("auth_method"));
+    assert!(!toml_str.contains("[accounts.oauth2]"));
+
+    let config: crate::config::GlobalConfig = toml::from_str(&toml_str)
+        .expect("Password TOML should be parseable");
+    assert_eq!(config.accounts[0].auth_method, crate::config::AuthMethod::Password);
+    assert!(config.accounts[0].oauth2.is_none());
 }

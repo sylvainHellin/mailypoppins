@@ -3,6 +3,7 @@ pub mod config;
 pub mod config_cmd;
 pub mod contacts;
 pub mod contacts_cmd;
+pub mod oauth2;
 pub mod parse;
 pub mod imap_client;
 pub mod draft;

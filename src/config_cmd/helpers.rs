@@ -83,6 +83,7 @@ pub(crate) fn test_imap_connection(host: &str, port: u16, username: &str, passwo
         username: username.to_string(),
         password: password.to_string(),
         accept_invalid_certs,
+        auth_method: crate::config::AuthMethod::Password,
     };
 
     let rt = tokio::runtime::Runtime::new()?;

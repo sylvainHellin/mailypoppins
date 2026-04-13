@@ -29,7 +29,7 @@ use anyhow::anyhow;
 use futures::io::{AsyncRead, AsyncWrite};
 use log::info;
 
-use crate::config::ImapConfig;
+use crate::config::{AuthMethod, ImapConfig};
 
 pub type ImapSession = async_imap::Session<ImapStream>;
 
@@ -107,6 +107,59 @@ impl fmt::Debug for ImapStream {
     }
 }
 
+// ---------------------------------------------------------------------------
+// XOAUTH2 Authenticator for async_imap
+// ---------------------------------------------------------------------------
+
+/// XOAUTH2 SASL authenticator for IMAP.
+/// Returns the raw XOAUTH2 string; async_imap handles base64 encoding.
+struct XOAuth2Authenticator {
+    user: String,
+    access_token: String,
+}
+
+impl async_imap::Authenticator for &XOAuth2Authenticator {
+    type Response = String;
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        format!(
+            "user={}\x01auth=Bearer {}\x01\x01",
+            self.user, self.access_token
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session opening (password or OAuth2)
+// ---------------------------------------------------------------------------
+
+/// Authenticate an IMAP client, branching on auth method.
+async fn authenticate_client(
+    client: async_imap::Client<ImapStream>,
+    imap_config: &ImapConfig,
+) -> anyhow::Result<ImapSession> {
+    match imap_config.auth_method {
+        AuthMethod::OAuth2 => {
+            info!("IMAP: authenticating via XOAUTH2 for {}", imap_config.username);
+            let auth = XOAuth2Authenticator {
+                user: imap_config.username.clone(),
+                access_token: imap_config.password.clone(), // password field holds the access token for OAuth2
+            };
+            let session = client
+                .authenticate("XOAUTH2", &auth)
+                .await
+                .map_err(|e| anyhow!("IMAP XOAUTH2 authentication failed: {}", e.0))?;
+            Ok(session)
+        }
+        AuthMethod::Password => {
+            let session = client
+                .login(&imap_config.username, &imap_config.password)
+                .await
+                .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
+            Ok(session)
+        }
+    }
+}
+
 pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
     use futures::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -125,13 +178,7 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
             .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
 
         let client = async_imap::Client::new(ImapStream::passthrough(tls_stream));
-
-        let session = client
-            .login(&imap_config.username, &imap_config.password)
-            .await
-            .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
-
-        Ok(session)
+        authenticate_client(client, imap_config).await
     } else {
         info!("IMAP STARTTLS: connecting to {} (plaintext first)", addr);
 
@@ -171,12 +218,6 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
             .map_err(|e| anyhow!("STARTTLS TLS handshake failed: {}", e))?;
 
         let client = async_imap::Client::new(ImapStream::with_greeting(tls_stream));
-
-        let session = client
-            .login(&imap_config.username, &imap_config.password)
-            .await
-            .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
-
-        Ok(session)
+        authenticate_client(client, imap_config).await
     }
 }

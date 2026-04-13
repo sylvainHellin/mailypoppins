@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::config::{EmailSettings, SmtpConfig};
+use crate::config::{AuthMethod, EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
 
 // ---------------------------------------------------------------------------
@@ -507,7 +507,7 @@ pub async fn send_email(
         .context("Invalid 'from' address")?
         .email;
 
-    // Create SMTP transport
+    // Create SMTP transport (branching on auth method)
     let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
 
     let mailer: AsyncSmtpTransport<Tokio1Executor> = if smtp_config.port == 465 {
@@ -519,7 +519,14 @@ pub async fn send_email(
                 .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
         }
-        transport.port(smtp_config.port).credentials(creds).build()
+        let transport = transport.port(smtp_config.port).credentials(creds);
+        if smtp_config.auth_method == AuthMethod::OAuth2 {
+            transport
+                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
+                .build()
+        } else {
+            transport.build()
+        }
     } else {
         // STARTTLS
         let mut transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?;
@@ -529,7 +536,14 @@ pub async fn send_email(
                 .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
         }
-        transport.port(smtp_config.port).credentials(creds).build()
+        let transport = transport.port(smtp_config.port).credentials(creds);
+        if smtp_config.auth_method == AuthMethod::OAuth2 {
+            transport
+                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
+                .build()
+        } else {
+            transport.build()
+        }
     };
 
     // Send to each recipient individually

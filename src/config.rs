@@ -21,6 +21,30 @@ pub struct GlobalConfig {
     pub accounts: Vec<AccountConfig>,
 }
 
+/// Authentication method for an account.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMethod {
+    Password,
+    #[serde(rename = "oauth2")]
+    OAuth2,
+}
+
+impl Default for AuthMethod {
+    fn default() -> Self {
+        AuthMethod::Password
+    }
+}
+
+/// OAuth2 settings stored in config (client_id + tenant_id for Azure Entra ID).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct OAuth2Settings {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub tenant_id: String,
+}
+
 /// Per-account configuration (one entry in [[accounts]]).
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct AccountConfig {
@@ -28,6 +52,10 @@ pub struct AccountConfig {
     pub name: String,
     #[serde(default)]
     pub default_from: String,
+    #[serde(default)]
+    pub auth_method: AuthMethod,
+    #[serde(default)]
+    pub oauth2: Option<OAuth2Settings>,
     #[serde(default)]
     pub smtp: SmtpSettings,
     #[serde(default)]
@@ -157,6 +185,7 @@ pub struct SmtpConfig {
     pub password: String,
     pub default_from: String,
     pub accept_invalid_certs: bool,
+    pub auth_method: AuthMethod,
 }
 
 #[derive(Clone)]
@@ -166,6 +195,7 @@ pub struct ImapConfig {
     pub username: String,
     pub password: String,
     pub accept_invalid_certs: bool,
+    pub auth_method: AuthMethod,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,11 +250,24 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     Ok(config)
 }
 
-/// Build SmtpConfig from AccountConfig + keyring password
+/// Build SmtpConfig from AccountConfig + keyring password (or OAuth2 token)
 impl SmtpConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
-        let key = format!("smtp-password-{}", account.name);
-        let password = get_keyring_password(&key)?;
+        let password = match account.auth_method {
+            AuthMethod::OAuth2 => {
+                let oauth2_settings = account.oauth2.as_ref()
+                    .context("OAuth2 auth_method requires [accounts.oauth2] config")?;
+                crate::oauth2::load_or_refresh_token_blocking(
+                    &account.name,
+                    &oauth2_settings.client_id,
+                    &oauth2_settings.tenant_id,
+                )?
+            }
+            AuthMethod::Password => {
+                let key = format!("smtp-password-{}", account.name);
+                get_keyring_password(&key)?
+            }
+        };
         Ok(Self {
             host: account.smtp.host.clone(),
             port: account.smtp.port,
@@ -232,11 +275,12 @@ impl SmtpConfig {
             password,
             default_from: account.default_from.clone(),
             accept_invalid_certs: account.smtp.accept_invalid_certs,
+            auth_method: account.auth_method.clone(),
         })
     }
 }
 
-/// Build ImapConfig from AccountConfig + keyring password (with SMTP fallback)
+/// Build ImapConfig from AccountConfig + keyring password (or OAuth2 token, with SMTP fallback)
 impl ImapConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
         // Username falls back to SMTP username if empty
@@ -246,11 +290,24 @@ impl ImapConfig {
             account.imap.username.clone()
         };
 
-        // Password: try imap-password first, fall back to smtp-password
-        let imap_key = format!("imap-password-{}", account.name);
-        let smtp_key = format!("smtp-password-{}", account.name);
-        let password = get_keyring_password(&imap_key)
-            .or_else(|_| get_keyring_password(&smtp_key))?;
+        let password = match account.auth_method {
+            AuthMethod::OAuth2 => {
+                let oauth2_settings = account.oauth2.as_ref()
+                    .context("OAuth2 auth_method requires [accounts.oauth2] config")?;
+                crate::oauth2::load_or_refresh_token_blocking(
+                    &account.name,
+                    &oauth2_settings.client_id,
+                    &oauth2_settings.tenant_id,
+                )?
+            }
+            AuthMethod::Password => {
+                // Password: try imap-password first, fall back to smtp-password
+                let imap_key = format!("imap-password-{}", account.name);
+                let smtp_key = format!("smtp-password-{}", account.name);
+                get_keyring_password(&imap_key)
+                    .or_else(|_| get_keyring_password(&smtp_key))?
+            }
+        };
 
         // Host falls back to SMTP host if empty
         let host = if account.imap.host.is_empty() {
@@ -265,6 +322,7 @@ impl ImapConfig {
             username,
             password,
             accept_invalid_certs: account.imap.accept_invalid_certs,
+            auth_method: account.auth_method.clone(),
         })
     }
 }
