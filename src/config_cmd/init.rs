@@ -37,8 +37,10 @@ pub fn cmd_config_init() -> Result<()> {
     println!("Select email provider:");
     println!("  1. Standard IMAP/SMTP (manual config)");
     println!("  2. Proton Mail (via Proton Bridge)");
+    println!("  3. Microsoft 365 / Exchange Online (OAuth2)");
     let provider_choice = prompt_input("Choice", "1")?;
     let is_proton = provider_choice.trim() == "2";
+    let is_exchange = provider_choice.trim() == "3";
     println!();
 
     if is_proton {
@@ -49,15 +51,48 @@ pub fn cmd_config_init() -> Result<()> {
         println!();
     }
 
-    // Pre-fill defaults for Proton Bridge
-    let default_smtp_host = if is_proton { "127.0.0.1" } else { "smtp.example.com" };
-    let default_smtp_port = if is_proton { "1025" } else { "465" };
-    let default_imap_host = if is_proton { "127.0.0.1" } else { "" };
+    if is_exchange {
+        println!(
+            "{} Microsoft 365 requires an Azure Entra ID app registration.",
+            "\u{2139}".blue()
+        );
+        println!("  See docs/exchange-setup.md for step-by-step instructions.");
+        println!();
+    }
+
+    // Pre-fill defaults per provider
+    let default_smtp_host = if is_proton {
+        "127.0.0.1"
+    } else if is_exchange {
+        "smtp.office365.com"
+    } else {
+        "smtp.example.com"
+    };
+    let default_smtp_port = if is_proton {
+        "1025"
+    } else if is_exchange {
+        "587"
+    } else {
+        "465"
+    };
+    let default_imap_host = if is_proton {
+        "127.0.0.1"
+    } else if is_exchange {
+        "outlook.office365.com"
+    } else {
+        ""
+    };
     let default_imap_port = if is_proton { "1143" } else { "993" };
     let accept_invalid_certs = is_proton;
 
     // -- Account name
-    let default_account_name = if is_proton { "proton" } else { "main" };
+    let default_account_name = if is_proton {
+        "proton"
+    } else if is_exchange {
+        "exchange"
+    } else {
+        "main"
+    };
     let account_name = prompt_input("Account name (unique slug, e.g. 'tum', 'gmail')", default_account_name)?;
     println!();
 
@@ -68,73 +103,53 @@ pub fn cmd_config_init() -> Result<()> {
     let smtp_username = prompt_input("SMTP username (email)", "")?;
     let default_from = prompt_input("Default from address", &smtp_username)?;
 
-    // SMTP password with connection test + retry
-    let smtp_password = loop {
-        let pw = dialoguer::Password::new()
-            .with_prompt("SMTP password")
-            .interact()
-            .context("Password input cancelled")?;
+    // -- OAuth2 settings (Exchange only)
+    let mut oauth2_client_id = String::new();
+    let mut oauth2_tenant_id = String::new();
 
-        print!("  Testing SMTP connection... ");
-        io::stdout().flush()?;
-        match test_smtp_connection(&smtp_host, smtp_port, &smtp_username, &pw, accept_invalid_certs) {
-            Ok(()) => {
-                println!("{}", "OK".green());
-                break pw;
-            }
-            Err(e) => {
-                println!("{}", "FAILED".red());
-                eprintln!("  Error: {}", e);
-                print!("  Retry? [Y/n] ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
-                    return Err(anyhow::anyhow!("SMTP connection test failed. Aborting setup."));
-                }
-            }
-        }
-    };
-    let smtp_keyring_key = format!("smtp-password-{}", account_name);
-    set_keyring_password(&smtp_keyring_key, &smtp_password)?;
-    println!("{} SMTP password stored in keyring", "\u{2713}".green());
+    // -- Authentication: OAuth2 or password
+    let (imap_host_input, imap_host, imap_port, imap_username_input, imap_password);
 
-    println!();
+    if is_exchange {
+        // OAuth2 flow: prompt for client_id and tenant_id
+        println!("{}", "OAuth2 Configuration".bold());
+        oauth2_client_id = prompt_input("Azure App client_id", "")?;
+        oauth2_tenant_id = prompt_input("Azure tenant_id", "")?;
+        println!();
 
-    // -- IMAP
-    println!("{}", "IMAP Configuration".bold());
-    let imap_host_input = prompt_input("IMAP host (leave empty to use SMTP host)", default_imap_host)?;
-    let imap_host = if imap_host_input.is_empty() {
-        smtp_host.clone()
+        // IMAP config (pre-filled for Exchange)
+        println!("{}", "IMAP Configuration".bold());
+        imap_host_input = prompt_input("IMAP host", default_imap_host)?;
+        imap_host = if imap_host_input.is_empty() {
+            smtp_host.clone()
+        } else {
+            imap_host_input.clone()
+        };
+        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
+
+        // Run device code flow
+        println!();
+        println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
+        let rt = tokio::runtime::Runtime::new()?;
+        let cache = rt.block_on(crate::oauth2::device_code_flow(
+            &oauth2_client_id,
+            &oauth2_tenant_id,
+            &account_name,
+        ))?;
+        println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
+        imap_password = cache.access_token;
     } else {
-        imap_host_input.clone()
-    };
-    let imap_port: u16 = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
-    let imap_username_input =
-        prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
-    let imap_username = if imap_username_input.is_empty() {
-        smtp_username.clone()
-    } else {
-        imap_username_input.clone()
-    };
-
-    // IMAP password with connection test + retry
-    print!("Use same password as SMTP? [Y/n] ");
-    io::stdout().flush()?;
-    let mut pw_input = String::new();
-    io::stdin().read_line(&mut pw_input)?;
-    let use_separate_imap_pw = matches!(pw_input.trim().to_lowercase().as_str(), "n" | "no");
-
-    let imap_password = if use_separate_imap_pw {
-        loop {
+        // Password flow (existing behavior)
+        let smtp_password = loop {
             let pw = dialoguer::Password::new()
-                .with_prompt("IMAP password")
+                .with_prompt("SMTP password")
                 .interact()
                 .context("Password input cancelled")?;
 
-            print!("  Testing IMAP connection... ");
+            print!("  Testing SMTP connection... ");
             io::stdout().flush()?;
-            match test_imap_connection(&imap_host, imap_port, &imap_username, &pw, accept_invalid_certs) {
+            match test_smtp_connection(&smtp_host, smtp_port, &smtp_username, &pw, accept_invalid_certs) {
                 Ok(()) => {
                     println!("{}", "OK".green());
                     break pw;
@@ -147,37 +162,93 @@ pub fn cmd_config_init() -> Result<()> {
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
                     if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
-                        return Err(anyhow::anyhow!(
-                            "IMAP connection test failed. Aborting setup."
-                        ));
+                        return Err(anyhow::anyhow!("SMTP connection test failed. Aborting setup."));
                     }
                 }
             }
-        }
-    } else {
-        // Test with SMTP password
-        print!("  Testing IMAP connection... ");
-        io::stdout().flush()?;
-        match test_imap_connection(&imap_host, imap_port, &imap_username, &smtp_password, accept_invalid_certs) {
-            Ok(()) => {
-                println!("{}", "OK".green());
-            }
-            Err(e) => {
-                println!("{}", "FAILED".red());
-                eprintln!("  Error: {}", e);
-                eprintln!(
-                    "  {} SMTP password did not work for IMAP. You may need to set it separately later.",
-                    "\u{26a0}".yellow()
-                );
-            }
-        }
-        smtp_password.clone()
-    };
+        };
+        let smtp_keyring_key = format!("smtp-password-{}", account_name);
+        set_keyring_password(&smtp_keyring_key, &smtp_password)?;
+        println!("{} SMTP password stored in keyring", "\u{2713}".green());
 
-    if use_separate_imap_pw {
-        let imap_keyring_key = format!("imap-password-{}", account_name);
-        set_keyring_password(&imap_keyring_key, &imap_password)?;
-        println!("{} IMAP password stored in keyring", "\u{2713}".green());
+        println!();
+
+        // -- IMAP
+        println!("{}", "IMAP Configuration".bold());
+        imap_host_input = prompt_input("IMAP host (leave empty to use SMTP host)", default_imap_host)?;
+        imap_host = if imap_host_input.is_empty() {
+            smtp_host.clone()
+        } else {
+            imap_host_input.clone()
+        };
+        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_username_input =
+            prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
+        let imap_username = if imap_username_input.is_empty() {
+            smtp_username.clone()
+        } else {
+            imap_username_input.clone()
+        };
+
+        // IMAP password with connection test + retry
+        print!("Use same password as SMTP? [Y/n] ");
+        io::stdout().flush()?;
+        let mut pw_input = String::new();
+        io::stdin().read_line(&mut pw_input)?;
+        let use_separate_imap_pw = matches!(pw_input.trim().to_lowercase().as_str(), "n" | "no");
+
+        imap_password = if use_separate_imap_pw {
+            let pw = loop {
+                let pw = dialoguer::Password::new()
+                    .with_prompt("IMAP password")
+                    .interact()
+                    .context("Password input cancelled")?;
+
+                print!("  Testing IMAP connection... ");
+                io::stdout().flush()?;
+                match test_imap_connection(&imap_host, imap_port, &imap_username, &pw, accept_invalid_certs) {
+                    Ok(()) => {
+                        println!("{}", "OK".green());
+                        break pw;
+                    }
+                    Err(e) => {
+                        println!("{}", "FAILED".red());
+                        eprintln!("  Error: {}", e);
+                        print!("  Retry? [Y/n] ");
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
+                            return Err(anyhow::anyhow!(
+                                "IMAP connection test failed. Aborting setup."
+                            ));
+                        }
+                    }
+                }
+            };
+            let imap_keyring_key = format!("imap-password-{}", account_name);
+            set_keyring_password(&imap_keyring_key, &pw)?;
+            println!("{} IMAP password stored in keyring", "\u{2713}".green());
+            pw
+        } else {
+            // Test with SMTP password
+            print!("  Testing IMAP connection... ");
+            io::stdout().flush()?;
+            match test_imap_connection(&imap_host, imap_port, &imap_username, &smtp_password, accept_invalid_certs) {
+                Ok(()) => {
+                    println!("{}", "OK".green());
+                }
+                Err(e) => {
+                    println!("{}", "FAILED".red());
+                    eprintln!("  Error: {}", e);
+                    eprintln!(
+                        "  {} SMTP password did not work for IMAP. You may need to set it separately later.",
+                        "\u{26a0}".yellow()
+                    );
+                }
+            }
+            smtp_password.clone()
+        };
     }
 
     println!();
@@ -187,12 +258,23 @@ pub fn cmd_config_init() -> Result<()> {
     print!("  Fetching mailbox list from server... ");
     io::stdout().flush()?;
 
+    let imap_username = if imap_username_input.is_empty() {
+        smtp_username.clone()
+    } else {
+        imap_username_input.clone()
+    };
+
     let imap_config = crate::config::ImapConfig {
         host: imap_host.clone(),
         port: imap_port,
         username: imap_username.clone(),
         password: imap_password.clone(),
         accept_invalid_certs,
+        auth_method: if is_exchange {
+            crate::config::AuthMethod::OAuth2
+        } else {
+            crate::config::AuthMethod::Password
+        },
     };
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -303,6 +385,11 @@ pub fn cmd_config_init() -> Result<()> {
         .and_then(|c| c.accounts.iter().find(|a| a.name == account_name));
 
     // -- Build config TOML
+    let oauth2_cfg = if is_exchange {
+        Some((&oauth2_client_id as &str, &oauth2_tenant_id as &str))
+    } else {
+        None
+    };
     let toml_content = build_init_toml(
         &account_name, &default_from,
         &smtp_host, smtp_port, &smtp_username, accept_invalid_certs,
@@ -313,6 +400,7 @@ pub fn cmd_config_init() -> Result<()> {
         &sent_server, &sent_local,
         &extra_mailboxes,
         existing_sigs,
+        oauth2_cfg,
     );
 
     // Write config file
@@ -327,10 +415,17 @@ pub fn cmd_config_init() -> Result<()> {
         "\u{2713}".green().bold(),
         path.display()
     );
-    println!(
-        "{} Passwords stored in OS keyring (service: email-cli)",
-        "\u{2713}".green().bold()
-    );
+    if is_exchange {
+        println!(
+            "{} OAuth2 token cached at ~/.email-cli/tokens/",
+            "\u{2713}".green().bold()
+        );
+    } else {
+        println!(
+            "{} Passwords stored in OS keyring (service: email-cli)",
+            "\u{2713}".green().bold()
+        );
+    }
 
     Ok(())
 }
@@ -359,8 +454,10 @@ pub fn cmd_config_add_account() -> Result<()> {
     println!("Select email provider:");
     println!("  1. Standard IMAP/SMTP (manual config)");
     println!("  2. Proton Mail (via Proton Bridge)");
+    println!("  3. Microsoft 365 / Exchange Online (OAuth2)");
     let provider_choice = prompt_input("Choice", "1")?;
     let is_proton = provider_choice.trim() == "2";
+    let is_exchange = provider_choice.trim() == "3";
     println!();
 
     if is_proton {
@@ -371,12 +468,45 @@ pub fn cmd_config_add_account() -> Result<()> {
         println!();
     }
 
-    let default_smtp_host = if is_proton { "127.0.0.1" } else { "smtp.example.com" };
-    let default_smtp_port = if is_proton { "1025" } else { "465" };
-    let default_imap_host = if is_proton { "127.0.0.1" } else { "" };
+    if is_exchange {
+        println!(
+            "{} Microsoft 365 requires an Azure Entra ID app registration.",
+            "\u{2139}".blue()
+        );
+        println!("  See docs/exchange-setup.md for step-by-step instructions.");
+        println!();
+    }
+
+    let default_smtp_host = if is_proton {
+        "127.0.0.1"
+    } else if is_exchange {
+        "smtp.office365.com"
+    } else {
+        "smtp.example.com"
+    };
+    let default_smtp_port = if is_proton {
+        "1025"
+    } else if is_exchange {
+        "587"
+    } else {
+        "465"
+    };
+    let default_imap_host = if is_proton {
+        "127.0.0.1"
+    } else if is_exchange {
+        "outlook.office365.com"
+    } else {
+        ""
+    };
     let default_imap_port = if is_proton { "1143" } else { "993" };
     let accept_invalid_certs = is_proton;
-    let default_account_name = if is_proton { "proton" } else { "work" };
+    let default_account_name = if is_proton {
+        "proton"
+    } else if is_exchange {
+        "exchange"
+    } else {
+        "work"
+    };
 
     // -- Account name
     let account_name = loop {
@@ -396,55 +526,45 @@ pub fn cmd_config_add_account() -> Result<()> {
     let smtp_username = prompt_input("SMTP username (email)", "")?;
     let default_from = prompt_input("Default from address", &smtp_username)?;
 
-    let smtp_password = loop {
-        let pw = dialoguer::Password::new()
-            .with_prompt("SMTP password")
-            .interact()
-            .context("Password input cancelled")?;
-        print!("  Testing SMTP connection... ");
-        io::stdout().flush()?;
-        match test_smtp_connection(&smtp_host, smtp_port, &smtp_username, &pw, accept_invalid_certs) {
-            Ok(()) => { println!("{}", "OK".green()); break pw; }
-            Err(e) => {
-                println!("{}", "FAILED".red());
-                eprintln!("  Error: {}", e);
-                print!("  Retry? [Y/n] ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
-                    return Err(anyhow::anyhow!("SMTP connection test failed."));
-                }
-            }
-        }
-    };
-    let smtp_key = format!("smtp-password-{}", account_name);
-    set_keyring_password(&smtp_key, &smtp_password)?;
-    println!("{} SMTP password stored in keyring", "\u{2713}".green());
-    println!();
+    // -- OAuth2 settings (Exchange only)
+    let mut oauth2_client_id = String::new();
+    let mut oauth2_tenant_id = String::new();
 
-    // -- IMAP
-    println!("{}", "IMAP Configuration".bold());
-    let imap_host_input = prompt_input("IMAP host (leave empty to use SMTP host)", default_imap_host)?;
-    let imap_host = if imap_host_input.is_empty() { smtp_host.clone() } else { imap_host_input.clone() };
-    let imap_port: u16 = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
-    let imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
-    let imap_username = if imap_username_input.is_empty() { smtp_username.clone() } else { imap_username_input.clone() };
+    // -- Authentication: OAuth2 or password
+    let (imap_host_input, imap_host, imap_port, imap_username_input, imap_password);
 
-    print!("Use same password as SMTP? [Y/n] ");
-    io::stdout().flush()?;
-    let mut pw_input = String::new();
-    io::stdin().read_line(&mut pw_input)?;
-    let use_separate = matches!(pw_input.trim().to_lowercase().as_str(), "n" | "no");
-    let imap_password = if use_separate {
-        loop {
+    if is_exchange {
+        println!();
+        println!("{}", "OAuth2 Configuration".bold());
+        oauth2_client_id = prompt_input("Azure App client_id", "")?;
+        oauth2_tenant_id = prompt_input("Azure tenant_id", "")?;
+        println!();
+
+        println!("{}", "IMAP Configuration".bold());
+        imap_host_input = prompt_input("IMAP host", default_imap_host)?;
+        imap_host = if imap_host_input.is_empty() { smtp_host.clone() } else { imap_host_input.clone() };
+        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
+
+        println!();
+        println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
+        let rt = tokio::runtime::Runtime::new()?;
+        let cache = rt.block_on(crate::oauth2::device_code_flow(
+            &oauth2_client_id,
+            &oauth2_tenant_id,
+            &account_name,
+        ))?;
+        println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
+        imap_password = cache.access_token;
+    } else {
+        let smtp_password = loop {
             let pw = dialoguer::Password::new()
-                .with_prompt("IMAP password")
+                .with_prompt("SMTP password")
                 .interact()
                 .context("Password input cancelled")?;
-            print!("  Testing IMAP connection... ");
+            print!("  Testing SMTP connection... ");
             io::stdout().flush()?;
-            match test_imap_connection(&imap_host, imap_port, &imap_username, &pw, accept_invalid_certs) {
+            match test_smtp_connection(&smtp_host, smtp_port, &smtp_username, &pw, accept_invalid_certs) {
                 Ok(()) => { println!("{}", "OK".green()); break pw; }
                 Err(e) => {
                     println!("{}", "FAILED".red());
@@ -454,28 +574,68 @@ pub fn cmd_config_add_account() -> Result<()> {
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
                     if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
-                        return Err(anyhow::anyhow!("IMAP connection test failed."));
+                        return Err(anyhow::anyhow!("SMTP connection test failed."));
                     }
                 }
             }
-        }
-    } else {
-        print!("  Testing IMAP connection... ");
+        };
+        let smtp_key = format!("smtp-password-{}", account_name);
+        set_keyring_password(&smtp_key, &smtp_password)?;
+        println!("{} SMTP password stored in keyring", "\u{2713}".green());
+        println!();
+
+        println!("{}", "IMAP Configuration".bold());
+        imap_host_input = prompt_input("IMAP host (leave empty to use SMTP host)", default_imap_host)?;
+        imap_host = if imap_host_input.is_empty() { smtp_host.clone() } else { imap_host_input.clone() };
+        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
+        let imap_username = if imap_username_input.is_empty() { smtp_username.clone() } else { imap_username_input.clone() };
+
+        print!("Use same password as SMTP? [Y/n] ");
         io::stdout().flush()?;
-        match test_imap_connection(&imap_host, imap_port, &imap_username, &smtp_password, accept_invalid_certs) {
-            Ok(()) => println!("{}", "OK".green()),
-            Err(e) => {
-                println!("{}", "FAILED".red());
-                eprintln!("  {} SMTP password did not work for IMAP.", "\u{26a0}".yellow());
-                eprintln!("  Error: {}", e);
+        let mut pw_input = String::new();
+        io::stdin().read_line(&mut pw_input)?;
+        let use_separate = matches!(pw_input.trim().to_lowercase().as_str(), "n" | "no");
+        imap_password = if use_separate {
+            let pw = loop {
+                let pw = dialoguer::Password::new()
+                    .with_prompt("IMAP password")
+                    .interact()
+                    .context("Password input cancelled")?;
+                print!("  Testing IMAP connection... ");
+                io::stdout().flush()?;
+                match test_imap_connection(&imap_host, imap_port, &imap_username, &pw, accept_invalid_certs) {
+                    Ok(()) => { println!("{}", "OK".green()); break pw; }
+                    Err(e) => {
+                        println!("{}", "FAILED".red());
+                        eprintln!("  Error: {}", e);
+                        print!("  Retry? [Y/n] ");
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
+                            return Err(anyhow::anyhow!("IMAP connection test failed."));
+                        }
+                    }
+                }
+            };
+            let imap_key = format!("imap-password-{}", account_name);
+            set_keyring_password(&imap_key, &pw)?;
+            println!("{} IMAP password stored in keyring", "\u{2713}".green());
+            pw
+        } else {
+            print!("  Testing IMAP connection... ");
+            io::stdout().flush()?;
+            match test_imap_connection(&imap_host, imap_port, &imap_username, &smtp_password, accept_invalid_certs) {
+                Ok(()) => println!("{}", "OK".green()),
+                Err(e) => {
+                    println!("{}", "FAILED".red());
+                    eprintln!("  {} SMTP password did not work for IMAP.", "\u{26a0}".yellow());
+                    eprintln!("  Error: {}", e);
+                }
             }
-        }
-        smtp_password.clone()
-    };
-    if use_separate {
-        let imap_key = format!("imap-password-{}", account_name);
-        set_keyring_password(&imap_key, &imap_password)?;
-        println!("{} IMAP password stored in keyring", "\u{2713}".green());
+            smtp_password.clone()
+        };
     }
     println!();
 
@@ -483,10 +643,16 @@ pub fn cmd_config_add_account() -> Result<()> {
     println!("{}", "Mailbox Configuration".bold());
     print!("  Fetching mailbox list from server... ");
     io::stdout().flush()?;
+    let imap_username = if imap_username_input.is_empty() { smtp_username.clone() } else { imap_username_input.clone() };
     let imap_config = crate::config::ImapConfig {
         host: imap_host.clone(), port: imap_port,
         username: imap_username.clone(), password: imap_password.clone(),
         accept_invalid_certs,
+        auth_method: if is_exchange {
+            crate::config::AuthMethod::OAuth2
+        } else {
+            crate::config::AuthMethod::Password
+        },
     };
     let rt = tokio::runtime::Runtime::new()?;
     let server_mailboxes = match rt.block_on(list_mailboxes(&imap_config)) {
@@ -543,6 +709,11 @@ pub fn cmd_config_add_account() -> Result<()> {
     println!("  Drafts:  {}/{}", root_dir, drafts_dir);
 
     // -- Append to config file
+    let oauth2_cfg = if is_exchange {
+        Some((&oauth2_client_id as &str, &oauth2_tenant_id as &str))
+    } else {
+        None
+    };
     let block = build_add_account_toml(
         &account_name, &default_from,
         &smtp_host, smtp_port, &smtp_username, accept_invalid_certs,
@@ -552,6 +723,7 @@ pub fn cmd_config_add_account() -> Result<()> {
         &archive_server, &archive_local,
         &sent_server, &sent_local,
         &extra_mailboxes,
+        oauth2_cfg,
     );
 
     // Read existing config and append
@@ -566,10 +738,17 @@ pub fn cmd_config_add_account() -> Result<()> {
         account_name,
         path.display()
     );
-    println!(
-        "{} Passwords stored in OS keyring (service: email-cli)",
-        "\u{2713}".green().bold()
-    );
+    if is_exchange {
+        println!(
+            "{} OAuth2 token cached at ~/.email-cli/tokens/",
+            "\u{2713}".green().bold()
+        );
+    } else {
+        println!(
+            "{} Passwords stored in OS keyring (service: email-cli)",
+            "\u{2713}".green().bold()
+        );
+    }
 
     Ok(())
 }
@@ -579,6 +758,7 @@ pub fn cmd_config_add_account() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Build the full config TOML for `config init`.
+/// `oauth2` is Some((client_id, tenant_id)) for OAuth2 accounts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_init_toml(
     account_name: &str, default_from: &str,
@@ -590,6 +770,7 @@ pub(crate) fn build_init_toml(
     sent_server: &str, sent_local: &str,
     extra_mailboxes: &[String],
     existing_sigs: Option<&AccountConfig>,
+    oauth2: Option<(&str, &str)>,
 ) -> String {
     let mut out = String::new();
     out.push_str("[email]\n");
@@ -600,6 +781,13 @@ pub(crate) fn build_init_toml(
     out.push_str("\n[[accounts]]\n");
     out.push_str(&format!("name = \"{}\"\n", account_name));
     out.push_str(&format!("default_from = \"{}\"\n", default_from));
+
+    if let Some((client_id, tenant_id)) = oauth2 {
+        out.push_str("auth_method = \"oauth2\"\n");
+        out.push_str("\n[accounts.oauth2]\n");
+        out.push_str(&format!("client_id = \"{}\"\n", client_id));
+        out.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
+    }
 
     out.push_str("\n[accounts.smtp]\n");
     out.push_str(&format!("host = \"{}\"\n", smtp_host));
@@ -664,6 +852,7 @@ pub(crate) fn build_init_toml(
 }
 
 /// Build an account TOML block for `config add-account` (appended to existing config).
+/// `oauth2` is Some((client_id, tenant_id)) for OAuth2 accounts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_add_account_toml(
     account_name: &str, default_from: &str,
@@ -674,11 +863,19 @@ pub(crate) fn build_add_account_toml(
     archive_server: &str, archive_local: &str,
     sent_server: &str, sent_local: &str,
     extra_mailboxes: &[String],
+    oauth2: Option<(&str, &str)>,
 ) -> String {
     let mut block = String::from("\n");
     block.push_str("[[accounts]]\n");
     block.push_str(&format!("name = \"{}\"\n", account_name));
     block.push_str(&format!("default_from = \"{}\"\n", default_from));
+
+    if let Some((client_id, tenant_id)) = oauth2 {
+        block.push_str("auth_method = \"oauth2\"\n");
+        block.push_str("\n[accounts.oauth2]\n");
+        block.push_str(&format!("client_id = \"{}\"\n", client_id));
+        block.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
+    }
 
     block.push_str("\n[accounts.smtp]\n");
     block.push_str(&format!("host = \"{}\"\n", smtp_host));

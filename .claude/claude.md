@@ -46,6 +46,8 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The lib
 | `src/tui/ui.rs` | TUI rendering (sidebar, email list, headers pane, preview pane, status bar, overlays) |
 | `src/tui/event.rs` | Terminal event polling (crossterm), tick rate management |
 | `src/tui/theme.rs` | Catppuccin Mocha color palette constants |
+| `src/oauth2.rs` | OAuth2 Device Code Flow for Microsoft Entra ID: token acquisition, cache (`~/.email-cli/tokens/`), refresh, XOAUTH2 SASL string builder |
+| `src/config_cmd/oauth2.rs` | `email config oauth2-login` command: runs device code flow, tests IMAP/SMTP |
 
 ### Dependency graph (no cycles)
 
@@ -57,7 +59,8 @@ imap_client --> config, parse, sync, types
 draft       --> config, parse, types
 send        --> config, types
 sync        --> parse
-config_cmd/ --> config, imap_client
+oauth2      --> (none; uses reqwest, base64, serde_json)
+config_cmd/ --> config, imap_client, oauth2
 tui         --> config, draft, imap_client, parse, send, sync, types
 main        --> all modules (via lib)
 ```
@@ -85,9 +88,10 @@ main        --> all modules (via lib)
 | `email open <file>` | Open an attachment from an email in the default application (fuzzy-select if multiple) |
 | `email save <file> [--output <dir>]` | Save attachment(s) from an email to a directory (multi-select, default: current dir) |
 | `email search <query>` | Search emails on the IMAP server; supports `from:`, `to:`, `subject:`, `body:`, `since:`, `before:`, `in:` prefixes; `--mailbox`, `--limit` (`-n`), `--full` flags |
-| `email config init` | Interactive setup wizard with credential testing |
-| `email config show` | Show current configuration (passwords masked) |
+| `email config init` | Interactive setup wizard with credential testing (supports password + OAuth2/Exchange) |
+| `email config show` | Show current configuration (passwords masked, OAuth2 token status) |
 | `email config set-password` | Store SMTP or IMAP password in OS keyring |
+| `email config oauth2-login [--account]` | Run OAuth2 device code flow to acquire and cache a token |
 | `email config path` | Print config file path |
 
 ## Configuration
@@ -108,10 +112,18 @@ All configuration lives in a single global file: **`~/.config/email/config.toml`
 ### Drafts directory resolution
 `list`, `send-approved`, and `reply` auto-resolve via `resolve_drafts_dir`: explicit CLI arg -> `config.directories.drafts` (resolved against root) -> `"."` fallback.
 
+### Authentication methods
+
+Each account has an `auth_method` field (default: `password`):
+
+- `password` -- Passwords stored in OS keyring via `keyring` crate. Keys: `smtp-password-<name>`, `imap-password-<name>`.
+- `oauth2` -- OAuth2 Device Code Flow for Microsoft 365 / Exchange Online. Requires `[accounts.oauth2]` section with `client_id` and `tenant_id` (Azure Entra ID app registration). Tokens cached at `~/.email-cli/tokens/<account>.json`. The `password` field on `SmtpConfig`/`ImapConfig` carries the access token for OAuth2 accounts. IMAP uses `XOAUTH2` SASL mechanism (`async_imap::Authenticator` trait). SMTP uses `lettre::Mechanism::Xoauth2`. Token refresh is automatic; if the refresh token expires (~90 days), re-run `email config oauth2-login`.
+
 ### Config subcommands
-- `email config init` -- Interactive wizard: tests SMTP/IMAP credentials, discovers server mailboxes, assigns roles, writes config.
-- `email config show` -- Displays resolved config with masked passwords.
+- `email config init` -- Interactive wizard: tests SMTP/IMAP credentials, discovers server mailboxes, assigns roles, writes config. Supports password + OAuth2 (Exchange) providers.
+- `email config show` -- Displays resolved config with masked passwords and OAuth2 token status.
 - `email config set-password smtp|imap` -- Stores password in OS keyring.
+- `email config oauth2-login [--account]` -- Runs OAuth2 device code flow, caches token, tests IMAP/SMTP.
 - `email config path` -- Prints config file path.
 
 ## Logging

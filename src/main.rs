@@ -248,6 +248,12 @@ enum ConfigAction {
     },
     /// Add a new account to the existing config
     AddAccount,
+    /// Run OAuth2 device code flow to acquire and cache a token
+    Oauth2Login {
+        /// Account name (default: first OAuth2 account)
+        #[arg(long)]
+        account: Option<String>,
+    },
     /// Migrate old single-account config to new [[accounts]] format
     Migrate,
     /// Print config file path
@@ -313,6 +319,7 @@ async fn main() -> Result<()> {
             password: String::new(),
             default_from: "user@example.com".to_string(),
             accept_invalid_certs: false,
+            auth_method: email::config::AuthMethod::Password,
         }
     });
 
@@ -1165,6 +1172,11 @@ async fn main() -> Result<()> {
                     cmd_set_password(&which, &acct_name)?;
                 }
                 ConfigAction::AddAccount => cmd_config_add_account()?,
+                ConfigAction::Oauth2Login { account } => {
+                    let acct_name = account
+                        .or_else(|| cli.account.clone());
+                    cmd_oauth2_login(acct_name.as_deref())?;
+                }
                 ConfigAction::Migrate => cmd_config_migrate()?,
                 ConfigAction::Path => cmd_config_path(),
             }

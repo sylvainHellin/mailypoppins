@@ -3,7 +3,7 @@ use colored::*;
 
 use crate::config::{
     all_configured_mailboxes, config_path, get_keyring_password, load_global_config,
-    resolve_mailbox_local_path,
+    resolve_mailbox_local_path, AuthMethod,
 };
 
 /// Print the config file path.
@@ -31,6 +31,42 @@ pub fn cmd_config_show() -> Result<()> {
     for account in &config.accounts {
         println!("\n{}", format!("[[accounts]] name = \"{}\"", account.name).bold().cyan());
         println!("  default_from = {}", account.default_from);
+
+        match account.auth_method {
+            AuthMethod::OAuth2 => {
+                println!("  auth_method  = {}", "oauth2".yellow());
+                if let Some(ref oauth2) = account.oauth2 {
+                    println!("\n  {}", "[oauth2]".bold());
+                    println!("    client_id = {}", oauth2.client_id);
+                    println!("    tenant_id = {}", oauth2.tenant_id);
+                    // Show token cache status
+                    let cache_path = std::path::PathBuf::from(
+                        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+                    )
+                    .join(".email-cli")
+                    .join("tokens")
+                    .join(format!("{}.json", account.name));
+                    if cache_path.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&cache_path) {
+                            if let Ok(cache) = serde_json::from_str::<crate::oauth2::TokenCache>(&content) {
+                                if cache.is_expired() {
+                                    println!("    token      = {} (run `email config oauth2-login`)", "expired".red());
+                                } else {
+                                    println!("    token      = {}", "valid".green());
+                                }
+                            } else {
+                                println!("    token      = {} (corrupt cache file)", "invalid".red());
+                            }
+                        }
+                    } else {
+                        println!("    token      = {} (run `email config oauth2-login`)", "not cached".red());
+                    }
+                }
+            }
+            AuthMethod::Password => {
+                println!("  auth_method  = password");
+            }
+        }
 
         println!("\n  {}", "[smtp]".bold());
         println!("    host     = {}", account.smtp.host);
