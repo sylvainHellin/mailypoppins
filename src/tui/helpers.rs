@@ -104,16 +104,18 @@ pub(super) fn watcher_loop(
 pub(super) fn suspend_terminal(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show,
+    )?;
     disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
     Ok(())
 }
 
 pub(super) fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    terminal.hide_cursor()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.clear()?;
     Ok(())
 }
