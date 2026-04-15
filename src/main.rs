@@ -775,12 +775,33 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::ListMailboxes) => {
-            let imap_config = ImapConfig::load(&account_config)?;
-            let mailboxes = list_mailboxes(&imap_config).await?;
+            if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = email::config::GraphConfig::load(&account_config)?;
+                let client = email::graph::GraphClient::new_async(&graph_config).await?;
+                let folders = client.list_folders().await?;
 
-            println!("{} Available mailboxes:", "ℹ".blue());
-            for name in &mailboxes {
-                println!("  {}", name);
+                println!("{} Available folders:", "ℹ".blue());
+                for folder in &folders {
+                    let unread = if folder.unread_item_count > 0 {
+                        format!(" ({})", format!("{} unread", folder.unread_item_count).yellow())
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {} {} total{}",
+                        folder.display_name.green(),
+                        folder.total_item_count,
+                        unread,
+                    );
+                }
+            } else {
+                let imap_config = ImapConfig::load(&account_config)?;
+                let mailboxes = list_mailboxes(&imap_config).await?;
+
+                println!("{} Available mailboxes:", "ℹ".blue());
+                for name in &mailboxes {
+                    println!("  {}", name);
+                }
             }
         }
 
@@ -1175,7 +1196,7 @@ async fn main() -> Result<()> {
                 ConfigAction::Oauth2Login { account } => {
                     let acct_name = account
                         .or_else(|| cli.account.clone());
-                    cmd_oauth2_login(acct_name.as_deref())?;
+                    cmd_oauth2_login(acct_name.as_deref()).await?;
                 }
                 ConfigAction::Migrate => cmd_config_migrate()?,
                 ConfigAction::Path => cmd_config_path(),

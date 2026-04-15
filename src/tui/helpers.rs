@@ -198,6 +198,9 @@ pub(super) async fn lib_do_sync(
     if result.read_updated > 0 {
         msg.push_str(&format!(", {} read status updated", result.read_updated));
     }
+    if result.deduped > 0 {
+        msg.push_str(&format!(", {} duplicates removed", result.deduped));
+    }
     if reconcile {
         if result.moved > 0 || result.removed > 0 {
             msg.push_str(&format!(
