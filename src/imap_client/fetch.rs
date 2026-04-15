@@ -13,14 +13,14 @@ pub(super) fn parse_message_id_from_header_bytes(header_bytes: &[u8]) -> Option<
     let text = std::str::from_utf8(header_bytes).ok()?;
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(value) = trimmed
-            .strip_prefix("Message-ID:")
-            .or_else(|| trimmed.strip_prefix("Message-Id:"))
-            .or_else(|| trimmed.strip_prefix("message-id:"))
-        {
-            let id = value.trim();
-            if !id.is_empty() {
-                return Some(id.to_string());
+        // Case-insensitive prefix check: some servers use MESSAGE-ID, MESSAGE-Id, etc.
+        if trimmed.len() >= 11 && trimmed.as_bytes()[10] == b':' {
+            let prefix = &trimmed[..10];
+            if prefix.eq_ignore_ascii_case("Message-ID") {
+                let id = trimmed[11..].trim();
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
             }
         }
     }

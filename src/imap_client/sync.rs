@@ -9,7 +9,8 @@ use super::open_imap_session;
 use super::ops::update_read_status_locally;
 use crate::config::ImapConfig;
 use crate::parse::{
-    save_fetched_emails_with_known_ids, scan_existing_message_ids, scan_mailbox_message_ids,
+    deduplicate_mailbox, save_fetched_emails_with_known_ids, scan_existing_message_ids,
+    scan_mailbox_message_ids,
 };
 use crate::sync::reconcile_local_files;
 
@@ -41,6 +42,7 @@ pub struct SyncResult {
     pub moved: usize,
     pub removed: usize,
     pub read_updated: usize,
+    pub deduped: usize,
     /// Address observations from newly-saved emails, ready to be merged
     /// into the contacts index by the caller. Empty on `dry_run`.
     pub fresh_observations: Vec<FreshObservation>,
@@ -85,16 +87,13 @@ pub async fn sync_mailboxes(
 
     // Phase 1: Additive sync with two-pass fetch
     for target in targets {
-        // Start from global known_ids so we skip emails already stored anywhere locally
-        let mut known_ids = global_known_ids.clone();
-
         if dry_run {
             // Dry run: only do pass 1 (header check) to count new messages
             match count_new_emails_on_session(
                 &mut session,
                 &target.server_name,
                 Some(limit),
-                &known_ids,
+                &global_known_ids,
             )
             .await
             {
@@ -114,7 +113,7 @@ pub async fn sync_mailboxes(
                 &mut session,
                 &target.server_name,
                 Some(limit),
-                &known_ids,
+                &global_known_ids,
             )
             .await
             {
@@ -125,7 +124,7 @@ pub async fn sync_mailboxes(
                             &new_emails,
                             &target.local_dir,
                             &target.status,
-                            &mut known_ids,
+                            &mut global_known_ids,
                         )?;
                         total_saved += saved;
                         // Collect fresh-contact observations from the new emails
@@ -151,6 +150,24 @@ pub async fn sync_mailboxes(
                         "Failed to sync mailbox '{}': {}. Continuing with next.",
                         target.server_name, e
                     );
+                }
+            }
+        }
+    }
+
+    // Dedup pass: remove any duplicate files that slipped through
+    let mut total_deduped = 0usize;
+    if !dry_run {
+        let mut deduped_dirs = std::collections::HashSet::new();
+        for target in targets {
+            if deduped_dirs.insert(target.local_dir.clone()) {
+                match deduplicate_mailbox(&target.local_dir) {
+                    Ok(n) if n > 0 => {
+                        info!("Deduplicated {} file(s) in {}", n, target.local_dir.display());
+                        total_deduped += n;
+                    }
+                    Err(e) => warn!("Dedup failed for {}: {}", target.local_dir.display(), e),
+                    _ => {}
                 }
             }
         }
@@ -216,6 +233,7 @@ pub async fn sync_mailboxes(
         moved: total_moved,
         removed: total_removed,
         read_updated: total_read_updated,
+        deduped: total_deduped,
         fresh_observations,
     })
 }

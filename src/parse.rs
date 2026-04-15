@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use colored::*;
 use mailparse::{parse_mail, MailHeaderMap};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -461,8 +461,8 @@ pub fn parse_email_date_prefix(date_str: &str) -> String {
 
 /// Low-level scanner: walks a mailbox directory and extracts message_id from frontmatter.
 /// Returns {message_id -> file_path}. Used as the canonical base for all scanning.
-pub(crate) fn scan_mailbox_message_ids(dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>> {
-    let mut ids = std::collections::HashMap::new();
+pub(crate) fn scan_mailbox_message_ids(dir: &Path) -> Result<HashMap<String, PathBuf>> {
+    let mut ids = HashMap::new();
     if !dir.exists() {
         return Ok(ids);
     }
@@ -485,7 +485,7 @@ pub(crate) fn scan_mailbox_message_ids(dir: &Path) -> Result<std::collections::H
                         }
                     }
                     if in_frontmatter && line.starts_with("message_id:") {
-                        let id = line.trim_start_matches("message_id:").trim().trim_matches('"');
+                        let id = line.trim_start_matches("message_id:").trim().trim_matches('"').trim_matches('\'');
                         if !id.is_empty() {
                             ids.insert(id.to_string(), path.to_path_buf());
                         }
@@ -636,6 +636,64 @@ pub fn save_fetched_emails_with_known_ids(
     }
 
     Ok((saved, skipped))
+}
+
+/// Remove duplicate emails in a directory by message_id.
+/// Keeps the first file found (alphabetically) and deletes subsequent duplicates
+/// along with their companion .html and _attachments/ files.
+/// Returns the number of duplicates removed.
+pub fn deduplicate_mailbox(dir: &Path) -> Result<usize> {
+    let mut seen: HashMap<String, PathBuf> = HashMap::new();
+    let mut removed = 0usize;
+
+    // Collect all (message_id, path) pairs, sorted by filename for determinism
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    if !dir.exists() {
+        return Ok(0);
+    }
+    for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().map_or(true, |ext| ext != "md") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(path) {
+            let mut in_frontmatter = false;
+            for line in content.lines() {
+                if line == "---" {
+                    if !in_frontmatter { in_frontmatter = true; continue; }
+                    else { break; }
+                }
+                if in_frontmatter && line.starts_with("message_id:") {
+                    let id = line.trim_start_matches("message_id:").trim().trim_matches('"').trim_matches('\'');
+                    if !id.is_empty() {
+                        entries.push((id.to_string(), path.to_path_buf()));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+    for (mid, path) in entries {
+        if let Some(_keeper) = seen.get(&mid) {
+            // This is a duplicate -- remove .md, .html, and _attachments/
+            let _ = fs::remove_file(&path);
+            let html = path.with_extension("html");
+            if html.exists() {
+                let _ = fs::remove_file(&html);
+            }
+            let att_dir = attachments_dir_for(&path);
+            if att_dir.is_dir() {
+                let _ = fs::remove_dir_all(&att_dir);
+            }
+            removed += 1;
+        } else {
+            seen.insert(mid, path);
+        }
+    }
+
+    Ok(removed)
 }
 
 pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {

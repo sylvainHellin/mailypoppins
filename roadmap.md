@@ -85,6 +85,16 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - New module: `src/config_cmd/oauth2.rs` (oauth2-login command)
 - New dependencies: `base64`, `reqwest` (for OAuth2 HTTP requests)
 
+### Graph API Integration Phase 1 (in progress)
+
+- Added `AuthMethod::Graph` variant (`auth_method = "graph"` in config)
+- `SmtpConfig::load()` and `ImapConfig::load()` return early errors for Graph accounts (they use Graph API, not SMTP/IMAP)
+- New `GraphConfig` struct with `::load()` to extract client_id, tenant_id, username, account_name from account config
+- OAuth2 scopes parameterized: `IMAP_SMTP_SCOPES` and `GRAPH_SCOPES` constants replace the old single `SCOPES`; all oauth2 functions accept a `scopes` parameter
+- `scopes_for_auth_method()` helper maps auth method to the correct scopes
+- `email config oauth2-login` supports Graph accounts: acquires Graph-scoped token and tests via Graph `/me` endpoint (skips IMAP/SMTP tests)
+- `email config show` displays "graph (Microsoft Graph API)" for Graph accounts and hides SMTP/IMAP details
+
 ---
 
 ## Backlog
@@ -95,6 +105,8 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - ~~**Install script / keychain re-prompting**: Fixed codesign/keychain issue after updates.~~ Regression: binary is still prompting 3x for keychain passwords at TUI startup despite codesign + ACL reset.
 - **Delete draft command**: `email delete` now works for local-only drafts (removes `.md` + `.html` files without IMAP).
 - **IMAP watcher retry spam**: Exponential sleep between retries; silent errors after first one (v0.6.0+).
+- review the hotkeys for the different commands. It makes for example no sense that search is `S` is for search (usually `f`) and that sync is `F`.
+- ~~bug: duplicated emails in inbox/archive~~ Fixed: case-insensitive Message-ID header parsing, propagate known IDs across sync targets, post-sync dedup pass, frontmatter scanner handles both quote styles. 37 existing duplicates cleaned up.
 
 ### TUI enhancements
 
