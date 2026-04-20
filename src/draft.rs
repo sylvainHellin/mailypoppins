@@ -91,15 +91,15 @@ pub fn create_reply_draft(
 
     let reply_cc = if reply_all {
         let mut all_recipients: Vec<String> = Vec::new();
-        for addr in inbox.to.split(',') {
-            let email = extract_email_address(addr.trim());
+        for addr in crate::send::split_addresses(&inbox.to) {
+            let email = extract_email_address(&addr);
             if email.to_lowercase() != default_from.to_lowercase() {
                 all_recipients.push(email);
             }
         }
         if let Some(ref cc) = inbox.cc {
-            for addr in cc.split(',') {
-                let email = extract_email_address(addr.trim());
+            for addr in crate::send::split_addresses(cc) {
+                let email = extract_email_address(&addr);
                 if email.to_lowercase() != default_from.to_lowercase()
                     && !all_recipients
                         .iter()
@@ -422,8 +422,7 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     }
 
     // Validate email format (basic check)
-    for email in draft.frontmatter.to.split(',') {
-        let email = email.trim();
+    for email in crate::send::split_addresses(&draft.frontmatter.to) {
         if email.parse::<lettre::message::Mailbox>().is_err() {
             return Err(anyhow!("Invalid email address: {}", email));
         }
