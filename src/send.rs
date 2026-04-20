@@ -282,6 +282,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // split_addresses
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn split_addresses_simple() {
+        let r = split_addresses("alice@x.com, bob@x.com");
+        assert_eq!(r, vec!["alice@x.com", "bob@x.com"]);
+    }
+
+    #[test]
+    fn split_addresses_quoted_comma_in_display_name() {
+        let r = split_addresses("\"Doe, Jane\" <jane@example.com>, bob@x.com");
+        assert_eq!(r, vec!["\"Doe, Jane\" <jane@example.com>", "bob@x.com"]);
+    }
+
+    #[test]
+    fn split_addresses_single_quoted_name() {
+        let r = split_addresses("\"Doe, Jane\" <jane@x.com>");
+        assert_eq!(r, vec!["\"Doe, Jane\" <jane@x.com>"]);
+    }
+
+    #[test]
+    fn split_addresses_empty() {
+        let r = split_addresses("");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn split_addresses_whitespace_only() {
+        let r = split_addresses("   ");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn split_addresses_lettre_parses_quoted_name() {
+        use lettre::message::Mailbox;
+        let addr = "\"Doe, Jane\" <jane@example.com>";
+        let mbox: Mailbox = addr.parse().expect("lettre should parse quoted display name");
+        assert_eq!(mbox.email.to_string(), "jane@example.com");
+    }
+
+    // -----------------------------------------------------------------------
     // markdown_to_html edge cases
     // -----------------------------------------------------------------------
 
@@ -323,6 +365,36 @@ mod tests {
     }
 }
 
+/// Split a comma-separated address list respecting quoted display names.
+/// e.g. `"Doe, Jane" <jane@x.com>, bob@x.com` → two entries, not three.
+pub fn split_addresses(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for ch in s.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            ',' if !in_quotes => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        parts.push(trimmed);
+    }
+    parts
+}
+
 pub async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
@@ -356,24 +428,21 @@ pub async fn send_email(
     let mut seen = HashSet::new();
     let mut recipients: Vec<(String, RecipientRole)> = Vec::new();
 
-    for to in draft.frontmatter.to.split(',') {
-        let addr = to.trim().to_string();
-        if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+    for addr in split_addresses(&draft.frontmatter.to) {
+        if seen.insert(addr.to_lowercase()) {
             recipients.push((addr, RecipientRole::To));
         }
     }
     if let Some(cc) = &draft.frontmatter.cc {
-        for cc_addr in cc.split(',') {
-            let addr = cc_addr.trim().to_string();
-            if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+        for addr in split_addresses(cc) {
+            if seen.insert(addr.to_lowercase()) {
                 recipients.push((addr, RecipientRole::Cc));
             }
         }
     }
     if let Some(bcc) = &draft.frontmatter.bcc {
-        for bcc_addr in bcc.split(',') {
-            let addr = bcc_addr.trim().to_string();
-            if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+        for addr in split_addresses(bcc) {
+            if seen.insert(addr.to_lowercase()) {
                 recipients.push((addr, RecipientRole::Bcc));
             }
         }
