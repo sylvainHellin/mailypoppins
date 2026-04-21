@@ -580,6 +580,12 @@ impl App {
             KeyCode::Char('b') => {
                 self.pending_action = Some(Action::SearchResultOpenInBrowser);
             }
+            KeyCode::Char('o') => {
+                self.open_search_result_attachment_picker(AttachmentPickerMode::Open);
+            }
+            KeyCode::Char('O') => {
+                self.open_search_result_attachment_picker(AttachmentPickerMode::Save);
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.server_search_focus = SearchOverlayFocus::Input;
             }
@@ -1049,6 +1055,44 @@ impl App {
                 Err(e) => {
                     self.set_status(format!("Attachments error: {e}"));
                 }
+            }
+        }
+    }
+
+    /// Helper to open the attachment picker for a search result.
+    /// Saves the search result locally first, then feeds into the same
+    /// attachment picker / dir picker pipeline as the regular list.
+    fn open_search_result_attachment_picker(&mut self, mode: AttachmentPickerMode) {
+        let path = match super::super::helpers::ensure_search_result_saved(self) {
+            Some(p) => p,
+            None => {
+                self.set_status("Failed to save email locally".to_string());
+                return;
+            }
+        };
+
+        match crate::parse::list_attachments(&path) {
+            Ok(files) if files.is_empty() => {
+                self.set_status("No attachments".to_string());
+            }
+            Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Open => {
+                self.pending_action =
+                    Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+            }
+            Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Save => {
+                let sources = files;
+                self.open_dir_picker(sources);
+            }
+            Ok(files) => {
+                self.attachment_picker = Some(AttachmentPicker {
+                    files,
+                    selected: 0,
+                    mode,
+                    selected_set: HashSet::new(),
+                });
+            }
+            Err(e) => {
+                self.set_status(format!("Attachments error: {e}"));
             }
         }
     }

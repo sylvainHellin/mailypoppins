@@ -449,6 +449,23 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
             ],
         ),
         (
+            "SERVER SEARCH",
+            vec![
+                ("j/k", "Navigate results"),
+                ("gg / G", "Jump to top / bottom"),
+                ("d/u", "Half-page down / up"),
+                ("Enter / e", "Open in editor"),
+                ("r / R", "Reply / Reply-all"),
+                ("w", "Forward"),
+                ("a", "Archive"),
+                ("b", "Open HTML in browser"),
+                ("o", "Open attachment"),
+                ("O", "Save attachment to disk"),
+                ("Tab", "Switch focus"),
+                ("Esc", "Close overlay"),
+            ],
+        ),
+        (
             "HEADERS",
             vec![("j/k", "Scroll headers"), ("h / l", "Back to list / body")],
         ),

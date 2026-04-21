@@ -107,6 +107,7 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - **IMAP watcher retry spam**: Exponential sleep between retries; silent errors after first one (v0.6.0+).
 - review the hotkeys for the different commands. It makes for example no sense that search is `S` is for search (usually `f`) and that sync is `F`.
 - ~~bug: duplicated emails in inbox/archive~~ Fixed: case-insensitive Message-ID header parsing, propagate known IDs across sync targets, post-sync dedup pass, frontmatter scanner handles both quote styles. 37 existing duplicates cleaned up.
+- ~~open/save attachments from server search overlay~~ Done: `o`/`O` in search overlay list saves result locally then opens the same attachment picker / dir picker flow as the regular list.
 - enable opening the attachments also for draft with `o` (useful to check what is being send).
 - ~~bug: quoted display names with commas (e.g. `"Hellin, Sylvain" <addr>`) broke send/validate because naive `.split(',')` split inside the quoted name~~ Fixed: `split_addresses()` helper respects quotes.
 - bug: frontmatter does not validate when to: is empty (or null) - but sometime we want to send emails to a bcc list, without anyone at 'to'

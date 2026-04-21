@@ -117,7 +117,8 @@ All configuration lives in a single global file: **`~/.config/email/config.toml`
 Each account has an `auth_method` field (default: `password`):
 
 - `password` -- Passwords stored in OS keyring via `keyring` crate. Keys: `smtp-password-<name>`, `imap-password-<name>`.
-- `oauth2` -- OAuth2 Device Code Flow for Microsoft 365 / Exchange Online. Requires `[accounts.oauth2]` section with `client_id` and `tenant_id` (Azure Entra ID app registration). Tokens cached at `~/.email-cli/tokens/<account>.json`. The `password` field on `SmtpConfig`/`ImapConfig` carries the access token for OAuth2 accounts. IMAP uses `XOAUTH2` SASL mechanism (`async_imap::Authenticator` trait). SMTP uses `lettre::Mechanism::Xoauth2`. Token refresh is automatic; if the refresh token expires (~90 days), re-run `email config oauth2-login`.
+- `oauth2` -- OAuth2 Device Code Flow for Microsoft 365 / Exchange Online via IMAP/SMTP. Requires `[accounts.oauth2]` section with `client_id` and `tenant_id` (Azure Entra ID app registration). Tokens cached at `~/.email-cli/tokens/<account>.json`. Uses `IMAP_SMTP_SCOPES` (outlook.office365.com). The `password` field on `SmtpConfig`/`ImapConfig` carries the access token. IMAP uses `XOAUTH2` SASL mechanism (`async_imap::Authenticator` trait). SMTP uses `lettre::Mechanism::Xoauth2`. Token refresh is automatic; if the refresh token expires (~90 days), re-run `email config oauth2-login`.
+- `graph` -- Microsoft Graph API for mail operations. Requires `[accounts.oauth2]` section with `client_id` and `tenant_id`. Uses `GRAPH_SCOPES` (graph.microsoft.com/Mail.*). `SmtpConfig::load()` and `ImapConfig::load()` return `Err` for Graph accounts (they don't use SMTP/IMAP). Use `GraphConfig::load()` instead. Token acquisition and refresh use the same `oauth2.rs` infrastructure but with Graph-specific scopes. `email config oauth2-login` tests Graph accounts via the `/me` endpoint instead of IMAP/SMTP connections.
 
 ### Config subcommands
 - `email config init` -- Interactive wizard: tests SMTP/IMAP credentials, discovers server mailboxes, assigns roles, writes config. Supports password + OAuth2 (Exchange) providers.
@@ -280,7 +281,7 @@ Quoted values are supported (e.g., `from:"John Doe"`). The `in:` prefix matches 
 
 **Result types:** `SearchHit` (raw result from background thread), `SearchResultEntry` (held in App state, includes `saved_path` once the email is written locally), `SearchTarget` (mailbox descriptor used to drive the search).
 
-**Result list keys:** `j`/`k` navigate, `Enter`/`e` open in `$EDITOR` (saves locally first), `r`/`R` reply/reply-all, `w` forward, `a` archive, `b` open HTML in browser, `Esc` close overlay.
+**Result list keys:** `j`/`k` navigate, `Enter`/`e` open in `$EDITOR` (saves locally first), `r`/`R` reply/reply-all, `w` forward, `a` archive, `b` open HTML in browser, `o` open attachment, `O` save attachment to disk, `Esc` close overlay.
 
 ### Attachment Picker Overlay
 
@@ -358,3 +359,4 @@ Pass `--reconcile` to also detect server-side moves and deletes (uses the same s
 1. **Test the app** -- Run the binary yourself to verify the change works as expected.
 2. **Update the binary** -- If it works, install the updated binary via **`./scripts/install.sh`** (NOT `cargo install --path .` directly). The wrapper runs `cargo install` and then re-signs the binary with a stable dev cert so the Keychain stops re-prompting for every `smtp-password-*` / `imap-password-*` entry at TUI startup. On Linux/Windows the codesign step is a no-op. See `CONTRIBUTING.md` for the one-time Keychain setup. Extra args are forwarded to cargo (e.g. `./scripts/install.sh --locked`).
 3. **Update `roadmap.md`** -- After every code change, update the roadmap: move completed items from the backlog to the resolved section, strike through done items, and remove entries that are no longer relevant. Keep the backlog accurate and current.
+4. if asked to commit the changes, NEVER add the 'co-authored by claude'
