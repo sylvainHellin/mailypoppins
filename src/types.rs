@@ -44,7 +44,8 @@ impl std::fmt::Display for EmailStatus {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EmailFrontmatter {
-    pub to: String,
+    #[serde(default)]
+    pub to: Option<String>,
     #[serde(default)]
     pub cc: Option<String>,
     #[serde(default)]
@@ -140,7 +141,7 @@ mod tests {
     #[test]
     fn test_email_frontmatter_serde_roundtrip() {
         let fm = EmailFrontmatter {
-            to: "alice@example.com".to_string(),
+            to: Some("alice@example.com".to_string()),
             cc: Some("bob@example.com".to_string()),
             bcc: None,
             subject: "Test Subject".to_string(),

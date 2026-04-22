@@ -186,7 +186,7 @@ fn test_parse_and_validate_draft() {
     let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body content", "draft");
 
     let draft = parse_email_draft(&path).unwrap();
-    assert_eq!(draft.frontmatter.to, "alice@example.com");
+    assert_eq!(draft.frontmatter.to.as_deref(), Some("alice@example.com"));
     assert_eq!(draft.frontmatter.subject, "Test");
     assert_eq!(draft.frontmatter.status, EmailStatus::Draft);
     assert_eq!(draft.body_markdown, "Body content");
@@ -273,7 +273,7 @@ fn test_find_drafts_with_status_filter() {
 
     let approved_only = find_drafts(tmp.path(), Some(EmailStatus::Approved)).unwrap();
     assert_eq!(approved_only.len(), 1);
-    assert_eq!(approved_only[0].frontmatter.to, "bob@example.com");
+    assert_eq!(approved_only[0].frontmatter.to.as_deref(), Some("bob@example.com"));
 }
 
 #[test]
@@ -462,7 +462,7 @@ fn test_validate_draft_missing_attachment_warning() {
     let draft = email::types::EmailDraft {
         path: std::path::PathBuf::from("test.md"),
         frontmatter: email::types::EmailFrontmatter {
-            to: "alice@example.com".to_string(),
+            to: Some("alice@example.com".to_string()),
             cc: None,
             bcc: None,
             subject: "Test".to_string(),
@@ -491,7 +491,7 @@ fn test_validate_draft_existing_attachment_no_warning() {
     let draft = email::types::EmailDraft {
         path: std::path::PathBuf::from("test.md"),
         frontmatter: email::types::EmailFrontmatter {
-            to: "alice@example.com".to_string(),
+            to: Some("alice@example.com".to_string()),
             cc: None,
             bcc: None,
             subject: "Test".to_string(),

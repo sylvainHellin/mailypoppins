@@ -37,8 +37,10 @@ pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) {
 
     let now = Utc::now().to_rfc3339();
     let mut obs: Vec<(ObservedIn, &str)> = Vec::new();
-    if !draft.frontmatter.to.trim().is_empty() {
-        obs.push((ObservedIn::SentTo, draft.frontmatter.to.as_str()));
+    if let Some(ref to) = draft.frontmatter.to {
+        if !to.trim().is_empty() {
+            obs.push((ObservedIn::SentTo, to.as_str()));
+        }
     }
     if let Some(ref cc) = draft.frontmatter.cc {
         if !cc.trim().is_empty() {
@@ -197,10 +199,11 @@ mod tests {
     }
 
     fn mk_draft(to: &str, cc: Option<&str>) -> EmailDraft {
+        let to_opt = if to.is_empty() { None } else { Some(to.to_string()) };
         EmailDraft {
             path: PathBuf::from("/tmp/fake.md"),
             frontmatter: EmailFrontmatter {
-                to: to.into(),
+                to: to_opt,
                 cc: cc.map(|s| s.into()),
                 bcc: None,
                 subject: "Test".into(),

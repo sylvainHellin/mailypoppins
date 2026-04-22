@@ -95,22 +95,22 @@ impl App {
                 self.reload_from_cache();
                 return None;
             }
-            KeyCode::Char(c @ '1'..='9') => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < self.mailboxes.len() {
-                    self.g_pending = false;
-                    self.sidebar_index = idx;
-                    self.switch_mailbox(idx);
-                    self.focus = Focus::List;
-                    return None;
-                }
-            }
-            KeyCode::Char('s') => {
+            KeyCode::Char(c @ '1'..='4') => {
                 self.g_pending = false;
-                self.focus = Focus::Sidebar;
+                let target = match c {
+                    '1' => Focus::Sidebar,
+                    '2' => Focus::List,
+                    '3' => Focus::Headers,
+                    '4' => Focus::Preview,
+                    _ => unreachable!(),
+                };
+                if self.focus == Focus::Sidebar && target != Focus::Sidebar {
+                    self.switch_mailbox(self.sidebar_index);
+                }
+                self.focus = target;
                 return None;
             }
-            KeyCode::Tab | KeyCode::Char('l') => {
+            KeyCode::Tab => {
                 self.g_pending = false;
                 if self.focus == Focus::Sidebar {
                     self.switch_mailbox(self.sidebar_index);
@@ -125,7 +125,7 @@ impl App {
                 };
                 return None;
             }
-            KeyCode::BackTab | KeyCode::Char('h') => {
+            KeyCode::BackTab => {
                 self.g_pending = false;
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Headers,
@@ -247,8 +247,19 @@ impl App {
         if self.emails.is_empty() {
             self.g_pending = false;
             match key.code {
-                KeyCode::Char('f') => self.pending_action = Some(Action::Fetch),
-                KeyCode::Char('F') => self.pending_action = Some(Action::Sync),
+                KeyCode::Char('s') => self.pending_action = Some(Action::Fetch),
+                KeyCode::Char('S') => self.pending_action = Some(Action::Sync),
+                KeyCode::Char('f') => {
+                    self.show_search_overlay = true;
+                    self.server_search_query.clear();
+                    self.server_search_results.clear();
+                    self.server_search_index = 0;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                    self.server_search_focus = SearchOverlayFocus::Input;
+                    self.server_search_loading = false;
+                    self.server_search_status = None;
+                }
                 KeyCode::Char('n') => {
                     self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::New));
                 }
@@ -377,15 +388,15 @@ impl App {
                 self.g_pending = false;
                 self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::New));
             }
-            KeyCode::Char('f') => {
+            KeyCode::Char('s') => {
                 self.g_pending = false;
                 self.pending_action = Some(Action::Fetch);
             }
-            KeyCode::Char('F') => {
+            KeyCode::Char('S') => {
                 self.g_pending = false;
                 self.pending_action = Some(Action::Sync);
             }
-            KeyCode::Char('S') => {
+            KeyCode::Char('f') => {
                 self.g_pending = false;
                 self.show_search_overlay = true;
                 self.server_search_query.clear();

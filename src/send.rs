@@ -428,9 +428,11 @@ pub async fn send_email(
     let mut seen = HashSet::new();
     let mut recipients: Vec<(String, RecipientRole)> = Vec::new();
 
-    for addr in split_addresses(&draft.frontmatter.to) {
-        if seen.insert(addr.to_lowercase()) {
-            recipients.push((addr, RecipientRole::To));
+    if let Some(ref to) = draft.frontmatter.to {
+        for addr in split_addresses(to) {
+            if seen.insert(addr.to_lowercase()) {
+                recipients.push((addr, RecipientRole::To));
+            }
         }
     }
     if let Some(cc) = &draft.frontmatter.cc {

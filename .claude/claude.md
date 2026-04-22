@@ -219,6 +219,20 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 - **Mutations** (archive, delete): Optimistic -- local file removed from list immediately, server operation runs in background. On failure, caches are invalidated and the list reloads.
 - **Queued actions**: Fetch/sync/reconcile are deferred if mutations are in progress (`bg_mutations > 0`), then auto-executed when mutations complete.
 
+### Key Bindings (Global)
+
+| Key | Action |
+|-----|--------|
+| `1`-`4` | Focus pane (1=Sidebar, 2=List, 3=Headers, 4=Preview) |
+| `Tab`/`Shift-Tab` | Cycle pane focus forward/backward |
+| `/` | Filter by metadata (subject/contact/date) |
+| `\` | Search (includes body) |
+| `!` | Toggle activity log panel |
+| `` ` `` | Switch account |
+| `Ctrl+1`-`9` | Jump to account by index |
+| `?` | Help overlay |
+| `q` | Quit |
+
 ### Key Bindings (List focus)
 
 | Key | Action |
@@ -233,25 +247,18 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 | `w` | Forward |
 | `a` | Archive selected or cursor (with confirmation) |
 | `d` | Delete selected or cursor (with confirmation) |
+| `m` | Toggle read/unread |
 | `A` | Mark as approved |
 | `x` | Send (with confirmation) |
 | `X` | Send all approved (with confirmation) |
 | `n` | New draft |
 | `y` | Copy file path to clipboard |
-| `f` | Fetch (all mailboxes) |
-| `F` | Sync (fetch + reconcile) |
-| `/` | Search (subject/contact/date) |
-| `\` | Search (includes body) |
-| `s` | Focus sidebar |
-| `1`-`9` | Jump to mailbox by index |
+| `s` | Quick sync (fetch + reconcile, limit 100) |
+| `S` | Full sync (fetch + reconcile, no limit) |
+| `f` | Server search (IMAP) |
 | `o` | Open attachment(s) of the selected email in the default application |
 | `O` | Save attachment(s) to a chosen directory (multi-select + dir picker with zoxide/browser) |
 | `b` | Open the HTML version of the selected email in the browser |
-| `S` | Open server search overlay |
-| `!` | Toggle activity log panel |
-| `Tab`/`Shift-Tab` | Cycle pane focus |
-| `?` | Help overlay |
-| `q` | Quit |
 
 ### Activity Log Panel
 
@@ -259,7 +266,7 @@ A persistent panel showing timestamped status entries for all background operati
 
 ### Server Search Overlay
 
-Activated with `S`. A full-screen overlay with two focus modes (`SearchOverlayFocus::Input` / `SearchOverlayFocus::List`) toggled with `Tab`/`Down`.
+Activated with `f`. A full-screen overlay with two focus modes (`SearchOverlayFocus::Input` / `SearchOverlayFocus::List`) toggled with `Tab`/`Down`.
 
 **Query syntax** (parsed by `imap_client::parse_search_query()`):
 
