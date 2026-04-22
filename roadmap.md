@@ -111,7 +111,7 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - enable opening the attachments also for draft with `o` (useful to check what is being send).
 - ~~bug: quoted display names with commas (e.g. `"Hellin, Sylvain" <addr>`) broke send/validate because naive `.split(',')` split inside the quoted name~~ Fixed: `split_addresses()` helper respects quotes.
 - bug: frontmatter does not validate when to: is empty (or null) - but sometime we want to send emails to a bcc list, without anyone at 'to'
-- bug: cannot open in-email img as attachments (e.g. message_id: <202604170909.63H99GFW3924666@easychair.org>) - also not possible to open in browser (no html attached)
+- ~~bug: cannot open in-email img as attachments (e.g. message_id: <202604170909.63H99GFW3924666@easychair.org>) - also not possible to open in browser (no html attached)~~ Fixed: `is_attachment_part()` now treats inline non-text MIME parts with a filename as attachments (catches PDFs, images, etc. sent with `Content-Disposition: inline`). Previously only explicit `attachment` disposition or inline `image/*` were detected.
 
 ### TUI enhancements
 

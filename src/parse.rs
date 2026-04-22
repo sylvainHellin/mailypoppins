@@ -158,16 +158,37 @@ pub fn extract_body_text(parsed: &mailparse::ParsedMail) -> (String, Option<Stri
     }
 }
 
-pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
-    for sub in &parsed.subparts {
-        let disposition = sub.get_content_disposition();
-        if disposition.disposition == mailparse::DispositionType::Attachment {
+/// Check whether a MIME part should be treated as an attachment.
+/// Matches: explicit `Content-Disposition: attachment`, inline images,
+/// and inline non-text parts that carry a filename (e.g. inline PDFs).
+fn is_attachment_part(part: &mailparse::ParsedMail) -> bool {
+    let disposition = part.get_content_disposition();
+    if disposition.disposition == mailparse::DispositionType::Attachment {
+        return true;
+    }
+    if disposition.disposition == mailparse::DispositionType::Inline {
+        // Inline images (referenced via cid: in HTML).
+        if part.ctype.mimetype.starts_with("image/") {
             return true;
         }
-        // Inline images referenced via Content-ID (cid:) in the HTML body.
-        if disposition.disposition == mailparse::DispositionType::Inline
-            && sub.ctype.mimetype.starts_with("image/")
+        // Inline non-text parts with a filename are effectively attachments
+        // (e.g. PDFs sent with Content-Disposition: inline).
+        if !part.ctype.mimetype.starts_with("text/")
+            && !part.ctype.mimetype.starts_with("multipart/")
         {
+            let has_filename = disposition.params.contains_key("filename")
+                || part.ctype.params.contains_key("name");
+            if has_filename {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
+    for sub in &parsed.subparts {
+        if is_attachment_part(sub) {
             return true;
         }
         if has_attachments(sub) {
@@ -190,13 +211,8 @@ fn collect_attachments(
     attachments: &mut Vec<AttachmentData>,
     counter: &mut usize,
 ) {
-    let disposition = parsed.get_content_disposition();
-    let is_attachment = disposition.disposition == mailparse::DispositionType::Attachment;
-    // Inline images referenced via Content-ID (cid:) in the HTML body.
-    let is_inline_image = disposition.disposition == mailparse::DispositionType::Inline
-        && parsed.ctype.mimetype.starts_with("image/");
-
-    if is_attachment || is_inline_image {
+    if is_attachment_part(parsed) {
+        let disposition = parsed.get_content_disposition();
         let filename = disposition
             .params
             .get("filename")
