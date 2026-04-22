@@ -95,20 +95,15 @@ impl App {
                 self.reload_from_cache();
                 return None;
             }
-            KeyCode::Char(c @ '1'..='4') => {
-                self.g_pending = false;
-                let target = match c {
-                    '1' => Focus::Sidebar,
-                    '2' => Focus::List,
-                    '3' => Focus::Headers,
-                    '4' => Focus::Preview,
-                    _ => unreachable!(),
-                };
-                if self.focus == Focus::Sidebar && target != Focus::Sidebar {
-                    self.switch_mailbox(self.sidebar_index);
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.mailboxes.len() {
+                    self.g_pending = false;
+                    self.sidebar_index = idx;
+                    self.switch_mailbox(idx);
+                    self.focus = Focus::List;
+                    return None;
                 }
-                self.focus = target;
-                return None;
             }
             KeyCode::Tab => {
                 self.g_pending = false;

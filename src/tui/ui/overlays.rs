@@ -404,7 +404,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("q", "Quit"),
                 ("`", "Switch account"),
                 ("Ctrl+1-9", "Jump to account"),
-                ("1-4", "Focus pane (sidebar/list/headers/preview)"),
+                ("1-9", "Jump to mailbox"),
                 ("Tab", "Cycle focus forward"),
                 ("Shift+Tab", "Cycle focus backward"),
                 ("/", "Filter by metadata"),

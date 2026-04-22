@@ -223,7 +223,7 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 
 | Key | Action |
 |-----|--------|
-| `1`-`4` | Focus pane (1=Sidebar, 2=List, 3=Headers, 4=Preview) |
+| `1`-`9` | Jump to mailbox by index |
 | `Tab`/`Shift-Tab` | Cycle pane focus forward/backward |
 | `/` | Filter by metadata (subject/contact/date) |
 | `\` | Search (includes body) |
