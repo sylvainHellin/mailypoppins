@@ -105,12 +105,12 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 - ~~**Install script / keychain re-prompting**: Fixed codesign/keychain issue after updates.~~ Regression: binary is still prompting 3x for keychain passwords at TUI startup despite codesign + ACL reset.
 - **Delete draft command**: `email delete` now works for local-only drafts (removes `.md` + `.html` files without IMAP).
 - **IMAP watcher retry spam**: Exponential sleep between retries; silent errors after first one (v0.6.0+).
-- review the hotkeys for the different commands. It makes for example no sense that search is `S` is for search (usually `f`) and that sync is `F`.
+- ~~review the hotkeys for the different commands~~ Done: `f`=IMAP search, `s`/`S`=quick/full sync, `1-4`=pane focus. Removed `h`/`l` from global Tab/BackTab. Sidebar focus via `1` instead of `s`.
 - ~~bug: duplicated emails in inbox/archive~~ Fixed: case-insensitive Message-ID header parsing, propagate known IDs across sync targets, post-sync dedup pass, frontmatter scanner handles both quote styles. 37 existing duplicates cleaned up.
 - ~~open/save attachments from server search overlay~~ Done: `o`/`O` in search overlay list saves result locally then opens the same attachment picker / dir picker flow as the regular list.
 - enable opening the attachments also for draft with `o` (useful to check what is being send).
 - ~~bug: quoted display names with commas (e.g. `"Doe, Jane" <addr>`) broke send/validate because naive `.split(',')` split inside the quoted name~~ Fixed: `split_addresses()` helper respects quotes.
-- bug: frontmatter does not validate when to: is empty (or null) - but sometime we want to send emails to a bcc list, without anyone at 'to'
+- ~~bug: frontmatter does not validate when to: is empty (or null)~~ Fixed: `to` is now `Option<String>` with `#[serde(default)]`. Validation requires at least one of to/cc/bcc to be non-empty. BCC-only emails are fully supported.
 - ~~bug: cannot open in-email img as attachments (e.g. message_id: <202604170909.63H99GFW3924666@easychair.org>) - also not possible to open in browser (no html attached)~~ Fixed: `is_attachment_part()` now treats inline non-text MIME parts with a filename as attachments (catches PDFs, images, etc. sent with `Content-Disposition: inline`). Previously only explicit `attachment` disposition or inline `image/*` were detected.
 
 ### TUI enhancements

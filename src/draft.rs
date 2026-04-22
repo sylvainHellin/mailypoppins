@@ -408,9 +408,12 @@ pub fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
 pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
-    // Check required fields
-    if draft.frontmatter.to.is_empty() {
-        return Err(anyhow!("Missing 'to' field"));
+    // Check that at least one recipient exists across to/cc/bcc
+    let to_empty = draft.frontmatter.to.as_deref().map_or(true, |s| s.trim().is_empty());
+    let cc_empty = draft.frontmatter.cc.as_deref().map_or(true, |s| s.trim().is_empty());
+    let bcc_empty = draft.frontmatter.bcc.as_deref().map_or(true, |s| s.trim().is_empty());
+    if to_empty && cc_empty && bcc_empty {
+        return Err(anyhow!("No recipients (to, cc, and bcc are all empty)"));
     }
 
     if draft.frontmatter.subject.is_empty() {
@@ -422,9 +425,11 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     }
 
     // Validate email format (basic check)
-    for email in crate::send::split_addresses(&draft.frontmatter.to) {
-        if email.parse::<lettre::message::Mailbox>().is_err() {
-            return Err(anyhow!("Invalid email address: {}", email));
+    if let Some(ref to) = draft.frontmatter.to {
+        for email in crate::send::split_addresses(to) {
+            if email.parse::<lettre::message::Mailbox>().is_err() {
+                return Err(anyhow!("Invalid email address: {}", email));
+            }
         }
     }
 
@@ -458,7 +463,7 @@ pub fn preview_draft(
             .as_ref()
             .unwrap_or(&smtp_config.default_from)
     );
-    println!("{}: {}", "To".bold(), draft.frontmatter.to);
+    println!("{}: {}", "To".bold(), draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
 
     if let Some(cc) = &draft.frontmatter.cc {
         println!("{}: {}", "Cc".bold(), cc);
@@ -625,10 +630,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_draft(to: &str, subject: &str, body: &str, status: EmailStatus) -> EmailDraft {
+        let to_opt = if to.is_empty() { None } else { Some(to.to_string()) };
         EmailDraft {
             path: PathBuf::from("test.md"),
             frontmatter: EmailFrontmatter {
-                to: to.to_string(),
+                to: to_opt,
                 cc: None,
                 bcc: None,
                 subject: subject.to_string(),
@@ -662,7 +668,15 @@ mod tests {
         let draft = make_draft("", "Hello", "Body text", EmailStatus::Draft);
         let result = validate_draft(&draft);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("to"));
+        assert!(result.unwrap_err().to_string().contains("No recipients"));
+    }
+
+    #[test]
+    fn test_validate_draft_bcc_only() {
+        let mut draft = make_draft("", "Hello", "Body text", EmailStatus::Draft);
+        draft.frontmatter.bcc = Some("secret@example.com".to_string());
+        let result = validate_draft(&draft);
+        assert!(result.is_ok());
     }
 
     #[test]

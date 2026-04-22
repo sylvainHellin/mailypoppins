@@ -714,7 +714,7 @@ pub(super) fn handle_action(
         Action::Fetch => {
             if app.bg_count > 0 {
                 app.queued_action = Some(Action::Fetch);
-                app.set_status(format!("Fetch queued ({} ops pending...)", app.bg_count));
+                app.set_status(format!("Quick sync queued ({} ops pending...)", app.bg_count));
                 return Ok(());
             }
             let imap_config = match app.imap_config.clone() {
@@ -727,7 +727,7 @@ pub(super) fn handle_action(
             let account_config = app.account_config.clone();
 
             app.bg_count += 1;
-            app.set_status_level("Fetching...".to_string(), StatusLevel::Progress);
+            app.set_status_level("Quick sync...".to_string(), StatusLevel::Progress);
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
@@ -736,8 +736,8 @@ pub(super) fn handle_action(
                     .block_on(super::helpers::lib_do_sync(
                         &account_config,
                         &imap_config,
-                        10,
-                        false,
+                        100,
+                        true,
                     ))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(BgResult::Fetch {
@@ -784,7 +784,7 @@ pub(super) fn handle_action(
         Action::Sync => {
             if app.bg_count > 0 {
                 app.queued_action = Some(Action::Sync);
-                app.set_status(format!("Sync queued ({} ops pending...)", app.bg_count));
+                app.set_status(format!("Full sync queued ({} ops pending...)", app.bg_count));
                 return Ok(());
             }
             let imap_config = match app.imap_config.clone() {
@@ -797,7 +797,7 @@ pub(super) fn handle_action(
             let account_config = app.account_config.clone();
 
             app.bg_count += 1;
-            app.set_status_level("Syncing...".to_string(), StatusLevel::Progress);
+            app.set_status_level("Full sync...".to_string(), StatusLevel::Progress);
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
@@ -806,7 +806,7 @@ pub(super) fn handle_action(
                     .block_on(super::helpers::lib_do_sync(
                         &account_config,
                         &imap_config,
-                        50,
+                        usize::MAX,
                         true,
                     ))
                     .map_err(|e| e.to_string());
@@ -886,10 +886,10 @@ fn submit_compose_wizard(
     wizard.bcc = normalize_recipient_field(&wizard.bcc);
     wizard.subject = wizard.subject.trim().to_string();
 
-    // Basic validation: must have a `to` address.
-    if wizard.to.is_empty() {
+    // Basic validation: must have at least one recipient across to/cc/bcc.
+    if wizard.to.is_empty() && wizard.cc.is_empty() && wizard.bcc.is_empty() {
         app.set_status_level(
-            "Cannot submit: `to:` is empty".to_string(),
+            "Cannot submit: no recipients (to/cc/bcc all empty)".to_string(),
             StatusLevel::Error,
         );
         // Re-open the wizard so the user can fix the field.

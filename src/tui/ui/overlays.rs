@@ -404,8 +404,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("q", "Quit"),
                 ("`", "Switch account"),
                 ("Ctrl+1-9", "Jump to account"),
-                ("1-9", "Jump to mailbox"),
-                ("s", "Focus sidebar"),
+                ("1-4", "Focus pane (sidebar/list/headers/preview)"),
                 ("Tab", "Cycle focus forward"),
                 ("Shift+Tab", "Cycle focus backward"),
                 ("/", "Filter by metadata"),
@@ -418,8 +417,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
             "SIDEBAR",
             vec![
                 ("j/k", "Navigate mailboxes"),
-                ("Enter/l", "Select mailbox"),
-                ("Esc/h", "Return to list"),
+                ("Enter", "Select mailbox"),
             ],
         ),
         (
@@ -430,7 +428,6 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("Space", "Toggle selection"),
                 ("Ctrl+a", "Select all visible"),
                 ("Esc", "Clear selection"),
-                ("h / l", "Focus sidebar / body"),
                 ("Enter / e", "Open in editor"),
                 ("r / R", "Reply / Reply-all"),
                 ("w", "Forward"),
@@ -444,8 +441,8 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("O", "Save attachment to disk"),
                 ("b", "Open HTML in browser"),
                 ("n", "New draft"),
-                ("f / F", "Fetch / Sync"),
-                ("S", "Server search (IMAP)"),
+                ("s / S", "Quick sync / Full sync"),
+                ("f", "Search (IMAP)"),
             ],
         ),
         (
@@ -467,14 +464,14 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
         ),
         (
             "HEADERS",
-            vec![("j/k", "Scroll headers"), ("h / l", "Back to list / body")],
+            vec![("j/k", "Scroll headers")],
         ),
         (
             "BODY",
             vec![
                 ("j/k", "Scroll line by line"),
                 ("d/u", "Half-page down / up"),
-                ("Esc/h", "Return to list"),
+                ("Esc", "Return to list"),
             ],
         ),
     ]

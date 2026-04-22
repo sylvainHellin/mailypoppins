@@ -471,7 +471,7 @@ async fn main() -> Result<()> {
                 println!(
                     "  {} → {}",
                     draft.path.file_name().unwrap_or_default().to_string_lossy(),
-                    draft.frontmatter.to
+                    draft.frontmatter.to.as_deref().unwrap_or("(bcc only)")
                 );
             }
 
@@ -484,7 +484,7 @@ async fn main() -> Result<()> {
             let mut failed_count = 0;
 
             for draft in drafts {
-                print!("Sending to {}... ", draft.frontmatter.to);
+                print!("Sending to {}... ", draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
                 io::stdout().flush()?;
 
                 match send_email(
@@ -612,7 +612,7 @@ async fn main() -> Result<()> {
                     "[{}] {} → {}",
                     status_colored,
                     draft.path.file_name().unwrap_or_default().to_string_lossy(),
-                    draft.frontmatter.to
+                    draft.frontmatter.to.as_deref().unwrap_or("(bcc only)")
                 );
             }
 
