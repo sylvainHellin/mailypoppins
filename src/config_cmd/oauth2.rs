@@ -6,7 +6,7 @@ use crate::config::{load_global_config, AuthMethod};
 use crate::oauth2;
 
 /// Run the OAuth2 device code flow for an account and cache the token.
-pub fn cmd_oauth2_login(account_name: Option<&str>) -> Result<()> {
+pub async fn cmd_oauth2_login(account_name: Option<&str>) -> Result<()> {
     let config = load_global_config()?;
 
     // Resolve which account to use
@@ -17,27 +17,26 @@ pub fn cmd_oauth2_login(account_name: Option<&str>) -> Result<()> {
             .find(|a| a.name == name)
             .ok_or_else(|| anyhow!("Account '{}' not found in config", name))?
     } else {
-        // Find the first OAuth2 account, or first account
+        // Find the first OAuth2 or Graph account, or first account
         config
             .accounts
             .iter()
-            .find(|a| a.auth_method == AuthMethod::OAuth2)
+            .find(|a| a.auth_method == AuthMethod::OAuth2 || a.auth_method == AuthMethod::Graph)
             .or_else(|| config.accounts.first())
             .ok_or_else(|| anyhow!("No accounts configured"))?
     };
 
-    if account.auth_method != AuthMethod::OAuth2 {
+    if account.auth_method != AuthMethod::OAuth2 && account.auth_method != AuthMethod::Graph {
         return Err(anyhow!(
-            "Account '{}' uses auth_method = \"password\", not \"oauth2\". \
-             Set auth_method = \"oauth2\" in config.toml to use OAuth2.",
+            "Account '{}' uses auth_method = \"password\", not \"oauth2\" or \"graph\". \
+             Set auth_method = \"oauth2\" or \"graph\" in config.toml to use OAuth2.",
             account.name
         ));
     }
 
     let oauth2_settings = account.oauth2.as_ref().ok_or_else(|| {
         anyhow!(
-            "Account '{}' has auth_method = \"oauth2\" but no [accounts.oauth2] section. \
-             Add client_id and tenant_id to config.toml.",
+            "Account '{}' requires an [accounts.oauth2] section with client_id and tenant_id.",
             account.name
         )
     })?;
@@ -49,18 +48,21 @@ pub fn cmd_oauth2_login(account_name: Option<&str>) -> Result<()> {
         ));
     }
 
+    let scopes = oauth2::scopes_for_auth_method(&account.auth_method);
+
     println!(
-        "{} Starting OAuth2 device code flow for account '{}'",
+        "{} Starting OAuth2 device code flow for account '{}' ({})",
         "\u{2139}".blue(),
-        account.name
+        account.name,
+        if account.auth_method == AuthMethod::Graph { "Graph API" } else { "IMAP/SMTP" },
     );
 
-    let rt = tokio::runtime::Runtime::new()?;
-    let cache = rt.block_on(oauth2::device_code_flow(
+    let cache = oauth2::device_code_flow(
         &oauth2_settings.client_id,
         &oauth2_settings.tenant_id,
         &account.name,
-    ))?;
+        scopes,
+    ).await?;
 
     println!(
         "{} OAuth2 token acquired and cached for account '{}'",
@@ -68,76 +70,139 @@ pub fn cmd_oauth2_login(account_name: Option<&str>) -> Result<()> {
         account.name
     );
 
-    // Test IMAP connection with the new token
-    print!("  Testing IMAP connection... ");
-    io::stdout().flush()?;
+    if account.auth_method == AuthMethod::Graph {
+        // Graph accounts: test with a Graph API call instead of IMAP/SMTP
+        print!("  Testing Graph API connection... ");
+        io::stdout().flush()?;
 
-    let imap_config = crate::config::ImapConfig {
-        host: if account.imap.host.is_empty() {
-            account.smtp.host.clone()
-        } else {
-            account.imap.host.clone()
-        },
-        port: account.imap.port,
-        username: if account.imap.username.is_empty() {
-            account.smtp.username.clone()
-        } else {
-            account.imap.username.clone()
-        },
-        password: cache.access_token.clone(),
-        accept_invalid_certs: account.imap.accept_invalid_certs,
-        auth_method: AuthMethod::OAuth2,
-    };
-
-    match rt.block_on(async {
-        let mut session = crate::imap_client::open_imap_session(&imap_config).await?;
-        session.logout().await.ok();
-        Ok::<_, anyhow::Error>(())
-    }) {
-        Ok(()) => println!("{}", "OK".green()),
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!(
-                "  {} IMAP connection failed: {}",
-                "\u{26a0}".yellow(),
-                e
-            );
-            eprintln!("  The token was cached, but the server rejected the connection.");
-            eprintln!("  Possible causes:");
-            eprintln!("    - IMAP may be disabled for your tenant (contact IT)");
-            eprintln!("    - The app registration may need admin consent");
-            eprintln!("    - The IMAP host/port may be incorrect");
+        match test_graph_api(&cache.access_token).await {
+            Ok((display_name, mail)) => {
+                println!("{}", "OK".green());
+                println!(
+                    "  {} Authenticated as: {} <{}>",
+                    "\u{2713}".green(),
+                    display_name,
+                    mail,
+                );
+            }
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!(
+                    "  {} Graph API test failed: {}",
+                    "\u{26a0}".yellow(),
+                    e
+                );
+                eprintln!("  The token was cached, but the Graph API rejected the request.");
+                eprintln!("  Possible causes:");
+                eprintln!("    - The app registration may need admin consent for Mail.Read / Mail.Send");
+                eprintln!("    - The account may not have an Exchange Online mailbox");
+            }
         }
-    }
+    } else {
+        // OAuth2 accounts: test IMAP + SMTP connections
+        print!("  Testing IMAP connection... ");
+        io::stdout().flush()?;
 
-    // Test SMTP connection
-    print!("  Testing SMTP connection... ");
-    io::stdout().flush()?;
+        let imap_config = crate::config::ImapConfig {
+            host: if account.imap.host.is_empty() {
+                account.smtp.host.clone()
+            } else {
+                account.imap.host.clone()
+            },
+            port: account.imap.port,
+            username: if account.imap.username.is_empty() {
+                account.smtp.username.clone()
+            } else {
+                account.imap.username.clone()
+            },
+            password: cache.access_token.clone(),
+            accept_invalid_certs: account.imap.accept_invalid_certs,
+            auth_method: AuthMethod::OAuth2,
+        };
 
-    let smtp_config = crate::config::SmtpConfig {
-        host: account.smtp.host.clone(),
-        port: account.smtp.port,
-        username: account.smtp.username.clone(),
-        password: cache.access_token,
-        default_from: account.default_from.clone(),
-        accept_invalid_certs: account.smtp.accept_invalid_certs,
-        auth_method: AuthMethod::OAuth2,
-    };
+        match async {
+            let mut session = crate::imap_client::open_imap_session(&imap_config).await?;
+            session.logout().await.ok();
+            Ok::<_, anyhow::Error>(())
+        }.await {
+            Ok(()) => println!("{}", "OK".green()),
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!(
+                    "  {} IMAP connection failed: {}",
+                    "\u{26a0}".yellow(),
+                    e
+                );
+                eprintln!("  The token was cached, but the server rejected the connection.");
+                eprintln!("  Possible causes:");
+                eprintln!("    - IMAP may be disabled for your tenant (contact IT)");
+                eprintln!("    - The app registration may need admin consent");
+                eprintln!("    - The IMAP host/port may be incorrect");
+            }
+        }
 
-    match test_smtp_oauth2(&smtp_config) {
-        Ok(()) => println!("{}", "OK".green()),
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!(
-                "  {} SMTP connection failed: {}",
-                "\u{26a0}".yellow(),
-                e
-            );
-            eprintln!("  SMTP sending may not work. Check SMTP host/port and permissions.");
+        // Test SMTP connection
+        print!("  Testing SMTP connection... ");
+        io::stdout().flush()?;
+
+        let smtp_config = crate::config::SmtpConfig {
+            host: account.smtp.host.clone(),
+            port: account.smtp.port,
+            username: account.smtp.username.clone(),
+            password: cache.access_token,
+            default_from: account.default_from.clone(),
+            accept_invalid_certs: account.smtp.accept_invalid_certs,
+            auth_method: AuthMethod::OAuth2,
+        };
+
+        match test_smtp_oauth2(&smtp_config) {
+            Ok(()) => println!("{}", "OK".green()),
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!(
+                    "  {} SMTP connection failed: {}",
+                    "\u{26a0}".yellow(),
+                    e
+                );
+                eprintln!("  SMTP sending may not work. Check SMTP host/port and permissions.");
+            }
         }
     }
 
     Ok(())
+}
+
+/// Test the Graph API connection by calling /me and returning (display_name, mail).
+async fn test_graph_api(access_token: &str) -> Result<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct MeResponse {
+        #[serde(default, rename = "displayName")]
+        display_name: String,
+        #[serde(default)]
+        mail: String,
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://graph.microsoft.com/v1.0/me")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .context("Failed to call Graph API /me endpoint")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("Graph API returned HTTP {}: {}", status, body));
+    }
+
+    let me: MeResponse = resp.json().await.context("Failed to parse /me response")?;
+    let mail = if me.mail.is_empty() {
+        "(no mail address)".to_string()
+    } else {
+        me.mail
+    };
+    Ok((me.display_name, mail))
 }
 
 /// Test SMTP connection with OAuth2 credentials.

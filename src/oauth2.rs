@@ -31,9 +31,23 @@ fn token_url(tenant_id: &str) -> String {
 }
 
 /// Scopes required for IMAP + SMTP access via OAuth2.
-const SCOPES: &str = "https://outlook.office365.com/IMAP.AccessAsUser.All \
-                       https://outlook.office365.com/SMTP.Send \
-                       offline_access";
+pub const IMAP_SMTP_SCOPES: &str = "https://outlook.office365.com/IMAP.AccessAsUser.All \
+                                    https://outlook.office365.com/SMTP.Send \
+                                    offline_access";
+
+/// Scopes required for Microsoft Graph API mail access.
+pub const GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read \
+                                https://graph.microsoft.com/Mail.ReadWrite \
+                                https://graph.microsoft.com/Mail.Send \
+                                offline_access";
+
+/// Return the appropriate OAuth2 scopes for a given auth method.
+pub fn scopes_for_auth_method(method: &crate::config::AuthMethod) -> &'static str {
+    match method {
+        crate::config::AuthMethod::Graph => GRAPH_SCOPES,
+        crate::config::AuthMethod::OAuth2 | crate::config::AuthMethod::Password => IMAP_SMTP_SCOPES,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Token cache
@@ -130,13 +144,14 @@ pub async fn device_code_flow(
     client_id: &str,
     tenant_id: &str,
     account_name: &str,
+    scopes: &str,
 ) -> Result<TokenCache> {
     let client = reqwest::Client::new();
 
     // Step 1: Request device code
     let resp = client
         .post(&device_code_url(tenant_id))
-        .form(&[("client_id", client_id), ("scope", SCOPES)])
+        .form(&[("client_id", client_id), ("scope", scopes)])
         .send()
         .await
         .context("Failed to request device code")?;
@@ -240,6 +255,7 @@ async fn refresh_token(
     tenant_id: &str,
     refresh_token_value: &str,
     account_name: &str,
+    scopes: &str,
 ) -> Result<TokenCache> {
     let client = reqwest::Client::new();
 
@@ -249,7 +265,7 @@ async fn refresh_token(
             ("grant_type", "refresh_token"),
             ("client_id", client_id),
             ("refresh_token", refresh_token_value),
-            ("scope", SCOPES),
+            ("scope", scopes),
         ])
         .send()
         .await
@@ -293,6 +309,7 @@ pub async fn load_or_refresh_token(
     account_name: &str,
     client_id: &str,
     tenant_id: &str,
+    scopes: &str,
 ) -> Result<String> {
     let cache = load_token_cache(account_name).ok_or_else(|| {
         anyhow!(
@@ -318,7 +335,7 @@ pub async fn load_or_refresh_token(
         "OAuth2 token expired for '{}', refreshing...",
         account_name
     );
-    let new_cache = refresh_token(client_id, tenant_id, &cache.refresh_token, account_name).await?;
+    let new_cache = refresh_token(client_id, tenant_id, &cache.refresh_token, account_name, scopes).await?;
     Ok(new_cache.access_token)
 }
 
@@ -327,21 +344,24 @@ pub fn load_or_refresh_token_blocking(
     account_name: &str,
     client_id: &str,
     tenant_id: &str,
+    scopes: &str,
 ) -> Result<String> {
     // Try to use existing tokio runtime first (e.g., when called from async context)
+    let scopes = scopes.to_string();
     if let Ok(_handle) = tokio::runtime::Handle::try_current() {
         // We're inside an async runtime -- spawn a blocking task
+        let scopes = scopes.clone();
         std::thread::scope(|s| {
             s.spawn(|| {
                 let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(load_or_refresh_token(account_name, client_id, tenant_id))
+                rt.block_on(load_or_refresh_token(account_name, client_id, tenant_id, &scopes))
             })
             .join()
             .map_err(|_| anyhow!("OAuth2 token refresh thread panicked"))?
         })
     } else {
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(load_or_refresh_token(account_name, client_id, tenant_id))
+        rt.block_on(load_or_refresh_token(account_name, client_id, tenant_id, &scopes))
     }
 }
 

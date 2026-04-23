@@ -31,6 +31,10 @@ impl App {
             return self.handle_help_key(key);
         }
 
+        if self.show_activity_overlay {
+            return self.handle_activity_overlay_key(key);
+        }
+
         if self.show_search_overlay {
             return self.handle_search_overlay_key(key);
         }
@@ -77,6 +81,14 @@ impl App {
             KeyCode::Char('!') => {
                 self.g_pending = false;
                 self.show_activity_log = !self.show_activity_log;
+                return None;
+            }
+            KeyCode::Char('L') => {
+                self.g_pending = false;
+                self.show_activity_overlay = true;
+                self.activity_filter.clear();
+                self.activity_filter_active = false;
+                self.activity_scroll = 0;
                 return None;
             }
             KeyCode::Char('/') => {
@@ -601,6 +613,87 @@ impl App {
             _ => {}
         }
         self.g_pending = false;
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Activity log overlay
+    // -----------------------------------------------------------------
+
+    fn handle_activity_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        if self.activity_filter_active {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.activity_filter.push(c);
+                    self.activity_scroll = 0;
+                }
+                KeyCode::Backspace => {
+                    self.activity_filter.pop();
+                    self.activity_scroll = 0;
+                }
+                KeyCode::Enter => {
+                    self.activity_filter_active = false;
+                }
+                KeyCode::Esc => {
+                    if !self.activity_filter.is_empty() {
+                        self.activity_filter.clear();
+                        self.activity_filter_active = false;
+                        self.activity_scroll = 0;
+                    } else {
+                        self.show_activity_overlay = false;
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.g_pending = false;
+                    self.activity_scroll = self.activity_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.g_pending = false;
+                    self.activity_scroll = self.activity_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    if self.g_pending {
+                        self.activity_scroll = 0;
+                        self.g_pending = false;
+                    } else {
+                        self.g_pending = true;
+                    }
+                    return None;
+                }
+                KeyCode::Char('G') => {
+                    self.g_pending = false;
+                    self.activity_scroll = u16::MAX;
+                }
+                KeyCode::Char('d') => {
+                    self.g_pending = false;
+                    self.activity_scroll = self.activity_scroll.saturating_add(10);
+                }
+                KeyCode::Char('u') => {
+                    self.g_pending = false;
+                    self.activity_scroll = self.activity_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('/') => {
+                    self.g_pending = false;
+                    self.activity_filter_active = true;
+                    self.activity_filter.clear();
+                    self.activity_scroll = 0;
+                }
+                KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => {
+                    self.g_pending = false;
+                    self.show_activity_overlay = false;
+                    self.activity_scroll = 0;
+                    self.activity_filter.clear();
+                    self.activity_filter_active = false;
+                }
+                _ => {
+                    self.g_pending = false;
+                }
+            }
+        }
         None
     }
 

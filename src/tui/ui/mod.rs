@@ -1,3 +1,4 @@
+mod activity;
 mod compose;
 mod headers;
 mod list;
@@ -110,6 +111,10 @@ pub fn view(app: &mut App, frame: &mut Frame) {
 
     if app.show_help {
         overlays::render_help_overlay(app, frame, area);
+    }
+
+    if app.show_activity_overlay {
+        activity::render_activity_overlay(app, frame, area);
     }
 
     if app.show_search_overlay {

@@ -47,7 +47,8 @@ The crate is both a library (`src/lib.rs`) and a binary (`src/main.rs`). The lib
 | `src/tui/event.rs` | Terminal event polling (crossterm), tick rate management |
 | `src/tui/theme.rs` | Catppuccin Mocha color palette constants |
 | `src/oauth2.rs` | OAuth2 Device Code Flow for Microsoft Entra ID: token acquisition, cache (`~/.email-cli/tokens/`), refresh, XOAUTH2 SASL string builder |
-| `src/config_cmd/oauth2.rs` | `email config oauth2-login` command: runs device code flow, tests IMAP/SMTP |
+| `src/graph.rs` | Microsoft Graph REST client: `GraphClient`, folder listing, fetch/sync/send/archive/delete/search via Graph API for Exchange accounts |
+| `src/config_cmd/oauth2.rs` | `email config oauth2-login` command: runs device code flow, tests IMAP/SMTP or Graph `/me` |
 
 ### Dependency graph (no cycles)
 
@@ -56,12 +57,13 @@ types       --> (none)
 config      --> (none)
 parse       --> types
 imap_client --> config, parse, sync, types
+graph       --> config, imap_client, oauth2, parse
 draft       --> config, parse, types
 send        --> config, types
 sync        --> parse
 oauth2      --> (none; uses reqwest, base64, serde_json)
-config_cmd/ --> config, imap_client, oauth2
-tui         --> config, draft, imap_client, parse, send, sync, types
+config_cmd/ --> config, graph, imap_client, oauth2
+tui         --> config, draft, graph, imap_client, parse, send, sync, types
 main        --> all modules (via lib)
 ```
 
@@ -121,10 +123,10 @@ Each account has an `auth_method` field (default: `password`):
 - `graph` -- Microsoft Graph API for mail operations. Requires `[accounts.oauth2]` section with `client_id` and `tenant_id`. Uses `GRAPH_SCOPES` (graph.microsoft.com/Mail.*). `SmtpConfig::load()` and `ImapConfig::load()` return `Err` for Graph accounts (they don't use SMTP/IMAP). Use `GraphConfig::load()` instead. Token acquisition and refresh use the same `oauth2.rs` infrastructure but with Graph-specific scopes. `email config oauth2-login` tests Graph accounts via the `/me` endpoint instead of IMAP/SMTP connections.
 
 ### Config subcommands
-- `email config init` -- Interactive wizard: tests SMTP/IMAP credentials, discovers server mailboxes, assigns roles, writes config. Supports password + OAuth2 (Exchange) providers.
+- `email config init` -- Interactive wizard: tests credentials, discovers server mailboxes, assigns roles, writes config. Supports password, OAuth2 (IMAP/SMTP), and Graph API providers.
 - `email config show` -- Displays resolved config with masked passwords and OAuth2 token status.
 - `email config set-password smtp|imap` -- Stores password in OS keyring.
-- `email config oauth2-login [--account]` -- Runs OAuth2 device code flow, caches token, tests IMAP/SMTP.
+- `email config oauth2-login [--account]` -- Runs OAuth2 device code flow, caches token, tests IMAP/SMTP or Graph `/me`.
 - `email config path` -- Prints config file path.
 
 ## Logging
@@ -216,6 +218,8 @@ The TUI follows The Elm Architecture: `Message -> update -> Action`. `App::updat
 ### Background Operations
 
 - **IMAP watcher**: A long-lived thread runs IMAP IDLE on INBOX and sends `WatchEvent::Changed` when new mail arrives, triggering an automatic fetch.
+- **Graph watcher**: For Graph accounts (no IMAP IDLE), a timer-based poll thread checks inbox message count every 60s via `fetch_message_ids("inbox")` and sends `WatchEvent::Changed` when the count changes.
+- **Graph action branching**: All TUI actions in `handle_action()` check `app.is_graph()` and branch to Graph API calls (`graph::archive_email_graph`, `graph::delete_email_graph`, `graph::mark_read_graph`, `graph::sync_mailboxes_graph`, `graph::send_mail`, `graph::search_messages`) instead of IMAP/SMTP equivalents.
 - **Mutations** (archive, delete): Optimistic -- local file removed from list immediately, server operation runs in background. On failure, caches are invalidated and the list reloads.
 - **Queued actions**: Fetch/sync/reconcile are deferred if mutations are in progress (`bg_mutations > 0`), then auto-executed when mutations complete.
 

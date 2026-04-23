@@ -11,7 +11,8 @@ use super::app::{
     StatusLevel,
 };
 use super::helpers::{
-    edit_file, ensure_search_result_saved, resolve_send_account, resume_terminal, suspend_terminal,
+    edit_file, ensure_search_result_saved, lib_do_multi_search_graph, lib_do_sync_graph,
+    resolve_send_account, resume_terminal, suspend_terminal,
 };
 use super::ui;
 
@@ -60,7 +61,7 @@ pub(super) fn handle_action(
                     .smtp_config
                     .as_ref()
                     .map(|s| s.default_from.clone())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| app.account_config.default_from.clone());
                 let drafts_dir = app.drafts_dir.clone();
                 match create_reply_draft(&path, reply_all, &default_from, drafts_dir.as_deref()) {
                     Ok(draft_path) => {
@@ -86,7 +87,7 @@ pub(super) fn handle_action(
                     .smtp_config
                     .as_ref()
                     .map(|s| s.default_from.clone())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| app.account_config.default_from.clone());
                 let drafts_dir = app.drafts_dir.clone();
                 match create_forward_draft(&path, &default_from, drafts_dir.as_deref()) {
                     Ok(draft_path) => {
@@ -108,152 +109,366 @@ pub(super) fn handle_action(
 
         Action::Send => {
             if let Some(path) = app.selected_email_path() {
-                let (acct_idx, smtp_config, imap_config, account_config, signature, sent_dir) =
+                let (acct_idx, smtp_config, imap_config, graph_config, account_config, signature, sent_dir) =
                     resolve_send_account(app, &path);
-                let smtp_config = match smtp_config {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
-                        return Ok(());
-                    }
-                };
-                let email_settings = app.global_config.email.clone();
 
-                app.bg_count += 1;
-                app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
-                let tx = bg_tx.clone();
-                std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = (|| -> anyhow::Result<String> {
-                        let draft = parse_email_draft(&path)?;
-                        validate_draft(&draft)?;
+                if graph_config.is_some()
+                    && account_config.auth_method == crate::config::AuthMethod::Graph
+                {
+                    let graph_config = graph_config.unwrap();
+                    let email_settings = app.global_config.email.clone();
 
-                        let (send_result, raw_message, message_id) = rt.block_on(send_email(
-                            &draft,
-                            &smtp_config,
-                            &email_settings,
-                            signature.as_deref(),
-                        ))?;
+                    app.bg_count += 1;
+                    app.set_status_level(
+                        "Sending via Graph...".to_string(),
+                        StatusLevel::Progress,
+                    );
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = (|| -> anyhow::Result<String> {
+                            let draft = parse_email_draft(&path)?;
+                            validate_draft(&draft)?;
 
-                        if send_result.all_succeeded() || send_result.any_succeeded() {
-                            update_status_to_sent(
-                                &draft,
-                                sent_dir.as_deref(),
-                                message_id.as_deref(),
-                            )?;
-                            if let Some(ref imap_cfg) = imap_config {
-                                let sent_mailbox = resolve_sent_mailbox(&account_config);
-                                let _ = rt.block_on(append_to_sent_folder(
-                                    imap_cfg,
-                                    &raw_message,
-                                    &sent_mailbox,
-                                ));
-                            }
-                            // Incremental contacts-index update (best-effort)
-                            crate::contacts::hooks::bump_after_send(&account_config, &draft);
-                            if send_result.all_succeeded() {
-                                Ok(format!(
-                                    "Sent to {} recipient(s)",
-                                    send_result.results.len()
-                                ))
+                            let to = parse_graph_recipients(draft.frontmatter.to.as_deref());
+                            let cc = parse_graph_recipients(draft.frontmatter.cc.as_deref());
+                            let bcc = parse_graph_recipients(draft.frontmatter.bcc.as_deref());
+                            let to_refs: Vec<(&str, &str)> =
+                                to.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                            let cc_refs: Vec<(&str, &str)> =
+                                cc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                            let bcc_refs: Vec<(&str, &str)> =
+                                bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+
+                            let quoted_html = draft.path.with_extension("html");
+                            let quoted = if quoted_html.exists() {
+                                std::fs::read_to_string(&quoted_html).ok()
                             } else {
-                                Ok(format!(
-                                    "Partial: {}/{} succeeded",
-                                    send_result.succeeded().len(),
-                                    send_result.results.len()
-                                ))
+                                None
+                            };
+                            let html_body = crate::send::markdown_to_html(
+                                &draft.body_markdown,
+                                &email_settings,
+                                signature.as_deref(),
+                                quoted.as_deref(),
+                            );
+
+                            let mut att_data: Vec<(String, Vec<u8>, String)> = Vec::new();
+                            if let Some(ref attachments) = draft.frontmatter.attachments {
+                                for att_path in attachments {
+                                    let expanded = shellexpand::tilde(att_path);
+                                    let p = std::path::Path::new(expanded.as_ref());
+                                    let content = std::fs::read(p)?;
+                                    let filename = p
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "attachment".to_string());
+                                    let content_type =
+                                        mime_guess::from_path(p).first_or_octet_stream().to_string();
+                                    att_data.push((filename, content, content_type));
+                                }
                             }
-                        } else {
-                            anyhow::bail!(
-                                "Failed to send to all {} recipient(s)",
-                                send_result.results.len()
-                            )
-                        }
-                    })();
-                    let _ = tx.send(BgResult::Send {
-                        account_index: acct_idx,
-                        result: result.map_err(|e| e.to_string()),
+
+                            let client = rt
+                                .block_on(crate::graph::GraphClient::new_async(&graph_config))?;
+                            rt.block_on(client.send_mail(
+                                &to_refs,
+                                &cc_refs,
+                                &bcc_refs,
+                                &draft.frontmatter.subject,
+                                &html_body,
+                                &att_data,
+                            ))?;
+
+                            update_status_to_sent(&draft, sent_dir.as_deref(), None)?;
+                            crate::contacts::hooks::bump_after_send(&account_config, &draft);
+
+                            Ok(format!(
+                                "Sent via Graph to {} recipient(s)",
+                                to.len() + cc.len() + bcc.len()
+                            ))
+                        })();
+                        let _ = tx.send(BgResult::Send {
+                            account_index: acct_idx,
+                            result: result.map_err(|e| e.to_string()),
+                        });
                     });
-                });
+                } else {
+                    let smtp_config = match smtp_config {
+                        Some(c) => c,
+                        None => {
+                            app.set_status_level(
+                                "SMTP not configured".to_string(),
+                                StatusLevel::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+                    let email_settings = app.global_config.email.clone();
+
+                    app.bg_count += 1;
+                    app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = (|| -> anyhow::Result<String> {
+                            let draft = parse_email_draft(&path)?;
+                            validate_draft(&draft)?;
+
+                            let (send_result, raw_message, message_id) = rt.block_on(send_email(
+                                &draft,
+                                &smtp_config,
+                                &email_settings,
+                                signature.as_deref(),
+                            ))?;
+
+                            if send_result.all_succeeded() || send_result.any_succeeded() {
+                                update_status_to_sent(
+                                    &draft,
+                                    sent_dir.as_deref(),
+                                    message_id.as_deref(),
+                                )?;
+                                if let Some(ref imap_cfg) = imap_config {
+                                    let sent_mailbox = resolve_sent_mailbox(&account_config);
+                                    let _ = rt.block_on(append_to_sent_folder(
+                                        imap_cfg,
+                                        &raw_message,
+                                        &sent_mailbox,
+                                    ));
+                                }
+                                crate::contacts::hooks::bump_after_send(&account_config, &draft);
+                                if send_result.all_succeeded() {
+                                    Ok(format!(
+                                        "Sent to {} recipient(s)",
+                                        send_result.results.len()
+                                    ))
+                                } else {
+                                    Ok(format!(
+                                        "Partial: {}/{} succeeded",
+                                        send_result.succeeded().len(),
+                                        send_result.results.len()
+                                    ))
+                                }
+                            } else {
+                                anyhow::bail!(
+                                    "Failed to send to all {} recipient(s)",
+                                    send_result.results.len()
+                                )
+                            }
+                        })();
+                        let _ = tx.send(BgResult::Send {
+                            account_index: acct_idx,
+                            result: result.map_err(|e| e.to_string()),
+                        });
+                    });
+                }
             }
         }
 
         Action::SendApproved => {
             if let Some(dir) = app.active_dir().cloned() {
-                let smtp_config = match app.smtp_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
-                        return Ok(());
-                    }
-                };
-                let email_settings = app.global_config.email.clone();
-                let account_config = app.account_config.clone();
-                let imap_config = app.imap_config.clone();
-                let signature = app.signature_content.clone();
-                let sent_dir = app.sent_dir.clone();
+                if app.is_graph() {
+                    let graph_config = app.graph_config.clone().unwrap();
+                    let email_settings = app.global_config.email.clone();
+                    let account_config = app.account_config.clone();
+                    let signature = app.signature_content.clone();
+                    let sent_dir = app.sent_dir.clone();
 
-                app.bg_count += 1;
-                app.set_status_level("Sending approved...".to_string(), StatusLevel::Progress);
-                let acct_idx = app.active_account;
-                let tx = bg_tx.clone();
-                std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = (|| -> anyhow::Result<String> {
-                        let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
-                        if drafts.is_empty() {
-                            return Ok("No approved emails found".to_string());
-                        }
+                    app.bg_count += 1;
+                    app.set_status_level(
+                        "Sending approved via Graph...".to_string(),
+                        StatusLevel::Progress,
+                    );
+                    let acct_idx = app.active_account;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = (|| -> anyhow::Result<String> {
+                            let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
+                            if drafts.is_empty() {
+                                return Ok("No approved emails found".to_string());
+                            }
 
-                        let mut sent = 0usize;
-                        let mut failed = 0usize;
+                            let mut sent = 0usize;
+                            let mut failed = 0usize;
 
-                        for draft in &drafts {
-                            match rt.block_on(send_email(
-                                draft,
-                                &smtp_config,
-                                &email_settings,
-                                signature.as_deref(),
-                            )) {
-                                Ok((send_result, raw_message, message_id)) => {
-                                    if send_result.all_succeeded() || send_result.any_succeeded() {
+                            for draft in &drafts {
+                                let send_result = (|| -> anyhow::Result<()> {
+                                    let to = parse_graph_recipients(
+                                        draft.frontmatter.to.as_deref(),
+                                    );
+                                    let cc = parse_graph_recipients(
+                                        draft.frontmatter.cc.as_deref(),
+                                    );
+                                    let bcc = parse_graph_recipients(
+                                        draft.frontmatter.bcc.as_deref(),
+                                    );
+                                    let to_refs: Vec<(&str, &str)> = to
+                                        .iter()
+                                        .map(|(n, a)| (n.as_str(), a.as_str()))
+                                        .collect();
+                                    let cc_refs: Vec<(&str, &str)> = cc
+                                        .iter()
+                                        .map(|(n, a)| (n.as_str(), a.as_str()))
+                                        .collect();
+                                    let bcc_refs: Vec<(&str, &str)> = bcc
+                                        .iter()
+                                        .map(|(n, a)| (n.as_str(), a.as_str()))
+                                        .collect();
+
+                                    let quoted_html = draft.path.with_extension("html");
+                                    let quoted = if quoted_html.exists() {
+                                        std::fs::read_to_string(&quoted_html).ok()
+                                    } else {
+                                        None
+                                    };
+                                    let html_body = crate::send::markdown_to_html(
+                                        &draft.body_markdown,
+                                        &email_settings,
+                                        signature.as_deref(),
+                                        quoted.as_deref(),
+                                    );
+
+                                    let mut att_data: Vec<(String, Vec<u8>, String)> = Vec::new();
+                                    if let Some(ref attachments) = draft.frontmatter.attachments {
+                                        for att_path in attachments {
+                                            let expanded = shellexpand::tilde(att_path);
+                                            let p = std::path::Path::new(expanded.as_ref());
+                                            let content = std::fs::read(p)?;
+                                            let filename = p
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| "attachment".to_string());
+                                            let content_type = mime_guess::from_path(p)
+                                                .first_or_octet_stream()
+                                                .to_string();
+                                            att_data.push((filename, content, content_type));
+                                        }
+                                    }
+
+                                    let client = rt.block_on(
+                                        crate::graph::GraphClient::new_async(&graph_config),
+                                    )?;
+                                    rt.block_on(client.send_mail(
+                                        &to_refs,
+                                        &cc_refs,
+                                        &bcc_refs,
+                                        &draft.frontmatter.subject,
+                                        &html_body,
+                                        &att_data,
+                                    ))?;
+                                    Ok(())
+                                })();
+
+                                match send_result {
+                                    Ok(()) => {
                                         let _ = update_status_to_sent(
                                             draft,
                                             sent_dir.as_deref(),
-                                            message_id.as_deref(),
+                                            None,
                                         );
-                                        if let Some(ref imap_cfg) = imap_config {
-                                            let sent_mailbox =
-                                                resolve_sent_mailbox(&account_config);
-                                            let _ = rt.block_on(append_to_sent_folder(
-                                                imap_cfg,
-                                                &raw_message,
-                                                &sent_mailbox,
-                                            ));
-                                        }
-                                        // Incremental contacts-index update (best-effort)
                                         crate::contacts::hooks::bump_after_send(
                                             &account_config,
                                             draft,
                                         );
                                         sent += 1;
-                                    } else {
-                                        failed += 1;
                                     }
+                                    Err(_) => failed += 1,
                                 }
-                                Err(_) => failed += 1,
                             }
-                        }
 
-                        Ok(format!("{} sent, {} failed", sent, failed))
-                    })();
-                    let _ = tx.send(BgResult::SendApproved {
-                        account_index: acct_idx,
-                        result: result.map_err(|e| e.to_string()),
+                            Ok(format!("{} sent, {} failed", sent, failed))
+                        })();
+                        let _ = tx.send(BgResult::SendApproved {
+                            account_index: acct_idx,
+                            result: result.map_err(|e| e.to_string()),
+                        });
                     });
-                });
+                } else {
+                    let smtp_config = match app.smtp_config.clone() {
+                        Some(c) => c,
+                        None => {
+                            app.set_status_level(
+                                "SMTP not configured".to_string(),
+                                StatusLevel::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+                    let email_settings = app.global_config.email.clone();
+                    let account_config = app.account_config.clone();
+                    let imap_config = app.imap_config.clone();
+                    let signature = app.signature_content.clone();
+                    let sent_dir = app.sent_dir.clone();
+
+                    app.bg_count += 1;
+                    app.set_status_level(
+                        "Sending approved...".to_string(),
+                        StatusLevel::Progress,
+                    );
+                    let acct_idx = app.active_account;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = (|| -> anyhow::Result<String> {
+                            let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
+                            if drafts.is_empty() {
+                                return Ok("No approved emails found".to_string());
+                            }
+
+                            let mut sent = 0usize;
+                            let mut failed = 0usize;
+
+                            for draft in &drafts {
+                                match rt.block_on(send_email(
+                                    draft,
+                                    &smtp_config,
+                                    &email_settings,
+                                    signature.as_deref(),
+                                )) {
+                                    Ok((send_result, raw_message, message_id)) => {
+                                        if send_result.all_succeeded()
+                                            || send_result.any_succeeded()
+                                        {
+                                            let _ = update_status_to_sent(
+                                                draft,
+                                                sent_dir.as_deref(),
+                                                message_id.as_deref(),
+                                            );
+                                            if let Some(ref imap_cfg) = imap_config {
+                                                let sent_mailbox =
+                                                    resolve_sent_mailbox(&account_config);
+                                                let _ = rt.block_on(append_to_sent_folder(
+                                                    imap_cfg,
+                                                    &raw_message,
+                                                    &sent_mailbox,
+                                                ));
+                                            }
+                                            crate::contacts::hooks::bump_after_send(
+                                                &account_config,
+                                                draft,
+                                            );
+                                            sent += 1;
+                                        } else {
+                                            failed += 1;
+                                        }
+                                    }
+                                    Err(_) => failed += 1,
+                                }
+                            }
+
+                            Ok(format!("{} sent, {} failed", sent, failed))
+                        })();
+                        let _ = tx.send(BgResult::SendApproved {
+                            account_index: acct_idx,
+                            result: result.map_err(|e| e.to_string()),
+                        });
+                    });
+                }
             }
         }
 
@@ -273,11 +488,12 @@ pub(super) fn handle_action(
                 app.set_status(format!("File already exists: {}", path.display()));
             } else {
                 let now = chrono::Utc::now().to_rfc2822();
-                let from = app
+                let default_from = app
                     .smtp_config
                     .as_ref()
-                    .map(|s| s.default_from.as_str())
-                    .unwrap_or("");
+                    .map(|s| s.default_from.clone())
+                    .unwrap_or_else(|| app.account_config.default_from.clone());
+                let from = default_from.as_str();
                 let skeleton = format!("---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom: {from}\ndate: {now}\nreply_to:\nattachments: []\n---\n\n");
                 match std::fs::write(&path, skeleton) {
                     Ok(()) => {
@@ -338,13 +554,6 @@ pub(super) fn handle_action(
 
         Action::Archive => {
             if let Some(path) = app.selected_email_path() {
-                let imap_config = match app.imap_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                        return Ok(());
-                    }
-                };
                 let archive_dir = match app.archive_dir.clone() {
                     Some(d) => d,
                     None => {
@@ -357,73 +566,133 @@ pub(super) fn handle_action(
                 };
                 let archive_server_name = app.archive_server_name.clone();
 
-                app.remove_selected_from_list();
-                app.bg_count += 1;
-                app.bg_mutations += 1;
-                app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
-                terminal.draw(|frame| ui::view(app, frame))?;
-                let acct_idx = app.active_account;
-                let tx = bg_tx.clone();
-                std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = rt
-                        .block_on(archive_email_locally(
-                            &imap_config,
-                            &archive_dir,
-                            &path,
-                            &archive_server_name,
-                        ))
-                        .map(|()| String::new())
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Archive {
-                        account_index: acct_idx,
-                        result,
+                if app.is_graph() {
+                    let graph_config = app.graph_config.clone().unwrap();
+
+                    app.remove_selected_from_list();
+                    app.bg_count += 1;
+                    app.bg_mutations += 1;
+                    app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
+                    terminal.draw(|frame| ui::view(app, frame))?;
+                    let acct_idx = app.active_account;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = rt
+                            .block_on(crate::graph::archive_email_graph(
+                                &graph_config,
+                                &archive_dir,
+                                &path,
+                                &archive_server_name,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Archive {
+                            account_index: acct_idx,
+                            result,
+                        });
                     });
-                });
+                } else {
+                    let imap_config = match app.imap_config.clone() {
+                        Some(c) => c,
+                        None => {
+                            app.set_status_level(
+                                "IMAP not configured".to_string(),
+                                StatusLevel::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+
+                    app.remove_selected_from_list();
+                    app.bg_count += 1;
+                    app.bg_mutations += 1;
+                    app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
+                    terminal.draw(|frame| ui::view(app, frame))?;
+                    let acct_idx = app.active_account;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = rt
+                            .block_on(archive_email_locally(
+                                &imap_config,
+                                &archive_dir,
+                                &path,
+                                &archive_server_name,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Archive {
+                            account_index: acct_idx,
+                            result,
+                        });
+                    });
+                }
             }
         }
 
         Action::Delete => {
             if let Some(path) = app.selected_email_path() {
-                let imap_config = match app.imap_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                        return Ok(());
-                    }
-                };
+                if app.is_graph() {
+                    let graph_config = app.graph_config.clone().unwrap();
 
-                app.remove_selected_from_list();
-                app.bg_count += 1;
-                app.bg_mutations += 1;
-                app.set_status_level("Deleting...".to_string(), StatusLevel::Progress);
-                terminal.draw(|frame| ui::view(app, frame))?;
-                let acct_idx = app.active_account;
-                let tx = bg_tx.clone();
-                std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = rt
-                        .block_on(delete_email_locally(&imap_config, &path))
-                        .map(|()| String::new())
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Delete {
-                        account_index: acct_idx,
-                        result,
+                    app.remove_selected_from_list();
+                    app.bg_count += 1;
+                    app.bg_mutations += 1;
+                    app.set_status_level("Deleting...".to_string(), StatusLevel::Progress);
+                    terminal.draw(|frame| ui::view(app, frame))?;
+                    let acct_idx = app.active_account;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = rt
+                            .block_on(crate::graph::delete_email_graph(&graph_config, &path))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Delete {
+                            account_index: acct_idx,
+                            result,
+                        });
                     });
-                });
+                } else {
+                    let imap_config = match app.imap_config.clone() {
+                        Some(c) => c,
+                        None => {
+                            app.set_status_level(
+                                "IMAP not configured".to_string(),
+                                StatusLevel::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+
+                    app.remove_selected_from_list();
+                    app.bg_count += 1;
+                    app.bg_mutations += 1;
+                    app.set_status_level("Deleting...".to_string(), StatusLevel::Progress);
+                    terminal.draw(|frame| ui::view(app, frame))?;
+                    let acct_idx = app.active_account;
+                    let tx = bg_tx.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = rt
+                            .block_on(delete_email_locally(&imap_config, &path))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Delete {
+                            account_index: acct_idx,
+                            result,
+                        });
+                    });
+                }
             }
         }
 
         Action::BatchArchive(paths) => {
-            let imap_config = match app.imap_config.clone() {
-                Some(c) => c,
-                None => {
-                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
             let archive_dir = match app.archive_dir.clone() {
                 Some(d) => d,
                 None => {
@@ -450,32 +719,59 @@ pub(super) fn handle_action(
 
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let results = rt.block_on(batch_archive_emails_locally(
-                    &imap_config,
-                    &archive_dir,
-                    &paths,
-                    &archive_server_name,
-                ));
-                for (_path, result) in results {
-                    let _ = tx.send(BgResult::Archive {
-                        account_index: acct_idx,
-                        result: result.map(|()| String::new()).map_err(|e| e.to_string()),
-                    });
-                }
-            });
+
+            if app.is_graph() {
+                let graph_config = app.graph_config.clone().unwrap();
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    for path in &paths {
+                        let result = rt
+                            .block_on(crate::graph::archive_email_graph(
+                                &graph_config,
+                                &archive_dir,
+                                path,
+                                &archive_server_name,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Archive {
+                            account_index: acct_idx,
+                            result,
+                        });
+                    }
+                });
+            } else {
+                let imap_config = match app.imap_config.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                };
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let results = rt.block_on(batch_archive_emails_locally(
+                        &imap_config,
+                        &archive_dir,
+                        &paths,
+                        &archive_server_name,
+                    ));
+                    for (_path, result) in results {
+                        let _ = tx.send(BgResult::Archive {
+                            account_index: acct_idx,
+                            result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                        });
+                    }
+                });
+            }
         }
 
         Action::BatchDelete(paths) => {
-            let imap_config = match app.imap_config.clone() {
-                Some(c) => c,
-                None => {
-                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
-
             let path_set: HashSet<PathBuf> = paths.iter().cloned().collect();
             app.remove_selected_from_list_batch(&path_set);
 
@@ -490,16 +786,47 @@ pub(super) fn handle_action(
 
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let results = rt.block_on(batch_delete_emails_locally(&imap_config, &paths));
-                for (_path, result) in results {
-                    let _ = tx.send(BgResult::Delete {
-                        account_index: acct_idx,
-                        result: result.map(|()| String::new()).map_err(|e| e.to_string()),
-                    });
-                }
-            });
+
+            if app.is_graph() {
+                let graph_config = app.graph_config.clone().unwrap();
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    for path in &paths {
+                        let result = rt
+                            .block_on(crate::graph::delete_email_graph(&graph_config, path))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Delete {
+                            account_index: acct_idx,
+                            result,
+                        });
+                    }
+                });
+            } else {
+                let imap_config = match app.imap_config.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                };
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let results =
+                        rt.block_on(batch_delete_emails_locally(&imap_config, &paths));
+                    for (_path, result) in results {
+                        let _ = tx.send(BgResult::Delete {
+                            account_index: acct_idx,
+                            result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                        });
+                    }
+                });
+            }
         }
 
         Action::ToggleRead => {
@@ -527,27 +854,51 @@ pub(super) fn handle_action(
                 app.set_status(label.to_string());
 
                 // Async server update
-                if let (Some(mid), Some(imap_config)) = (message_id, app.imap_config.clone()) {
-                    let mailbox = app.active_server_mailbox();
-                    let acct_idx = app.active_account;
-                    let path_clone = path.clone();
-                    app.bg_count += 1;
-                    let tx = bg_tx.clone();
-                    std::thread::spawn(move || {
-                        let rt =
-                            tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                        let result = if new_read {
-                            rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox))
-                        } else {
-                            rt.block_on(mark_unread_on_server(&imap_config, &mid, &mailbox))
-                        };
-                        let _ = tx.send(BgResult::ToggleRead {
-                            account_index: acct_idx,
-                            path: path_clone,
-                            new_read_state: new_read,
-                            result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                if let Some(mid) = message_id {
+                    if app.is_graph() {
+                        let graph_cfg = app.graph_config.clone().unwrap();
+                        let acct_idx = app.active_account;
+                        let path_clone = path.clone();
+                        app.bg_count += 1;
+                        let tx = bg_tx.clone();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new()
+                                .expect("failed to create tokio runtime");
+                            let result =
+                                rt.block_on(crate::graph::mark_read_graph(&graph_cfg, &mid, new_read));
+                            let _ = tx.send(BgResult::ToggleRead {
+                                account_index: acct_idx,
+                                path: path_clone,
+                                new_read_state: new_read,
+                                result: result
+                                    .map(|()| String::new())
+                                    .map_err(|e| e.to_string()),
+                            });
                         });
-                    });
+                    } else if let Some(imap_config) = app.imap_config.clone() {
+                        let mailbox = app.active_server_mailbox();
+                        let acct_idx = app.active_account;
+                        let path_clone = path.clone();
+                        app.bg_count += 1;
+                        let tx = bg_tx.clone();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new()
+                                .expect("failed to create tokio runtime");
+                            let result = if new_read {
+                                rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox))
+                            } else {
+                                rt.block_on(mark_unread_on_server(&imap_config, &mid, &mailbox))
+                            };
+                            let _ = tx.send(BgResult::ToggleRead {
+                                account_index: acct_idx,
+                                path: path_clone,
+                                new_read_state: new_read,
+                                result: result
+                                    .map(|()| String::new())
+                                    .map_err(|e| e.to_string()),
+                            });
+                        });
+                    }
                 }
             }
         }
@@ -555,7 +906,7 @@ pub(super) fn handle_action(
         Action::MarkAsRead => {
             if let Some(email) = app.selected_email() {
                 if email.read {
-                    return Ok(()); // Already read, no-op
+                    return Ok(());
                 }
                 let path = email.path.clone();
                 let message_id = get_message_id_from_file(&path);
@@ -572,29 +923,54 @@ pub(super) fn handle_action(
                 }
 
                 // Async server update (no status message for auto-mark)
-                if let (Some(mid), Some(imap_config)) = (message_id, app.imap_config.clone()) {
-                    let mailbox = app.active_server_mailbox();
-                    let acct_idx = app.active_account;
-                    let path_clone = path.clone();
-                    app.bg_count += 1;
-                    let tx = bg_tx.clone();
-                    std::thread::spawn(move || {
-                        let rt =
-                            tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                        let result = rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox));
-                        let _ = tx.send(BgResult::ToggleRead {
-                            account_index: acct_idx,
-                            path: path_clone,
-                            new_read_state: true,
-                            result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                if let Some(mid) = message_id {
+                    if app.is_graph() {
+                        let graph_cfg = app.graph_config.clone().unwrap();
+                        let acct_idx = app.active_account;
+                        let path_clone = path.clone();
+                        app.bg_count += 1;
+                        let tx = bg_tx.clone();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new()
+                                .expect("failed to create tokio runtime");
+                            let result = rt.block_on(crate::graph::mark_read_graph(
+                                &graph_cfg, &mid, true,
+                            ));
+                            let _ = tx.send(BgResult::ToggleRead {
+                                account_index: acct_idx,
+                                path: path_clone,
+                                new_read_state: true,
+                                result: result
+                                    .map(|()| String::new())
+                                    .map_err(|e| e.to_string()),
+                            });
                         });
-                    });
+                    } else if let Some(imap_config) = app.imap_config.clone() {
+                        let mailbox = app.active_server_mailbox();
+                        let acct_idx = app.active_account;
+                        let path_clone = path.clone();
+                        app.bg_count += 1;
+                        let tx = bg_tx.clone();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new()
+                                .expect("failed to create tokio runtime");
+                            let result =
+                                rt.block_on(mark_read_on_server(&imap_config, &mid, &mailbox));
+                            let _ = tx.send(BgResult::ToggleRead {
+                                account_index: acct_idx,
+                                path: path_clone,
+                                new_read_state: true,
+                                result: result
+                                    .map(|()| String::new())
+                                    .map_err(|e| e.to_string()),
+                            });
+                        });
+                    }
                 }
             }
         }
 
         Action::BatchToggleRead(paths) => {
-            // If any selected email is unread, mark all as read; otherwise mark all as unread
             let any_unread = paths
                 .iter()
                 .any(|p| app.emails.iter().any(|e| e.path == *p && !e.read));
@@ -622,7 +998,32 @@ pub(super) fn handle_action(
             app.set_status(label);
 
             // Async server update
-            if let Some(imap_config) = app.imap_config.clone() {
+            if app.is_graph() {
+                let graph_cfg = app.graph_config.clone().unwrap();
+                let acct_idx = app.active_account;
+                app.bg_count += 1;
+                let tx = bg_tx.clone();
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    for path in &paths {
+                        if let Some(mid) = get_message_id_from_file(path) {
+                            let result = rt.block_on(crate::graph::mark_read_graph(
+                                &graph_cfg, &mid, new_read,
+                            ));
+                            if let Err(e) = result {
+                                log::warn!("Failed to toggle read for {}: {}", mid, e);
+                            }
+                        }
+                    }
+                    let _ = tx.send(BgResult::ToggleRead {
+                        account_index: acct_idx,
+                        path: paths.first().cloned().unwrap_or_default(),
+                        new_read_state: new_read,
+                        result: Ok(String::new()),
+                    });
+                });
+            } else if let Some(imap_config) = app.imap_config.clone() {
                 let mailbox = app.active_server_mailbox();
                 let acct_idx = app.active_account;
                 app.bg_count += 1;
@@ -642,7 +1043,6 @@ pub(super) fn handle_action(
                             }
                         }
                     }
-                    // Send a single result for the batch
                     let _ = tx.send(BgResult::ToggleRead {
                         account_index: acct_idx,
                         path: paths.first().cloned().unwrap_or_default(),
@@ -714,63 +1114,110 @@ pub(super) fn handle_action(
         Action::Fetch => {
             if app.bg_count > 0 {
                 app.queued_action = Some(Action::Fetch);
-                app.set_status(format!("Quick sync queued ({} ops pending...)", app.bg_count));
+                app.set_status(format!(
+                    "Quick sync queued ({} ops pending...)",
+                    app.bg_count
+                ));
                 return Ok(());
             }
-            let imap_config = match app.imap_config.clone() {
-                Some(c) => c,
-                None => {
-                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
             let account_config = app.account_config.clone();
-
-            app.bg_count += 1;
-            app.set_status_level("Quick sync...".to_string(), StatusLevel::Progress);
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let result = rt
-                    .block_on(super::helpers::lib_do_sync(
-                        &account_config,
-                        &imap_config,
-                        100,
-                        true,
-                    ))
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Fetch {
-                    account_index: acct_idx,
-                    result,
+
+            if app.is_graph() {
+                let graph_config = app.graph_config.clone().unwrap();
+                app.bg_count += 1;
+                app.set_status_level("Quick sync (Graph)...".to_string(), StatusLevel::Progress);
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(lib_do_sync_graph(&account_config, &graph_config, 100, true))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Fetch {
+                        account_index: acct_idx,
+                        result,
+                    });
                 });
-            });
+            } else {
+                let imap_config = match app.imap_config.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                };
+                app.bg_count += 1;
+                app.set_status_level("Quick sync...".to_string(), StatusLevel::Progress);
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(super::helpers::lib_do_sync(
+                            &account_config,
+                            &imap_config,
+                            100,
+                            true,
+                        ))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Fetch {
+                        account_index: acct_idx,
+                        result,
+                    });
+                });
+            }
         }
 
         Action::ServerSearch { query, targets } => {
-            let imap_config = match app.imap_config.clone() {
-                Some(c) => c,
-                None => {
-                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
-
             app.server_search_loading = true;
             app.server_search_status = Some("Searching...".to_string());
             app.bg_count += 1;
             let tx = bg_tx.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let result = rt.block_on(super::helpers::lib_do_multi_search(
-                    &imap_config,
-                    &query,
-                    &targets,
-                ));
-                let _ = tx.send(BgResult::ServerSearch {
-                    result: result.map_err(|e| e.to_string()),
+
+            if app.is_graph() {
+                let graph_config = app.graph_config.clone().unwrap();
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt.block_on(lib_do_multi_search_graph(
+                        &graph_config,
+                        &query,
+                        &targets,
+                    ));
+                    let _ = tx.send(BgResult::ServerSearch {
+                        result: result.map_err(|e| e.to_string()),
+                    });
                 });
-            });
+            } else {
+                let imap_config = match app.imap_config.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        app.server_search_loading = false;
+                        app.server_search_status = None;
+                        app.bg_count -= 1;
+                        return Ok(());
+                    }
+                };
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt.block_on(super::helpers::lib_do_multi_search(
+                        &imap_config,
+                        &query,
+                        &targets,
+                    ));
+                    let _ = tx.send(BgResult::ServerSearch {
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
+            }
         }
 
         Action::SearchResultOpen
@@ -784,37 +1231,69 @@ pub(super) fn handle_action(
         Action::Sync => {
             if app.bg_count > 0 {
                 app.queued_action = Some(Action::Sync);
-                app.set_status(format!("Full sync queued ({} ops pending...)", app.bg_count));
+                app.set_status(format!(
+                    "Full sync queued ({} ops pending...)",
+                    app.bg_count
+                ));
                 return Ok(());
             }
-            let imap_config = match app.imap_config.clone() {
-                Some(c) => c,
-                None => {
-                    app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
             let account_config = app.account_config.clone();
-
-            app.bg_count += 1;
-            app.set_status_level("Full sync...".to_string(), StatusLevel::Progress);
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                let result = rt
-                    .block_on(super::helpers::lib_do_sync(
-                        &account_config,
-                        &imap_config,
-                        usize::MAX,
-                        true,
-                    ))
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(BgResult::Sync {
-                    account_index: acct_idx,
-                    result,
+
+            if app.is_graph() {
+                let graph_config = app.graph_config.clone().unwrap();
+                app.bg_count += 1;
+                app.set_status_level(
+                    "Full sync (Graph)...".to_string(),
+                    StatusLevel::Progress,
+                );
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(lib_do_sync_graph(
+                            &account_config,
+                            &graph_config,
+                            usize::MAX,
+                            true,
+                        ))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Sync {
+                        account_index: acct_idx,
+                        result,
+                    });
                 });
-            });
+            } else {
+                let imap_config = match app.imap_config.clone() {
+                    Some(c) => c,
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                };
+                app.bg_count += 1;
+                app.set_status_level("Full sync...".to_string(), StatusLevel::Progress);
+                std::thread::spawn(move || {
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(super::helpers::lib_do_sync(
+                            &account_config,
+                            &imap_config,
+                            usize::MAX,
+                            true,
+                        ))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Sync {
+                        account_index: acct_idx,
+                        result,
+                    });
+                });
+            }
         }
 
         Action::OpenComposeWizard(mode) => {
@@ -944,11 +1423,12 @@ fn write_new_draft_from_wizard(app: &App, wizard: &ComposeWizard) -> Result<Path
         .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&dir)?;
 
-    let from = app
+    let default_from = app
         .smtp_config
         .as_ref()
-        .map(|s| s.default_from.as_str())
-        .unwrap_or("");
+        .map(|s| s.default_from.clone())
+        .unwrap_or_else(|| app.account_config.default_from.clone());
+    let from = default_from.as_str();
     let now = chrono::Utc::now().to_rfc2822();
 
     // Build a unique filename from the subject slug (fall back to timestamp).
@@ -1000,13 +1480,12 @@ fn write_forward_draft_from_wizard(
     source_path: &std::path::Path,
     wizard: &ComposeWizard,
 ) -> Result<PathBuf> {
-    // Reuse the full forward-skeleton machinery (body + attachments),
-    // then patch the frontmatter with the user's to/cc/bcc/subject edits.
-    let default_from = app
+    let default_from_owned = app
         .smtp_config
         .as_ref()
-        .map(|s| s.default_from.as_str())
-        .unwrap_or("");
+        .map(|s| s.default_from.clone())
+        .unwrap_or_else(|| app.account_config.default_from.clone());
+    let default_from = default_from_owned.as_str();
     let drafts_dir = app
         .find_mailbox_by_kind(MailboxKind::Drafts)
         .map(|i| app.mailboxes[i].dir.clone())
@@ -1188,7 +1667,7 @@ fn handle_search_result_action(
                     .smtp_config
                     .as_ref()
                     .map(|s| s.default_from.clone())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| app.account_config.default_from.clone());
                 let drafts_dir = app.drafts_dir.clone();
                 match create_reply_draft(&path, reply_all, &default_from, drafts_dir.as_deref()) {
                     Ok(draft_path) => {
@@ -1218,7 +1697,7 @@ fn handle_search_result_action(
                     .smtp_config
                     .as_ref()
                     .map(|s| s.default_from.clone())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| app.account_config.default_from.clone());
                 let drafts_dir = app.drafts_dir.clone();
                 match create_forward_draft(&path, &default_from, drafts_dir.as_deref()) {
                     Ok(draft_path) => {
@@ -1244,13 +1723,6 @@ fn handle_search_result_action(
 
         Action::SearchResultArchive => {
             if let Some(path) = ensure_search_result_saved(app) {
-                let imap_config = match app.imap_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                        return Ok(());
-                    }
-                };
                 let archive_dir = match app.archive_dir.clone() {
                     Some(d) => d,
                     None => {
@@ -1275,23 +1747,55 @@ fn handle_search_result_action(
                 app.set_status_level("Archiving...".to_string(), StatusLevel::Progress);
                 let acct_idx = app.active_account;
                 let tx = bg_tx.clone();
-                std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = rt
-                        .block_on(archive_email_locally(
-                            &imap_config,
-                            &archive_dir,
-                            &path,
-                            &archive_server_name,
-                        ))
-                        .map(|()| String::new())
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Archive {
-                        account_index: acct_idx,
-                        result,
+
+                if app.is_graph() {
+                    let graph_config = app.graph_config.clone().unwrap();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = rt
+                            .block_on(crate::graph::archive_email_graph(
+                                &graph_config,
+                                &archive_dir,
+                                &path,
+                                &archive_server_name,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Archive {
+                            account_index: acct_idx,
+                            result,
+                        });
                     });
-                });
+                } else {
+                    let imap_config = match app.imap_config.clone() {
+                        Some(c) => c,
+                        None => {
+                            app.set_status_level(
+                                "IMAP not configured".to_string(),
+                                StatusLevel::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new()
+                            .expect("failed to create tokio runtime");
+                        let result = rt
+                            .block_on(archive_email_locally(
+                                &imap_config,
+                                &archive_dir,
+                                &path,
+                                &archive_server_name,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Archive {
+                            account_index: acct_idx,
+                            result,
+                        });
+                    });
+                }
             } else {
                 app.set_status_level(
                     "Failed to save email locally".to_string(),
@@ -1303,6 +1807,28 @@ fn handle_search_result_action(
         _ => {}
     }
     Ok(())
+}
+
+fn parse_name_address(s: &str) -> (String, String) {
+    let s = s.trim();
+    if let Some(lt) = s.find('<') {
+        if let Some(gt) = s.find('>') {
+            let name = s[..lt].trim().trim_matches('"').trim().to_string();
+            let addr = s[lt + 1..gt].trim().to_string();
+            return (name, addr);
+        }
+    }
+    (String::new(), s.to_string())
+}
+
+fn parse_graph_recipients(field: Option<&str>) -> Vec<(String, String)> {
+    match field {
+        Some(s) if !s.trim().is_empty() => crate::send::split_addresses(s)
+            .into_iter()
+            .map(|a| parse_name_address(&a))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
