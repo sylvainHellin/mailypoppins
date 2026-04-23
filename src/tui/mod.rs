@@ -125,14 +125,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
         }
 
         // Auto-execute queued action when all mutations complete
-        if app.bg_mutations == 0 {
+        if app.bg_mutations == 0 && app.pending_actions.is_empty() {
             if let Some(action) = app.queued_action.take() {
-                app.pending_action = Some(action);
+                app.pending_actions.push_back(action);
             }
         }
 
-        // Process pending action (side-effects outside the pure update)
-        if let Some(action) = app.pending_action.take() {
+        // Process pending actions (drain queue so user actions are never lost)
+        while let Some(action) = app.pending_actions.pop_front() {
             actions::handle_action(&mut app, terminal, action, &bg_tx)?;
         }
     }

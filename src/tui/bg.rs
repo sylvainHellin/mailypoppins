@@ -31,7 +31,13 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                 Err(e) => {
                     app.push_status(format!("Archive failed: {e}"), StatusLevel::Error);
                     if account_index == app.active_account {
-                        app.invalidate_all_caches();
+                        // Only invalidate Inbox + Archive (the two involved mailboxes)
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Inbox) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Archive) {
+                            app.invalidate_cache_idx(idx);
+                        }
                         app.reload_current_mailbox();
                     } else {
                         app.invalidate_all_caches_on(account_index);
@@ -53,7 +59,6 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                 Err(e) => {
                     app.push_status(format!("Delete failed: {e}"), StatusLevel::Error);
                     if account_index == app.active_account {
-                        app.invalidate_all_caches();
                         app.reload_current_mailbox();
                     } else {
                         app.invalidate_all_caches_on(account_index);
@@ -71,7 +76,13 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                     let text = if msg.is_empty() { "Email sent".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
                     if account_index == app.active_account {
-                        app.invalidate_all_caches();
+                        // Send moves a draft to Sent -- only those two need invalidation
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Sent) {
+                            app.invalidate_cache_idx(idx);
+                        }
                         app.reload_current_mailbox();
                     } else {
                         app.invalidate_all_caches_on(account_index);
@@ -87,7 +98,12 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                     let text = if msg.is_empty() { "Approved emails sent".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
                     if account_index == app.active_account {
-                        app.invalidate_all_caches();
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                            app.invalidate_cache_idx(idx);
+                        }
+                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Sent) {
+                            app.invalidate_cache_idx(idx);
+                        }
                         app.reload_current_mailbox();
                     } else {
                         app.invalidate_all_caches_on(account_index);
@@ -119,8 +135,10 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                     let text = if msg.is_empty() { "Sync complete".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
                     if account_index == app.active_account {
+                        // Full sync may move emails between mailboxes via reconciliation
                         app.invalidate_all_caches();
                         app.reload_current_mailbox();
+                        app.recount_all_mailboxes();
                     } else {
                         app.invalidate_all_caches_on(account_index);
                     }
