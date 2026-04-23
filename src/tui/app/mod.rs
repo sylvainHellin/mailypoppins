@@ -45,7 +45,7 @@ pub struct App {
     pub account_config: crate::config::AccountConfig,
 
     // --- Global state ---
-    pub pending_action: Option<Action>,
+    pub pending_actions: VecDeque<Action>,
     pub confirm_dialog: Option<ConfirmDialog>,
     pub status_message: Option<String>,
     pub status_ticks: u8,
@@ -138,7 +138,7 @@ impl App {
             drafts_dir: None,
             inbox_dir: None,
             account_config: crate::config::AccountConfig::default(),
-            pending_action: None,
+            pending_actions: VecDeque::new(),
             confirm_dialog: None,
             status_message: None,
             status_ticks: 0,
@@ -348,7 +348,7 @@ impl App {
             }
             Message::MailboxChanged { account_index } => {
                 if account_index == self.active_account {
-                    self.pending_action = Some(Action::Fetch);
+                    self.push_action_dedup(Action::Fetch);
                 } else if let Some(acct) = self.accounts.get_mut(account_index) {
                     acct.has_unseen = true;
                 }
@@ -494,6 +494,22 @@ impl App {
         }
     }
 
+    /// Push an action to the queue.
+    pub fn push_action(&mut self, action: Action) {
+        self.pending_actions.push_back(action);
+    }
+
+    /// Push an action only if no equivalent variant is already queued.
+    /// Used for watcher-triggered fetches to avoid duplicates.
+    pub fn push_action_dedup(&mut self, action: Action) {
+        let dominated = self.pending_actions.iter().any(|a| {
+            std::mem::discriminant(a) == std::mem::discriminant(&action)
+        });
+        if !dominated {
+            self.pending_actions.push_back(action);
+        }
+    }
+
     pub fn reload_current_mailbox(&mut self) {
         let am = self.active_mailbox;
         self.invalidate_cache_idx(am);
@@ -504,9 +520,16 @@ impl App {
         } else {
             self.list_index = 0;
         }
-        let mailboxes = &self.mailboxes;
-        let counts = count_all_emails(mailboxes);
-        self.mailbox_counts = counts;
+        // Only update count for the active mailbox (not all)
+        if let Some(count) = self.mailbox_counts.get_mut(am) {
+            *count = self.emails.len();
+        }
+    }
+
+    /// Recount all mailbox sizes by walking every directory.
+    /// Only needed after full sync/reconciliation that moves emails between mailboxes.
+    pub fn recount_all_mailboxes(&mut self) {
+        self.mailbox_counts = count_all_emails(&self.mailboxes);
     }
 
     pub(crate) fn switch_mailbox(&mut self, idx: usize) {

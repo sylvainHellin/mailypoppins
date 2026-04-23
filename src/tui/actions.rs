@@ -50,7 +50,7 @@ pub(super) fn handle_action(
                 app.reload_current_mailbox();
                 // Auto-mark as read after opening in editor
                 if was_unread {
-                    app.pending_action = Some(Action::MarkAsRead);
+                    app.push_action(Action::MarkAsRead);
                 }
             }
         }

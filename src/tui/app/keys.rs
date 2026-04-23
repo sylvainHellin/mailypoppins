@@ -164,18 +164,18 @@ impl App {
                     match dialog.action {
                         ConfirmAction::Approve if !self.selection.is_empty() => {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
-                            self.pending_action = Some(Action::BatchApprove(paths));
+                            self.push_action(Action::BatchApprove(paths));
                         }
                         ConfirmAction::Archive if !self.selection.is_empty() => {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
-                            self.pending_action = Some(Action::BatchArchive(paths));
+                            self.push_action(Action::BatchArchive(paths));
                         }
                         ConfirmAction::Delete if !self.selection.is_empty() => {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
-                            self.pending_action = Some(Action::BatchDelete(paths));
+                            self.push_action(Action::BatchDelete(paths));
                         }
                         _ => {
-                            self.pending_action = Some(match dialog.action {
+                            self.push_action(match dialog.action {
                                 ConfirmAction::Approve => Action::Approve,
                                 ConfirmAction::Archive => Action::Archive,
                                 ConfirmAction::Delete => Action::Delete,
@@ -239,7 +239,7 @@ impl App {
                 if let Some(email) = self.selected_email() {
                     let html_path = email.path.with_extension("html");
                     if html_path.exists() {
-                        self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                        self.push_action(Action::OpenHtmlInBrowser(html_path));
                     } else {
                         self.set_status("No HTML version available".to_string());
                     }
@@ -254,8 +254,8 @@ impl App {
         if self.emails.is_empty() {
             self.g_pending = false;
             match key.code {
-                KeyCode::Char('s') => self.pending_action = Some(Action::Fetch),
-                KeyCode::Char('S') => self.pending_action = Some(Action::Sync),
+                KeyCode::Char('s') => self.push_action(Action::Fetch),
+                KeyCode::Char('S') => self.push_action(Action::Sync),
                 KeyCode::Char('f') => {
                     self.show_search_overlay = true;
                     self.server_search_query.clear();
@@ -268,7 +268,7 @@ impl App {
                     self.server_search_status = None;
                 }
                 KeyCode::Char('n') => {
-                    self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::New));
+                    self.push_action(Action::OpenComposeWizard(ComposeMode::New));
                 }
                 _ => {}
             }
@@ -302,20 +302,20 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char('e') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::EditCurrent);
+                self.push_action(Action::EditCurrent);
             }
             KeyCode::Char('r') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Reply(false));
+                self.push_action(Action::Reply(false));
             }
             KeyCode::Char('R') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Reply(true));
+                self.push_action(Action::Reply(true));
             }
             KeyCode::Char('w') => {
                 self.g_pending = false;
                 if let Some(path) = self.selected_email_path() {
-                    self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::Forward {
+                    self.push_action(Action::OpenComposeWizard(ComposeMode::Forward {
                         source_path: path,
                     }));
                 }
@@ -366,7 +366,7 @@ impl App {
                         action: ConfirmAction::Approve,
                     });
                 } else {
-                    self.pending_action = Some(Action::Approve);
+                    self.push_action(Action::Approve);
                 }
             }
             KeyCode::Char('x') => {
@@ -389,19 +389,19 @@ impl App {
             }
             KeyCode::Char('y') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::CopyPath);
+                self.push_action(Action::CopyPath);
             }
             KeyCode::Char('n') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::OpenComposeWizard(ComposeMode::New));
+                self.push_action(Action::OpenComposeWizard(ComposeMode::New));
             }
             KeyCode::Char('s') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Fetch);
+                self.push_action(Action::Fetch);
             }
             KeyCode::Char('S') => {
                 self.g_pending = false;
-                self.pending_action = Some(Action::Sync);
+                self.push_action(Action::Sync);
             }
             KeyCode::Char('f') => {
                 self.g_pending = false;
@@ -429,7 +429,7 @@ impl App {
                 if let Some(email) = self.selected_email() {
                     let html_path = email.path.with_extension("html");
                     if html_path.exists() {
-                        self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                        self.push_action(Action::OpenHtmlInBrowser(html_path));
                     } else {
                         self.set_status("No HTML version available".to_string());
                     }
@@ -439,9 +439,9 @@ impl App {
                 self.g_pending = false;
                 if !self.selection.is_empty() {
                     let paths: Vec<PathBuf> = self.selection.iter().cloned().collect();
-                    self.pending_action = Some(Action::BatchToggleRead(paths));
+                    self.push_action(Action::BatchToggleRead(paths));
                 } else {
-                    self.pending_action = Some(Action::ToggleRead);
+                    self.push_action(Action::ToggleRead);
                 }
             }
             KeyCode::Char(' ') => {
@@ -508,7 +508,7 @@ impl App {
                         (self.all_search_targets(), "All".to_string())
                     };
                     self.server_search_scope_label = scope_label;
-                    self.pending_action = Some(Action::ServerSearch {
+                    self.push_action(Action::ServerSearch {
                         query: self.server_search_query.clone(),
                         targets,
                     });
@@ -581,22 +581,22 @@ impl App {
                 self.server_search_scroll = self.server_search_scroll.saturating_sub(10);
             }
             KeyCode::Enter | KeyCode::Char('e') => {
-                self.pending_action = Some(Action::SearchResultOpen);
+                self.push_action(Action::SearchResultOpen);
             }
             KeyCode::Char('r') => {
-                self.pending_action = Some(Action::SearchResultReply(false));
+                self.push_action(Action::SearchResultReply(false));
             }
             KeyCode::Char('R') => {
-                self.pending_action = Some(Action::SearchResultReply(true));
+                self.push_action(Action::SearchResultReply(true));
             }
             KeyCode::Char('w') => {
-                self.pending_action = Some(Action::SearchResultForward);
+                self.push_action(Action::SearchResultForward);
             }
             KeyCode::Char('a') => {
-                self.pending_action = Some(Action::SearchResultArchive);
+                self.push_action(Action::SearchResultArchive);
             }
             KeyCode::Char('b') => {
-                self.pending_action = Some(Action::SearchResultOpenInBrowser);
+                self.push_action(Action::SearchResultOpenInBrowser);
             }
             KeyCode::Char('o') => {
                 self.open_search_result_attachment_picker(AttachmentPickerMode::Open);
@@ -709,7 +709,7 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.pending_action = Some(Action::ComposeWizardCancel);
+                self.push_action(Action::ComposeWizardCancel);
                 return None;
             }
             KeyCode::Tab => {
@@ -744,7 +744,7 @@ impl App {
             }
             KeyCode::Char('g') if ctrl => {
                 // Force-submit from any field.
-                self.pending_action = Some(Action::ComposeWizardSubmit);
+                self.push_action(Action::ComposeWizardSubmit);
                 return None;
             }
             KeyCode::Char('n') if ctrl => {
@@ -784,7 +784,7 @@ impl App {
                 }
                 // On subject (or an empty-suggestion address field), submit.
                 if wizard.focus == ComposeField::Subject || !wizard.subject.trim().is_empty() {
-                    self.pending_action = Some(Action::ComposeWizardSubmit);
+                    self.push_action(Action::ComposeWizardSubmit);
                     return None;
                 }
                 // Otherwise cycle to the next field.
@@ -907,7 +907,7 @@ impl App {
                 if let Some(email) = self.selected_email() {
                     let html_path = email.path.with_extension("html");
                     if html_path.exists() {
-                        self.pending_action = Some(Action::OpenHtmlInBrowser(html_path));
+                        self.push_action(Action::OpenHtmlInBrowser(html_path));
                     } else {
                         self.set_status("No HTML version available".to_string());
                     }
@@ -937,7 +937,7 @@ impl App {
                 KeyCode::Enter => {
                     let picker = self.attachment_picker.take().unwrap();
                     let path = picker.files[picker.selected].clone();
-                    self.pending_action = Some(Action::OpenAttachment(path));
+                    self.push_action(Action::OpenAttachment(path));
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.attachment_picker = None;
@@ -1036,7 +1036,7 @@ impl App {
                     if let Some(dir) = picker.zoxide_results.get(picker.selected).cloned() {
                         let sources = picker.sources.clone();
                         self.dir_picker = None;
-                        self.pending_action = Some(Action::SaveAttachments {
+                        self.push_action(Action::SaveAttachments {
                             sources,
                             dest_dir: dir,
                         });
@@ -1099,7 +1099,7 @@ impl App {
                         let sources = picker.sources.clone();
                         let dest_dir = picker.current_dir.clone();
                         self.dir_picker = None;
-                        self.pending_action = Some(Action::SaveAttachments {
+                        self.push_action(Action::SaveAttachments {
                             sources,
                             dest_dir,
                         });
@@ -1135,8 +1135,7 @@ impl App {
                     self.set_status("No attachments".to_string());
                 }
                 Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Open => {
-                    self.pending_action =
-                        Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                    self.push_action(Action::OpenAttachment(files.into_iter().next().unwrap()));
                 }
                 Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Save => {
                     // Single file in save mode -- skip picker, go straight to dir picker
@@ -1175,8 +1174,7 @@ impl App {
                 self.set_status("No attachments".to_string());
             }
             Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Open => {
-                self.pending_action =
-                    Some(Action::OpenAttachment(files.into_iter().next().unwrap()));
+                self.push_action(Action::OpenAttachment(files.into_iter().next().unwrap()));
             }
             Ok(files) if files.len() == 1 && mode == AttachmentPickerMode::Save => {
                 let sources = files;
@@ -1310,7 +1308,7 @@ impl App {
         match key.code {
             KeyCode::Char('s') => {
                 self.persistent_error = None;
-                self.pending_action = Some(Action::Sync);
+                self.push_action(Action::Sync);
             }
             KeyCode::Char('d') | KeyCode::Esc => {
                 self.persistent_error = None;
