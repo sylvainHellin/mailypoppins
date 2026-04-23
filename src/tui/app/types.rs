@@ -188,6 +188,7 @@ pub struct AccountState {
     pub account_config: crate::config::AccountConfig,
     pub imap_config: Option<crate::config::ImapConfig>,
     pub smtp_config: Option<crate::config::SmtpConfig>,
+    pub graph_config: Option<crate::config::GraphConfig>,
     pub signature_content: Option<String>,
     pub sent_dir: Option<PathBuf>,
     pub archive_dir: Option<PathBuf>,
@@ -217,6 +218,7 @@ impl AccountState {
     ) -> Self {
         let imap_config = crate::config::ImapConfig::load(&account_config).ok();
         let smtp_config = crate::config::SmtpConfig::load(&account_config).ok();
+        let graph_config = crate::config::GraphConfig::load(&account_config).ok();
 
         let signature_content = if email_settings.include_signature {
             crate::config::load_signature(&account_config, None)
@@ -256,6 +258,7 @@ impl AccountState {
             account_config,
             imap_config,
             smtp_config,
+            graph_config,
             signature_content,
             sent_dir,
             archive_dir,
@@ -277,6 +280,10 @@ impl AccountState {
             watcher_active: false,
             has_unseen: false,
         }
+    }
+
+    pub fn is_graph(&self) -> bool {
+        self.account_config.auth_method == crate::config::AuthMethod::Graph
     }
 }
 

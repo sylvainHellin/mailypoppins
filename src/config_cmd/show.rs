@@ -33,8 +33,13 @@ pub fn cmd_config_show() -> Result<()> {
         println!("  default_from = {}", account.default_from);
 
         match account.auth_method {
-            AuthMethod::OAuth2 => {
-                println!("  auth_method  = {}", "oauth2".yellow());
+            AuthMethod::OAuth2 | AuthMethod::Graph => {
+                let label = if account.auth_method == AuthMethod::Graph {
+                    "graph (Microsoft Graph API)"
+                } else {
+                    "oauth2"
+                };
+                println!("  auth_method  = {}", label.yellow());
                 if let Some(ref oauth2) = account.oauth2 {
                     println!("\n  {}", "[oauth2]".bold());
                     println!("    client_id = {}", oauth2.client_id);
@@ -68,54 +73,61 @@ pub fn cmd_config_show() -> Result<()> {
             }
         }
 
-        println!("\n  {}", "[smtp]".bold());
-        println!("    host     = {}", account.smtp.host);
-        println!("    port     = {}", account.smtp.port);
-        println!("    username = {}", account.smtp.username);
-        let smtp_key = format!("smtp-password-{}", account.name);
-        let smtp_pw = if get_keyring_password(&smtp_key).is_ok() {
-            "****".green().to_string()
+        if account.auth_method == AuthMethod::Graph {
+            // Graph accounts don't use SMTP/IMAP -- show a note instead
+            println!("\n  {}", "[transport]".bold());
+            println!("    Uses Microsoft Graph API (no SMTP/IMAP)");
         } else {
-            "(not set)".red().to_string()
-        };
-        println!("    password = {} (keyring)", smtp_pw);
-        if account.smtp.accept_invalid_certs {
-            println!("    accept_invalid_certs = {}", "true".yellow());
-        }
+            println!("\n  {}", "[smtp]".bold());
+            println!("    host     = {}", account.smtp.host);
+            println!("    port     = {}", account.smtp.port);
+            println!("    username = {}", account.smtp.username);
+            let smtp_key = format!("smtp-password-{}", account.name);
+            let smtp_pw = if get_keyring_password(&smtp_key).is_ok() {
+                "****".green().to_string()
+            } else {
+                "(not set)".red().to_string()
+            };
+            println!("    password = {} (keyring)", smtp_pw);
+            if account.smtp.accept_invalid_certs {
+                println!("    accept_invalid_certs = {}", "true".yellow());
+            }
 
-        println!("\n  {}", "[imap]".bold());
-        println!(
-            "    host     = {}",
-            if account.imap.host.is_empty() {
-                format!("{} (falls back to smtp.host)", account.smtp.host)
-                    .dimmed()
-                    .to_string()
+            println!("\n  {}", "[imap]".bold());
+            println!(
+                "    host     = {}",
+                if account.imap.host.is_empty() {
+                    format!("{} (falls back to smtp.host)", account.smtp.host)
+                        .dimmed()
+                        .to_string()
+                } else {
+                    account.imap.host.clone()
+                }
+            );
+            println!("    port     = {}", account.imap.port);
+            println!(
+                "    username = {}",
+                if account.imap.username.is_empty() {
+                    format!("{} (falls back to smtp.username)", account.smtp.username)
+                        .dimmed()
+                        .to_string()
+                } else {
+                    account.imap.username.clone()
+                }
+            );
+            let imap_key = format!("imap-password-{}", account.name);
+            let smtp_key = format!("smtp-password-{}", account.name);
+            let imap_pw = if get_keyring_password(&imap_key).is_ok() {
+                "****".green().to_string()
+            } else if get_keyring_password(&smtp_key).is_ok() {
+                format!("{} (falls back to smtp)", "****".green())
             } else {
-                account.imap.host.clone()
+                "(not set)".red().to_string()
+            };
+            println!("    password = {} (keyring)", imap_pw);
+            if account.imap.accept_invalid_certs {
+                println!("    accept_invalid_certs = {}", "true".yellow());
             }
-        );
-        println!("    port     = {}", account.imap.port);
-        println!(
-            "    username = {}",
-            if account.imap.username.is_empty() {
-                format!("{} (falls back to smtp.username)", account.smtp.username)
-                    .dimmed()
-                    .to_string()
-            } else {
-                account.imap.username.clone()
-            }
-        );
-        let imap_key = format!("imap-password-{}", account.name);
-        let imap_pw = if get_keyring_password(&imap_key).is_ok() {
-            "****".green().to_string()
-        } else if get_keyring_password(&smtp_key).is_ok() {
-            format!("{} (falls back to smtp)", "****".green())
-        } else {
-            "(not set)".red().to_string()
-        };
-        println!("    password = {} (keyring)", imap_pw);
-        if account.imap.accept_invalid_certs {
-            println!("    accept_invalid_certs = {}", "true".yellow());
         }
 
         println!("\n  {}", "[directories]".bold());

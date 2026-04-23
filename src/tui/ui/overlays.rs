@@ -411,6 +411,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("\\", "Search email content"),
                 ("?", "Toggle this help"),
                 ("!", "Toggle activity log"),
+                ("L", "Open activity log overlay"),
             ],
         ),
         (
@@ -472,6 +473,16 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("j/k", "Scroll line by line"),
                 ("d/u", "Half-page down / up"),
                 ("Esc", "Return to list"),
+            ],
+        ),
+        (
+            "ACTIVITY LOG",
+            vec![
+                ("j/k", "Scroll line by line"),
+                ("d/u", "Half-page down / up"),
+                ("gg / G", "Jump to top / bottom"),
+                ("/", "Filter entries"),
+                ("Esc", "Close overlay"),
             ],
         ),
     ]

@@ -13,7 +13,10 @@ use anyhow::Result;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, BgResult};
-use helpers::{init_terminal, install_panic_hook, restore_terminal, watcher_loop, WatchEvent};
+use helpers::{
+    graph_watcher_loop, init_terminal, install_panic_hook, restore_terminal, watcher_loop,
+    WatchEvent,
+};
 
 /// Entry point for the TUI. Call this when `email` is invoked with no arguments.
 pub fn run() -> Result<()> {
@@ -41,6 +44,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
             let acct_idx = i;
             std::thread::spawn(move || {
                 watcher_loop(tx, imap_clone, acct_idx);
+            });
+        } else if let Some(ref graph_cfg) = acct.graph_config {
+            acct.watcher_active = true;
+            let tx = watch_tx.clone();
+            let graph_clone = graph_cfg.clone();
+            let acct_idx = i;
+            std::thread::spawn(move || {
+                graph_watcher_loop(tx, graph_clone, acct_idx);
             });
         }
     }

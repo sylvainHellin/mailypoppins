@@ -28,6 +28,8 @@ pub enum AuthMethod {
     Password,
     #[serde(rename = "oauth2")]
     OAuth2,
+    #[serde(rename = "graph")]
+    Graph,
 }
 
 impl Default for AuthMethod {
@@ -198,6 +200,40 @@ pub struct ImapConfig {
     pub auth_method: AuthMethod,
 }
 
+/// Runtime config for Graph API accounts (no SMTP/IMAP needed).
+#[derive(Clone)]
+pub struct GraphConfig {
+    pub client_id: String,
+    pub tenant_id: String,
+    pub username: String,
+    pub account_name: String,
+}
+
+impl GraphConfig {
+    pub fn load(account: &AccountConfig) -> Result<Self> {
+        let oauth2_settings = account
+            .oauth2
+            .as_ref()
+            .context("Graph auth_method requires [accounts.oauth2] config with client_id and tenant_id")?;
+        if oauth2_settings.client_id.is_empty() || oauth2_settings.tenant_id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Graph auth_method requires non-empty client_id and tenant_id in [accounts.oauth2]"
+            ));
+        }
+        let username = if !account.smtp.username.is_empty() {
+            account.smtp.username.clone()
+        } else {
+            account.default_from.clone()
+        };
+        Ok(Self {
+            client_id: oauth2_settings.client_id.clone(),
+            tenant_id: oauth2_settings.tenant_id.clone(),
+            username,
+            account_name: account.name.clone(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Keyring helpers
 // ---------------------------------------------------------------------------
@@ -253,6 +289,11 @@ pub fn load_global_config() -> Result<GlobalConfig> {
 /// Build SmtpConfig from AccountConfig + keyring password (or OAuth2 token)
 impl SmtpConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
+        if account.auth_method == AuthMethod::Graph {
+            return Err(anyhow::anyhow!(
+                "Graph accounts use Microsoft Graph API, not SMTP"
+            ));
+        }
         let password = match account.auth_method {
             AuthMethod::OAuth2 => {
                 let oauth2_settings = account.oauth2.as_ref()
@@ -261,12 +302,14 @@ impl SmtpConfig {
                     &account.name,
                     &oauth2_settings.client_id,
                     &oauth2_settings.tenant_id,
+                    crate::oauth2::IMAP_SMTP_SCOPES,
                 )?
             }
             AuthMethod::Password => {
                 let key = format!("smtp-password-{}", account.name);
                 get_keyring_password(&key)?
             }
+            AuthMethod::Graph => unreachable!(),
         };
         Ok(Self {
             host: account.smtp.host.clone(),
@@ -283,6 +326,12 @@ impl SmtpConfig {
 /// Build ImapConfig from AccountConfig + keyring password (or OAuth2 token, with SMTP fallback)
 impl ImapConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
+        if account.auth_method == AuthMethod::Graph {
+            return Err(anyhow::anyhow!(
+                "Graph accounts use Microsoft Graph API, not IMAP"
+            ));
+        }
+
         // Username falls back to SMTP username if empty
         let username = if account.imap.username.is_empty() {
             account.smtp.username.clone()
@@ -298,6 +347,7 @@ impl ImapConfig {
                     &account.name,
                     &oauth2_settings.client_id,
                     &oauth2_settings.tenant_id,
+                    crate::oauth2::IMAP_SMTP_SCOPES,
                 )?
             }
             AuthMethod::Password => {
@@ -307,6 +357,7 @@ impl ImapConfig {
                 get_keyring_password(&imap_key)
                     .or_else(|_| get_keyring_password(&smtp_key))?
             }
+            AuthMethod::Graph => unreachable!(),
         };
 
         // Host falls back to SMTP host if empty

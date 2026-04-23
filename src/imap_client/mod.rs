@@ -157,6 +157,9 @@ async fn authenticate_client(
                 .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
             Ok(session)
         }
+        AuthMethod::Graph => {
+            Err(anyhow!("Graph accounts use Microsoft Graph API, not IMAP"))
+        }
     }
 }
 

@@ -6,8 +6,9 @@ use email::draft::*;
 use email::send::*;
 use email::sync::*;
 use email::config_cmd::*;
+use email::graph;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 use log::{error, info, warn};
@@ -281,6 +282,33 @@ fn prompt_confirmation(message: &str) -> bool {
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+/// Parse an address string like `"Name <addr>"` or `"addr"` into `(name, address)`.
+fn parse_name_address(s: &str) -> (String, String) {
+    let s = s.trim();
+    if let Some(lt) = s.find('<') {
+        if let Some(gt) = s.find('>') {
+            let name = s[..lt].trim().trim_matches('"').trim().to_string();
+            let addr = s[lt + 1..gt].trim().to_string();
+            return (name, addr);
+        }
+    }
+    // Plain address
+    (String::new(), s.to_string())
+}
+
+/// Parse a frontmatter address field (comma-separated) into `(name, address)` pairs.
+fn parse_recipients(field: Option<&str>) -> Vec<(String, String)> {
+    match field {
+        Some(s) if !s.trim().is_empty() => {
+            split_addresses(s)
+                .into_iter()
+                .map(|a| parse_name_address(&a))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -349,107 +377,176 @@ async fn main() -> Result<()> {
             let draft = parse_email_draft(&file)?;
             validate_draft(&draft)?;
 
-            preview_draft(
-                &draft,
-                &smtp_config,
-                &global_config.email,
-                signature_content.as_deref(),
-                false,
-            )?;
+            if account_config.auth_method == AuthMethod::Graph {
+                // Graph API send path
+                let graph_config = GraphConfig::load(&account_config)?;
 
-            if !yes && !prompt_confirmation("Send this email?") {
-                println!("Cancelled.");
-                return Ok(());
-            }
+                // Preview (simplified -- no SMTP config needed)
+                println!("{}", "--- Email Preview ---".bold());
+                println!("  {} {}", "To:".green(), draft.frontmatter.to.as_deref().unwrap_or("(none)"));
+                if let Some(ref cc) = draft.frontmatter.cc {
+                    println!("  {} {}", "Cc:".blue(), cc);
+                }
+                if let Some(ref bcc) = draft.frontmatter.bcc {
+                    println!("  {} {}", "Bcc:".blue(), bcc);
+                }
+                println!("  {} {}", "Subject:".yellow(), draft.frontmatter.subject);
+                println!("{}", "---".dimmed());
 
-            println!("Sending email...");
-            let (send_result, raw_message, message_id) = send_email(
-                &draft,
-                &smtp_config,
-                &global_config.email,
-                signature_content.as_deref(),
-            )
-            .await?;
+                if !yes && !prompt_confirmation("Send this email?") {
+                    println!("Cancelled.");
+                    return Ok(());
+                }
 
-            // Display per-recipient results
-            for r in &send_result.succeeded() {
-                println!(
-                    "  {} {} ({})",
-                    "✓".green(),
-                    r.address,
-                    r.role
+                println!("Sending via Graph API...");
+                let to = parse_recipients(draft.frontmatter.to.as_deref());
+                let cc = parse_recipients(draft.frontmatter.cc.as_deref());
+                let bcc = parse_recipients(draft.frontmatter.bcc.as_deref());
+
+                let to_refs: Vec<(&str, &str)> = to.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                let cc_refs: Vec<(&str, &str)> = cc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                let bcc_refs: Vec<(&str, &str)> = bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+
+                // Render HTML
+                let quoted_html = draft.path.with_extension("html");
+                let quoted = if quoted_html.exists() { fs::read_to_string(&quoted_html).ok() } else { None };
+                let html_body = markdown_to_html(
+                    &draft.body_markdown,
+                    &global_config.email,
+                    signature_content.as_deref(),
+                    quoted.as_deref(),
                 );
-            }
-            for r in &send_result.failed() {
-                println!(
-                    "  {} {} ({}): {}",
-                    "✗".red(),
-                    r.address,
-                    r.role,
-                    r.error.as_deref().unwrap_or("unknown error")
-                );
-            }
 
-            if send_result.all_succeeded() {
-                update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref())?;
-                info!("Email marked as sent: {}", draft.path.display());
-
-                // IMAP APPEND to Sent folder (best-effort)
-                if let Ok(imap_config) = ImapConfig::load(&account_config) {
-                    let sent_mailbox = resolve_sent_mailbox(&account_config);
-                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
-                        warn!("Failed to append to Sent folder: {}", e);
-                        println!(
-                            "  {} Could not copy to server Sent folder: {}",
-                            "⚠".yellow(), e
-                        );
+                // Read attachments
+                let mut att_data: Vec<(String, Vec<u8>, String)> = Vec::new();
+                if let Some(ref attachments) = draft.frontmatter.attachments {
+                    for att_path in attachments {
+                        let expanded = shellexpand::tilde(att_path);
+                        let path = Path::new(expanded.as_ref());
+                        let content = fs::read(path)
+                            .with_context(|| format!("Failed to read attachment: {}", att_path))?;
+                        let filename = path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "attachment".to_string());
+                        let content_type = mime_guess::from_path(path)
+                            .first_or_octet_stream()
+                            .to_string();
+                        att_data.push((filename, content, content_type));
                     }
                 }
 
-                // Incremental contacts-index update (best-effort, no-op if no cache)
+                let client = graph::GraphClient::new_async(&graph_config).await?;
+                client.send_mail(&to_refs, &cc_refs, &bcc_refs, &draft.frontmatter.subject, &html_body, &att_data).await?;
+
+                // Graph auto-copies to Sent Items, no IMAP APPEND needed
+                update_status_to_sent(&draft, sent_dir.as_deref(), None)?;
+                info!("Email sent via Graph and marked as sent: {}", draft.path.display());
                 email::contacts::hooks::bump_after_send(&account_config, &draft);
-
-                println!(
-                    "{} Email sent successfully to all {} recipient(s)",
-                    "✓".green().bold(),
-                    send_result.results.len()
-                );
-            } else if send_result.any_succeeded() {
-                update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref())?;
-                warn!(
-                    "Partial send: {} succeeded, {} failed for {}",
-                    send_result.succeeded().len(),
-                    send_result.failed().len(),
-                    draft.path.display()
-                );
-
-                // IMAP APPEND to Sent folder (best-effort)
-                if let Ok(imap_config) = ImapConfig::load(&account_config) {
-                    let sent_mailbox = resolve_sent_mailbox(&account_config);
-                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
-                        warn!("Failed to append to Sent folder: {}", e);
-                        println!(
-                            "  {} Could not copy to server Sent folder: {}",
-                            "⚠".yellow(), e
-                        );
-                    }
-                }
-
-                // Incremental contacts-index update (best-effort)
-                email::contacts::hooks::bump_after_send(&account_config, &draft);
-
-                println!(
-                    "{} Partial send: {} succeeded, {} failed (marked as sent -- see logs for details)",
-                    "⚠".yellow().bold(),
-                    send_result.succeeded().len().to_string().green(),
-                    send_result.failed().len().to_string().red()
-                );
+                println!("{} Email sent successfully via Graph API", "✓".green().bold());
             } else {
-                error!("All recipients failed for {}", draft.path.display());
-                return Err(anyhow!(
-                    "Failed to send to all {} recipient(s)",
-                    send_result.results.len()
-                ));
+                // SMTP send path (existing)
+                preview_draft(
+                    &draft,
+                    &smtp_config,
+                    &global_config.email,
+                    signature_content.as_deref(),
+                    false,
+                )?;
+
+                if !yes && !prompt_confirmation("Send this email?") {
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+
+                println!("Sending email...");
+                let (send_result, raw_message, message_id) = send_email(
+                    &draft,
+                    &smtp_config,
+                    &global_config.email,
+                    signature_content.as_deref(),
+                )
+                .await?;
+
+                // Display per-recipient results
+                for r in &send_result.succeeded() {
+                    println!(
+                        "  {} {} ({})",
+                        "✓".green(),
+                        r.address,
+                        r.role
+                    );
+                }
+                for r in &send_result.failed() {
+                    println!(
+                        "  {} {} ({}): {}",
+                        "✗".red(),
+                        r.address,
+                        r.role,
+                        r.error.as_deref().unwrap_or("unknown error")
+                    );
+                }
+
+                if send_result.all_succeeded() {
+                    update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref())?;
+                    info!("Email marked as sent: {}", draft.path.display());
+
+                    // IMAP APPEND to Sent folder (best-effort)
+                    if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                        let sent_mailbox = resolve_sent_mailbox(&account_config);
+                        if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
+                            warn!("Failed to append to Sent folder: {}", e);
+                            println!(
+                                "  {} Could not copy to server Sent folder: {}",
+                                "⚠".yellow(), e
+                            );
+                        }
+                    }
+
+                    // Incremental contacts-index update (best-effort, no-op if no cache)
+                    email::contacts::hooks::bump_after_send(&account_config, &draft);
+
+                    println!(
+                        "{} Email sent successfully to all {} recipient(s)",
+                        "✓".green().bold(),
+                        send_result.results.len()
+                    );
+                } else if send_result.any_succeeded() {
+                    update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref())?;
+                    warn!(
+                        "Partial send: {} succeeded, {} failed for {}",
+                        send_result.succeeded().len(),
+                        send_result.failed().len(),
+                        draft.path.display()
+                    );
+
+                    // IMAP APPEND to Sent folder (best-effort)
+                    if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                        let sent_mailbox = resolve_sent_mailbox(&account_config);
+                        if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
+                            warn!("Failed to append to Sent folder: {}", e);
+                            println!(
+                                "  {} Could not copy to server Sent folder: {}",
+                                "⚠".yellow(), e
+                            );
+                        }
+                    }
+
+                    // Incremental contacts-index update (best-effort)
+                    email::contacts::hooks::bump_after_send(&account_config, &draft);
+
+                    println!(
+                        "{} Partial send: {} succeeded, {} failed (marked as sent -- see logs for details)",
+                        "⚠".yellow().bold(),
+                        send_result.succeeded().len().to_string().green(),
+                        send_result.failed().len().to_string().red()
+                    );
+                } else {
+                    error!("All recipients failed for {}", draft.path.display());
+                    return Err(anyhow!(
+                        "Failed to send to all {} recipient(s)",
+                        send_result.results.len()
+                    ));
+                }
             }
         }
 
@@ -469,7 +566,7 @@ async fn main() -> Result<()> {
 
             for draft in &drafts {
                 println!(
-                    "  {} → {}",
+                    "  {} -> {}",
                     draft.path.file_name().unwrap_or_default().to_string_lossy(),
                     draft.frontmatter.to.as_deref().unwrap_or("(bcc only)")
                 );
@@ -483,84 +580,142 @@ async fn main() -> Result<()> {
             let mut sent_count = 0;
             let mut failed_count = 0;
 
-            for draft in drafts {
-                print!("Sending to {}... ", draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
-                io::stdout().flush()?;
+            if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(&account_config)?;
+                let client = graph::GraphClient::new_async(&graph_config).await?;
 
-                match send_email(
-                    &draft,
-                    &smtp_config,
-                    &global_config.email,
-                    signature_content.as_deref(),
-                )
-                .await
-                {
-                    Ok((send_result, raw_message, message_id)) => {
-                        if send_result.all_succeeded() {
-                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref()) {
+                for draft in drafts {
+                    print!("Sending to {}... ", draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
+                    io::stdout().flush()?;
+
+                    let to = parse_recipients(draft.frontmatter.to.as_deref());
+                    let cc = parse_recipients(draft.frontmatter.cc.as_deref());
+                    let bcc = parse_recipients(draft.frontmatter.bcc.as_deref());
+                    let to_refs: Vec<(&str, &str)> = to.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                    let cc_refs: Vec<(&str, &str)> = cc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                    let bcc_refs: Vec<(&str, &str)> = bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+
+                    let quoted_html = draft.path.with_extension("html");
+                    let quoted = if quoted_html.exists() { fs::read_to_string(&quoted_html).ok() } else { None };
+                    let html_body = markdown_to_html(
+                        &draft.body_markdown,
+                        &global_config.email,
+                        signature_content.as_deref(),
+                        quoted.as_deref(),
+                    );
+
+                    let mut att_data: Vec<(String, Vec<u8>, String)> = Vec::new();
+                    if let Some(ref attachments) = draft.frontmatter.attachments {
+                        for att_path in attachments {
+                            let expanded = shellexpand::tilde(att_path);
+                            let path = Path::new(expanded.as_ref());
+                            if let Ok(content) = fs::read(path) {
+                                let filename = path.file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "attachment".to_string());
+                                let ct = mime_guess::from_path(path).first_or_octet_stream().to_string();
+                                att_data.push((filename, content, ct));
+                            }
+                        }
+                    }
+
+                    match client.send_mail(&to_refs, &cc_refs, &bcc_refs, &draft.frontmatter.subject, &html_body, &att_data).await {
+                        Ok(()) => {
+                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), None) {
                                 println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
                             } else {
-                                // IMAP APPEND to Sent folder (best-effort)
-                                if let Ok(imap_config) = ImapConfig::load(&account_config) {
-                                    let sent_mailbox = resolve_sent_mailbox(&account_config);
-                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
-                                        warn!("Failed to append to Sent folder: {}", e);
-                                    }
-                                }
-                                // Incremental contacts-index update (best-effort)
                                 email::contacts::hooks::bump_after_send(&account_config, &draft);
                                 println!("{}", "✓".green());
                             }
                             sent_count += 1;
-                        } else if send_result.any_succeeded() {
-                            // Partial success -- mark as sent, warn about failures
-                            if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref()) {
-                                println!("{} (partial send, failed to update status: {})", "⚠".yellow(), e);
-                            } else {
-                                // IMAP APPEND to Sent folder (best-effort)
-                                if let Ok(imap_config) = ImapConfig::load(&account_config) {
-                                    let sent_mailbox = resolve_sent_mailbox(&account_config);
-                                    if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
-                                        warn!("Failed to append to Sent folder: {}", e);
-                                    }
-                                }
-                                // Incremental contacts-index update (best-effort)
-                                email::contacts::hooks::bump_after_send(&account_config, &draft);
-                                println!(
-                                    "{} (partial: {}/{} recipients)",
-                                    "⚠".yellow(),
-                                    send_result.succeeded().len(),
-                                    send_result.results.len()
-                                );
-                            }
-                            for r in &send_result.failed() {
-                                warn!(
-                                    "Failed recipient {} ({}) for {}: {}",
-                                    r.address,
-                                    r.role,
-                                    draft.path.display(),
-                                    r.error.as_deref().unwrap_or("unknown")
-                                );
-                            }
-                            sent_count += 1;
-                        } else {
-                            println!("{} all recipients failed", "✗".red());
-                            for r in &send_result.failed() {
-                                error!(
-                                    "Failed recipient {} ({}) for {}: {}",
-                                    r.address,
-                                    r.role,
-                                    draft.path.display(),
-                                    r.error.as_deref().unwrap_or("unknown")
-                                );
-                            }
+                        }
+                        Err(e) => {
+                            println!("{} {}", "✗".red(), e);
+                            error!("Graph send error for {}: {}", draft.path.display(), e);
                             failed_count += 1;
                         }
                     }
-                    Err(e) => {
-                        println!("{} {}", "✗".red(), e);
-                        error!("Fatal send error for {}: {}", draft.path.display(), e);
-                        failed_count += 1;
+                }
+            } else {
+                for draft in drafts {
+                    print!("Sending to {}... ", draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
+                    io::stdout().flush()?;
+
+                    match send_email(
+                        &draft,
+                        &smtp_config,
+                        &global_config.email,
+                        signature_content.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok((send_result, raw_message, message_id)) => {
+                            if send_result.all_succeeded() {
+                                if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref()) {
+                                    println!("{} (sent but failed to update status: {})", "⚠".yellow(), e);
+                                } else {
+                                    // IMAP APPEND to Sent folder (best-effort)
+                                    if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                                        let sent_mailbox = resolve_sent_mailbox(&account_config);
+                                        if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
+                                            warn!("Failed to append to Sent folder: {}", e);
+                                        }
+                                    }
+                                    // Incremental contacts-index update (best-effort)
+                                    email::contacts::hooks::bump_after_send(&account_config, &draft);
+                                    println!("{}", "✓".green());
+                                }
+                                sent_count += 1;
+                            } else if send_result.any_succeeded() {
+                                // Partial success -- mark as sent, warn about failures
+                                if let Err(e) = update_status_to_sent(&draft, sent_dir.as_deref(), message_id.as_deref()) {
+                                    println!("{} (partial send, failed to update status: {})", "⚠".yellow(), e);
+                                } else {
+                                    // IMAP APPEND to Sent folder (best-effort)
+                                    if let Ok(imap_config) = ImapConfig::load(&account_config) {
+                                        let sent_mailbox = resolve_sent_mailbox(&account_config);
+                                        if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
+                                            warn!("Failed to append to Sent folder: {}", e);
+                                        }
+                                    }
+                                    // Incremental contacts-index update (best-effort)
+                                    email::contacts::hooks::bump_after_send(&account_config, &draft);
+                                    println!(
+                                        "{} (partial: {}/{} recipients)",
+                                        "⚠".yellow(),
+                                        send_result.succeeded().len(),
+                                        send_result.results.len()
+                                    );
+                                }
+                                for r in &send_result.failed() {
+                                    warn!(
+                                        "Failed recipient {} ({}) for {}: {}",
+                                        r.address,
+                                        r.role,
+                                        draft.path.display(),
+                                        r.error.as_deref().unwrap_or("unknown")
+                                    );
+                                }
+                                sent_count += 1;
+                            } else {
+                                println!("{} all recipients failed", "✗".red());
+                                for r in &send_result.failed() {
+                                    error!(
+                                        "Failed recipient {} ({}) for {}: {}",
+                                        r.address,
+                                        r.role,
+                                        draft.path.display(),
+                                        r.error.as_deref().unwrap_or("unknown")
+                                    );
+                                }
+                                failed_count += 1;
+                            }
+                        }
+                        Err(e) => {
+                            println!("{} {}", "✗".red(), e);
+                            error!("Fatal send error for {}: {}", draft.path.display(), e);
+                            failed_count += 1;
+                        }
                     }
                 }
             }
@@ -817,21 +972,27 @@ async fn main() -> Result<()> {
             full,
             mailbox,
         }) => {
-            let imap_config = ImapConfig::load(&account_config)?;
-            let criteria = FetchCriteria {
-                from,
-                to,
-                cc,
-                subject,
-                body,
-                since,
-                before,
-                text: None,
-                in_mailbox: None,
-            };
-
             let mailbox_for_save = mailbox.clone();
-            let emails = fetch_emails(&imap_config, &criteria, &mailbox, Some(limit)).await?;
+
+            let emails = if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(&account_config)?;
+                let client = graph::GraphClient::new_async(&graph_config).await?;
+                client.fetch_messages(&mailbox, limit).await?
+            } else {
+                let imap_config = ImapConfig::load(&account_config)?;
+                let criteria = FetchCriteria {
+                    from,
+                    to,
+                    cc,
+                    subject,
+                    body,
+                    since,
+                    before,
+                    text: None,
+                    in_mailbox: None,
+                };
+                fetch_emails(&imap_config, &criteria, &mailbox, Some(limit)).await?
+            };
 
             display_fetched_emails(&emails, full);
 
@@ -882,8 +1043,6 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Sync { limit, mailbox, reconcile, dry_run }) => {
-            let imap_config = ImapConfig::load(&account_config)?;
-
             let targets: Vec<imap_client::SyncTarget> = if let Some(ref user_mailboxes) = mailbox {
                 user_mailboxes.iter().map(|mb| {
                     imap_client::SyncTarget {
@@ -905,7 +1064,13 @@ async fn main() -> Result<()> {
                 }).collect()
             };
 
-            let result = sync_mailboxes(&imap_config, &targets, limit, reconcile, dry_run).await?;
+            let result = if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(&account_config)?;
+                graph::sync_mailboxes_graph(&graph_config, &targets, limit, reconcile, dry_run).await?
+            } else {
+                let imap_config = ImapConfig::load(&account_config)?;
+                sync_mailboxes(&imap_config, &targets, limit, reconcile, dry_run).await?
+            };
 
             // Incremental contacts-index update (best-effort, no-op on dry_run).
             if !dry_run {
@@ -953,6 +1118,11 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Watch { mailbox, timeout }) => {
+            if account_config.auth_method == AuthMethod::Graph {
+                return Err(anyhow!(
+                    "IMAP IDLE watch is not supported for Graph accounts. Use 'email sync' instead."
+                ));
+            }
             let imap_config = ImapConfig::load(&account_config)?;
             println!("Watching {} for changes...", mailbox);
             let exit_code = watch_mailbox(&imap_config, &mailbox, timeout).await?;
@@ -969,14 +1139,22 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Archive { file }) => {
-            let imap_config = ImapConfig::load(&account_config)?;
             let dir = archive_dir.as_ref().ok_or_else(|| {
                 anyhow!("Archive mailbox not configured. Check [mailboxes.archive] in {}", config_path().display())
             })?;
             let archive_server_name = account_config.mailboxes.archive.as_ref()
                 .map(|m| m.server.as_str())
                 .unwrap_or("Archive");
-            match archive_email_locally(&imap_config, dir, &file, archive_server_name).await {
+
+            let result = if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(&account_config)?;
+                graph::archive_email_graph(&graph_config, dir, &file, archive_server_name).await
+            } else {
+                let imap_config = ImapConfig::load(&account_config)?;
+                archive_email_locally(&imap_config, dir, &file, archive_server_name).await
+            };
+
+            match result {
                 Ok(()) => {
                     println!(
                         "{} Archived: {}",
@@ -997,8 +1175,15 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Delete { file }) => {
-            let imap_config = ImapConfig::load(&account_config)?;
-            match delete_email_locally(&imap_config, &file).await {
+            let result = if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(&account_config)?;
+                graph::delete_email_graph(&graph_config, &file).await
+            } else {
+                let imap_config = ImapConfig::load(&account_config)?;
+                delete_email_locally(&imap_config, &file).await
+            };
+
+            match result {
                 Ok(()) => {
                     println!("{} Deleted: {}", "✓".green(), file.display());
                 }
@@ -1094,66 +1279,81 @@ async fn main() -> Result<()> {
             limit,
             full,
         }) => {
-            let imap_config = ImapConfig::load(&account_config)?;
             let mut criteria = parse_search_query(&query);
 
             // Resolve mailbox scope: --mailbox flag > in: prefix > all
             let mailbox_name = mailbox.or_else(|| criteria.in_mailbox.take());
             criteria.in_mailbox = None;
 
-            if let Some(ref mb) = mailbox_name {
-                let mut emails =
-                    fetch_emails(&imap_config, &criteria, mb, Some(limit)).await?;
+            if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(&account_config)?;
+                let client = graph::GraphClient::new_async(&graph_config).await?;
+                let mut emails = client
+                    .search_messages(&criteria, mailbox_name.as_deref(), limit)
+                    .await?;
                 sort_fetched_by_date(&mut emails);
                 if emails.is_empty() {
                     println!("{}", "No results found".yellow());
                 } else {
-                    println!("{} result(s) in {}:\n", emails.len(), mb);
                     display_fetched_emails(&emails, full);
                 }
             } else {
-                // Search all configured mailboxes
-                let configured = all_configured_mailboxes(&account_config);
-                let mut session = imap_client::open_imap_session(&imap_config).await?;
-                let per_mb = (limit / configured.len().max(1)).max(5);
-                let mut total = 0usize;
-                let mut all_emails: Vec<FetchedEmail> = Vec::new();
+                let imap_config = ImapConfig::load(&account_config)?;
 
-                for (role, mapping) in &configured {
-                    if total >= limit {
-                        break;
+                if let Some(ref mb) = mailbox_name {
+                    let mut emails =
+                        fetch_emails(&imap_config, &criteria, mb, Some(limit)).await?;
+                    sort_fetched_by_date(&mut emails);
+                    if emails.is_empty() {
+                        println!("{}", "No results found".yellow());
+                    } else {
+                        println!("{} result(s) in {}:\n", emails.len(), mb);
+                        display_fetched_emails(&emails, full);
                     }
-                    let budget = per_mb.min(limit - total);
-                    match imap_client::fetch_emails_on_session(
-                        &mut session,
-                        &criteria,
-                        &mapping.server,
-                        Some(budget),
-                    )
-                    .await
-                    {
-                        Ok(emails) if !emails.is_empty() => {
-                            total += emails.len();
-                            all_emails.extend(emails);
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!(
-                                "{} Search in {} failed: {}",
-                                "\u{26a0}".yellow(),
-                                role,
-                                e
-                            );
-                        }
-                    }
-                }
-                session.logout().await.ok();
-
-                sort_fetched_by_date(&mut all_emails);
-                if all_emails.is_empty() {
-                    println!("{}", "No results found".yellow());
                 } else {
-                    display_fetched_emails(&all_emails, full);
+                    // Search all configured mailboxes
+                    let configured = all_configured_mailboxes(&account_config);
+                    let mut session = imap_client::open_imap_session(&imap_config).await?;
+                    let per_mb = (limit / configured.len().max(1)).max(5);
+                    let mut total = 0usize;
+                    let mut all_emails: Vec<FetchedEmail> = Vec::new();
+
+                    for (role, mapping) in &configured {
+                        if total >= limit {
+                            break;
+                        }
+                        let budget = per_mb.min(limit - total);
+                        match imap_client::fetch_emails_on_session(
+                            &mut session,
+                            &criteria,
+                            &mapping.server,
+                            Some(budget),
+                        )
+                        .await
+                        {
+                            Ok(emails) if !emails.is_empty() => {
+                                total += emails.len();
+                                all_emails.extend(emails);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "{} Search in {} failed: {}",
+                                    "\u{26a0}".yellow(),
+                                    role,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    session.logout().await.ok();
+
+                    sort_fetched_by_date(&mut all_emails);
+                    if all_emails.is_empty() {
+                        println!("{}", "No results found".yellow());
+                    } else {
+                        display_fetched_emails(&all_emails, full);
+                    }
                 }
             }
         }

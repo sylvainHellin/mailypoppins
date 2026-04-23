@@ -35,6 +35,7 @@ pub struct App {
     pub bg_mutations: usize,
     pub imap_config: Option<crate::config::ImapConfig>,
     pub smtp_config: Option<crate::config::SmtpConfig>,
+    pub graph_config: Option<crate::config::GraphConfig>,
     pub signature_content: Option<String>,
     pub sent_dir: Option<PathBuf>,
     pub archive_dir: Option<PathBuf>,
@@ -63,6 +64,12 @@ pub struct App {
 
     pub status_log: VecDeque<StatusEntry>,
     pub show_activity_log: bool,
+
+    // Activity log overlay
+    pub show_activity_overlay: bool,
+    pub activity_filter: String,
+    pub activity_filter_active: bool,
+    pub activity_scroll: u16,
 
     // Server search overlay
     pub show_search_overlay: bool,
@@ -123,6 +130,7 @@ impl App {
             bg_mutations: 0,
             imap_config: None,
             smtp_config: None,
+            graph_config: None,
             signature_content: None,
             sent_dir: None,
             archive_dir: None,
@@ -147,6 +155,10 @@ impl App {
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
+            show_activity_overlay: false,
+            activity_filter: String::new(),
+            activity_filter_active: false,
+            activity_scroll: 0,
             show_search_overlay: false,
             server_search_query: String::new(),
             server_search_focus: SearchOverlayFocus::Input,
@@ -209,6 +221,7 @@ impl App {
             self.bg_mutations = acct.bg_mutations;
             self.imap_config = acct.imap_config.clone();
             self.smtp_config = acct.smtp_config.clone();
+            self.graph_config = acct.graph_config.clone();
             self.signature_content = acct.signature_content.clone();
             self.sent_dir = acct.sent_dir.clone();
             self.archive_dir = acct.archive_dir.clone();
@@ -246,6 +259,11 @@ impl App {
 
     pub fn account_name(&self) -> &str {
         &self.account_config.name
+    }
+
+    pub fn is_graph(&self) -> bool {
+        self.graph_config.is_some()
+            && self.account_config.auth_method == crate::config::AuthMethod::Graph
     }
 
     pub fn account_index_by_from(&self, from: &str) -> usize {

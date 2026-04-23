@@ -37,10 +37,12 @@ pub fn cmd_config_init() -> Result<()> {
     println!("Select email provider:");
     println!("  1. Standard IMAP/SMTP (manual config)");
     println!("  2. Proton Mail (via Proton Bridge)");
-    println!("  3. Microsoft 365 / Exchange Online (OAuth2)");
+    println!("  3. Microsoft 365 / Exchange Online (OAuth2 IMAP/SMTP)");
+    println!("  4. Microsoft 365 / Exchange Online (Graph API)");
     let provider_choice = prompt_input("Choice", "1")?;
     let is_proton = provider_choice.trim() == "2";
     let is_exchange = provider_choice.trim() == "3";
+    let is_graph = provider_choice.trim() == "4";
     println!();
 
     if is_proton {
@@ -58,6 +60,11 @@ pub fn cmd_config_init() -> Result<()> {
         );
         println!("  See docs/exchange-setup.md for step-by-step instructions.");
         println!();
+    }
+
+    // -- Graph API early-return flow (no IMAP/SMTP needed)
+    if is_graph {
+        return graph_init_flow(&path);
     }
 
     // Pre-fill defaults per provider
@@ -136,6 +143,7 @@ pub fn cmd_config_init() -> Result<()> {
             &oauth2_client_id,
             &oauth2_tenant_id,
             &account_name,
+            crate::oauth2::IMAP_SMTP_SCOPES,
         ))?;
         println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
         imap_password = cache.access_token;
@@ -454,10 +462,12 @@ pub fn cmd_config_add_account() -> Result<()> {
     println!("Select email provider:");
     println!("  1. Standard IMAP/SMTP (manual config)");
     println!("  2. Proton Mail (via Proton Bridge)");
-    println!("  3. Microsoft 365 / Exchange Online (OAuth2)");
+    println!("  3. Microsoft 365 / Exchange Online (OAuth2 IMAP/SMTP)");
+    println!("  4. Microsoft 365 / Exchange Online (Graph API)");
     let provider_choice = prompt_input("Choice", "1")?;
     let is_proton = provider_choice.trim() == "2";
     let is_exchange = provider_choice.trim() == "3";
+    let is_graph = provider_choice.trim() == "4";
     println!();
 
     if is_proton {
@@ -475,6 +485,11 @@ pub fn cmd_config_add_account() -> Result<()> {
         );
         println!("  See docs/exchange-setup.md for step-by-step instructions.");
         println!();
+    }
+
+    // -- Graph API early-return flow (no IMAP/SMTP needed)
+    if is_graph {
+        return graph_add_account_flow(&path, &existing_names);
     }
 
     let default_smtp_host = if is_proton {
@@ -553,6 +568,7 @@ pub fn cmd_config_add_account() -> Result<()> {
             &oauth2_client_id,
             &oauth2_tenant_id,
             &account_name,
+            crate::oauth2::IMAP_SMTP_SCOPES,
         ))?;
         println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
         imap_password = cache.access_token;
@@ -754,6 +770,358 @@ pub fn cmd_config_add_account() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Graph API wizard flows
+// ---------------------------------------------------------------------------
+
+/// Graph API flow for `config init` (creates a new config file).
+fn graph_init_flow(path: &std::path::Path) -> Result<()> {
+    println!(
+        "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
+        "\u{2139}".blue()
+    );
+    println!("  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions.");
+    println!("  See docs/exchange-setup.md for details.");
+    println!();
+
+    // -- Account name
+    let account_name = prompt_input("Account name (unique slug, e.g. 'exchange', 'hines')", "exchange")?;
+    println!();
+
+    // -- Email address
+    let default_from = prompt_input("Email address", "")?;
+    println!();
+
+    // -- OAuth2 settings
+    println!("{}", "OAuth2 Configuration".bold());
+    let oauth2_client_id = prompt_input("Azure App client_id", "")?;
+    let oauth2_tenant_id = prompt_input("Azure tenant_id", "")?;
+    println!();
+
+    // -- Device code flow
+    println!("{} Running OAuth2 device code flow (Graph API)...", "\u{2139}".blue());
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(crate::oauth2::device_code_flow(
+        &oauth2_client_id,
+        &oauth2_tenant_id,
+        &account_name,
+        crate::oauth2::GRAPH_SCOPES,
+    ))?;
+    println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
+    println!();
+
+    // -- Test Graph API connection
+    print!("  Testing Graph API connection... ");
+    io::stdout().flush()?;
+    let graph_config = crate::config::GraphConfig {
+        client_id: oauth2_client_id.clone(),
+        tenant_id: oauth2_tenant_id.clone(),
+        username: default_from.clone(),
+        account_name: account_name.clone(),
+    };
+    match rt.block_on(crate::graph::GraphClient::new_async(&graph_config)) {
+        Ok(_client) => println!("{}", "OK".green()),
+        Err(e) => {
+            println!("{}", "FAILED".red());
+            eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
+            eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+        }
+    }
+    println!();
+
+    // -- Folder discovery via Graph API
+    println!("{}", "Mailbox Configuration".bold());
+    print!("  Fetching folder list from Graph API... ");
+    io::stdout().flush()?;
+
+    let folder_names: Vec<String> = match rt.block_on(async {
+        let client = crate::graph::GraphClient::new_async(&graph_config).await?;
+        client.list_folders().await
+    }) {
+        Ok(folders) => {
+            println!("{} ({} folders)", "OK".green(), folders.len());
+            folders.iter().map(|f| f.display_name.clone()).collect()
+        }
+        Err(e) => {
+            println!("{}", "FAILED".red());
+            eprintln!("  Error: {}", e);
+            eprintln!("  Continuing with manual mailbox configuration.");
+            Vec::new()
+        }
+    };
+
+    // Select special-role mailboxes
+    let (inbox_server, archive_server, sent_server) = if !folder_names.is_empty() {
+        let mut available = folder_names.clone();
+        let inbox = select_mailbox("Which folder is your Inbox?", &available, &["Inbox"])?;
+        available.retain(|m| m != &inbox);
+        let archive = select_mailbox("Which folder is your Archive?", &available, &["Archive"])?;
+        available.retain(|m| m != &archive);
+        let sent = select_mailbox("Which folder is your Sent folder?", &available, &["Sent Items"])?;
+        available.retain(|m| m != &sent);
+        (inbox, archive, sent)
+    } else {
+        let inbox = prompt_input("Inbox folder name", "Inbox")?;
+        let archive = prompt_input("Archive folder name", "Archive")?;
+        let sent = prompt_input("Sent folder name", "Sent Items")?;
+        (inbox, archive, sent)
+    };
+
+    // Extra mailboxes
+    let extra_mailboxes: Vec<String> = if !folder_names.is_empty() {
+        let remaining: Vec<&str> = folder_names
+            .iter()
+            .filter(|m| {
+                m.as_str() != inbox_server
+                    && m.as_str() != archive_server
+                    && m.as_str() != sent_server
+            })
+            .map(|s| s.as_str())
+            .collect();
+        if !remaining.is_empty() {
+            let selection = dialoguer::MultiSelect::new()
+                .with_prompt("Select additional folders to sync (optional)")
+                .items(&remaining)
+                .interact()
+                .unwrap_or_default();
+            selection.iter().map(|&i| remaining[i].to_string()).collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    println!();
+
+    // -- Directories
+    println!("{}", "Directory Configuration".bold());
+    let root_dir = prompt_input("Root directory for email storage", "~/notes/email")?;
+    let drafts_dir = prompt_input("Drafts directory (relative to root)", "drafts")?;
+
+    let inbox_local = slugify_mailbox_name(&inbox_server);
+    let archive_local = slugify_mailbox_name(&archive_server);
+    let sent_local = slugify_mailbox_name(&sent_server);
+
+    println!();
+    println!("{}", "Derived local paths:".bold());
+    println!("  Inbox:   {}/{}", root_dir, inbox_local);
+    println!("  Archive: {}/{}", root_dir, archive_local);
+    println!("  Sent:    {}/{}", root_dir, sent_local);
+    for mb in &extra_mailboxes {
+        println!("  {}:   {}/{}", mb, root_dir, slugify_mailbox_name(mb));
+    }
+    println!("  Drafts:  {}/{}", root_dir, drafts_dir);
+
+    // -- Build config TOML
+    let mut toml_content = String::new();
+    toml_content.push_str("[email]\n");
+    toml_content.push_str("font_family = \"Helvetica, Arial, sans-serif\"\n");
+    toml_content.push_str("font_size = \"12pt\"\n");
+    toml_content.push_str("include_signature = true\n\n");
+    toml_content.push_str(&build_graph_account_toml(
+        &account_name, &default_from,
+        &oauth2_client_id, &oauth2_tenant_id,
+        &root_dir, &drafts_dir,
+        &inbox_server, &inbox_local,
+        &archive_server, &archive_local,
+        &sent_server, &sent_local,
+        &extra_mailboxes,
+    ));
+
+    // Write config file
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, toml_content)?;
+
+    println!();
+    println!(
+        "{} Config written to {}",
+        "\u{2713}".green().bold(),
+        path.display()
+    );
+    println!(
+        "{} OAuth2 token cached at ~/.email-cli/tokens/",
+        "\u{2713}".green().bold()
+    );
+
+    Ok(())
+}
+
+/// Graph API flow for `config add-account` (appends to existing config).
+fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Result<()> {
+    println!(
+        "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
+        "\u{2139}".blue()
+    );
+    println!("  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions.");
+    println!("  See docs/exchange-setup.md for details.");
+    println!();
+
+    // -- Account name (unique)
+    let account_name = loop {
+        let name = prompt_input("Account name (unique slug)", "exchange")?;
+        if existing_names.contains(&name.as_str()) {
+            println!("{} Account '{}' already exists. Choose a different name.", "\u{26a0}".yellow(), name);
+        } else {
+            break name;
+        }
+    };
+    println!();
+
+    // -- Email address
+    let default_from = prompt_input("Email address", "")?;
+    println!();
+
+    // -- OAuth2 settings
+    println!("{}", "OAuth2 Configuration".bold());
+    let oauth2_client_id = prompt_input("Azure App client_id", "")?;
+    let oauth2_tenant_id = prompt_input("Azure tenant_id", "")?;
+    println!();
+
+    // -- Device code flow
+    println!("{} Running OAuth2 device code flow (Graph API)...", "\u{2139}".blue());
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(crate::oauth2::device_code_flow(
+        &oauth2_client_id,
+        &oauth2_tenant_id,
+        &account_name,
+        crate::oauth2::GRAPH_SCOPES,
+    ))?;
+    println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
+    println!();
+
+    // -- Test Graph API connection
+    print!("  Testing Graph API connection... ");
+    io::stdout().flush()?;
+    let graph_config = crate::config::GraphConfig {
+        client_id: oauth2_client_id.clone(),
+        tenant_id: oauth2_tenant_id.clone(),
+        username: default_from.clone(),
+        account_name: account_name.clone(),
+    };
+    match rt.block_on(crate::graph::GraphClient::new_async(&graph_config)) {
+        Ok(_client) => println!("{}", "OK".green()),
+        Err(e) => {
+            println!("{}", "FAILED".red());
+            eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
+            eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+        }
+    }
+    println!();
+
+    // -- Folder discovery via Graph API
+    println!("{}", "Mailbox Configuration".bold());
+    print!("  Fetching folder list from Graph API... ");
+    io::stdout().flush()?;
+
+    let folder_names: Vec<String> = match rt.block_on(async {
+        let client = crate::graph::GraphClient::new_async(&graph_config).await?;
+        client.list_folders().await
+    }) {
+        Ok(folders) => {
+            println!("{} ({} folders)", "OK".green(), folders.len());
+            folders.iter().map(|f| f.display_name.clone()).collect()
+        }
+        Err(e) => {
+            println!("{}", "FAILED".red());
+            eprintln!("  Error: {}", e);
+            eprintln!("  Continuing with manual mailbox configuration.");
+            Vec::new()
+        }
+    };
+
+    let (inbox_server, archive_server, sent_server) = if !folder_names.is_empty() {
+        let mut available = folder_names.clone();
+        let inbox = select_mailbox("Which folder is your Inbox?", &available, &["Inbox"])?;
+        available.retain(|m| m != &inbox);
+        let archive = select_mailbox("Which folder is your Archive?", &available, &["Archive"])?;
+        available.retain(|m| m != &archive);
+        let sent = select_mailbox("Which folder is your Sent folder?", &available, &["Sent Items"])?;
+        available.retain(|m| m != &sent);
+        (inbox, archive, sent)
+    } else {
+        let inbox = prompt_input("Inbox folder name", "Inbox")?;
+        let archive = prompt_input("Archive folder name", "Archive")?;
+        let sent = prompt_input("Sent folder name", "Sent Items")?;
+        (inbox, archive, sent)
+    };
+
+    let extra_mailboxes: Vec<String> = if !folder_names.is_empty() {
+        let remaining: Vec<&str> = folder_names
+            .iter()
+            .filter(|m| {
+                m.as_str() != inbox_server
+                    && m.as_str() != archive_server
+                    && m.as_str() != sent_server
+            })
+            .map(|s| s.as_str())
+            .collect();
+        if !remaining.is_empty() {
+            let selection = dialoguer::MultiSelect::new()
+                .with_prompt("Select additional folders to sync (optional)")
+                .items(&remaining)
+                .interact()
+                .unwrap_or_default();
+            selection.iter().map(|&i| remaining[i].to_string()).collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    println!();
+
+    // -- Directories
+    println!("{}", "Directory Configuration".bold());
+    let default_root = format!("~/notes/email/{}", account_name);
+    let root_dir = prompt_input("Root directory for this account", &default_root)?;
+    let drafts_dir = prompt_input("Drafts directory (relative to root)", "drafts")?;
+
+    let inbox_local = slugify_mailbox_name(&inbox_server);
+    let archive_local = slugify_mailbox_name(&archive_server);
+    let sent_local = slugify_mailbox_name(&sent_server);
+
+    println!();
+    println!("{}", "Derived local paths:".bold());
+    println!("  Inbox:   {}/{}", root_dir, inbox_local);
+    println!("  Archive: {}/{}", root_dir, archive_local);
+    println!("  Sent:    {}/{}", root_dir, sent_local);
+    for mb in &extra_mailboxes {
+        println!("  {}:   {}/{}", mb, root_dir, slugify_mailbox_name(mb));
+    }
+    println!("  Drafts:  {}/{}", root_dir, drafts_dir);
+
+    // -- Append to config file
+    let block = format!("\n{}", build_graph_account_toml(
+        &account_name, &default_from,
+        &oauth2_client_id, &oauth2_tenant_id,
+        &root_dir, &drafts_dir,
+        &inbox_server, &inbox_local,
+        &archive_server, &archive_local,
+        &sent_server, &sent_local,
+        &extra_mailboxes,
+    ));
+
+    let mut content = fs::read_to_string(path)?;
+    content.push_str(&block);
+    fs::write(path, content)?;
+
+    println!();
+    println!(
+        "{} Account '{}' added to {}",
+        "\u{2713}".green().bold(),
+        account_name,
+        path.display()
+    );
+    println!(
+        "{} OAuth2 token cached at ~/.email-cli/tokens/",
+        "\u{2713}".green().bold()
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // TOML builders (pure functions, testable)
 // ---------------------------------------------------------------------------
 
@@ -905,4 +1273,50 @@ pub(crate) fn build_add_account_toml(
     }
 
     block
+}
+
+/// Build a Graph API account TOML block (no SMTP/IMAP sections).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_graph_account_toml(
+    account_name: &str, default_from: &str,
+    client_id: &str, tenant_id: &str,
+    root_dir: &str, drafts_dir: &str,
+    inbox_server: &str, inbox_local: &str,
+    archive_server: &str, archive_local: &str,
+    sent_server: &str, sent_local: &str,
+    extra_mailboxes: &[String],
+) -> String {
+    let mut out = String::new();
+    out.push_str("[[accounts]]\n");
+    out.push_str(&format!("name = \"{}\"\n", account_name));
+    out.push_str(&format!("default_from = \"{}\"\n", default_from));
+    out.push_str("auth_method = \"graph\"\n");
+
+    out.push_str("\n[accounts.oauth2]\n");
+    out.push_str(&format!("client_id = \"{}\"\n", client_id));
+    out.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
+
+    out.push_str("\n[accounts.directories]\n");
+    out.push_str(&format!("root = \"{}\"\n", root_dir));
+    out.push_str(&format!("drafts = \"{}\"\n", drafts_dir));
+
+    out.push_str("\n[accounts.mailboxes.inbox]\n");
+    out.push_str(&format!("server = \"{}\"\n", inbox_server));
+    out.push_str(&format!("local = \"{}\"\n", inbox_local));
+
+    out.push_str("\n[accounts.mailboxes.archive]\n");
+    out.push_str(&format!("server = \"{}\"\n", archive_server));
+    out.push_str(&format!("local = \"{}\"\n", archive_local));
+
+    out.push_str("\n[accounts.mailboxes.sent]\n");
+    out.push_str(&format!("server = \"{}\"\n", sent_server));
+    out.push_str(&format!("local = \"{}\"\n", sent_local));
+
+    for mb in extra_mailboxes {
+        out.push_str("\n[[accounts.mailboxes.extra]]\n");
+        out.push_str(&format!("server = \"{}\"\n", mb));
+        out.push_str(&format!("local = \"{}\"\n", slugify_mailbox_name(mb)));
+    }
+
+    out
 }

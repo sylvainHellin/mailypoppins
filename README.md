@@ -79,12 +79,27 @@ path = "~/notes/email/signatures/personal.html"
 
 Passwords are **never** stored in the config file. They live in the OS keyring under keys `smtp-password` and `imap-password`. IMAP password falls back to SMTP password if not set separately.
 
+### OAuth2 / Exchange Online
+
+For Microsoft 365 accounts using OAuth2 (IMAP/SMTP) or Graph API:
+
+1. Register an app in Azure Entra ID with delegated permissions (`Mail.Read`, `Mail.ReadWrite`, `Mail.Send`).
+2. Add the account to `config.toml` with `auth_method = "oauth2"` (IMAP/SMTP) or `auth_method = "graph"` (Graph API, for tenants that block IMAP/SMTP).
+3. Run the device code flow:
+
+```bash
+email config oauth2-login --account <name>
+```
+
+Graph accounts require an `[accounts.oauth2]` section with `client_id` and `tenant_id`, and use Graph well-known folder names (`inbox`, `archive`, `sentitems`) instead of IMAP folder names.
+
 ### Config commands
 
 ```bash
 email config init           # Interactive setup wizard
 email config show           # Display config (passwords masked)
 email config set-password   # Store SMTP or IMAP password in keyring
+email config oauth2-login   # Run OAuth2 device code flow
 email config path           # Print config file path
 ```
 
@@ -148,6 +163,7 @@ email mark-approved <file>      # Mark draft as approved
 email send <file> [-y]          # Send a single approved email
 email send-approved [dir] [-y]  # Send all approved emails in directory
 email reply [file] [--all]      # Create a reply draft from a received email
+email forward [file]            # Create a forward draft from a received email
 ```
 
 ### IMAP
@@ -159,6 +175,9 @@ email watch [options]           # Watch mailbox for changes (IMAP IDLE)
 email list-mailboxes            # List available server mailboxes
 email archive <file>            # Archive an inbox email (server + local)
 email delete <file>             # Delete an inbox email (server + local)
+email search <query>            # Search emails on the server
+email open <file>               # Open an attachment in the default app
+email save <file> [--output]    # Save attachment(s) to a directory
 ```
 
 ### Fetch options

@@ -97,6 +97,53 @@ pub(super) fn watcher_loop(
     }
 }
 
+pub(super) fn graph_watcher_loop(
+    tx: mpsc::Sender<WatchEvent>,
+    graph_config: crate::config::GraphConfig,
+    account_index: usize,
+) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => {
+            let _ = tx.send(WatchEvent::Error {
+                account_index,
+                message: "Failed to create async runtime".into(),
+            });
+            return;
+        }
+    };
+
+    let mut last_count: Option<usize> = None;
+    let poll_interval = std::time::Duration::from_secs(60);
+
+    loop {
+        match rt.block_on(async {
+            let client = crate::graph::GraphClient::new_async(&graph_config).await?;
+            let ids = client.fetch_message_ids("inbox").await?;
+            Ok::<usize, anyhow::Error>(ids.len())
+        }) {
+            Ok(count) => {
+                if let Some(prev) = last_count {
+                    if count != prev {
+                        if tx.send(WatchEvent::Changed { account_index }).is_err() {
+                            break;
+                        }
+                    }
+                }
+                last_count = Some(count);
+            }
+            Err(e) => {
+                log::warn!(
+                    "Graph watcher poll failed for account {}: {}",
+                    account_index,
+                    e
+                );
+            }
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Terminal helpers
 // ---------------------------------------------------------------------------
@@ -277,6 +324,94 @@ pub(super) async fn lib_do_multi_search(
     Ok(hits)
 }
 
+pub(super) async fn lib_do_sync_graph(
+    account_config: &AccountConfig,
+    graph_config: &crate::config::GraphConfig,
+    limit: usize,
+    reconcile: bool,
+) -> anyhow::Result<String> {
+    let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
+        .iter()
+        .map(|(role, mapping)| SyncTarget {
+            role: role.clone(),
+            server_name: mapping.server.clone(),
+            local_dir: resolve_mailbox_local_path(account_config, mapping),
+            status: mailbox_status(role).to_string(),
+        })
+        .collect();
+
+    let result =
+        crate::graph::sync_mailboxes_graph(graph_config, &targets, limit, reconcile, false)
+            .await?;
+
+    crate::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
+
+    let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
+    if result.read_updated > 0 {
+        msg.push_str(&format!(", {} read status updated", result.read_updated));
+    }
+    if result.deduped > 0 {
+        msg.push_str(&format!(", {} duplicates removed", result.deduped));
+    }
+    if reconcile {
+        if result.moved > 0 || result.removed > 0 {
+            msg.push_str(&format!(
+                " | Reconciled: {} moved, {} removed",
+                result.moved, result.removed
+            ));
+        } else {
+            msg.push_str(" | Already in sync");
+        }
+    }
+    Ok(msg)
+}
+
+pub(super) async fn lib_do_multi_search_graph(
+    graph_config: &crate::config::GraphConfig,
+    query: &str,
+    targets: &[SearchTarget],
+) -> anyhow::Result<Vec<SearchHit>> {
+    let mut criteria = parse_search_query(query);
+    criteria.in_mailbox = None;
+
+    let client = crate::graph::GraphClient::new_async(graph_config).await?;
+    let total_limit = 50usize;
+    let per_mb = (total_limit / targets.len().max(1)).max(5);
+    let mut total = 0usize;
+    let mut hits: Vec<SearchHit> = Vec::new();
+
+    for target in targets {
+        if total >= total_limit {
+            break;
+        }
+        let budget = per_mb.min(total_limit - total);
+        match client
+            .search_messages(&criteria, Some(&target.server_name), budget)
+            .await
+        {
+            Ok(emails) => {
+                total += emails.len();
+                for fetched in emails {
+                    let entry = fetched_to_email_entry(&fetched);
+                    hits.push(SearchHit {
+                        entry,
+                        fetched,
+                        source_label: target.label.clone(),
+                        source_local_dir: target.local_dir.clone(),
+                        source_status: target.status.clone(),
+                    });
+                }
+            }
+            Err(e) => {
+                log::warn!("Graph search in {} failed: {}", target.server_name, e);
+            }
+        }
+    }
+
+    hits.sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
+    Ok(hits)
+}
+
 fn fetched_to_email_entry(fetched: &FetchedEmail) -> EmailEntry {
     let (date_display, date_sort) =
         if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(&fetched.date) {
@@ -317,6 +452,7 @@ pub(super) fn resolve_send_account(
     usize,
     Option<crate::config::SmtpConfig>,
     Option<crate::config::ImapConfig>,
+    Option<crate::config::GraphConfig>,
     AccountConfig,
     Option<String>,
     Option<PathBuf>,
@@ -329,6 +465,7 @@ pub(super) fn resolve_send_account(
                     i,
                     acct.smtp_config.clone(),
                     acct.imap_config.clone(),
+                    acct.graph_config.clone(),
                     acct.account_config.clone(),
                     acct.signature_content.clone(),
                     acct.sent_dir.clone(),
@@ -341,6 +478,7 @@ pub(super) fn resolve_send_account(
         app.active_account,
         acct.smtp_config.clone(),
         acct.imap_config.clone(),
+        acct.graph_config.clone(),
         acct.account_config.clone(),
         acct.signature_content.clone(),
         acct.sent_dir.clone(),
