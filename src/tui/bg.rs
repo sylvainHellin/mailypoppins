@@ -113,11 +113,20 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Fetch { account_index, result } => {
+        BgResult::Fetch { account_index, result, new_index, new_mailbox_states } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Fetch complete".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
+                    // Merge updated index and mailbox states back into AccountState
+                    if let Some(acct) = app.accounts.get_mut(account_index) {
+                        if let Some(index) = new_index {
+                            acct.message_id_index = index;
+                        }
+                        if let Some(states) = new_mailbox_states {
+                            acct.mailbox_states = states;
+                        }
+                    }
                     if account_index == app.active_account {
                         app.invalidate_all_caches();
                         app.reload_current_mailbox();
@@ -129,11 +138,20 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Sync { account_index, result } => {
+        BgResult::Sync { account_index, result, new_index, new_mailbox_states } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Sync complete".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
+                    // Merge updated index and mailbox states back into AccountState
+                    if let Some(acct) = app.accounts.get_mut(account_index) {
+                        if let Some(index) = new_index {
+                            acct.message_id_index = index;
+                        }
+                        if let Some(states) = new_mailbox_states {
+                            acct.mailbox_states = states;
+                        }
+                    }
                     if account_index == app.active_account {
                         // Full sync may move emails between mailboxes via reconciliation
                         app.invalidate_all_caches();

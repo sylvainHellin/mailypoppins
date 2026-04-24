@@ -17,7 +17,8 @@ use crate::config::{
 };
 use crate::draft::parse_email_draft;
 use crate::imap_client::{
-    fetch_emails_on_session, open_imap_session, parse_search_query, sync_mailboxes, SyncTarget,
+    fetch_emails_on_session, open_imap_session, parse_search_query, sync_mailboxes,
+    MailboxState, MessageIdIndex, SyncTarget,
 };
 use crate::parse::FetchedEmail;
 use crate::sync::mailbox_status;
@@ -227,7 +228,9 @@ pub(super) async fn lib_do_sync(
     imap_config: &ImapConfig,
     limit: usize,
     reconcile: bool,
-) -> anyhow::Result<String> {
+    known_index: Option<&mut MessageIdIndex>,
+    prev_states: Option<&std::collections::HashMap<String, MailboxState>>,
+) -> anyhow::Result<(String, SyncResultMeta)> {
     let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
         .iter()
         .map(|(role, mapping)| SyncTarget {
@@ -238,7 +241,7 @@ pub(super) async fn lib_do_sync(
         })
         .collect();
 
-    let result = sync_mailboxes(imap_config, &targets, limit, reconcile, false).await?;
+    let result = sync_mailboxes(imap_config, &targets, limit, reconcile, false, known_index, prev_states).await?;
 
     // Incremental contacts-index update (best-effort, no-op if no cache).
     crate::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
@@ -260,7 +263,16 @@ pub(super) async fn lib_do_sync(
             msg.push_str(" | Already in sync");
         }
     }
-    Ok(msg)
+    let meta = SyncResultMeta {
+        mailbox_states: result.mailbox_states,
+    };
+    Ok((msg, meta))
+}
+
+/// Metadata returned alongside the status message from lib_do_sync.
+/// Carries state that needs to be persisted back to AccountState.
+pub(super) struct SyncResultMeta {
+    pub mailbox_states: std::collections::HashMap<String, MailboxState>,
 }
 
 pub(super) async fn lib_do_multi_search(
