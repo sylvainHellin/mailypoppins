@@ -462,6 +462,35 @@ impl App {
         removed
     }
 
+    /// Remove a message_id from the in-memory index for the active account.
+    /// Called optimistically when archiving/deleting an email.
+    pub fn remove_from_message_index(&mut self, file_path: &std::path::Path, message_id: &str) {
+        if let Some(acct) = self.accounts.get_mut(self.active_account) {
+            for dir_map in acct.message_id_index.values_mut() {
+                if dir_map.get(message_id).is_some_and(|p| p == file_path) {
+                    dir_map.remove(message_id);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Insert a message_id into the in-memory index for the active account.
+    /// Used when archiving (file moves to archive dir).
+    pub fn insert_into_message_index(
+        &mut self,
+        dir: &std::path::Path,
+        message_id: String,
+        file_path: std::path::PathBuf,
+    ) {
+        if let Some(acct) = self.accounts.get_mut(self.active_account) {
+            acct.message_id_index
+                .entry(dir.to_path_buf())
+                .or_default()
+                .insert(message_id, file_path);
+        }
+    }
+
     pub fn set_persistent_error(&mut self, msg: String) {
         self.persistent_error = Some(PersistentError { message: msg });
     }

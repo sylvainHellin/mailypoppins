@@ -7,7 +7,8 @@ use gray_matter::engine::YAML;
 use gray_matter::Matter;
 use serde::Deserialize;
 
-use crate::parse::FetchedEmail;
+use crate::parse::{FetchedEmail, scan_mailbox_message_ids};
+use crate::imap_client::{MailboxState, MessageIdIndex};
 
 // ---------------------------------------------------------------------------
 // EmailEntry (ported from beautifulmail's email.rs)
@@ -209,6 +210,12 @@ pub struct AccountState {
     pub bg_mutations: usize,
     pub watcher_active: bool,
     pub has_unseen: bool,
+    /// In-memory index: local_dir -> {message_id -> file_path}.
+    /// Built once at startup; updated incrementally during sync/mutations.
+    pub message_id_index: MessageIdIndex,
+    /// Last-seen IMAP mailbox states, keyed by role (e.g. "inbox", "archive").
+    /// Used to decide whether reconciliation is needed on quick sync.
+    pub mailbox_states: std::collections::HashMap<String, MailboxState>,
 }
 
 impl AccountState {
@@ -254,6 +261,16 @@ impl AccountState {
         let n = mailboxes.len();
         let counts = count_all_emails(&mailboxes);
 
+        // Build in-memory message ID index from all mailbox directories
+        let mut message_id_index: MessageIdIndex = std::collections::HashMap::new();
+        for mb in &mailboxes {
+            if mb.dir.is_dir() {
+                if let Ok(ids) = scan_mailbox_message_ids(&mb.dir) {
+                    message_id_index.insert(mb.dir.clone(), ids);
+                }
+            }
+        }
+
         Self {
             account_config,
             imap_config,
@@ -279,6 +296,8 @@ impl AccountState {
             bg_mutations: 0,
             watcher_active: false,
             has_unseen: false,
+            message_id_index,
+            mailbox_states: std::collections::HashMap::new(),
         }
     }
 
@@ -293,10 +312,18 @@ pub enum BgResult {
     Fetch {
         account_index: usize,
         result: Result<String, String>,
+        /// Updated message ID index after sync (for merging back into AccountState).
+        new_index: Option<MessageIdIndex>,
+        /// Updated mailbox states from IMAP SELECT (for state-based reconciliation).
+        new_mailbox_states: Option<std::collections::HashMap<String, MailboxState>>,
     },
     Sync {
         account_index: usize,
         result: Result<String, String>,
+        /// Updated message ID index after full sync.
+        new_index: Option<MessageIdIndex>,
+        /// Updated mailbox states from IMAP SELECT.
+        new_mailbox_states: Option<std::collections::HashMap<String, MailboxState>>,
     },
     Send {
         account_index: usize,
