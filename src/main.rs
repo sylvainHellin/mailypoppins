@@ -1069,7 +1069,7 @@ async fn main() -> Result<()> {
                 graph::sync_mailboxes_graph(&graph_config, &targets, limit, reconcile, dry_run).await?
             } else {
                 let imap_config = ImapConfig::load(&account_config)?;
-                sync_mailboxes(&imap_config, &targets, limit, reconcile, dry_run).await?
+                sync_mailboxes(&imap_config, &targets, limit, reconcile, dry_run, None, None).await?
             };
 
             // Incremental contacts-index update (best-effort, no-op on dry_run).

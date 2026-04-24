@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -13,6 +14,57 @@ use crate::parse::{
     scan_mailbox_message_ids,
 };
 use crate::sync::reconcile_local_files;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// In-memory index mapping message_id -> file_path, keyed by local directory.
+/// Built once at startup, maintained incrementally during quick sync.
+pub type MessageIdIndex = HashMap<PathBuf, HashMap<String, PathBuf>>;
+
+/// Cached IMAP mailbox state from the SELECT response.
+/// Used to detect whether reconciliation is needed on the next quick sync.
+#[derive(Debug, Clone, Default)]
+pub struct MailboxState {
+    pub uid_validity: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub exists: u32,
+}
+
+impl MailboxState {
+    /// Determine whether reconciliation is needed by comparing previous
+    /// (self) and current (new) mailbox state.
+    ///
+    /// Returns `true` when evidence of server-side moves/deletes is detected.
+    pub fn needs_reconciliation(&self, new: &MailboxState) -> bool {
+        // uid_validity changed -> full reconciliation needed
+        if self.uid_validity != new.uid_validity {
+            return true;
+        }
+        // If we don't have uid_next from either side, be conservative
+        let (Some(old_next), Some(new_next)) = (self.uid_next, new.uid_next) else {
+            return true;
+        };
+        if new_next > old_next {
+            // New messages arrived. Check if `exists` grew by the same delta
+            // (pure additions) or less (additions + deletions/moves).
+            let uid_delta = new_next - old_next;
+            let exists_delta = new.exists as i64 - self.exists as i64;
+            if exists_delta < 0 || (exists_delta as u32) < uid_delta {
+                return true;
+            }
+            // Pure additions -- no reconciliation needed
+            return false;
+        }
+        if new_next == old_next && new.exists < self.exists {
+            // No new UIDs but fewer messages -> deletions/moves
+            return true;
+        }
+        // uid_next same, exists same or greater -> no change
+        false
+    }
+}
 
 /// A mailbox target for the unified sync operation.
 pub struct SyncTarget {
@@ -46,10 +98,24 @@ pub struct SyncResult {
     /// Address observations from newly-saved emails, ready to be merged
     /// into the contacts index by the caller. Empty on `dry_run`.
     pub fresh_observations: Vec<FreshObservation>,
+    /// Mailbox states observed during this sync (from SELECT responses).
+    /// Keyed by role (e.g. "inbox", "archive").
+    pub mailbox_states: HashMap<String, MailboxState>,
 }
+
+// ---------------------------------------------------------------------------
+// sync_mailboxes
+// ---------------------------------------------------------------------------
 
 /// Unified sync orchestrator: fetches all mailboxes using a single IMAP connection,
 /// with optional reconciliation pass.
+///
+/// When `known_index` is `Some`, the in-memory message-ID index is used instead
+/// of scanning local directories from disk. The index is updated in-place as
+/// new emails are saved. Pass `None` for CLI / full-sync (scans from disk).
+///
+/// When `prev_states` is `Some`, mailbox states from the previous sync are used
+/// to decide whether reconciliation is needed. Pass `None` to always reconcile.
 ///
 /// When `dry_run` is true, connects to the server and checks what *would* change
 /// but does not save any files or perform any local mutations.
@@ -59,13 +125,17 @@ pub async fn sync_mailboxes(
     limit: usize,
     reconcile: bool,
     dry_run: bool,
+    mut known_index: Option<&mut MessageIdIndex>,
+    prev_states: Option<&HashMap<String, MailboxState>>,
 ) -> Result<SyncResult> {
     info!(
-        "sync_mailboxes: {} targets, limit={}, reconcile={}, dry_run={}",
+        "sync_mailboxes: {} targets, limit={}, reconcile={}, dry_run={}, has_index={}, has_prev_states={}",
         targets.len(),
         limit,
         reconcile,
-        dry_run
+        dry_run,
+        known_index.is_some(),
+        prev_states.is_some(),
     );
 
     let mut session = open_imap_session(imap_config).await?;
@@ -73,22 +143,29 @@ pub async fn sync_mailboxes(
     let mut total_skipped = 0usize;
     let mut total_read_updated = 0usize;
     let mut fresh_observations: Vec<FreshObservation> = Vec::new();
+    let mut new_mailbox_states: HashMap<String, MailboxState> = HashMap::new();
 
-    // Build a global known_ids set from ALL local directories.
-    // This prevents re-fetching an email to one mailbox if it's already
-    // stored in another local mailbox directory (e.g. archived locally but
-    // still in server INBOX, or found via search and saved to Archive).
-    let mut global_known_ids = std::collections::HashSet::new();
-    for target in targets {
-        if let Ok(ids) = scan_existing_message_ids(&target.local_dir) {
-            global_known_ids.extend(ids);
+    // Build the global known_ids set.
+    // If we have an in-memory index, derive it from there (zero disk I/O).
+    // Otherwise, scan from disk (CLI / full-sync path).
+    let mut global_known_ids = HashSet::new();
+    if let Some(ref index) = known_index {
+        for dir_map in index.values() {
+            for mid in dir_map.keys() {
+                global_known_ids.insert(mid.clone());
+            }
+        }
+    } else {
+        for target in targets {
+            if let Ok(ids) = scan_existing_message_ids(&target.local_dir) {
+                global_known_ids.extend(ids);
+            }
         }
     }
 
     // Phase 1: Additive sync with two-pass fetch
     for target in targets {
         if dry_run {
-            // Dry run: only do pass 1 (header check) to count new messages
             match count_new_emails_on_session(
                 &mut session,
                 &target.server_name,
@@ -109,15 +186,24 @@ pub async fn sync_mailboxes(
                 }
             }
         } else {
+            // Adaptive probe: for quick sync (limit < usize::MAX), probe with
+            // 10 UIDs first. If all known, skip the full 100-header check.
+            let probe = if limit < usize::MAX { Some(10) } else { None };
             match fetch_new_emails_on_session(
                 &mut session,
                 &target.server_name,
                 Some(limit),
                 &global_known_ids,
+                probe,
             )
             .await
             {
-                Ok((new_emails, skipped, known_read_flags)) => {
+                Ok((new_emails, skipped, known_read_flags, mb_state)) => {
+                    // Capture mailbox state from SELECT for reconciliation decisions
+                    if let Some(state) = mb_state {
+                        new_mailbox_states.insert(target.role.clone(), state);
+                    }
+
                     total_skipped += skipped;
                     if !new_emails.is_empty() {
                         let (saved, _dup) = save_fetched_emails_with_known_ids(
@@ -127,8 +213,23 @@ pub async fn sync_mailboxes(
                             &mut global_known_ids,
                         )?;
                         total_saved += saved;
-                        // Collect fresh-contact observations from the new emails
-                        // so the caller can merge them into the contacts index.
+
+                        // Update in-memory index with newly saved emails
+                        if let Some(ref mut index) = known_index {
+                            let dir_map = index.entry(target.local_dir.clone()).or_default();
+                            for email in &new_emails {
+                                if let Some(ref mid) = email.message_id {
+                                    // Find the file that was just saved for this message_id
+                                    if let Some(path) = find_file_by_message_id_in_dir(
+                                        &target.local_dir,
+                                        mid,
+                                    ) {
+                                        dir_map.insert(mid.clone(), path);
+                                    }
+                                }
+                            }
+                        }
+
                         for e in &new_emails {
                             fresh_observations.push(FreshObservation {
                                 role: target.role.clone(),
@@ -139,10 +240,19 @@ pub async fn sync_mailboxes(
                             });
                         }
                     }
-                    // Sync read status from server for existing local emails
+
+                    // Sync read status from server for existing local emails.
+                    // Use the in-memory index if available to avoid re-scanning.
                     if !known_read_flags.is_empty() {
-                        total_read_updated +=
-                            sync_local_read_flags(&target.local_dir, &known_read_flags);
+                        if let Some(ref index) = known_index {
+                            if let Some(dir_map) = index.get(&target.local_dir) {
+                                total_read_updated +=
+                                    sync_local_read_flags_with_index(dir_map, &known_read_flags);
+                            }
+                        } else {
+                            total_read_updated +=
+                                sync_local_read_flags(&target.local_dir, &known_read_flags);
+                        }
                     }
                 }
                 Err(e) => {
@@ -155,10 +265,11 @@ pub async fn sync_mailboxes(
         }
     }
 
-    // Dedup pass: remove any duplicate files that slipped through
+    // Dedup pass: skip when using in-memory index (index prevents duplicates).
+    // Only run on full-sync / CLI path.
     let mut total_deduped = 0usize;
-    if !dry_run {
-        let mut deduped_dirs = std::collections::HashSet::new();
+    if !dry_run && known_index.is_none() {
+        let mut deduped_dirs = HashSet::new();
         for target in targets {
             if deduped_dirs.insert(target.local_dir.clone()) {
                 match deduplicate_mailbox(&target.local_dir) {
@@ -177,7 +288,83 @@ pub async fn sync_mailboxes(
     let mut total_removed = 0usize;
 
     // Phase 2: Reconciliation (only INBOX and Archive)
-    if reconcile {
+    if reconcile && !dry_run {
+        let mut reconcile_pairs: Vec<(String, String)> = Vec::new();
+        let mut local_dirs: HashMap<String, PathBuf> = HashMap::new();
+
+        for target in targets {
+            let role = target.role.to_ascii_lowercase();
+            if role == "inbox" || role == "archive" {
+                let key = if role == "inbox" {
+                    "INBOX".to_string()
+                } else {
+                    "Archive".to_string()
+                };
+
+                // Check whether reconciliation is actually needed using
+                // IMAP mailbox state comparison (avoids fetching all
+                // server Message-IDs when nothing was moved/deleted).
+                let should_reconcile = match prev_states {
+                    Some(prev) => {
+                        if let (Some(prev_state), Some(new_state)) =
+                            (prev.get(&role), new_mailbox_states.get(&role))
+                        {
+                            let needed = prev_state.needs_reconciliation(new_state);
+                            if !needed {
+                                info!(
+                                    "Reconciliation skipped for '{}': state unchanged (exists={}, uid_next={:?})",
+                                    role, new_state.exists, new_state.uid_next
+                                );
+                            }
+                            needed
+                        } else {
+                            true // No previous state or missing new state -- be conservative
+                        }
+                    }
+                    None => true, // No previous states provided -- always reconcile
+                };
+
+                if should_reconcile {
+                    reconcile_pairs.push((key.clone(), target.server_name.clone()));
+                    local_dirs.insert(key, target.local_dir.clone());
+                }
+            }
+        }
+
+        if !reconcile_pairs.is_empty() {
+            let mut server_ids: HashMap<String, HashSet<String>> = HashMap::new();
+            for (key, imap_mailbox) in &reconcile_pairs {
+                match fetch_server_message_ids_on_session(&mut session, imap_mailbox).await {
+                    Ok(ids) => {
+                        server_ids.insert(key.clone(), ids);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to fetch Message-IDs for reconciliation from '{}': {}",
+                            imap_mailbox, e
+                        );
+                    }
+                }
+            }
+
+            if !server_ids.is_empty() {
+                let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
+                total_moved = moved;
+                total_removed = removed;
+
+                // Update in-memory index to reflect reconciliation changes
+                if let Some(ref mut index) = known_index {
+                    for (_key, dir) in &local_dirs {
+                        // Re-scan only the reconciled directories (at most 2)
+                        if let Ok(ids) = scan_mailbox_message_ids(dir) {
+                            index.insert(dir.clone(), ids);
+                        }
+                    }
+                }
+            }
+        }
+    } else if reconcile && dry_run {
+        // Dry-run reconciliation: always run (no state-based skip for dry run)
         let mut reconcile_pairs: Vec<(String, String)> = Vec::new();
         let mut local_dirs: HashMap<String, PathBuf> = HashMap::new();
 
@@ -195,7 +382,7 @@ pub async fn sync_mailboxes(
         }
 
         if !reconcile_pairs.is_empty() {
-            let mut server_ids: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+            let mut server_ids: HashMap<String, HashSet<String>> = HashMap::new();
             for (key, imap_mailbox) in &reconcile_pairs {
                 match fetch_server_message_ids_on_session(&mut session, imap_mailbox).await {
                     Ok(ids) => {
@@ -209,18 +396,10 @@ pub async fn sync_mailboxes(
                     }
                 }
             }
-
             if !server_ids.is_empty() {
-                if dry_run {
-                    let (moved, removed) =
-                        crate::sync::dry_run_reconcile(&server_ids, &local_dirs)?;
-                    total_moved = moved;
-                    total_removed = removed;
-                } else {
-                    let (moved, removed) = reconcile_local_files(&server_ids, &local_dirs)?;
-                    total_moved = moved;
-                    total_removed = removed;
-                }
+                let (moved, removed) = crate::sync::dry_run_reconcile(&server_ids, &local_dirs)?;
+                total_moved = moved;
+                total_removed = removed;
             }
         }
     }
@@ -235,11 +414,16 @@ pub async fn sync_mailboxes(
         read_updated: total_read_updated,
         deduped: total_deduped,
         fresh_observations,
+        mailbox_states: new_mailbox_states,
     })
 }
 
+// ---------------------------------------------------------------------------
+// Read-flag sync helpers
+// ---------------------------------------------------------------------------
+
 /// Update local emails' `read:` frontmatter to match server \Seen flags.
-/// Returns the number of files updated.
+/// Scans the directory from disk to find files. Returns the number of files updated.
 fn sync_local_read_flags(
     local_dir: &std::path::Path,
     server_flags: &HashMap<String, bool>,
@@ -248,11 +432,18 @@ fn sync_local_read_flags(
         Ok(ids) => ids,
         Err(_) => return 0,
     };
+    sync_local_read_flags_with_index(&local_ids, server_flags)
+}
 
+/// Update local emails' `read:` frontmatter using a pre-built index map.
+/// Avoids re-scanning the directory. Returns the number of files updated.
+fn sync_local_read_flags_with_index(
+    local_ids: &HashMap<String, PathBuf>,
+    server_flags: &HashMap<String, bool>,
+) -> usize {
     let mut updated = 0usize;
     for (message_id, is_seen) in server_flags {
         if let Some(file_path) = local_ids.get(message_id) {
-            // Read current local status from frontmatter
             let local_read = read_local_read_status(file_path);
             if local_read != *is_seen && update_read_status_locally(file_path, *is_seen).is_ok() {
                 updated += 1;
@@ -284,13 +475,33 @@ fn read_local_read_status(path: &std::path::Path) -> bool {
     false
 }
 
+/// Find a file containing a specific message_id in a directory.
+/// Used to update the in-memory index after saving new emails.
+fn find_file_by_message_id_in_dir(dir: &std::path::Path, message_id: &str) -> Option<PathBuf> {
+    let walker = walkdir::WalkDir::new(dir).max_depth(1);
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        if entry.path().extension().is_some_and(|ext| ext == "md") {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if content.contains(message_id) {
+                    return Some(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run helper
+// ---------------------------------------------------------------------------
+
 /// Lightweight pass-1-only check: counts how many new emails exist on the server
 /// without downloading full message bodies. Used for dry-run mode.
 async fn count_new_emails_on_session(
     session: &mut super::ImapSession,
     mailbox: &str,
     limit: Option<usize>,
-    known_ids: &std::collections::HashSet<String>,
+    known_ids: &HashSet<String>,
 ) -> Result<(usize, usize)> {
     use crate::parse::compress_uid_set;
     use anyhow::anyhow;
@@ -347,6 +558,10 @@ async fn count_new_emails_on_session(
     Ok((new_count, skipped))
 }
 
+// ---------------------------------------------------------------------------
+// list_mailboxes
+// ---------------------------------------------------------------------------
+
 pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
     use anyhow::anyhow;
     use futures::TryStreamExt;
@@ -367,11 +582,105 @@ pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
     Ok(names)
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // -----------------------------------------------------------------------
+    // MailboxState::needs_reconciliation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_no_previous_state_needs_reconciliation() {
+        let prev = MailboxState::default(); // uid_validity None
+        let new = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 50,
+        };
+        assert!(prev.needs_reconciliation(&new));
+    }
+
+    #[test]
+    fn test_no_change_skips_reconciliation() {
+        let prev = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 50,
+        };
+        let new = prev.clone();
+        assert!(!prev.needs_reconciliation(&new));
+    }
+
+    #[test]
+    fn test_pure_addition_skips_reconciliation() {
+        let prev = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 50,
+        };
+        let new = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(103),
+            exists: 53, // grew by same delta (3)
+        };
+        assert!(!prev.needs_reconciliation(&new));
+    }
+
+    #[test]
+    fn test_addition_plus_deletion_needs_reconciliation() {
+        let prev = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 50,
+        };
+        let new = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(103), // 3 new UIDs
+            exists: 51,          // only grew by 1 -> 2 were deleted/moved
+        };
+        assert!(prev.needs_reconciliation(&new));
+    }
+
+    #[test]
+    fn test_exists_decreased_needs_reconciliation() {
+        let prev = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 50,
+        };
+        let new = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 48,
+        };
+        assert!(prev.needs_reconciliation(&new));
+    }
+
+    #[test]
+    fn test_uid_validity_changed_needs_reconciliation() {
+        let prev = MailboxState {
+            uid_validity: Some(1),
+            uid_next: Some(100),
+            exists: 50,
+        };
+        let new = MailboxState {
+            uid_validity: Some(2), // renumbered
+            uid_next: Some(100),
+            exists: 50,
+        };
+        assert!(prev.needs_reconciliation(&new));
+    }
+
+    // -----------------------------------------------------------------------
+    // read_local_read_status
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_read_local_read_status_true() {
@@ -404,6 +713,10 @@ mod tests {
         fs::write(&path, "---\nfrom: a@x.com\nstatus: inbox\n---\n\nBody").unwrap();
         assert!(!read_local_read_status(&path));
     }
+
+    // -----------------------------------------------------------------------
+    // sync_local_read_flags
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_sync_local_read_flags_updates_file() {
@@ -457,5 +770,32 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("read: false"));
+    }
+
+    // -----------------------------------------------------------------------
+    // sync_local_read_flags_with_index
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sync_local_read_flags_with_index() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: false\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        // Build an index map manually
+        let mut index = HashMap::new();
+        index.insert("<msg1@x.com>".to_string(), path.clone());
+
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), true);
+
+        let updated = sync_local_read_flags_with_index(&index, &flags);
+        assert_eq!(updated, 1);
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: true"));
     }
 }

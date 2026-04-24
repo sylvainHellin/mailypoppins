@@ -724,6 +724,7 @@ pub async fn sync_mailboxes_graph(
         read_updated: total_read_updated,
         deduped: 0,
         fresh_observations,
+        mailbox_states: std::collections::HashMap::new(),
     })
 }
 

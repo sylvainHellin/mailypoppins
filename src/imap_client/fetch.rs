@@ -156,16 +156,27 @@ pub async fn fetch_emails(
 /// Returns (new_emails, num_already_known_in_window, read_flags_for_known_emails).
 /// The third element maps message_id -> is_seen for emails that already exist locally,
 /// enabling the caller to sync read status from the server.
+/// Adaptive two-pass fetch with optional probe.
+///
+/// When `probe_limit` is `Some(n)`, first checks the latest `n` UIDs.
+/// If all are known locally, returns early (fast path for "nothing new").
+/// If any are unknown, expands to the full `limit` window.
 pub async fn fetch_new_emails_on_session(
     session: &mut ImapSession,
     mailbox: &str,
     limit: Option<usize>,
     known_ids: &HashSet<String>,
-) -> Result<(Vec<FetchedEmail>, usize, HashMap<String, bool>)> {
-    session
+    probe_limit: Option<usize>,
+) -> Result<(Vec<FetchedEmail>, usize, HashMap<String, bool>, Option<super::sync::MailboxState>)> {
+    let imap_mailbox = session
         .select(mailbox)
         .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    let mb_state = Some(super::sync::MailboxState {
+        uid_validity: imap_mailbox.uid_validity,
+        uid_next: imap_mailbox.uid_next,
+        exists: imap_mailbox.exists,
+    });
 
     let uids = session
         .uid_search("ALL")
@@ -173,18 +184,67 @@ pub async fn fetch_new_emails_on_session(
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        return Ok((Vec::new(), 0, HashMap::new()));
+        return Ok((Vec::new(), 0, HashMap::new(), mb_state));
     }
 
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort();
+
+    // Adaptive probe: check a small window first. If all are known,
+    // return early without checking the full limit window.
+    if let Some(probe_n) = probe_limit {
+        if let Some(full_n) = limit {
+            if probe_n < full_n && uid_list.len() > probe_n {
+                let probe_uids: Vec<u32> = uid_list.iter().rev().take(probe_n).copied().collect();
+                let probe_set = compress_uid_set(&probe_uids);
+                let probe_fetched: Vec<_> = session
+                    .uid_fetch(&probe_set, "(UID BODY.PEEK[HEADER.FIELDS (Message-ID)] FLAGS)")
+                    .await
+                    .map_err(|e| anyhow!("Failed to fetch probe headers: {}", e))?
+                    .try_collect()
+                    .await
+                    .map_err(|e| anyhow!("Failed to collect probe headers: {}", e))?;
+
+                let mut all_known = true;
+                let mut probe_flags: HashMap<String, bool> = HashMap::new();
+                for msg in probe_fetched.iter() {
+                    let mid = msg.header().and_then(parse_message_id_from_header_bytes);
+                    match mid {
+                        Some(ref id) if known_ids.contains(id) => {
+                            let is_seen = msg.flags().any(|f| matches!(f, async_imap::types::Flag::Seen));
+                            probe_flags.insert(id.clone(), is_seen);
+                        }
+                        _ => {
+                            all_known = false;
+                            break;
+                        }
+                    }
+                }
+
+                if all_known {
+                    info!(
+                        "Adaptive probe for '{}': all {} probed UIDs known, skipping full check",
+                        mailbox, probe_n
+                    );
+                    let skipped = probe_fetched.len();
+                    return Ok((Vec::new(), skipped, probe_flags, mb_state));
+                }
+                // Some new UIDs found in probe -- fall through to full check
+                info!(
+                    "Adaptive probe for '{}': new UIDs detected in probe, expanding to {}",
+                    mailbox, full_n
+                );
+            }
+        }
+    }
+
     let selected_uids: Vec<u32> = match limit {
         Some(n) => uid_list.into_iter().rev().take(n).collect(),
         None => uid_list,
     };
 
     if selected_uids.is_empty() {
-        return Ok((Vec::new(), 0, HashMap::new()));
+        return Ok((Vec::new(), 0, HashMap::new(), mb_state));
     }
 
     let checked_count = selected_uids.len();
@@ -224,7 +284,7 @@ pub async fn fetch_new_emails_on_session(
     let skipped = checked_count - new_uids.len();
 
     if new_uids.is_empty() {
-        return Ok((Vec::new(), skipped, known_flags));
+        return Ok((Vec::new(), skipped, known_flags, mb_state));
     }
 
     info!(
@@ -254,7 +314,7 @@ pub async fn fetch_new_emails_on_session(
         }
     }
 
-    Ok((emails, skipped, known_flags))
+    Ok((emails, skipped, known_flags, mb_state))
 }
 
 #[cfg(test)]
