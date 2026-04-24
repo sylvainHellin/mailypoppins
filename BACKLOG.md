@@ -4,6 +4,10 @@
 
 Items to tackle in the current work cycle.
 
+- **Diagnose and fix quick-sync latency (P0)** -- Quick sync still takes ~16s despite the in-memory index and state-caching work (commits `08b8b94`..`5cdd643`). The optimization added zero-disk-scan paths and reconciliation skipping but did not measurably reduce wall-clock time. Two problems:
+  1. **Root cause unknown.** Previous attempts optimized the wrong bottleneck (local disk I/O) without profiling. The actual bottleneck is likely network round-trips (TLS handshake, LOGIN, N x SELECT+SEARCH+FETCH) or server-side query latency. Need to instrument with wall-clock timings at each phase boundary to identify where the 16s is spent.
+  2. **Cold start regression.** `AccountState::new()` now calls `scan_mailbox_message_ids()` for every mailbox directory synchronously on the main thread. With large mailboxes this blocks the UI for seconds before the first frame renders. The index build must move to a background task with a loading indicator.
+  - Approach: (a) Add `log::info!` timestamps or `std::time::Instant` spans around each phase in `sync_mailboxes` and `fetch_new_emails_on_session` (TLS connect, LOGIN, each SELECT, each SEARCH, each FETCH pass, reconciliation, file saves). Run a quick sync and read the log. (b) Move index build in `AccountState::new()` to a spawned thread; show "Indexing..." in the status bar until `BgResult::IndexReady` arrives. (c) Based on profiling, fix the actual bottleneck -- likely parallel IMAP connections or connection reuse (see "Parallel IMAP fetch" in Next).
 - **Fix read/unread sync behaviour** -- read status resets after each fetch. Bidirectional sync with IMAP `\Seen` flag is not working correctly. [handoff](.claude/handoff/2026-04-05_23-34-46_read-unread-sync-debug.md)
 - **macOS codesign for local dev** -- re-sign `~/.cargo/bin/email` with a stable self-signed cert after every `cargo install --path .` so the Keychain ACL persists across rebuilds and stops re-prompting three times per install. Secrets stay in Keychain; no plaintext fallback. [plan](.pi/workflow/macos-codesign-dev/plan.md)
 
