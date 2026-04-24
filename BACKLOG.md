@@ -10,6 +10,7 @@ Items to tackle in the current work cycle.
 ## Next
 
 Queued up, will pick from here when Now is clear.
+- **Parallel IMAP fetch per mailbox** -- `sync_mailboxes` uses one IMAP session and SELECTs mailboxes sequentially (IMAP requires one selected mailbox per connection). For accounts with 3+ mailboxes on a remote server, each SELECT+SEARCH+FETCH cycle adds ~200-300ms of network latency serially. Opening N parallel IMAP connections (one per mailbox) would turn `N * latency` into `1 * latency`. Trade-off: N TLS handshakes + N logins vs sequential latency. Measure post-index-optimization to confirm this is still needed.
 - **Flagging / starring** -- flag important emails on the server, display flag icon in the list, filter flagged.
 - **Threading / conversation view** -- group emails by `In-Reply-To` / `References` headers. Show conversation as an expandable tree or inline thread. [plan](docs/plans/threading.md)
 - **Desktop notifications** -- IDLE watcher detects new mail but gives no notification outside the TUI. Integrate `notify-rust` or macOS `terminal-notifier`.

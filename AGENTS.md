@@ -36,7 +36,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 | **`src/imap_client/`** | |
 | `mod.rs` | `ImapStream` wrapper, `open_imap_session()`, re-exports |
 | `fetch.rs` | `fetch_emails*`, `fetch_new_emails*`, `fetch_server_message_ids*` |
-| `sync.rs` | `sync_mailboxes()`, `list_mailboxes()`, `SyncTarget`, `SyncResult` |
+| `sync.rs` | `sync_mailboxes()`, `list_mailboxes()`, `SyncTarget`, `SyncResult`, `MailboxState`, `MessageIdIndex` |
 | `search.rs` | `parse_search_query()`, `build_imap_search_query()`, `FetchCriteria` |
 | `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
 | `ops.rs` | `archive_email_on_server/locally`, `delete_email_on_server/locally`, `append_to_sent_folder`, `mark_read/unread_on_server`, `update_read_status_locally`, `get_message_id_from_file` |
@@ -72,6 +72,9 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - **Sent folder dedup:** Sent `.md` files store `message_id` in frontmatter. Sync skips uploading emails already present on the server by Message-ID. The Sent directory is never reconciled -- local files are source of truth.
 - **Reconciliation scope:** Only INBOX and Archive participate in server-driven reconciliation. Sent is excluded.
 - **Send account resolution:** At send time, the draft's `from:` address is matched against each account's `default_from` to select the correct SMTP/IMAP config. This is done in `resolve_send_account()` in `tui/helpers.rs`. Draft-creation commands (reply, forward, new) auto-insert the active account's `default_from`.
+- **In-memory message ID index:** `AccountState.message_id_index` is a `HashMap<PathBuf, HashMap<String, PathBuf>>` mapping local dir to {message_id -> file_path}. Built once at startup from disk. Quick sync uses it instead of re-scanning directories (zero disk I/O for known-ID checks). Updated incrementally on save, archive, delete, and reconciliation. Full sync rebuilds from disk.
+- **IMAP mailbox state caching:** `AccountState.mailbox_states` stores `MailboxState { uid_validity, uid_next, exists }` per role from the last sync's SELECT response. On quick sync, the new SELECT response is compared to the cached state to skip reconciliation when only pure additions occurred (most common case). Reconciliation only runs when `exists` decreased or `uid_next`/`exists` deltas indicate moves/deletes.
+- **Adaptive probe:** Quick sync probes the last 10 UIDs before expanding to 100. If all 10 are known, the mailbox is skipped entirely (common when IDLE fires on flag changes, not new mail).
 - **Queued actions:** Fetch/sync are deferred while mutations are in-flight (`bg_mutations > 0`) and auto-triggered on completion.
 - **Per-account watchers:** One IMAP IDLE thread per account. All send events to a shared channel tagged with `account_index`. Non-active account changes set `has_unseen` (badge in status bar).
 - **Output style (CLI):** Use `colored` crate. `✓` success (green), `✗` error (red), `⚠` warning (yellow), `ℹ` info (blue). No emoji -- use Unicode or Nerd Font icons.
