@@ -101,14 +101,6 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         overlays::render_confirm_dialog(dialog, frame, area);
     }
 
-    if let Some(picker) = &app.attachment_picker {
-        overlays::render_attachment_picker(picker, frame, area);
-    }
-
-    if let Some(picker) = &app.dir_picker {
-        overlays::render_dir_picker(picker, frame, area);
-    }
-
     if app.show_help {
         overlays::render_help_overlay(app, frame, area);
     }
@@ -123,6 +115,14 @@ pub fn view(app: &mut App, frame: &mut Frame) {
 
     if app.compose_wizard.is_some() {
         compose::render_compose_wizard(app, frame, area);
+    }
+
+    if let Some(picker) = &app.attachment_picker {
+        overlays::render_attachment_picker(picker, frame, area);
+    }
+
+    if let Some(picker) = &app.dir_picker {
+        overlays::render_dir_picker(picker, frame, area);
     }
 
     if let Some(error) = &app.persistent_error {
