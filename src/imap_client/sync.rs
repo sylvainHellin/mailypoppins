@@ -14,6 +14,7 @@ use crate::parse::{
     scan_mailbox_message_ids,
 };
 use crate::sync::reconcile_local_files;
+use crate::timing::TimingSpan;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,7 +139,11 @@ pub async fn sync_mailboxes(
         prev_states.is_some(),
     );
 
+    let span_label = if limit < usize::MAX { "sync_mailboxes:quick" } else { "sync_mailboxes:full" };
+    let mut span = TimingSpan::with_context(span_label, format!("{} targets", targets.len()));
+
     let mut session = open_imap_session(imap_config).await?;
+    span.mark("session_open");
     let mut total_saved = 0usize;
     let mut total_skipped = 0usize;
     let mut total_read_updated = 0usize;
@@ -162,6 +167,7 @@ pub async fn sync_mailboxes(
             }
         }
     }
+    span.mark("build_known_ids");
 
     // Phase 1: Additive sync with two-pass fetch
     for target in targets {
@@ -265,6 +271,8 @@ pub async fn sync_mailboxes(
         }
     }
 
+    span.mark("additive_fetch");
+
     // Dedup pass: skip when using in-memory index (index prevents duplicates).
     // Only run on full-sync / CLI path.
     let mut total_deduped = 0usize;
@@ -282,6 +290,10 @@ pub async fn sync_mailboxes(
                 }
             }
         }
+    }
+
+    if total_deduped > 0 {
+        span.mark("dedup");
     }
 
     let mut total_moved = 0usize;
@@ -404,7 +416,10 @@ pub async fn sync_mailboxes(
         }
     }
 
+    span.mark("reconcile");
+
     session.logout().await.ok();
+    span.mark("logout");
 
     Ok(SyncResult {
         saved: total_saved,

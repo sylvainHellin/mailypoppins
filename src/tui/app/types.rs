@@ -261,15 +261,33 @@ impl AccountState {
         let n = mailboxes.len();
         let counts = count_all_emails(&mailboxes);
 
-        // Build in-memory message ID index from all mailbox directories
+        // Build in-memory message ID index from all mailbox directories.
+        // This blocks first-frame render -- instrument per-dir to see which
+        // mailboxes dominate the cold-start cost.
+        let mut span = crate::timing::TimingSpan::with_context(
+            "AccountState::new (index build)",
+            account_config.name.clone(),
+        );
         let mut message_id_index: MessageIdIndex = std::collections::HashMap::new();
+        let mut total_indexed = 0usize;
         for mb in &mailboxes {
             if mb.dir.is_dir() {
+                let t0 = std::time::Instant::now();
                 if let Ok(ids) = scan_mailbox_message_ids(&mb.dir) {
+                    let n = ids.len();
+                    total_indexed += n;
+                    log::info!(
+                        "[TIMING] AccountState::new [{}] scan {} ({} files): {} ms",
+                        account_config.name,
+                        mb.dir.display(),
+                        n,
+                        t0.elapsed().as_millis()
+                    );
                     message_id_index.insert(mb.dir.clone(), ids);
                 }
             }
         }
+        span.mark(&format!("indexed {} files total", total_indexed));
 
         Self {
             account_config,

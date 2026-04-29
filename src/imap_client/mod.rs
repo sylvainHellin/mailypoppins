@@ -164,24 +164,31 @@ async fn authenticate_client(
 }
 
 pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapSession> {
+    use crate::timing::TimingSpan;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = format!("{}:{}", imap_config.host, imap_config.port);
+    let mut span = TimingSpan::with_context("open_imap_session", addr.clone());
 
     let tls = async_native_tls::TlsConnector::new()
         .danger_accept_invalid_certs(imap_config.accept_invalid_certs);
-    let addr = format!("{}:{}", imap_config.host, imap_config.port);
 
     let mut tcp_stream = async_std::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| anyhow!("Failed to connect to IMAP server: {}", e))?;
+    span.mark("tcp_connect");
 
     if imap_config.port == 993 {
         let tls_stream = tls
             .connect(&imap_config.host, tcp_stream)
             .await
             .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
+        span.mark("tls_handshake");
 
         let client = async_imap::Client::new(ImapStream::passthrough(tls_stream));
-        authenticate_client(client, imap_config).await
+        let session = authenticate_client(client, imap_config).await?;
+        span.mark("login");
+        Ok(session)
     } else {
         info!("IMAP STARTTLS: connecting to {} (plaintext first)", addr);
 
@@ -194,6 +201,7 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
         if !greeting.starts_with("* ") {
             return Err(anyhow!("Unexpected IMAP greeting: {}", greeting.trim()));
         }
+        span.mark("greeting");
         info!("IMAP STARTTLS: got greeting, sending STARTTLS");
 
         tcp_stream
@@ -213,14 +221,18 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
         if !response.contains("OK") {
             return Err(anyhow!("STARTTLS rejected by server: {}", response.trim()));
         }
+        span.mark("starttls_negotiate");
         info!("IMAP STARTTLS: upgrading to TLS");
 
         let tls_stream = tls
             .connect(&imap_config.host, tcp_stream)
             .await
             .map_err(|e| anyhow!("STARTTLS TLS handshake failed: {}", e))?;
+        span.mark("tls_handshake");
 
         let client = async_imap::Client::new(ImapStream::with_greeting(tls_stream));
-        authenticate_client(client, imap_config).await
+        let session = authenticate_client(client, imap_config).await?;
+        span.mark("login");
+        Ok(session)
     }
 }
