@@ -425,7 +425,7 @@ pub fn cmd_config_init() -> Result<()> {
     );
     if is_exchange {
         println!(
-            "{} OAuth2 token cached at ~/.email-cli/tokens/",
+            "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
             "\u{2713}".green().bold()
         );
     } else {
@@ -756,7 +756,7 @@ pub fn cmd_config_add_account() -> Result<()> {
     );
     if is_exchange {
         println!(
-            "{} OAuth2 token cached at ~/.email-cli/tokens/",
+            "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
             "\u{2713}".green().bold()
         );
     } else {
@@ -940,7 +940,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
         path.display()
     );
     println!(
-        "{} OAuth2 token cached at ~/.email-cli/tokens/",
+        "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
         "\u{2713}".green().bold()
     );
 
@@ -1114,7 +1114,7 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
         path.display()
     );
     println!(
-        "{} OAuth2 token cached at ~/.email-cli/tokens/",
+        "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
         "\u{2713}".green().bold()
     );
 

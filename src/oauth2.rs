@@ -3,7 +3,7 @@
 // Implements the device authorization grant for acquiring access tokens
 // to use with IMAP (XOAUTH2) and SMTP (XOAUTH2) on Exchange Online.
 //
-// Token cache is stored at ~/.email-cli/tokens/<account>.json.
+// Token cache is stored at ~/.mailypoppins/tokens/<account>.json.
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
@@ -74,7 +74,7 @@ impl TokenCache {
 
 fn token_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".email-cli").join("tokens")
+    PathBuf::from(home).join(".mailypoppins").join("tokens")
 }
 
 fn token_cache_path(account_name: &str) -> PathBuf {

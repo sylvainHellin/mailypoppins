@@ -7,6 +7,7 @@ use log::info;
 use super::{ImapSession, search::{FetchCriteria, build_imap_search_query}, open_imap_session};
 use crate::config::ImapConfig;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
+use crate::timing::TimingSpan;
 
 /// Extract Message-ID from raw header bytes (from BODY.PEEK[HEADER.FIELDS (Message-ID)]).
 pub(super) fn parse_message_id_from_header_bytes(header_bytes: &[u8]) -> Option<String> {
@@ -168,10 +169,13 @@ pub async fn fetch_new_emails_on_session(
     known_ids: &HashSet<String>,
     probe_limit: Option<usize>,
 ) -> Result<(Vec<FetchedEmail>, usize, HashMap<String, bool>, Option<super::sync::MailboxState>)> {
+    let mut span = TimingSpan::with_context("fetch_new_emails", mailbox.to_string());
+
     let imap_mailbox = session
         .select(mailbox)
         .await
         .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    span.mark("select");
     let mb_state = Some(super::sync::MailboxState {
         uid_validity: imap_mailbox.uid_validity,
         uid_next: imap_mailbox.uid_next,
@@ -182,6 +186,7 @@ pub async fn fetch_new_emails_on_session(
         .uid_search("ALL")
         .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+    span.mark("uid_search");
 
     if uids.is_empty() {
         return Ok((Vec::new(), 0, HashMap::new(), mb_state));
@@ -222,6 +227,7 @@ pub async fn fetch_new_emails_on_session(
                 }
 
                 if all_known {
+                    span.mark("probe_all_known");
                     info!(
                         "Adaptive probe for '{}': all {} probed UIDs known, skipping full check",
                         mailbox, probe_n
@@ -229,6 +235,7 @@ pub async fn fetch_new_emails_on_session(
                     let skipped = probe_fetched.len();
                     return Ok((Vec::new(), skipped, probe_flags, mb_state));
                 }
+                span.mark("probe_expanded");
                 // Some new UIDs found in probe -- fall through to full check
                 info!(
                     "Adaptive probe for '{}': new UIDs detected in probe, expanding to {}",
@@ -258,6 +265,7 @@ pub async fn fetch_new_emails_on_session(
         .try_collect()
         .await
         .map_err(|e| anyhow!("Failed to collect Message-ID headers: {}", e))?;
+    span.mark("pass1_headers");
 
     // Identify UIDs whose Message-ID is not in known_ids,
     // and collect \Seen flags for known emails.
@@ -286,6 +294,7 @@ pub async fn fetch_new_emails_on_session(
     if new_uids.is_empty() {
         return Ok((Vec::new(), skipped, known_flags, mb_state));
     }
+    span.mark("diff_new_uids");
 
     info!(
         "Two-pass fetch for '{}': {} new, {} skipped (out of {} checked)",
@@ -304,6 +313,7 @@ pub async fn fetch_new_emails_on_session(
         .try_collect()
         .await
         .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+    span.mark("pass2_bodies");
 
     let mut emails = Vec::new();
     for msg in fetched.iter() {
@@ -313,6 +323,7 @@ pub async fn fetch_new_emails_on_session(
             emails.push(email);
         }
     }
+    span.mark("parse_rfc822");
 
     Ok((emails, skipped, known_flags, mb_state))
 }

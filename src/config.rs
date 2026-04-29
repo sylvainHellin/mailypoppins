@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use colored::*;
 use log::debug;
 use serde::Deserialize;
-use simplelog::{CombinedLogger, Config as LogConfig, LevelFilter, WriteLogger};
+use simplelog::{format_description, CombinedLogger, ConfigBuilder, LevelFilter, WriteLogger};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -528,7 +528,7 @@ pub fn slugify_mailbox_name(name: &str) -> String {
 // Logging (unchanged)
 // ---------------------------------------------------------------------------
 
-/// Initialize file-based logging to ~/.email-cli/logs/email-cli-YYYY-MM-DD.log.
+/// Initialize file-based logging to ~/.mailypoppins/logs/mailypoppins-YYYY-MM-DD.log.
 /// Non-fatal: prints a warning and continues if setup fails.
 pub fn init_logging() {
     let log_dir = log_base_dir().join("logs");
@@ -542,7 +542,7 @@ pub fn init_logging() {
         return;
     }
 
-    let filename = format!("email-cli-{}.log", Utc::now().format("%Y-%m-%d"));
+    let filename = format!("mailypoppins-{}.log", Utc::now().format("%Y-%m-%d"));
     let log_path = log_dir.join(filename);
 
     let log_file = match fs::OpenOptions::new()
@@ -562,19 +562,29 @@ pub fn init_logging() {
         }
     };
 
+    // Custom log timestamp format with millisecond precision. Using local
+    // time when available (best for human debugging); falls back to UTC if
+    // the local offset cannot be determined safely (e.g. multithreaded env).
+    let mut builder = ConfigBuilder::new();
+    builder.set_time_format_custom(format_description!(
+        "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"
+    ));
+    let _ = builder.set_time_offset_to_local();
+    let log_config = builder.build();
+
     if let Err(e) = CombinedLogger::init(vec![WriteLogger::new(
         LevelFilter::Debug,
-        LogConfig::default(),
+        log_config,
         log_file,
     )]) {
         eprintln!("{} Could not initialize logger: {}", "⚠".yellow(), e);
     }
 }
 
-/// Return the base directory for email-cli data: ~/.email-cli
+/// Return the base directory for mailypoppins data: ~/.mailypoppins
 fn log_base_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".email-cli")
+    PathBuf::from(home).join(".mailypoppins")
 }
 
 // ---------------------------------------------------------------------------

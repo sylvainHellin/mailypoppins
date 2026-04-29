@@ -231,6 +231,9 @@ pub(super) async fn lib_do_sync(
     known_index: Option<&mut MessageIdIndex>,
     prev_states: Option<&std::collections::HashMap<String, MailboxState>>,
 ) -> anyhow::Result<(String, SyncResultMeta)> {
+    let span_label = if limit < usize::MAX { "lib_do_sync:quick" } else { "lib_do_sync:full" };
+    let _span = crate::timing::TimingSpan::with_context(span_label, account_config.name.clone());
+
     let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
         .iter()
         .map(|(role, mapping)| SyncTarget {

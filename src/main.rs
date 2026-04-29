@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 #[derive(Parser)]
-#[command(name = "email-cli")]
+#[command(name = "mailypoppins")]
 #[command(about = "A CLI tool for sending emails from Markdown drafts with YAML frontmatter")]
 #[command(version)]
 struct Cli {
@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
     init_logging();
     let cli = Cli::parse();
 
-    info!("email-cli started: {:?}", std::env::args().collect::<Vec<_>>());
+    info!("mailypoppins started: {:?}", std::env::args().collect::<Vec<_>>());
 
     // Load global config from ~/.config/email/config.toml
     let global_config = load_global_config().unwrap_or_else(|e| {

@@ -75,7 +75,7 @@ Broke the 3,700-line `main.rs` into focused modules: `types.rs`, `config.rs`, `c
 
 - Added `auth_method = "oauth2"` and `[accounts.oauth2]` config section for Microsoft 365 / Exchange Online accounts
 - OAuth2 Device Code Flow via `email config oauth2-login` command (acquires and caches tokens)
-- Token cache at `~/.email-cli/tokens/<account>.json` with automatic refresh on expiry
+- Token cache at `~/.mailypoppins/tokens/<account>.json` with automatic refresh on expiry
 - IMAP XOAUTH2 authentication branch in `open_imap_session()` (via `async_imap::Authenticator` trait)
 - SMTP XOAUTH2 authentication branch in `send_email()` (via `lettre::Mechanism::Xoauth2`)
 - Config init wizard updated with "Microsoft 365 / Exchange Online" provider option

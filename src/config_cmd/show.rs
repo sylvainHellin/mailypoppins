@@ -48,7 +48,7 @@ pub fn cmd_config_show() -> Result<()> {
                     let cache_path = std::path::PathBuf::from(
                         std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
                     )
-                    .join(".email-cli")
+                    .join(".mailypoppins")
                     .join("tokens")
                     .join(format!("{}.json", account.name));
                     if cache_path.exists() {

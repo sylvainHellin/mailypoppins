@@ -78,6 +78,8 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - **Queued actions:** Fetch/sync are deferred while mutations are in-flight (`bg_mutations > 0`) and auto-triggered on completion.
 - **Per-account watchers:** One IMAP IDLE thread per account. All send events to a shared channel tagged with `account_index`. Non-active account changes set `has_unseen` (badge in status bar).
 - **Output style (CLI):** Use `colored` crate. `✓` success (green), `✗` error (red), `⚠` warning (yellow), `ℹ` info (blue). No emoji -- use Unicode or Nerd Font icons.
+- **Data directory:** `~/.mailypoppins/` holds logs (`logs/mailypoppins-YYYY-MM-DD.log`) and OAuth2 token caches (`tokens/<account>.json`). The OS keyring service name remains `email-cli` for backwards compatibility -- do **not** rename `KEYRING_SERVICE` (`src/config.rs`).
+- **Timing instrumentation:** `crate::timing::TimingSpan` emits `[TIMING]` lines to the log with millisecond precision. Use `TimingSpan::new("name")` or `with_context("name", "ctx")` for top-level operations and `span.mark("phase")` at boundaries. Total elapsed is logged on drop. To analyze a sync, `rg '\[TIMING\]' ~/.mailypoppins/logs/mailypoppins-YYYY-MM-DD.log`. Currently instrumented: `open_imap_session`, `sync_mailboxes`, `fetch_new_emails_on_session`, `lib_do_sync`, `AccountState::new` (per-mailbox index scan).
 
 ---
 
