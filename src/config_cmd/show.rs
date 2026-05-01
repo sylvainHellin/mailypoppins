@@ -2,7 +2,7 @@ use anyhow::Result;
 use colored::*;
 
 use crate::config::{
-    all_configured_mailboxes, config_path, get_keyring_password, load_global_config,
+    all_configured_mailboxes, config_path, get_secret, load_global_config,
     resolve_mailbox_local_path, AuthMethod,
 };
 
@@ -45,22 +45,18 @@ pub fn cmd_config_show() -> Result<()> {
                     println!("    client_id = {}", oauth2.client_id);
                     println!("    tenant_id = {}", oauth2.tenant_id);
                     // Show token cache status
-                    let cache_path = std::path::PathBuf::from(
-                        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-                    )
-                    .join(".mailypoppins")
-                    .join("tokens")
-                    .join(format!("{}.json", account.name));
+                    let cache_path = crate::oauth2::token_cache_path(&account.name);
                     if cache_path.exists() {
-                        if let Ok(content) = std::fs::read_to_string(&cache_path) {
-                            if let Ok(cache) = serde_json::from_str::<crate::oauth2::TokenCache>(&content) {
+                        match crate::oauth2::load_token_cache(&account.name) {
+                            Some(cache) => {
                                 if cache.is_expired() {
                                     println!("    token      = {} (run `email config oauth2-login`)", "expired".red());
                                 } else {
                                     println!("    token      = {}", "valid".green());
                                 }
-                            } else {
-                                println!("    token      = {} (corrupt cache file)", "invalid".red());
+                            }
+                            None => {
+                                println!("    token      = {} (corrupt or undecryptable cache file)", "invalid".red());
                             }
                         }
                     } else {
@@ -83,12 +79,12 @@ pub fn cmd_config_show() -> Result<()> {
             println!("    port     = {}", account.smtp.port);
             println!("    username = {}", account.smtp.username);
             let smtp_key = format!("smtp-password-{}", account.name);
-            let smtp_pw = if get_keyring_password(&smtp_key).is_ok() {
+            let smtp_pw = if get_secret(&smtp_key).is_ok() {
                 "****".green().to_string()
             } else {
                 "(not set)".red().to_string()
             };
-            println!("    password = {} (keyring)", smtp_pw);
+            println!("    password = {}", smtp_pw);
             if account.smtp.accept_invalid_certs {
                 println!("    accept_invalid_certs = {}", "true".yellow());
             }
@@ -117,14 +113,14 @@ pub fn cmd_config_show() -> Result<()> {
             );
             let imap_key = format!("imap-password-{}", account.name);
             let smtp_key = format!("smtp-password-{}", account.name);
-            let imap_pw = if get_keyring_password(&imap_key).is_ok() {
+            let imap_pw = if get_secret(&imap_key).is_ok() {
                 "****".green().to_string()
-            } else if get_keyring_password(&smtp_key).is_ok() {
+            } else if get_secret(&smtp_key).is_ok() {
                 format!("{} (falls back to smtp)", "****".green())
             } else {
                 "(not set)".red().to_string()
             };
-            println!("    password = {} (keyring)", imap_pw);
+            println!("    password = {}", imap_pw);
             if account.imap.accept_invalid_certs {
                 println!("    accept_invalid_certs = {}", "true".yellow());
             }

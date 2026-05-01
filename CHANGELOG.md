@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Default password store switched from OS keyring to a machine-bound
+  encrypted file** at `~/.config/email/secrets.enc`. Built on
+  ChaCha20-Poly1305 + HKDF-SHA256 with the key derived from
+  `machine-uid + getuid + app salt`. Pure Rust, zero prompts at runtime,
+  identical UX on macOS, Linux, and WSL. The file is undecryptable on any
+  machine other than the one that wrote it (defends against Time Machine /
+  iCloud / Dropbox / accidental git commit leakage).
+- OAuth2 token caches now stored encrypted at
+  `~/.mailypoppins/tokens/<account>.enc` using the same crypto.
+- New `email config reset-secrets` command -- wipes the secrets file and
+  token caches, then walks each account prompting for re-entry. Use after
+  a Time Machine restore to a new machine.
+- `keyring` retained as an **opt-in backend** via
+  `secrets_backend = "keyring"` in `~/.config/email/config.toml`.
+- New `src/secrets.rs` module exposing `SecretsBackend` trait,
+  `EncryptedFileBackend`, `KeyringBackend`, and `encrypt_blob` /
+  `decrypt_blob` helpers reused by `oauth2.rs`.
+- See [docs/secrets.md](docs/secrets.md) for the threat model, key
+  derivation, file layout, and recovery procedure.
+
+### Removed
+- `scripts/codesign-macos.sh` and the `scripts/install.sh` wrapper. No
+  longer needed -- secrets do not depend on a stable code-signing
+  identity, so `cargo install --path .` is the canonical install command
+  again.
+- `keyring`-to-encrypted-file migration command. Per project policy ("no
+  migration paths until v1.0"), users on the old keyring path re-enter
+  passwords once via `email config init` or `email config set-password`.
+- `windows-native` feature on the `keyring` crate. Native Windows is not
+  a supported target (WSL only).
+
+### Breaking
+- After upgrading, run `email config init` (fresh setup) or
+  `email config set-password <smtp|imap> --account <name>` for each
+  configured account to populate `~/.config/email/secrets.enc`. Existing
+  Keychain entries are ignored unless you opt into
+  `secrets_backend = "keyring"` in `config.toml`.
+- OAuth2 token cache file extension changed from `.json` to `.enc`. Run
+  `email config oauth2-login --account <name>` to re-acquire and cache
+  tokens for each OAuth2 / Graph account.
+
 ## [0.8.0] - 2026-04-08
 
 ### Added

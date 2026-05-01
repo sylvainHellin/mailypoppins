@@ -3,7 +3,8 @@
 // Implements the device authorization grant for acquiring access tokens
 // to use with IMAP (XOAUTH2) and SMTP (XOAUTH2) on Exchange Online.
 //
-// Token cache is stored at ~/.mailypoppins/tokens/<account>.json.
+// Token cache is stored encrypted at ~/.mailypoppins/tokens/<account>.enc
+// using the same machine-bound key as the secrets store (see `secrets.rs`).
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
@@ -77,8 +78,9 @@ fn token_cache_dir() -> PathBuf {
     PathBuf::from(home).join(".mailypoppins").join("tokens")
 }
 
-fn token_cache_path(account_name: &str) -> PathBuf {
-    token_cache_dir().join(format!("{}.json", account_name))
+/// Path to the encrypted token cache for `account_name`.
+pub fn token_cache_path(account_name: &str) -> PathBuf {
+    token_cache_dir().join(format!("{}.enc", account_name))
 }
 
 fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
@@ -86,17 +88,31 @@ fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create token cache dir: {}", dir.display()))?;
     let path = token_cache_path(account_name);
-    let json = serde_json::to_string_pretty(cache)?;
-    fs::write(&path, json)
-        .with_context(|| format!("Failed to write token cache: {}", path.display()))?;
+    let json = serde_json::to_vec(cache).context("Failed to serialize token cache")?;
+    let blob = crate::secrets::encrypt_blob(&json)
+        .context("Failed to encrypt token cache")?;
+    // Atomic write with 0600 mode.
+    let tmp = path.with_extension("enc.tmp");
+    fs::write(&tmp, &blob)
+        .with_context(|| format!("Failed to write token cache: {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
     debug!("Token cache saved: {}", path.display());
     Ok(())
 }
 
-fn load_token_cache(account_name: &str) -> Option<TokenCache> {
+/// Load the cached token for `account_name`, or `None` if missing /
+/// undecryptable / corrupt.
+pub fn load_token_cache(account_name: &str) -> Option<TokenCache> {
     let path = token_cache_path(account_name);
-    let content = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let bytes = fs::read(&path).ok()?;
+    let plaintext = crate::secrets::decrypt_blob(&bytes).ok()?;
+    serde_json::from_slice(&plaintext).ok()
 }
 
 // ---------------------------------------------------------------------------

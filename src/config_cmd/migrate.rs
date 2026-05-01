@@ -132,19 +132,6 @@ pub fn cmd_config_migrate() -> Result<()> {
         }
     }
 
-    // Migrate keyring
-    let mut migrated_keys = Vec::new();
-    if let Ok(pw) = crate::config::get_keyring_password("smtp-password") {
-        let new_key = format!("smtp-password-{}", account_name);
-        crate::config::set_keyring_password(&new_key, &pw)?;
-        migrated_keys.push(("smtp-password".to_string(), new_key));
-    }
-    if let Ok(pw) = crate::config::get_keyring_password("imap-password") {
-        let new_key = format!("imap-password-{}", account_name);
-        crate::config::set_keyring_password(&new_key, &pw)?;
-        migrated_keys.push(("imap-password".to_string(), new_key));
-    }
-
     // Backup old config
     let backup = path.with_extension("toml.bak");
     fs::copy(&path, &backup)?;
@@ -154,10 +141,14 @@ pub fn cmd_config_migrate() -> Result<()> {
     fs::write(&path, out)?;
     println!("{} Config migrated to [[accounts]] format", "\u{2713}".green());
     println!("  Account name: {}", account_name.bold());
-
-    for (old_key, new_key) in &migrated_keys {
-        println!("  Keyring: {} -> {}", old_key, new_key);
-    }
+    println!(
+        "  Note: passwords are not migrated. Run `email config set-password smtp --account {}` and",
+        account_name
+    );
+    println!(
+        "        `email config set-password imap --account {}` to set the new credentials.",
+        account_name
+    );
 
     Ok(())
 }

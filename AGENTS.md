@@ -10,7 +10,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 
 **Single crate, library + binary.** All logic lives in `src/lib.rs` modules. The TUI and CLI share the same library -- no subprocess spawning. Config types derive `Clone` so they can be moved into background threads.
 
-**Multi-account.** Config uses a `[[accounts]]` array. Each account has independent IMAP/SMTP/directories/signatures. The TUI shows one account at a time, switching via backtick or Ctrl+1-9. All accounts are watched for new mail simultaneously. CLI commands target an account via `--account` flag (defaults to first). Keyring keys are namespaced: `smtp-password-{name}`, `imap-password-{name}`.
+**Multi-account.** Config uses a `[[accounts]]` array. Each account has independent IMAP/SMTP/directories/signatures. The TUI shows one account at a time, switching via backtick or Ctrl+1-9. All accounts are watched for new mail simultaneously. CLI commands target an account via `--account` flag (defaults to first). Secret keys are namespaced: `smtp-password-{name}`, `imap-password-{name}`.
 
 **TUI follows The Elm Architecture (TEA).** `App::update()` is a pure state machine (`Message -> State`). Side effects (IMAP, SMTP, filesystem) are dispatched as `Action` variants and executed in `tui/mod.rs::handle_action()`. Background operations run on threads and report back via `mpsc` as `BgResult` variants (each tagged with `account_index`). Mutations (archive, delete) are optimistic: local state updates immediately, server follows async.
 
@@ -27,8 +27,9 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 | File | Responsibility |
 |------|---------------|
 | `src/types.rs` | Shared types: `EmailStatus`, `EmailFrontmatter`, `EmailDraft`, `InboxFrontmatter`, `SaveFrontmatter`, `collapse_hyphens` |
-| `src/config.rs` | Config loading (`~/.config/email/config.toml`), keyring, mailbox/drafts dir resolution |
-| `src/config_cmd.rs` | Config subcommands: init wizard, add-account, show, set-password, migrate, path |
+| `src/config.rs` | Config loading (`~/.config/email/config.toml`), secrets-backend dispatch, mailbox/drafts dir resolution |
+| `src/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in) impls. `encrypt_blob` / `decrypt_blob` reused by `oauth2.rs`. See [docs/secrets.md](docs/secrets.md). |
+| `src/config_cmd.rs` | Config subcommands: init wizard, add-account, show, set-password, reset-secrets, migrate, path |
 | `src/parse.rs` | RFC822 parsing, saving emails to disk, attachment extraction, `open_file_with_system()` |
 | `src/draft.rs` | Draft parsing/validation, reply/forward creation, status transitions |
 | `src/send.rs` | `markdown_to_html`, per-recipient `send_email`, IMAP APPEND to Sent |
@@ -78,7 +79,8 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 - **Queued actions:** Fetch/sync are deferred while mutations are in-flight (`bg_mutations > 0`) and auto-triggered on completion.
 - **Per-account watchers:** One IMAP IDLE thread per account. All send events to a shared channel tagged with `account_index`. Non-active account changes set `has_unseen` (badge in status bar).
 - **Output style (CLI):** Use `colored` crate. `✓` success (green), `✗` error (red), `⚠` warning (yellow), `ℹ` info (blue). No emoji -- use Unicode or Nerd Font icons.
-- **Data directory:** `~/.mailypoppins/` holds logs (`logs/mailypoppins-YYYY-MM-DD.log`) and OAuth2 token caches (`tokens/<account>.json`). The OS keyring service name remains `email-cli` for backwards compatibility -- do **not** rename `KEYRING_SERVICE` (`src/config.rs`).
+- **Data directory:** `~/.mailypoppins/` holds logs (`logs/mailypoppins-YYYY-MM-DD.log`) and encrypted OAuth2 token caches (`tokens/<account>.enc`). The OS keyring service name remains `email-cli` (constant `KEYRING_SERVICE` in `src/secrets.rs`) for the opt-in keyring backend.
+- **Secrets storage:** SMTP/IMAP passwords are stored encrypted at rest in `~/.config/email/secrets.enc`, sealed with a key derived from `machine-uid + getuid + app salt` via HKDF-SHA256 and encrypted with ChaCha20-Poly1305. The file is undecryptable on any machine other than the one that wrote it. OAuth2 token caches use the same crypto via `secrets::encrypt_blob` / `decrypt_blob`. Recovery (e.g. after Time Machine restore to a new Mac): `email config reset-secrets`. Keyring backend is opt-in via `secrets_backend = "keyring"` in `config.toml`.
 - **Timing instrumentation:** `crate::timing::TimingSpan` emits `[TIMING]` lines to the log with millisecond precision. Use `TimingSpan::new("name")` or `with_context("name", "ctx")` for top-level operations and `span.mark("phase")` at boundaries. Total elapsed is logged on drop. To analyze a sync, `rg '\[TIMING\]' ~/.mailypoppins/logs/mailypoppins-YYYY-MM-DD.log`. Currently instrumented: `open_imap_session`, `sync_mailboxes`, `fetch_new_emails_on_session`, `lib_do_sync`, `AccountState::new` (per-mailbox index scan).
 
 ---
@@ -115,15 +117,14 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Draf
 ## Instructions
 
 - **No emoji** in code, output, or UI. Use Unicode symbols or Nerd Font icons.
+- **No migration paths until v1.0.** When changing data formats, secret storage, or wire protocols, drop the old code, replace with the new, and prompt the user to re-enter / reconfigure as needed. Do not write keyring->file or v1->v2 migrators.
+- **Windows is targeted via WSL only.** Do not write native-Windows-specific code paths (registry, Credential Manager, etc.).
 - **After every code change:** verify it works, then install the updated binary:
   ```
-  ./scripts/install.sh
+  cargo install --path .
   ```
-  The wrapper runs `cargo install --path .` and, on macOS, re-signs the
-  binary with a stable self-signed identity so the Keychain doesn't
-  re-prompt for SMTP/IMAP password access on every rebuild. See
-  [CONTRIBUTING.md](CONTRIBUTING.md) for the one-time keychain setup.
-  Linux/Windows can keep using `cargo install --path .` directly -- the
-  codesign step is a no-op there.
+  Secrets live in a machine-bound encrypted file (see
+  [docs/secrets.md](docs/secrets.md)), so there is no Keychain prompt and
+  no codesign step to maintain.
 - **Keep this file current.** When making architectural or design changes, update the relevant section of `AGENTS.md` to reflect the new state.
 - **Keep BACKLOG.md current.** When completing a feature, move it out of the backlog and into CHANGELOG.md. When discovering new work, add it to the appropriate bucket.

@@ -239,7 +239,7 @@ enum ConfigAction {
     Init,
     /// Show current configuration
     Show,
-    /// Store a password in the OS keyring
+    /// Store a password in the active secrets backend
     SetPassword {
         /// Which password to set: "smtp" or "imap"
         which: String,
@@ -247,6 +247,10 @@ enum ConfigAction {
         #[arg(long)]
         account: Option<String>,
     },
+    /// Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt
+    /// for credentials. Use this after a Time Machine restore to a new
+    /// machine, or whenever the secrets file can no longer be decrypted.
+    ResetSecrets,
     /// Add a new account to the existing config
     AddAccount,
     /// Run OAuth2 device code flow to acquire and cache a token
@@ -322,6 +326,25 @@ async fn main() -> Result<()> {
         eprintln!("  Some commands may not work without proper configuration.");
         GlobalConfig::default()
     });
+
+    // Initialize the secrets backend (encrypted file by default, or OS keyring
+    // if the user opted in via `secrets_backend = "keyring"` in config.toml).
+    if let Err(e) = email::config::init_secrets_backend(&global_config) {
+        match &e {
+            email::secrets::SecretsError::NotInitialized(_) => {
+                // Empty store at startup is fine -- `email config init` or
+                // `set-password` will populate it. The actual missing-key
+                // error surfaces later when `SmtpConfig::load` is called.
+            }
+            email::secrets::SecretsError::Undecryptable(_, _) => {
+                eprintln!("{} {}", "\u{2717}".red(), e);
+                std::process::exit(1);
+            }
+            email::secrets::SecretsError::Other(err) => {
+                eprintln!("{} Could not initialize secrets backend: {}", "\u{26a0}".yellow(), err);
+            }
+        }
+    }
 
     // Resolve which account to use
     let account_config: email::config::AccountConfig = if let Some(ref name) = cli.account {
@@ -1399,6 +1422,7 @@ async fn main() -> Result<()> {
                     cmd_oauth2_login(acct_name.as_deref()).await?;
                 }
                 ConfigAction::Migrate => cmd_config_migrate()?,
+                ConfigAction::ResetSecrets => cmd_reset_secrets()?,
                 ConfigAction::Path => cmd_config_path(),
             }
         }

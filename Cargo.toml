@@ -21,7 +21,13 @@ serde_yaml = "0.9"
 gray_matter = "0.2"
 pulldown-cmark = "0.9"
 anyhow = "1.0"
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+keyring = { version = "3", features = ["apple-native", "linux-native"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1.7", features = ["derive"] }
+machine-uid = "0.5"
+rand = "0.8"
 chrono = "0.4"
 walkdir = "2.4"
 colored = "2.1"
