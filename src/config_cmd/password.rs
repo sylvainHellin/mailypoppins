@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use colored::*;
 
-use crate::config::set_keyring_password;
+use crate::config::set_secret;
 
-/// Store a password in the OS keyring.
+/// Store a password in the active secrets backend.
 pub fn cmd_set_password(which: &str, account_name: &str) -> Result<()> {
     match which {
         "smtp" | "imap" => {},
@@ -24,9 +24,9 @@ pub fn cmd_set_password(which: &str, account_name: &str) -> Result<()> {
         .interact()
         .context("Password input cancelled")?;
 
-    set_keyring_password(&key, &password)?;
+    set_secret(&key, &password)?;
     println!(
-        "{} {} password for '{}' stored in keyring",
+        "{} {} password for '{}' stored",
         "\u{2713}".green(),
         which.to_uppercase(),
         account_name

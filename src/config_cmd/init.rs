@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 
 use crate::config::{
-    config_path, load_global_config, set_keyring_password,
+    config_path, load_global_config, set_secret,
     slugify_mailbox_name, AccountConfig,
 };
 use crate::imap_client::list_mailboxes;
@@ -175,9 +175,9 @@ pub fn cmd_config_init() -> Result<()> {
                 }
             }
         };
-        let smtp_keyring_key = format!("smtp-password-{}", account_name);
-        set_keyring_password(&smtp_keyring_key, &smtp_password)?;
-        println!("{} SMTP password stored in keyring", "\u{2713}".green());
+        let smtp_secret_key = format!("smtp-password-{}", account_name);
+        set_secret(&smtp_secret_key, &smtp_password)?;
+        println!("{} SMTP password stored", "\u{2713}".green());
 
         println!();
 
@@ -234,9 +234,9 @@ pub fn cmd_config_init() -> Result<()> {
                     }
                 }
             };
-            let imap_keyring_key = format!("imap-password-{}", account_name);
-            set_keyring_password(&imap_keyring_key, &pw)?;
-            println!("{} IMAP password stored in keyring", "\u{2713}".green());
+            let imap_secret_key = format!("imap-password-{}", account_name);
+            set_secret(&imap_secret_key, &pw)?;
+            println!("{} IMAP password stored", "\u{2713}".green());
             pw
         } else {
             // Test with SMTP password
@@ -425,12 +425,12 @@ pub fn cmd_config_init() -> Result<()> {
     );
     if is_exchange {
         println!(
-            "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
+            "{} OAuth2 token cached at ~/.mailypoppins/tokens/<account>.enc",
             "\u{2713}".green().bold()
         );
     } else {
         println!(
-            "{} Passwords stored in OS keyring (service: email-cli)",
+            "{} Passwords stored in encrypted secrets file (~/.config/email/secrets.enc)",
             "\u{2713}".green().bold()
         );
     }
@@ -596,8 +596,8 @@ pub fn cmd_config_add_account() -> Result<()> {
             }
         };
         let smtp_key = format!("smtp-password-{}", account_name);
-        set_keyring_password(&smtp_key, &smtp_password)?;
-        println!("{} SMTP password stored in keyring", "\u{2713}".green());
+        set_secret(&smtp_key, &smtp_password)?;
+        println!("{} SMTP password stored", "\u{2713}".green());
         println!();
 
         println!("{}", "IMAP Configuration".bold());
@@ -636,8 +636,8 @@ pub fn cmd_config_add_account() -> Result<()> {
                 }
             };
             let imap_key = format!("imap-password-{}", account_name);
-            set_keyring_password(&imap_key, &pw)?;
-            println!("{} IMAP password stored in keyring", "\u{2713}".green());
+            set_secret(&imap_key, &pw)?;
+            println!("{} IMAP password stored", "\u{2713}".green());
             pw
         } else {
             print!("  Testing IMAP connection... ");
@@ -756,12 +756,12 @@ pub fn cmd_config_add_account() -> Result<()> {
     );
     if is_exchange {
         println!(
-            "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
+            "{} OAuth2 token cached at ~/.mailypoppins/tokens/<account>.enc",
             "\u{2713}".green().bold()
         );
     } else {
         println!(
-            "{} Passwords stored in OS keyring (service: email-cli)",
+            "{} Passwords stored in encrypted secrets file (~/.config/email/secrets.enc)",
             "\u{2713}".green().bold()
         );
     }

@@ -1,6 +1,7 @@
 pub mod types;
 pub mod timing;
 pub mod config;
+pub mod secrets;
 pub mod config_cmd;
 pub mod contacts;
 pub mod contacts_cmd;

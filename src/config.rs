@@ -19,6 +19,10 @@ pub struct GlobalConfig {
     pub email: EmailSettings,
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
+    /// Where to store SMTP/IMAP passwords and OAuth2 token caches.
+    /// Default: "encrypted-file" (machine-bound). Opt-in: "keyring".
+    #[serde(default)]
+    pub secrets_backend: crate::secrets::SecretsBackendKind,
 }
 
 /// Authentication method for an account.
@@ -176,7 +180,7 @@ pub struct SignatureEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Resolved runtime configs (include secrets from keyring)
+// Resolved runtime configs (include secrets from the secrets backend)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -235,25 +239,30 @@ impl GraphConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Keyring helpers
+// Secrets backend (file-encrypted or keyring) -- see src/secrets.rs.
 // ---------------------------------------------------------------------------
+//
+// `get_secret` / `set_secret` go through the process-wide backend selected
+// by `GlobalConfig::secrets_backend`. Callers must call
+// `init_secrets_backend()` once at startup.
 
-const KEYRING_SERVICE: &str = "email-cli";
-
-pub fn get_keyring_password(key: &str) -> Result<String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-        .context("Failed to create keyring entry")?;
-    entry
-        .get_password()
-        .with_context(|| format!("Password '{}' not found in keyring. Run `email config set-password` to set it.", key))
+pub fn get_secret(key: &str) -> Result<String> {
+    crate::secrets::get(key)
 }
 
-pub fn set_keyring_password(key: &str, password: &str) -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-        .context("Failed to create keyring entry")?;
-    entry
-        .set_password(password)
-        .with_context(|| format!("Failed to store password '{}' in keyring", key))
+pub fn set_secret(key: &str, value: &str) -> Result<()> {
+    crate::secrets::set(key, value)
+}
+
+pub fn delete_secret(key: &str) -> Result<()> {
+    crate::secrets::delete(key)
+}
+
+/// Initialize the process-wide secrets backend from the loaded config.
+/// Idempotent. Logs (does not fail) if config is unreadable -- callers can
+/// still operate on a default `EncryptedFile` backend.
+pub fn init_secrets_backend(config: &GlobalConfig) -> std::result::Result<(), crate::secrets::SecretsError> {
+    crate::secrets::init(config.secrets_backend)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +295,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     Ok(config)
 }
 
-/// Build SmtpConfig from AccountConfig + keyring password (or OAuth2 token)
+/// Build SmtpConfig from AccountConfig + secrets-backend password (or OAuth2 token)
 impl SmtpConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
         if account.auth_method == AuthMethod::Graph {
@@ -307,7 +316,7 @@ impl SmtpConfig {
             }
             AuthMethod::Password => {
                 let key = format!("smtp-password-{}", account.name);
-                get_keyring_password(&key)?
+                get_secret(&key)?
             }
             AuthMethod::Graph => unreachable!(),
         };
@@ -323,7 +332,7 @@ impl SmtpConfig {
     }
 }
 
-/// Build ImapConfig from AccountConfig + keyring password (or OAuth2 token, with SMTP fallback)
+/// Build ImapConfig from AccountConfig + secrets-backend password (or OAuth2 token, with SMTP fallback)
 impl ImapConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
         if account.auth_method == AuthMethod::Graph {
@@ -354,8 +363,7 @@ impl ImapConfig {
                 // Password: try imap-password first, fall back to smtp-password
                 let imap_key = format!("imap-password-{}", account.name);
                 let smtp_key = format!("smtp-password-{}", account.name);
-                get_keyring_password(&imap_key)
-                    .or_else(|_| get_keyring_password(&smtp_key))?
+                get_secret(&imap_key).or_else(|_| get_secret(&smtp_key))?
             }
             AuthMethod::Graph => unreachable!(),
         };
@@ -645,7 +653,7 @@ host = "imap.example.com"
             },
             ..Default::default()
         };
-        // ImapConfig::load needs keyring; test the logic inline
+        // ImapConfig::load needs the secrets backend; test the logic inline
         let username = if account.imap.username.is_empty() {
             account.smtp.username.clone()
         } else {
