@@ -1,0 +1,153 @@
+---
+import MobileMenu from './MobileMenu.svelte';
+
+const currentPath = Astro.url.pathname;
+
+const navLinks = [
+  { href: '/', label: 'Home' },
+  { href: '/getting-started/', label: 'Getting Started' },
+  { href: '/commands/', label: 'Commands' },
+  { href: '/draft-format/', label: 'Draft Format' },
+  { href: '/config/', label: 'Config' },
+  { href: '/faq/', label: 'FAQ' },
+];
+
+function isActive(href: string): boolean {
+  if (href === '/') return currentPath === '/';
+  return currentPath.startsWith(href);
+}
+---
+
+<nav class="nav">
+  <div class="nav-inner content-wide">
+    <a href="/" class="nav-logo" aria-label="mailypoppins home">
+      <svg width="28" height="28" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect x="6" y="24" width="52" height="32" rx="3" fill="#313244" stroke="#cba6f7" stroke-width="2"/>
+        <line x1="6" y1="56" x2="32" y2="40" stroke="#cba6f7" stroke-width="1.2" opacity="0.45"/>
+        <line x1="58" y1="56" x2="32" y2="40" stroke="#cba6f7" stroke-width="1.2" opacity="0.45"/>
+        <polygon points="6,24 58,24 32,45" fill="#3a3c52" stroke="#cba6f7" stroke-width="2" stroke-linejoin="round"/>
+        <g transform="translate(14, 2) scale(2.35)" fill="#cba6f7">
+          <path d="M8 0a.5.5 0 0 1 .5.5v.514C12.625 1.238 16 4.22 16 8c0 0 0 .5-.5.5-.149 0-.352-.145-.352-.145l-.004-.004-.025-.023a3.484 3.484 0 0 0-.555-.394A3.166 3.166 0 0 0 13 7.5c-.638 0-1.178.213-1.564.434a3.484 3.484 0 0 0-.555.394l-.025.023-.003.003s-.204.146-.353.146-.352-.145-.352-.145l-.004-.004-.025-.023a3.484 3.484 0 0 0-.555-.394A3.3 3.3 0 0 0 8.5 7.544V13.5H8h.5v.039l-.005.083a2.958 2.958 0 0 1-.298 1.102 2.257 2.257 0 0 1-.763.88C7.06 15.851 6.587 16 6 16s-1.061-.148-1.434-.396a2.255 2.255 0 0 1-.763-.88 2.958 2.958 0 0 1-.302-1.185v-.025l-.001-.009v-.003s0-.002.5-.002h-.5V13a.5.5 0 0 1 1 0v.506l.003.044a1.958 1.958 0 0 0 .195.726c.095.191.23.367.423.495.19.127.466.229.879.229s.689-.102.879-.229c.193-.128.328-.304.424-.495a1.958 1.958 0 0 0 .197-.77V7.544a3.3 3.3 0 0 0-1.064.39 3.482 3.482 0 0 0-.58.417l-.004.004S5.65 8.5 5.5 8.5c-.149 0-.352-.145-.352-.145l-.003-.004-.026-.023a3.484 3.484 0 0 0-.556-.394A3.166 3.166 0 0 0 3 7.5c-.638 0-1.178.213-1.564.434a3.484 3.484 0 0 0-.555.394L.856 8.351S.5 8.5.5 8.5.5 8 .5 8C.5 4.22 3.375 1.238 7.5 1.014V.5A.5.5 0 0 1 8 0z"/>
+        </g>
+      </svg>
+    </a>
+
+    <div class="nav-links">
+      {navLinks.map((link) => (
+        <a
+          href={link.href}
+          class:list={['nav-link', { active: isActive(link.href) }]}
+        >
+          {link.label}
+        </a>
+      ))}
+    </div>
+
+    <div class="nav-right">
+      <a
+        href="https://github.com/sylvainhellin/mailypoppins"
+        class="nav-github"
+        aria-label="GitHub repository"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+      </a>
+
+      <div class="nav-mobile">
+        <MobileMenu client:load {currentPath} />
+      </div>
+    </div>
+  </div>
+</nav>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    height: var(--nav-height);
+    background: color-mix(in srgb, var(--color-bg-nav) 85%, transparent);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+
+  .nav-inner {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    gap: var(--space-6);
+  }
+
+  .nav-logo {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: var(--color-text);
+    transition: opacity 0.15s ease;
+  }
+
+  .nav-logo:hover {
+    opacity: 0.8;
+  }
+
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex: 1;
+  }
+
+  .nav-link {
+    padding: var(--space-2) var(--space-3);
+    font-size: 0.875rem;
+    color: var(--color-subtext0);
+    border-radius: 6px;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+
+  .nav-link:hover {
+    color: var(--color-text);
+    background: var(--color-surface0);
+  }
+
+  .nav-link.active {
+    color: var(--color-mauve);
+    background: color-mix(in srgb, var(--color-mauve) 10%, transparent);
+  }
+
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    flex-shrink: 0;
+  }
+
+  .nav-github {
+    display: flex;
+    align-items: center;
+    color: var(--color-subtext0);
+    transition: color 0.15s ease;
+  }
+
+  .nav-github:hover {
+    color: var(--color-text);
+  }
+
+  .nav-mobile {
+    display: none;
+  }
+
+  @media (max-width: 768px) {
+    .nav-links {
+      display: none;
+    }
+
+    .nav-mobile {
+      display: flex;
+    }
+  }
+</style>

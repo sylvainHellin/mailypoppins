@@ -1,0 +1,101 @@
+---
+---
+
+<div class="workflow">
+  <div class="workflow-row">
+    <div class="workflow-box">draft</div>
+    <div class="workflow-arrow">
+      <span class="arrow-line">--&gt;</span>
+      <span class="arrow-label">mark-approved</span>
+    </div>
+    <div class="workflow-box">approved</div>
+    <div class="workflow-arrow">
+      <span class="arrow-line">--&gt;</span>
+      <span class="arrow-label">send</span>
+    </div>
+    <div class="workflow-box accent">sent</div>
+  </div>
+
+  <div class="workflow-row secondary">
+    <div class="workflow-box">inbox</div>
+    <div class="workflow-arrow">
+      <span class="arrow-line">--&gt;</span>
+      <span class="arrow-label">archive</span>
+    </div>
+    <div class="workflow-box accent">archived</div>
+  </div>
+</div>
+
+<style>
+  .workflow {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    margin-bottom: var(--space-8);
+  }
+
+  .workflow-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+  }
+
+  .workflow-row.secondary {
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--color-surface0);
+  }
+
+  .workflow-box {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface0);
+    border: 1px solid var(--color-surface1);
+    border-radius: 6px;
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+
+  .workflow-box.accent {
+    border-color: var(--color-mauve);
+    color: var(--color-mauve);
+  }
+
+  .workflow-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .arrow-line {
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--color-overlay0);
+    letter-spacing: -0.05em;
+  }
+
+  .arrow-label {
+    font-size: 0.75rem;
+    font-style: italic;
+    color: var(--color-overlay0);
+    white-space: nowrap;
+  }
+
+  @media (max-width: 480px) {
+    .workflow-row {
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+
+    .workflow-arrow {
+      flex-direction: row;
+      gap: var(--space-2);
+    }
+
+    .arrow-line {
+      transform: rotate(90deg);
+    }
+  }
+</style>

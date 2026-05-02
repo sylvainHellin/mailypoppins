@@ -1,0 +1,74 @@
+---
+import { Code } from 'astro:components';
+import CopyButton from './CopyButton.svelte';
+
+interface Props {
+  code: string;
+  lang?: string;
+  filename?: string;
+}
+
+const { code, lang = 'bash', filename } = Astro.props;
+
+const label = filename || lang;
+---
+
+<div class="code-block">
+  {label && (
+    <div class="code-header">
+      <span class="code-label">{label}</span>
+    </div>
+  )}
+  <div class="code-body">
+    <CopyButton client:load text={code} />
+    <Code code={code} lang={lang} theme="catppuccin-mocha" />
+  </div>
+</div>
+
+<style>
+  .code-block {
+    background: var(--color-crust);
+    border: 1px solid var(--color-surface0);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: var(--space-6);
+  }
+
+  .code-header {
+    display: flex;
+    align-items: center;
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface0);
+    border-bottom: 1px solid var(--color-surface0);
+  }
+
+  .code-label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--color-overlay0);
+  }
+
+  .code-body {
+    position: relative;
+    padding: var(--space-4);
+    overflow-x: auto;
+  }
+
+  .code-body :global(pre) {
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+
+  .code-body :global(code) {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+    color: inherit;
+  }
+</style>

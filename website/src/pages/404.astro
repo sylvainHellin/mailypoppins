@@ -1,0 +1,72 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+---
+
+<Layout title="Page Not Found -- mailypoppins" description="The page you are looking for does not exist.">
+  <Nav />
+  <main id="main-content" class="content page">
+    <div class="not-found">
+      <span class="not-found-code">404</span>
+      <h1>Page not found</h1>
+      <p>The page you are looking for does not exist or has been moved.</p>
+      <a href="/" class="btn btn-primary">Back to home</a>
+    </div>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .not-found {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: var(--space-20) 0;
+    gap: var(--space-4);
+  }
+
+  .not-found-code {
+    font-family: var(--font-mono);
+    font-size: 5rem;
+    font-weight: 700;
+    color: var(--color-surface2);
+    line-height: 1;
+  }
+
+  .not-found h1 {
+    margin-bottom: 0;
+  }
+
+  .not-found p {
+    color: var(--color-subtext0);
+    margin-bottom: var(--space-6);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-3) var(--space-6);
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 8px;
+    transition: background 0.15s ease, color 0.15s ease;
+    text-decoration: none;
+  }
+
+  .btn-primary {
+    background: var(--color-mauve);
+    color: var(--color-crust);
+  }
+
+  .btn-primary:hover {
+    background: color-mix(in srgb, var(--color-mauve) 85%, white);
+    color: var(--color-crust);
+  }
+</style>

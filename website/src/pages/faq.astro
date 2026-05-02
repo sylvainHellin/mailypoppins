@@ -1,0 +1,174 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import AccordionItem from '../components/AccordionItem.astro';
+---
+
+<Layout title="FAQ -- mailypoppins" description="Frequently asked questions and troubleshooting for mailypoppins.">
+  <Nav />
+  <main id="main-content" class="content page">
+    <header class="page-header">
+      <h1>Frequently Asked Questions</h1>
+      <p class="subtitle">Common questions and troubleshooting.</p>
+    </header>
+
+    <section>
+      <h2 id="general">General</h2>
+      <div class="accordion-group">
+        <AccordionItem question="Config file not found">
+          <p>
+            Run <code>email config init</code> to create the config file at
+            <code>~/.config/email/config.toml</code>. The interactive wizard will walk you through
+            SMTP/IMAP credentials, test connections, discover server mailboxes, and assign roles.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="Password not found in keyring">
+          <p>
+            Run <code>email config set-password</code> to store your SMTP or IMAP password in the
+            OS keyring (macOS Keychain, Windows Credential Manager, or Linux Secret Service).
+            Passwords are never stored in the config file.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="Email not approved for sending">
+          <p>
+            The draft workflow requires explicit approval before sending. Run
+            <code>email mark-approved &lt;file&gt;</code> or press <code>A</code> in the TUI to
+            change a draft's status from <code>draft</code> to <code>approved</code>. Only approved
+            emails can be sent.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="SMTP authentication failed">
+          <p>
+            Check your credentials with <code>email config show</code> and re-run
+            <code>email config set-password smtp</code> if needed. For OAuth2 accounts, try
+            <code>email config oauth2-login</code> to refresh the token.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="Signature file not found">
+          <p>
+            Check the path in your config under <code>[signatures]</code>. Paths support
+            <code>~</code> expansion. Verify the file exists at the specified location with
+            <code>ls</code> or <code>email config show</code>.
+          </p>
+        </AccordionItem>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="oauth2-exchange">OAuth2 / Exchange</h2>
+      <div class="accordion-group">
+        <AccordionItem question="IMAP is disabled for my organization">
+          <p>
+            Your Microsoft 365 tenant may have IMAP disabled. Contact IT to enable it, or use
+            <code>auth_method = "graph"</code> in your account config, which bypasses IMAP/SMTP
+            entirely and uses the Microsoft Graph API for all mail operations.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="Needs admin consent for API permissions">
+          <p>
+            The <code>IMAP.AccessAsUser.All</code> and <code>SMTP.Send</code> permissions often
+            require admin consent. Request your IT administrator to grant consent via Azure portal
+            &gt; Entra ID &gt; App registrations &gt; API permissions.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="OAuth2 token expired">
+          <p>
+            Run <code>email config oauth2-login --account &lt;name&gt;</code> to re-authenticate.
+            Access tokens expire after roughly one hour and are auto-refreshed, but refresh tokens
+            expire after approximately 90 days of inactivity.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="AUTHENTICATE failed with OAuth2">
+          <p>
+            This can mean IMAP is disabled for the account, the token has wrong scopes, or admin
+            consent is missing. Check the app permissions in Azure and ensure IMAP is enabled. If
+            your tenant blocks IMAP, consider switching to <code>auth_method = "graph"</code>.
+          </p>
+        </AccordionItem>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="sync-workflow">Sync and Workflow</h2>
+      <div class="accordion-group">
+        <AccordionItem question="How does sync work?">
+          <p>
+            <code>email sync</code> is additive by default -- it only downloads new emails,
+            deduplicating by Message-ID. It uses a two-pass approach: first fetches headers (~50
+            bytes per message) to check what is new, then downloads full messages only for emails
+            not already stored locally. Add <code>--reconcile</code> to also detect server-side
+            moves and deletes.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="What does reconciliation do?">
+          <p>
+            With <code>--reconcile</code>, sync compares local files against server state for INBOX
+            and Archive. Emails moved on the server are moved locally to match. Emails deleted on
+            the server are removed locally. The Sent directory is never reconciled -- locally-authored
+            files are the source of truth.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="Can I use mailypoppins with multiple accounts?">
+          <p>
+            Yes. Use the <code>[[accounts]]</code> array in <code>config.toml</code>. Each account
+            has its own SMTP/IMAP settings, directories, and mailboxes. Switch between accounts in
+            the TUI with the backtick key (<code>`</code>) or <code>Ctrl+1-9</code>.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="How are attachments handled?">
+          <p>
+            Incoming attachments are saved in a <code>_attachments/</code> subdirectory next to the
+            email's <code>.md</code> file. Frontmatter records filenames. Use <code>o</code> in the
+            TUI to open an attachment, or <code>O</code> to save it to a chosen directory. For
+            outgoing drafts, list file paths in the <code>attachments:</code> frontmatter field.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="Does it support HTML emails?">
+          <p>
+            Outgoing emails are written in Markdown and converted to HTML for sending, with a
+            plaintext fallback. Incoming emails are stored as plaintext (<code>.md</code>) with the
+            original HTML saved as a companion <code>.html</code> file. Press <code>b</code> in the
+            TUI to open the HTML version in your browser.
+          </p>
+        </AccordionItem>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-12);
+  }
+
+  .accordion-group {
+    margin-top: var(--space-4);
+  }
+</style>

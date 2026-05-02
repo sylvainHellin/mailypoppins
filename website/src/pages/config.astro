@@ -1,0 +1,515 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import ConfigExample from '../components/ConfigExample.astro';
+import { Code } from 'astro:components';
+---
+
+<Layout title="Configuration -- mailypoppins" description="Complete configuration reference for mailypoppins email CLI.">
+  <Nav />
+  <main id="main-content" class="content page">
+    <header class="page-header">
+      <h1>Configuration</h1>
+      <p class="subtitle">Complete reference for <code>~/.config/email/config.toml</code></p>
+    </header>
+
+    <!-- Config File Location -->
+    <section>
+      <h2>Config File Location</h2>
+      <p>
+        All configuration lives in a single file: <code>~/.config/email/config.toml</code>.
+        Create it interactively with <code>email config init</code>, or write it by hand.
+        View the resolved config at any time with <code>email config show</code>.
+        Print the file path with <code>email config path</code>.
+      </p>
+    </section>
+
+    <!-- Full Example -->
+    <section>
+      <h2>Full Example</h2>
+      <p>A complete single-account configuration with comments explaining each section.</p>
+      <ConfigExample code={`[email]
+font_family = "Helvetica, Arial, sans-serif"  # HTML email font
+font_size = "12pt"                             # HTML email font size
+include_signature = true                       # Append signature to outgoing mail
+
+[smtp]
+host = "postout.lrz.de"
+port = 587
+username = "your-id"
+default_from = "your.name@example.com"
+# Password stored in OS keyring, not here
+
+[imap]
+host = "imap.example.com"   # Falls back to smtp.host if omitted
+port = 993
+username = ""               # Falls back to smtp.username if omitted
+# Password falls back to SMTP password if not set separately
+
+[mailboxes.inbox]
+server = "INBOX"            # IMAP folder name; the local directory is
+                            # always <data_dir>/accounts/<name>/inbox/
+
+[mailboxes.archive]
+server = "Archive"
+
+[mailboxes.sent]
+server = "Sent Items"
+
+[[mailboxes.extra]]         # Additional mailboxes to sync
+server = "Projects"
+
+[signatures]
+default = "work"            # Which signature to use by default
+
+[signatures.work]
+name = "Work Signature"
+path = "~/notes/email/signatures/work.html"
+
+[signatures.personal]
+name = "Personal"
+path = "~/notes/email/signatures/personal.html"`} />
+    </section>
+
+    <!-- Section Breakdown -->
+    <section>
+      <h2>Section Breakdown</h2>
+
+      <!-- [email] -->
+      <h3 id="email-section">[email]</h3>
+      <p>
+        Controls the HTML rendering of sent emails. The font family and size are applied
+        to the generated HTML when Markdown is converted for sending. <code>include_signature</code>
+        determines whether a signature is appended to outgoing mail.
+      </p>
+      <ConfigExample code={`[email]
+font_family = "Helvetica, Arial, sans-serif"
+font_size = "12pt"
+include_signature = true`} />
+
+      <!-- [smtp] -->
+      <h3 id="smtp-section">[smtp]</h3>
+      <p>
+        SMTP settings for sending email. The password is stored in the OS keyring
+        (macOS Keychain, Windows Credential Manager, or Linux Secret Service) under the
+        key <code>smtp-password</code> (or <code>smtp-password-&lt;account&gt;</code> for named accounts).
+        It is never written to the config file.
+      </p>
+      <ConfigExample code={`[smtp]
+host = "postout.lrz.de"
+port = 587
+username = "your-id"
+default_from = "your.name@example.com"`} />
+
+      <!-- [imap] -->
+      <h3 id="imap-section">[imap]</h3>
+      <p>
+        IMAP settings for fetching, syncing, and watching mailboxes. All three fields
+        fall back to their SMTP counterparts if omitted, so you only need to specify
+        them when the IMAP server differs from SMTP.
+      </p>
+      <ConfigExample code={`[imap]
+host = "imap.example.com"   # Falls back to smtp.host
+port = 993
+username = ""               # Falls back to smtp.username`} />
+
+      <!-- Where data lives -->
+      <h3 id="data-dir-section">Data directory (not configurable)</h3>
+      <p>
+        Mail, drafts, contacts cache, OAuth2 tokens, and logs all live under a single
+        OS-conventional app data directory:
+      </p>
+      <ul>
+        <li><strong>macOS:</strong> <code>~/Library/Application Support/mailypoppins/</code></li>
+        <li><strong>Linux (incl. WSL):</strong> <code>$XDG_DATA_HOME/mailypoppins/</code> (default <code>~/.local/share/mailypoppins/</code>)</li>
+      </ul>
+      <p>Layout under the data directory:</p>
+      <ConfigExample code={`mailypoppins/
+  accounts/<name>/{inbox,archive,sent,drafts,<extra>}/   # mail tree
+  accounts/<name>/contacts-cache.json                    # contacts index
+  tokens/<name>.enc                                      # OAuth2 tokens
+  logs/mailypoppins-YYYY-MM-DD.log`} />
+      <p>
+        The location is not user-configurable per account. To make the mail tree visible
+        inside an Obsidian vault, symlink <code>accounts/&lt;name&gt;/</code> into the desired
+        location. Override the entire data root with <code>MAILYPOPPINS_DATA_DIR=/some/path</code>
+        for tests or portable installs.
+      </p>
+
+      <!-- [mailboxes] -->
+      <h3 id="mailboxes-section">[mailboxes]</h3>
+      <p>
+        Three special-role mailboxes are required: <code>inbox</code>, <code>archive</code>,
+        and <code>sent</code>. Each has a <code>server</code> field (the IMAP folder name).
+        The local directory is always derived from the role -- <code>inbox/</code>,
+        <code>archive/</code>, <code>sent/</code>, plus <code>drafts/</code> -- under the
+        account's data directory.
+      </p>
+      <p>
+        Additional mailboxes can be added with the <code>[[mailboxes.extra]]</code> array
+        syntax. They are included in sync alongside the three core mailboxes; their local
+        subdirectory name is a slugified form of the server name.
+      </p>
+      <ConfigExample code={`[mailboxes.inbox]
+server = "INBOX"
+
+[mailboxes.archive]
+server = "Archive"
+
+[mailboxes.sent]
+server = "Sent Items"
+
+[[mailboxes.extra]]
+server = "Projects"
+
+[[mailboxes.extra]]
+server = "Newsletters"`} />
+
+      <!-- [signatures] -->
+      <h3 id="signatures-section">[signatures]</h3>
+      <p>
+        Named signature definitions. Set <code>default</code> to the name of the signature
+        to use by default. Each signature entry has a <code>path</code> pointing to an HTML
+        snippet file. Paths support <code>~</code> expansion.
+      </p>
+      <p>
+        Signature files are plain HTML snippets appended after the email body. In reply
+        drafts, a <code>{"{{SIGNATURE}}"}</code> placeholder is inserted between the reply
+        area and quoted text, and the signature replaces it on send.
+      </p>
+      <ConfigExample code={`[signatures]
+default = "work"
+
+[signatures.work]
+name = "Work Signature"
+path = "~/notes/email/signatures/work.html"
+
+[signatures.personal]
+name = "Personal"
+path = "~/notes/email/signatures/personal.html"`} />
+    </section>
+
+    <!-- Multi-Account Setup -->
+    <section>
+      <h2>Multi-Account Setup</h2>
+      <p>
+        To manage multiple email accounts, use the <code>[[accounts]]</code> array syntax.
+        Each account has its own <code>smtp</code>, <code>imap</code>, and <code>mailboxes</code>
+        sections nested under it. The account <code>name</code> is used to identify it in
+        commands, keyring keys, and the data-dir layout (<code>accounts/&lt;name&gt;/</code>).
+      </p>
+      <p>
+        In the TUI, press <code>`</code> (backtick) to switch between accounts, or
+        <code>Ctrl+1</code> through <code>Ctrl+9</code> to jump to an account by index.
+      </p>
+      <ConfigExample title="Two-account example" code={`[email]
+font_family = "Helvetica, Arial, sans-serif"
+font_size = "12pt"
+include_signature = true
+
+# --- First account ---
+[[accounts]]
+name = "personal"
+default_from = "me@example.com"
+auth_method = "password"
+
+[accounts.smtp]
+host = "smtp.example.com"
+port = 587
+username = "me@example.com"
+
+[accounts.imap]
+host = "imap.example.com"
+port = 993
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[accounts.mailboxes.archive]
+server = "Archive"
+
+[accounts.mailboxes.sent]
+server = "Sent"
+
+# --- Second account ---
+[[accounts]]
+name = "work"
+default_from = "name@company.com"
+auth_method = "oauth2"
+
+[accounts.oauth2]
+client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+
+[accounts.smtp]
+host = "smtp.office365.com"
+port = 587
+username = "name@company.com"
+
+[accounts.imap]
+host = "outlook.office365.com"
+port = 993
+username = "name@company.com"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[accounts.mailboxes.archive]
+server = "Archive"
+
+[accounts.mailboxes.sent]
+server = "Sent Items"`} />
+    </section>
+
+    <!-- Authentication Methods -->
+    <section>
+      <h2>Authentication Methods</h2>
+      <p>
+        Each account has an <code>auth_method</code> field that determines how
+        credentials are handled. Three methods are supported.
+      </p>
+
+      <h3 id="auth-password">1. Password (default)</h3>
+      <p>
+        Passwords are stored in the OS keyring (macOS Keychain, Windows Credential Manager,
+        Linux Secret Service). They are never written to the config file. Keyring keys
+        follow the pattern <code>smtp-password-&lt;name&gt;</code> and
+        <code>imap-password-&lt;name&gt;</code>. If the IMAP password is not set, it falls
+        back to the SMTP password.
+      </p>
+      <p>Set or update passwords with:</p>
+      <div class="code-inline">
+        <Code code="email config set-password" lang="bash" theme="catppuccin-mocha" />
+      </div>
+      <ConfigExample title="Password auth config" code={`[[accounts]]
+name = "personal"
+default_from = "me@example.com"
+auth_method = "password"  # This is the default; can be omitted
+
+[accounts.smtp]
+host = "smtp.example.com"
+port = 587
+username = "me@example.com"`} />
+
+      <h3 id="auth-oauth2">2. OAuth2 (IMAP/SMTP)</h3>
+      <p>
+        For Microsoft 365 / Exchange Online accounts that support IMAP and SMTP.
+        Requires an Azure Entra ID app registration with <code>IMAP.AccessAsUser.All</code>
+        and <code>SMTP.Send</code> delegated permissions. Tokens are cached at
+        <code>~/.email-cli/tokens/&lt;account&gt;.json</code> and refreshed automatically.
+        Access tokens last about 1 hour; refresh tokens expire after roughly 90 days of
+        inactivity.
+      </p>
+      <p>Run the device code flow to authenticate:</p>
+      <div class="code-inline">
+        <Code code="email config oauth2-login --account work" lang="bash" theme="catppuccin-mocha" />
+      </div>
+      <ConfigExample title="OAuth2 (IMAP/SMTP) config" code={`[[accounts]]
+name = "work"
+default_from = "name@company.com"
+auth_method = "oauth2"
+
+[accounts.oauth2]
+client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+
+[accounts.smtp]
+host = "smtp.office365.com"
+port = 587
+username = "name@company.com"
+
+[accounts.imap]
+host = "outlook.office365.com"
+port = 993
+username = "name@company.com"`} />
+
+      <h3 id="auth-graph">3. Graph API</h3>
+      <p>
+        For tenants that block IMAP and SMTP entirely. Uses the Microsoft Graph REST API
+        for all mail operations. Requires an Azure app registration with
+        <code>Mail.Read</code>, <code>Mail.ReadWrite</code>, and <code>Mail.Send</code>
+        delegated permissions (plus <code>offline_access</code> for refresh tokens).
+      </p>
+      <p>
+        Graph accounts use well-known folder names (<code>inbox</code>,
+        <code>archive</code>, <code>sentitems</code>) instead of IMAP folder names.
+        SMTP and IMAP sections are not needed.
+      </p>
+      <div class="code-inline">
+        <Code code="email config oauth2-login --account exchange" lang="bash" theme="catppuccin-mocha" />
+      </div>
+      <ConfigExample title="Graph API config" code={`[[accounts]]
+name = "exchange"
+default_from = "name@company.com"
+auth_method = "graph"
+
+[accounts.oauth2]
+client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+
+[accounts.mailboxes.inbox]
+server = "inbox"              # Graph well-known folder name
+
+[accounts.mailboxes.archive]
+server = "archive"
+
+[accounts.mailboxes.sent]
+server = "sentitems"          # Not "Sent Items"`} />
+    </section>
+
+    <!-- Azure App Registration -->
+    <section>
+      <h2>Azure App Registration</h2>
+      <p>
+        Both OAuth2 and Graph authentication require registering an application in
+        Azure Entra ID (formerly Azure Active Directory). Here is a condensed setup.
+      </p>
+
+      <ol class="setup-steps">
+        <li>
+          Go to <a href="https://portal.azure.com" target="_blank" rel="noopener noreferrer">portal.azure.com</a>
+          and navigate to Microsoft Entra ID &gt; App registrations &gt; New registration.
+        </li>
+        <li>
+          Name the app (e.g., "Email CLI"), set supported account types to
+          "Accounts in this organizational directory only", and leave the redirect URI blank.
+        </li>
+        <li>
+          In the app's Authentication settings, scroll to Advanced settings and set
+          "Allow public client flows" to Yes. This enables the device code flow.
+        </li>
+        <li>
+          Under API permissions, add delegated permissions:
+          <ul>
+            <li>
+              For OAuth2 (IMAP/SMTP): <code>IMAP.AccessAsUser.All</code> and
+              <code>SMTP.Send</code> from Office 365 Exchange Online, plus
+              <code>offline_access</code> from Microsoft Graph.
+            </li>
+            <li>
+              For Graph API: <code>Mail.Read</code>, <code>Mail.ReadWrite</code>, and
+              <code>Mail.Send</code> from Microsoft Graph, plus <code>offline_access</code>.
+            </li>
+          </ul>
+        </li>
+        <li>
+          If permissions show "Needs admin consent", request your IT administrator to
+          grant consent via the Azure portal.
+        </li>
+        <li>
+          From the app's Overview page, copy the Application (client) ID and
+          Directory (tenant) ID into your config's <code>[accounts.oauth2]</code> section.
+        </li>
+      </ol>
+    </section>
+
+    <!-- Keyring Management -->
+    <section>
+      <h2>Keyring Management</h2>
+      <p>
+        Passwords for the <code>password</code> auth method are stored in the OS-native
+        keyring. The CLI uses the <code>keyring</code> Rust crate, which maps to:
+      </p>
+      <ul class="keyring-list">
+        <li>macOS: Keychain</li>
+        <li>Windows: Credential Manager</li>
+        <li>Linux: Secret Service (e.g., GNOME Keyring, KWallet)</li>
+      </ul>
+      <p>Keyring keys follow this naming pattern:</p>
+      <ul class="keyring-list">
+        <li><code>smtp-password-&lt;account-name&gt;</code></li>
+        <li><code>imap-password-&lt;account-name&gt;</code> (falls back to SMTP password if not set)</li>
+      </ul>
+      <p>To set or update a password:</p>
+      <div class="code-inline">
+        <Code code="email config set-password" lang="bash" theme="catppuccin-mocha" />
+      </div>
+      <p>
+        The command prompts you to select which password to update (SMTP or IMAP) and
+        which account. The password is entered interactively and never echoed to the terminal.
+      </p>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-8);
+  }
+
+  .setup-steps {
+    list-style: decimal;
+    padding-left: var(--space-6);
+    color: var(--color-subtext1);
+    margin-bottom: var(--space-6);
+  }
+
+  .setup-steps li {
+    margin-bottom: var(--space-3);
+    line-height: 1.6;
+  }
+
+  .setup-steps ul {
+    list-style: disc;
+    padding-left: var(--space-6);
+    margin-top: var(--space-2);
+  }
+
+  .setup-steps ul li {
+    margin-bottom: var(--space-2);
+  }
+
+  .keyring-list {
+    list-style: disc;
+    padding-left: var(--space-6);
+    color: var(--color-subtext1);
+    margin-bottom: var(--space-4);
+  }
+
+  .keyring-list li {
+    margin-bottom: var(--space-2);
+  }
+
+  .code-inline {
+    background: var(--color-crust);
+    border: 1px solid var(--color-surface0);
+    border-radius: 8px;
+    padding: var(--space-3) var(--space-4);
+    overflow-x: auto;
+    margin-bottom: var(--space-4);
+  }
+
+  .code-inline :global(pre) {
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+
+  .code-inline :global(code) {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+    color: inherit;
+  }
+</style>

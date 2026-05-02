@@ -1,0 +1,222 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import CommandTable from '../components/CommandTable.astro';
+import KeyBindingTable from '../components/KeyBindingTable.astro';
+import { Code } from 'astro:components';
+
+const draftCommands = [
+  { command: 'email <file>', description: 'Preview a draft (dry-run)' },
+  { command: 'email new <name>', description: 'Create a new draft from template' },
+  { command: 'email list [dir]', description: 'List drafts grouped by status' },
+  { command: 'email validate <file|dir>', description: 'Validate frontmatter' },
+  { command: 'email mark-approved <file>', description: 'Mark draft as approved' },
+  { command: 'email send <file> [-y]', description: 'Send a single approved email' },
+  { command: 'email send-approved [dir] [-y]', description: 'Send all approved emails' },
+  { command: 'email reply [file] [--all]', description: 'Create a reply draft' },
+  { command: 'email forward [file]', description: 'Create a forward draft' },
+];
+
+const imapCommands = [
+  { command: 'email fetch [filters]', description: 'Fetch emails from server' },
+  { command: 'email sync [options]', description: 'Sync local folders with server' },
+  { command: 'email watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
+  { command: 'email list-mailboxes', description: 'List available server mailboxes' },
+  { command: 'email archive <file>', description: 'Archive an email (server + local)' },
+  { command: 'email delete <file>', description: 'Delete an email (server + local)' },
+  { command: 'email search <query>', description: 'Search emails on server' },
+  { command: 'email open <file>', description: 'Open attachment in default app' },
+  { command: 'email save <file> [--output]', description: 'Save attachment(s) to directory' },
+];
+
+const configCommands = [
+  { command: 'email config init', description: 'Interactive setup wizard' },
+  { command: 'email config show', description: 'Display config (passwords masked)' },
+  { command: 'email config set-password', description: 'Store password in OS keyring' },
+  { command: 'email config oauth2-login', description: 'Run OAuth2 device code flow' },
+  { command: 'email config path', description: 'Print config file path' },
+];
+
+const fetchOptions = [
+  { command: '--from <addr>', description: 'Filter by sender' },
+  { command: '--to <addr>', description: 'Filter by recipient' },
+  { command: '--cc <addr>', description: 'Filter by CC' },
+  { command: '--subject <text>', description: 'Subject contains' },
+  { command: '--body <text>', description: 'Body contains' },
+  { command: '--since <YYYY-MM-DD>', description: 'Emails since date' },
+  { command: '--before <YYYY-MM-DD>', description: 'Emails before date' },
+  { command: '-n, --limit <N>', description: 'Max results (default: 10)' },
+  { command: '--full', description: 'Show full body instead of preview' },
+  { command: '--mailbox <name>', description: 'Mailbox name (default: INBOX)' },
+];
+
+const syncOptions = [
+  { command: '-n, --limit <N>', description: 'Max messages per mailbox (default: 50)' },
+  { command: '--mailbox <name>...', description: 'Mailboxes to sync (default: all configured)' },
+  { command: '--reconcile', description: 'Also detect server-side moves and deletes' },
+  { command: '--dry-run', description: 'Show what would change without modifying files' },
+];
+
+const globalOptions = [
+  { command: '-s, --signature <name>', description: 'Use a specific signature' },
+  { command: '--no-signature', description: 'Skip signature entirely' },
+];
+
+const searchSyntax = [
+  { command: 'from:', description: 'Filter by sender (IMAP FROM)' },
+  { command: 'to:', description: 'Filter by recipient (IMAP TO)' },
+  { command: 'cc:', description: 'Filter by CC (IMAP CC)' },
+  { command: 'subject:', description: 'Filter by subject (IMAP SUBJECT)' },
+  { command: 'body:', description: 'Filter by body content (IMAP BODY)' },
+  { command: 'since:', description: 'Emails since date (YYYY-MM-DD)' },
+  { command: 'before:', description: 'Emails before date (YYYY-MM-DD)' },
+  { command: 'in:', description: 'Restrict search to a mailbox' },
+  { command: 'bare text', description: 'Matches any field (IMAP TEXT)' },
+];
+
+const globalKeys = [
+  { key: '1-9', action: 'Jump to mailbox by index' },
+  { key: 'Tab / Shift-Tab', action: 'Cycle pane focus forward / backward' },
+  { key: '/', action: 'Filter by metadata (subject, contact, date)' },
+  { key: '\\', action: 'Search (includes body)' },
+  { key: '!', action: 'Toggle activity log panel' },
+  { key: '`', action: 'Switch account' },
+  { key: 'Ctrl+1-9', action: 'Jump to account by index' },
+  { key: '?', action: 'Help overlay' },
+  { key: 'q', action: 'Quit' },
+];
+
+const listKeys = [
+  { key: 'j / k', action: 'Navigate up / down' },
+  { key: 'g g / G', action: 'Jump to top / bottom' },
+  { key: 'Space', action: 'Toggle selection' },
+  { key: 'Ctrl+a', action: 'Select all visible' },
+  { key: 'Esc', action: 'Clear selection' },
+  { key: 'Enter / e', action: 'Open in $EDITOR' },
+  { key: 'r / R', action: 'Reply / Reply all' },
+  { key: 'w', action: 'Forward' },
+  { key: 'a', action: 'Archive selected (with confirmation)' },
+  { key: 'd', action: 'Delete selected (with confirmation)' },
+  { key: 'm', action: 'Toggle read / unread' },
+  { key: 'A', action: 'Mark as approved' },
+  { key: 'x', action: 'Send (with confirmation)' },
+  { key: 'X', action: 'Send all approved (with confirmation)' },
+  { key: 'n', action: 'New draft' },
+  { key: 'y', action: 'Copy file path to clipboard' },
+  { key: 's', action: 'Quick sync (fetch + reconcile, limit 100)' },
+  { key: 'S', action: 'Full sync (fetch + reconcile, no limit)' },
+  { key: 'f', action: 'Server search (IMAP)' },
+  { key: 'o', action: 'Open attachment in default app' },
+  { key: 'O', action: 'Save attachment(s) to directory' },
+  { key: 'b', action: 'Open HTML version in browser' },
+];
+---
+
+<Layout title="Commands -- mailypoppins" description="Complete reference for mailypoppins CLI commands and TUI key bindings.">
+  <Nav />
+  <main id="main-content" class="content page">
+    <header class="page-header">
+      <h1>Commands</h1>
+      <p class="subtitle">Complete reference for CLI commands and TUI key bindings.</p>
+    </header>
+
+    <section>
+      <h2 id="tui">TUI</h2>
+      <p>
+        Running <code>email</code> with no arguments launches a full-screen terminal interface
+        built on <code>ratatui</code>. The layout has four panes: a sidebar with the mailbox list,
+        an email list, a headers pane, and a body preview. Panes adapt to terminal width -- the
+        sidebar hides below 40 columns, and the right panes hide below 80 columns.
+      </p>
+      <p>
+        The TUI calls library functions directly (no subprocess spawning). A background IMAP IDLE
+        thread watches for new mail and triggers automatic fetches. For Graph API accounts, a
+        timer-based poll checks every 60 seconds.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="draft-commands">Draft Commands</h2>
+      <CommandTable commands={draftCommands} />
+    </section>
+
+    <section>
+      <h2 id="imap-commands">IMAP Commands</h2>
+      <CommandTable commands={imapCommands} />
+    </section>
+
+    <section>
+      <h2 id="config-commands">Config Commands</h2>
+      <CommandTable commands={configCommands} />
+    </section>
+
+    <section>
+      <h2 id="fetch-options">Fetch Options</h2>
+      <CommandTable commands={fetchOptions} />
+    </section>
+
+    <section>
+      <h2 id="sync-options">Sync Options</h2>
+      <CommandTable commands={syncOptions} />
+      <p>
+        Sync is additive by default -- it fetches new emails only, deduplicated by Message-ID.
+        A two-pass strategy first downloads headers (~50 bytes per message) to identify new emails,
+        then fetches full RFC822 bodies only for messages not already stored locally.
+      </p>
+      <p>
+        With <code>--reconcile</code>, a second pass detects server-side moves and deletes.
+        It compares local files against INBOX and Archive on the server, moving or removing
+        local files to match. The Sent directory is never reconciled -- locally-authored
+        files are the source of truth.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="global-options">Global Options</h2>
+      <CommandTable commands={globalOptions} />
+    </section>
+
+    <section>
+      <h2 id="search-syntax">Search Query Syntax</h2>
+      <p>
+        The <code>email search</code> command and the TUI server search overlay (<code>f</code>)
+        accept structured queries with prefix operators. Quoted values are supported
+        (e.g., <code>from:"John Doe"</code>). Without an <code>in:</code> prefix, all configured
+        mailboxes are searched in sequence.
+      </p>
+      <CommandTable commands={searchSyntax} />
+    </section>
+
+    <section>
+      <h2 id="tui-keys">TUI Key Bindings</h2>
+
+      <h3 id="global-keys">Global</h3>
+      <KeyBindingTable bindings={globalKeys} />
+
+      <h3 id="list-keys">List Focus</h3>
+      <KeyBindingTable bindings={listKeys} />
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-4);
+  }
+</style>
