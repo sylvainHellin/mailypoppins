@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 
 use super::fetch::{fetch_new_emails_on_session, fetch_server_message_ids_on_session};
 use super::open_imap_session;
@@ -26,7 +27,7 @@ pub type MessageIdIndex = HashMap<PathBuf, HashMap<String, PathBuf>>;
 
 /// Cached IMAP mailbox state from the SELECT response.
 /// Used to detect whether reconciliation is needed on the next quick sync.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MailboxState {
     pub uid_validity: Option<u32>,
     pub uid_next: Option<u32>,
@@ -65,6 +66,92 @@ impl MailboxState {
         // uid_next same, exists same or greater -> no change
         false
     }
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox-state persistence cache
+// ---------------------------------------------------------------------------
+//
+// `MailboxState` carries the last-seen `uid_validity` / `uid_next` / `exists`
+// triple per mailbox role. Persisting it across TUI sessions lets the first
+// quick sync after launch use state-based reconciliation instead of falling
+// through to a full Message-ID scan (~14 s on a busy mailbox -> <2 s).
+//
+// File lives at `<account_dir>/mailbox-states.json`. Schema is open: extra
+// keys are ignored on load, missing fields fall back to `Default` (which
+// triggers a full reconcile via `needs_reconciliation`, so we degrade safely
+// when the file is corrupt or the schema evolves).
+
+/// Filename of the persisted mailbox-state cache inside an account directory.
+pub const MAILBOX_STATES_CACHE_FILENAME: &str = "mailbox-states.json";
+
+/// Resolve the on-disk cache path for the given account directory.
+pub fn mailbox_states_cache_path(account_root: &Path) -> PathBuf {
+    account_root.join(MAILBOX_STATES_CACHE_FILENAME)
+}
+
+/// Load the persisted per-role mailbox states for an account.
+///
+/// Returns `Ok(HashMap::new())` when the file does not exist (fresh install
+/// or never-synced account). Returns the parsed map when the file is
+/// readable and valid JSON. Logs and returns an empty map on any I/O or
+/// parse error -- a corrupt cache must never block startup, and the worst
+/// case is one extra full reconcile.
+pub fn load_mailbox_states_cache(
+    account_root: &Path,
+) -> HashMap<String, MailboxState> {
+    let path = mailbox_states_cache_path(account_root);
+    if !path.exists() {
+        return HashMap::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<HashMap<String, MailboxState>>(&data) {
+            Ok(map) => {
+                info!(
+                    "Loaded mailbox states cache from {} ({} entries)",
+                    path.display(),
+                    map.len(),
+                );
+                map
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to parse mailbox states cache at {}: {}. Ignoring.",
+                    path.display(),
+                    e,
+                );
+                HashMap::new()
+            }
+        },
+        Err(e) => {
+            warn!(
+                "Failed to read mailbox states cache at {}: {}. Ignoring.",
+                path.display(),
+                e,
+            );
+            HashMap::new()
+        }
+    }
+}
+
+/// Persist per-role mailbox states for an account.
+///
+/// Best-effort: callers should log but not fail on error. Creates the
+/// parent directory if needed.
+pub fn save_mailbox_states_cache(
+    account_root: &Path,
+    states: &HashMap<String, MailboxState>,
+) -> Result<()> {
+    let path = mailbox_states_cache_path(account_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating cache directory at {}", parent.display()))?;
+    }
+    let data = serde_json::to_string_pretty(states)
+        .context("serializing mailbox states cache")?;
+    std::fs::write(&path, data)
+        .with_context(|| format!("writing mailbox states cache at {}", path.display()))?;
+    Ok(())
 }
 
 /// A mailbox target for the unified sync operation.
@@ -676,6 +763,93 @@ mod tests {
             exists: 48,
         };
         assert!(prev.needs_reconciliation(&new));
+    }
+
+    // -----------------------------------------------------------------------
+    // mailbox-states cache (load / save round-trip)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mailbox_states_cache_path_inside_account_dir() {
+        let dir = tempdir().unwrap();
+        let p = mailbox_states_cache_path(dir.path());
+        assert_eq!(p, dir.path().join("mailbox-states.json"));
+    }
+
+    #[test]
+    fn mailbox_states_cache_load_missing_returns_empty() {
+        let dir = tempdir().unwrap();
+        let states = load_mailbox_states_cache(dir.path());
+        assert!(states.is_empty());
+    }
+
+    #[test]
+    fn mailbox_states_cache_round_trip() {
+        let dir = tempdir().unwrap();
+        let mut states: HashMap<String, MailboxState> = HashMap::new();
+        states.insert(
+            "inbox".to_string(),
+            MailboxState { uid_validity: Some(42), uid_next: Some(1234), exists: 56 },
+        );
+        states.insert(
+            "archive".to_string(),
+            MailboxState { uid_validity: Some(7), uid_next: Some(99), exists: 12 },
+        );
+
+        save_mailbox_states_cache(dir.path(), &states).unwrap();
+        let loaded = load_mailbox_states_cache(dir.path());
+
+        assert_eq!(loaded.len(), 2);
+        let inbox = loaded.get("inbox").unwrap();
+        assert_eq!(inbox.uid_validity, Some(42));
+        assert_eq!(inbox.uid_next, Some(1234));
+        assert_eq!(inbox.exists, 56);
+        let archive = loaded.get("archive").unwrap();
+        assert_eq!(archive.uid_validity, Some(7));
+        assert_eq!(archive.uid_next, Some(99));
+        assert_eq!(archive.exists, 12);
+    }
+
+    #[test]
+    fn mailbox_states_cache_save_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("accounts").join("alice");
+        let mut states: HashMap<String, MailboxState> = HashMap::new();
+        states.insert(
+            "inbox".to_string(),
+            MailboxState { uid_validity: Some(1), uid_next: Some(2), exists: 3 },
+        );
+        save_mailbox_states_cache(&nested, &states).unwrap();
+        assert!(nested.join("mailbox-states.json").exists());
+    }
+
+    #[test]
+    fn mailbox_states_cache_corrupt_file_returns_empty() {
+        let dir = tempdir().unwrap();
+        let path = mailbox_states_cache_path(dir.path());
+        fs::write(&path, "{ this is not valid JSON").unwrap();
+        let states = load_mailbox_states_cache(dir.path());
+        assert!(states.is_empty(), "corrupt cache must degrade to empty, not panic");
+    }
+
+    #[test]
+    fn mailbox_states_cache_drives_reconcile_skip() {
+        // Smoke test: a persisted state matched against an unchanged new
+        // state must report "no reconciliation needed". This is the whole
+        // point of persistence -- prove the round-tripped value still
+        // takes the fast branch.
+        let dir = tempdir().unwrap();
+        let mut states: HashMap<String, MailboxState> = HashMap::new();
+        states.insert(
+            "inbox".to_string(),
+            MailboxState { uid_validity: Some(1), uid_next: Some(100), exists: 50 },
+        );
+        save_mailbox_states_cache(dir.path(), &states).unwrap();
+
+        let loaded = load_mailbox_states_cache(dir.path());
+        let prev = loaded.get("inbox").unwrap();
+        let new = MailboxState { uid_validity: Some(1), uid_next: Some(100), exists: 50 };
+        assert!(!prev.needs_reconciliation(&new));
     }
 
     #[test]

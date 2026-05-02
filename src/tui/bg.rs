@@ -1,5 +1,19 @@
 use super::app::{App, BgResult, MailboxKind, SearchOverlayFocus, SearchResultEntry, StatusLevel};
-use crate::imap_client::update_read_status_locally;
+use crate::imap_client::{save_mailbox_states_cache, update_read_status_locally};
+
+/// Persist the account's `mailbox_states` cache to disk. Best-effort: logs
+/// and continues on failure (the cache only buys us a faster first quick
+/// sync; sync correctness does not depend on it).
+fn persist_mailbox_states(acct: &super::app::AccountState) {
+    let root = crate::config::account_dir(&acct.account_config.name);
+    if let Err(e) = save_mailbox_states_cache(&root, &acct.mailbox_states) {
+        log::warn!(
+            "Failed to persist mailbox states for '{}': {}",
+            acct.account_config.name,
+            e,
+        );
+    }
+}
 
 /// Decrement bg_mutations on the correct account.
 fn decrement_mutations(app: &mut App, account_index: usize) {
@@ -125,6 +139,7 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                         }
                         if let Some(states) = new_mailbox_states {
                             acct.mailbox_states = states;
+                            persist_mailbox_states(acct);
                         }
                     }
                     if account_index == app.active_account {
@@ -150,6 +165,7 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                         }
                         if let Some(states) = new_mailbox_states {
                             acct.mailbox_states = states;
+                            persist_mailbox_states(acct);
                         }
                     }
                     if account_index == app.active_account {

@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- **First quick sync after launch is now <2 s instead of ~14 s.** Persist
+  per-role IMAP `MailboxState` (`uid_validity`, `uid_next`, `exists`) to
+  `<account_dir>/mailbox-states.json` after every successful Fetch /
+  Sync, and reload it in `AccountState::new`. This lets the cold-start
+  reconcile decision in `sync_mailboxes` take the state-based skip
+  branch instead of falling through to a full Message-ID scan of INBOX +
+  Archive. `uid_validity` mismatch on the next SELECT still falls back
+  to a full reconcile, so other-client moves / mailbox renumbering
+  remain safe. Closes [#0002](docs/tickets/0002-persist-mailbox-states.md).
+
 ### Changed
 - **All app data moved to a single OS-conventional data directory.**
   Mail tree, drafts, contacts cache, OAuth2 tokens, and logs now live

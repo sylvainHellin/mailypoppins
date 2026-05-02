@@ -17,7 +17,11 @@ pub use ops::{
     get_message_id_from_file,
 };
 pub use search::{parse_search_query, FetchCriteria};
-pub use sync::{list_mailboxes, sync_mailboxes, FreshObservation, MailboxState, MessageIdIndex, SyncResult, SyncTarget};
+pub use sync::{
+    list_mailboxes, load_mailbox_states_cache, mailbox_states_cache_path,
+    save_mailbox_states_cache, sync_mailboxes, FreshObservation, MailboxState, MessageIdIndex,
+    SyncResult, SyncTarget,
+};
 pub use watch::watch_mailbox;
 
 use std::fmt;
