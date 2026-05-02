@@ -6,10 +6,9 @@ fn test_build_init_toml_basic() {
         "main", "user@example.com",
         "smtp.example.com", 465, "user@example.com", false,
         "", 993, "",
-        "~/notes/email", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
         None,
@@ -25,9 +24,9 @@ fn test_build_init_toml_basic() {
     assert!(toml.contains("port = 465"));
     assert!(toml.contains("[accounts.imap]"));
     assert!(toml.contains("port = 993"));
-    assert!(toml.contains("[accounts.directories]"));
-    assert!(toml.contains("root = \"~/notes/email\""));
-    assert!(toml.contains("drafts = \"drafts\""));
+    // Removed: [accounts.directories], local = "..."
+    assert!(!toml.contains("[accounts.directories]"));
+    assert!(!toml.contains("local ="));
     assert!(toml.contains("[accounts.mailboxes.inbox]"));
     assert!(toml.contains("server = \"INBOX\""));
     assert!(toml.contains("[accounts.mailboxes.archive]"));
@@ -42,10 +41,9 @@ fn test_build_init_toml_proton_bridge() {
         "proton", "user@proton.me",
         "127.0.0.1", 1025, "user@proton.me", true,
         "127.0.0.1", 1143, "user@proton.me",
-        "~/notes/email", "drafts",
-        "INBOX", "inbox",
-        "All Mail", "all-mail",
-        "Sent", "sent",
+        "INBOX",
+        "All Mail",
+        "Sent",
         &[],
         None,
         None,
@@ -55,7 +53,6 @@ fn test_build_init_toml_proton_bridge() {
     assert!(toml.contains("host = \"127.0.0.1\""));
     assert!(toml.contains("port = 1025"));
     assert!(toml.contains("port = 1143"));
-    // IMAP host should be included when non-empty
     let imap_section = toml.find("[accounts.imap]").unwrap();
     let after_imap = &toml[imap_section..];
     assert!(after_imap.contains("host = \"127.0.0.1\""));
@@ -67,16 +64,14 @@ fn test_build_init_toml_imap_host_omitted_when_empty() {
         "main", "user@example.com",
         "smtp.example.com", 465, "user@example.com", false,
         "", 993, "",
-        "~/notes/email", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
         None,
     );
 
-    // IMAP section should NOT have a host line (falls back to SMTP)
     let imap_pos = toml.find("[accounts.imap]").unwrap();
     let imap_end = toml[imap_pos..].find("\n[").map(|p| imap_pos + p).unwrap_or(toml.len());
     let imap_section = &toml[imap_pos..imap_end];
@@ -90,10 +85,9 @@ fn test_build_init_toml_with_extra_mailboxes() {
         "main", "user@example.com",
         "smtp.example.com", 465, "user@example.com", false,
         "", 993, "",
-        "~/notes/email", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &extras,
         None,
         None,
@@ -102,8 +96,8 @@ fn test_build_init_toml_with_extra_mailboxes() {
     assert!(toml.contains("[[accounts.mailboxes.extra]]"));
     assert!(toml.contains("server = \"Junk\""));
     assert!(toml.contains("server = \"Trash\""));
-    assert!(toml.contains("local = \"junk\""));
-    assert!(toml.contains("local = \"trash\""));
+    // Local paths are now derived from the data dir, not stored in config.
+    assert!(!toml.contains("local ="));
 }
 
 #[test]
@@ -112,10 +106,9 @@ fn test_build_init_toml_parseable() {
         "test", "test@example.com",
         "smtp.example.com", 465, "test@example.com", false,
         "", 993, "",
-        "~/mail", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
         None,
@@ -136,10 +129,9 @@ fn test_build_add_account_toml_basic() {
         "work", "work@corp.com",
         "smtp.corp.com", 587, "work@corp.com", false,
         "imap.corp.com", 993, "work@corp.com",
-        "~/mail/work", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
     );
@@ -149,33 +141,31 @@ fn test_build_add_account_toml_basic() {
     assert!(block.contains("default_from = \"work@corp.com\""));
     assert!(block.contains("host = \"smtp.corp.com\""));
     assert!(block.contains("host = \"imap.corp.com\""));
+    assert!(!block.contains("[accounts.directories]"));
+    assert!(!block.contains("local ="));
 }
 
 #[test]
 fn test_build_add_account_toml_appended_is_valid() {
-    // Build initial config
     let base = build_init_toml(
         "main", "main@example.com",
         "smtp.example.com", 465, "main@example.com", false,
         "", 993, "",
-        "~/mail", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
         None,
     );
 
-    // Build second account
     let addition = build_add_account_toml(
         "work", "work@corp.com",
         "smtp.corp.com", 587, "work@corp.com", false,
         "imap.corp.com", 993, "work@corp.com",
-        "~/mail/work", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
     );
@@ -194,10 +184,9 @@ fn test_build_init_toml_oauth2_exchange() {
         "hines", "user@example.com",
         "smtp.office365.com", 587, "user@example.com", false,
         "outlook.office365.com", 993, "",
-        "~/notes/email/hines", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent Items", "sent-items",
+        "INBOX",
+        "Archive",
+        "Sent Items",
         &[],
         None,
         Some(("test-client-id", "test-tenant-id")),
@@ -211,7 +200,6 @@ fn test_build_init_toml_oauth2_exchange() {
     assert!(toml_str.contains("host = \"outlook.office365.com\""));
     assert!(toml_str.contains("port = 587"));
 
-    // Verify parseable
     let config: crate::config::GlobalConfig = toml::from_str(&toml_str)
         .expect("OAuth2 TOML should be parseable");
     assert_eq!(config.accounts[0].name, "hines");
@@ -227,10 +215,9 @@ fn test_build_init_toml_password_no_oauth2_section() {
         "test", "test@example.com",
         "smtp.example.com", 465, "test@example.com", false,
         "", 993, "",
-        "~/mail", "drafts",
-        "INBOX", "inbox",
-        "Archive", "archive",
-        "Sent", "sent",
+        "INBOX",
+        "Archive",
+        "Sent",
         &[],
         None,
         None,

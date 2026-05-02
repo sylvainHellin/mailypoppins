@@ -1,5 +1,31 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::io::{self, Write};
+
+/// Block on a future from sync context.
+///
+/// `email config init` and friends are sync but reachable from `#[tokio::main]`,
+/// so calling `Runtime::new()` directly panics with "Cannot start a runtime
+/// from within a runtime". Detect that case and run the future on a fresh
+/// runtime in a dedicated OS thread.
+pub(crate) fn run_async_blocking<F, T>(fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(fut)
+            })
+            .join()
+            .map_err(|_| anyhow!("async work thread panicked"))?
+        })
+    } else {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(fut)
+    }
+}
 
 /// Prompt user for text input with an optional default value.
 pub(crate) fn prompt_input(prompt: &str, default: &str) -> Result<String> {
@@ -86,8 +112,7 @@ pub(crate) fn test_imap_connection(host: &str, port: u16, username: &str, passwo
         auth_method: crate::config::AuthMethod::Password,
     };
 
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    run_async_blocking(async move {
         let mut session = open_imap_session(&imap_config).await?;
         session.logout().await.ok();
         Ok(())

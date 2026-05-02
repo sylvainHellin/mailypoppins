@@ -33,6 +33,7 @@ walkdir = "2.4"
 colored = "2.1"
 tokio = { version = "1", features = ["full"] }
 shellexpand = "3.1"
+dirs = "5"
 toml = "0.8"
 mime_guess = "2"
 async-imap = "0.11"

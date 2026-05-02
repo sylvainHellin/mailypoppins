@@ -237,12 +237,12 @@ impl AccountState {
             .mailboxes
             .sent
             .as_ref()
-            .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
+            .map(|_| crate::config::mailbox_dir(&account_config.name, "sent"));
         let archive_dir = account_config
             .mailboxes
             .archive
             .as_ref()
-            .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
+            .map(|_| crate::config::mailbox_dir(&account_config.name, "archive"));
         let archive_server_name = account_config
             .mailboxes
             .archive
@@ -250,12 +250,12 @@ impl AccountState {
             .map(|m| m.server.as_str())
             .unwrap_or("Archive")
             .to_string();
-        let drafts_dir = crate::config::resolve_drafts_dir_from_config(&account_config);
+        let drafts_dir = Some(crate::config::drafts_dir(&account_config.name));
         let inbox_dir = account_config
             .mailboxes
             .inbox
             .as_ref()
-            .map(|m| crate::config::resolve_mailbox_local_path(&account_config, m));
+            .map(|_| crate::config::mailbox_dir(&account_config.name, "inbox"));
 
         let mailboxes = build_mailboxes(&account_config);
         let n = mailboxes.len();
@@ -672,24 +672,13 @@ pub fn kind_to_status(kind: MailboxKind) -> String {
 }
 
 pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo> {
-    let root = crate::config::resolve_root_dir(config)
-        .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/notes/email").into_owned()));
-
-    let drafts_dir = crate::config::resolve_drafts_dir_from_config(config)
-        .unwrap_or_else(|| root.join("drafts"));
-
+    let name = &config.name;
     let mut result = Vec::new();
 
-    let inbox_dir = config
-        .mailboxes
-        .inbox
-        .as_ref()
-        .map(|m| crate::config::resolve_mailbox_local_path(config, m))
-        .unwrap_or_else(|| root.join("inbox"));
     result.push(MailboxInfo {
         label: "Inbox".to_string(),
         icon: "\u{f0172}",
-        dir: inbox_dir,
+        dir: crate::config::mailbox_dir(name, "inbox"),
         kind: MailboxKind::Inbox,
         server_name: config.mailboxes.inbox.as_ref().map(|m| m.server.clone()),
     });
@@ -697,35 +686,23 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
     result.push(MailboxInfo {
         label: "Drafts".to_string(),
         icon: "\u{f03eb}",
-        dir: drafts_dir,
+        dir: crate::config::drafts_dir(name),
         kind: MailboxKind::Drafts,
         server_name: None,
     });
 
-    let sent_dir = config
-        .mailboxes
-        .sent
-        .as_ref()
-        .map(|m| crate::config::resolve_mailbox_local_path(config, m))
-        .unwrap_or_else(|| root.join("sent"));
     result.push(MailboxInfo {
         label: "Sent".to_string(),
         icon: "\u{f046b}",
-        dir: sent_dir,
+        dir: crate::config::mailbox_dir(name, "sent"),
         kind: MailboxKind::Sent,
         server_name: config.mailboxes.sent.as_ref().map(|m| m.server.clone()),
     });
 
-    let archive_dir = config
-        .mailboxes
-        .archive
-        .as_ref()
-        .map(|m| crate::config::resolve_mailbox_local_path(config, m))
-        .unwrap_or_else(|| root.join("archive"));
     result.push(MailboxInfo {
         label: "Archive".to_string(),
         icon: "\u{f013c}",
-        dir: archive_dir,
+        dir: crate::config::mailbox_dir(name, "archive"),
         kind: MailboxKind::Archive,
         server_name: config.mailboxes.archive.as_ref().map(|m| m.server.clone()),
     });
@@ -735,7 +712,7 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
             result.push(MailboxInfo {
                 label: m.server.clone(),
                 icon: "\u{f0247}",
-                dir: crate::config::resolve_mailbox_local_path(config, m),
+                dir: crate::config::mailbox_dir(name, &m.server),
                 kind: MailboxKind::Extra,
                 server_name: Some(m.server.clone()),
             });

@@ -2,7 +2,7 @@
 //!
 //! Reuses the existing walkdir + gray_matter pattern from `parse.rs`.
 
-use crate::config::{resolve_root_dir, AccountConfig};
+use crate::config::{account_dir, mailbox_dir, AccountConfig};
 use crate::contacts::filter::is_usable_address;
 use crate::contacts::rank::{update_from_observation, Observation, ObservationField};
 use crate::contacts::types::ContactIndex;
@@ -31,12 +31,7 @@ pub enum ObservedIn {
 /// Walk the given account's mailboxes and build a full `ContactIndex`.
 /// Returns even if some mailboxes are missing — best-effort across directories.
 pub fn build_index_for_account(account: &AccountConfig) -> Result<ContactIndex> {
-    let root = resolve_root_dir(account).ok_or_else(|| {
-        anyhow::anyhow!(
-            "account '{}' has no directories.root configured",
-            account.name
-        )
-    })?;
+    let _root = account_dir(&account.name);
 
     let mut index = ContactIndex {
         account: account.name.clone(),
@@ -46,7 +41,7 @@ pub fn build_index_for_account(account: &AccountConfig) -> Result<ContactIndex> 
     let self_addr = account.default_from.to_ascii_lowercase();
 
     // For each configured mailbox (inbox/archive/sent/extra), walk its files.
-    for (role, dir) in account_mailboxes(account, &root) {
+    for (role, dir) in account_mailboxes(account) {
         if !dir.exists() {
             continue;
         }
@@ -136,33 +131,23 @@ fn process_header(
 }
 
 /// Returns `(role_label, absolute_path)` pairs for every configured mailbox.
-fn account_mailboxes(account: &AccountConfig, root: &Path) -> Vec<(&'static str, PathBuf)> {
+fn account_mailboxes(account: &AccountConfig) -> Vec<(&'static str, PathBuf)> {
     let mut out = Vec::new();
-    if let Some(m) = &account.mailboxes.inbox {
-        out.push(("inbox", join_local(root, &m.local)));
+    if account.mailboxes.inbox.is_some() {
+        out.push(("inbox", mailbox_dir(&account.name, "inbox")));
     }
-    if let Some(m) = &account.mailboxes.archive {
-        out.push(("archive", join_local(root, &m.local)));
+    if account.mailboxes.archive.is_some() {
+        out.push(("archive", mailbox_dir(&account.name, "archive")));
     }
-    if let Some(m) = &account.mailboxes.sent {
-        out.push(("sent", join_local(root, &m.local)));
+    if account.mailboxes.sent.is_some() {
+        out.push(("sent", mailbox_dir(&account.name, "sent")));
     }
     if let Some(extras) = &account.mailboxes.extra {
         for m in extras {
-            out.push(("extra", join_local(root, &m.local)));
+            out.push(("extra", mailbox_dir(&account.name, &m.server)));
         }
     }
     out
-}
-
-fn join_local(root: &Path, local: &str) -> PathBuf {
-    let expanded = shellexpand::tilde(local).into_owned();
-    let p = PathBuf::from(&expanded);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(&expanded)
-    }
 }
 
 fn flatten_addr(info: &mailparse::MailAddr) -> Vec<(String, String)> {

@@ -45,25 +45,18 @@ host = "imap.example.com"    # Falls back to smtp.host if omitted
 port = 993
 username = ""                # Falls back to smtp.username if omitted
 
-[directories]
-root = "~/notes/email"       # Base path for all local mailbox directories
-drafts = "drafts"            # Relative to root, or absolute
-
 [mailboxes.inbox]
-server = "INBOX"
-local = "inbox"              # Relative to root
+server = "INBOX"             # IMAP folder name; the local directory is
+                             # always <data_dir>/accounts/<name>/inbox/
 
 [mailboxes.archive]
 server = "Archive"
-local = "archive"
 
 [mailboxes.sent]
 server = "Sent Items"
-local = "sent"
 
 [[mailboxes.extra]]          # Additional mailboxes to sync
 server = "Projects"
-local = "projects"
 
 [signatures]
 default = "work"
@@ -78,6 +71,27 @@ path = "~/notes/email/signatures/personal.html"
 ```
 
 Passwords are **never** stored in the config file. They live in the OS keyring under keys `smtp-password` and `imap-password`. IMAP password falls back to SMTP password if not set separately.
+
+### Where mailypoppins stores data
+
+All mail, drafts, contacts cache, OAuth2 tokens, and logs live under a single OS-conventional app data directory:
+
+| OS                  | Path                                                  |
+|---------------------|-------------------------------------------------------|
+| macOS               | `~/Library/Application Support/mailypoppins/`         |
+| Linux (incl. WSL)   | `$XDG_DATA_HOME/mailypoppins/` (def. `~/.local/share/mailypoppins/`) |
+
+Layout:
+
+```
+mailypoppins/
+  accounts/<name>/{inbox,archive,sent,drafts,<extra>}/    # mail tree
+  accounts/<name>/contacts-cache.json                     # contacts index
+  tokens/<name>.enc                                       # OAuth2 tokens
+  logs/mailypoppins-YYYY-MM-DD.log
+```
+
+The location is not user-configurable per account. To make the mail tree visible inside an Obsidian vault (or any other directory), symlink `accounts/<name>/` into the desired location. Override the root for tests / portable installs with `MAILYPOPPINS_DATA_DIR=/some/path`.
 
 ### OAuth2 / Exchange Online
 

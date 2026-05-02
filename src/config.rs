@@ -67,8 +67,6 @@ pub struct AccountConfig {
     #[serde(default)]
     pub imap: ImapSettings,
     #[serde(default)]
-    pub directories: DirectorySettings,
-    #[serde(default)]
     pub mailboxes: MailboxesConfig,
     #[serde(default)]
     pub signatures: SignaturesConfig,
@@ -138,18 +136,9 @@ fn default_imap_port() -> u16 {
     993
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
-pub struct DirectorySettings {
-    #[serde(default)]
-    pub root: Option<String>,
-    #[serde(default)]
-    pub drafts: Option<String>,
-}
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct MailboxMapping {
     pub server: String,
-    pub local: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -289,10 +278,41 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     }
     let content = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+    reject_legacy_keys(&content, &path)?;
     let config: GlobalConfig = toml::from_str(&content)
         .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
     debug!("Loaded global config from {}", path.display());
     Ok(config)
+}
+
+/// Refuse to parse legacy configs containing `[accounts.directories]` or
+/// per-mailbox `local = "..."` keys. Per the v1.0 "no migrations" invariant,
+/// fail loud and instruct the user to re-run `email config init`.
+fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
+    let mut hits: Vec<&'static str> = Vec::new();
+    if content.contains("[accounts.directories]")
+        || content.contains("[directories]")
+    {
+        hits.push("[accounts.directories] / [directories]");
+    }
+    // Per-mailbox `local = "..."`. Be conservative: only flag when both
+    // `server = ` and `local = ` appear in the file, to avoid false positives
+    // on unrelated keys.
+    let local_count = content.matches("local = ").count();
+    let server_count = content.matches("server = ").count();
+    if local_count > 0 && server_count > 0 {
+        hits.push("per-mailbox `local = \"...\"`");
+    }
+    if !hits.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Config at {} uses removed keys: {}.\n\
+             Mail data now lives under `mailypoppins_data_dir()` (e.g. ~/Library/Application Support/mailypoppins on macOS).\n\
+             Per the v1.0 \"no migrations\" policy, please re-run `email config init` to regenerate the config.",
+            path.display(),
+            hits.join(", "),
+        ));
+    }
+    Ok(())
 }
 
 /// Build SmtpConfig from AccountConfig + secrets-backend password (or OAuth2 token)
@@ -386,32 +406,72 @@ impl ImapConfig {
     }
 }
 
-/// Expand a path string: resolve ~ and optionally resolve relative paths against root.
-fn expand_path(s: &str, root: Option<&Path>) -> PathBuf {
-    let s = s.trim_matches('"').trim_matches('\'');
-    if s.starts_with('/') || s.starts_with('~') {
-        PathBuf::from(shellexpand::tilde(s).into_owned())
-    } else if let Some(root) = root {
-        root.join(s)
-    } else {
-        PathBuf::from(shellexpand::tilde(s).into_owned())
+// ---------------------------------------------------------------------------
+// App-managed data directory (replaces user-configurable [accounts.directories])
+// ---------------------------------------------------------------------------
+//
+// Layout under <data_dir>:
+//
+//   accounts/<account>/{inbox,archive,sent,drafts,<extra_slug>}/
+//   accounts/<account>/contacts-cache.json
+//   tokens/<account>.enc
+//   logs/mailypoppins-YYYY-MM-DD.log
+//
+// `<data_dir>` defaults to the OS-conventional app data directory:
+//   - macOS:  ~/Library/Application Support/mailypoppins
+//   - Linux:  $XDG_DATA_HOME/mailypoppins  (default ~/.local/share/mailypoppins)
+//
+// Override with the `MAILYPOPPINS_DATA_DIR` env var (for tests, or for power
+// users running mailypoppins from a portable location).
+
+/// Root data directory for all app-owned files.
+pub fn mailypoppins_data_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("MAILYPOPPINS_DATA_DIR") {
+        if !p.is_empty() {
+            return PathBuf::from(shellexpand::tilde(&p).into_owned());
+        }
     }
+    dirs::data_dir()
+        .map(|d| d.join("mailypoppins"))
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".local/share/mailypoppins")
+        })
 }
 
-/// Resolve an optional directory path from config: expand ~ and return PathBuf
-pub fn resolve_dir(dir: &Option<String>) -> Option<PathBuf> {
-    dir.as_ref().map(|s| expand_path(s, None))
+/// `<data_dir>/accounts/<account_name>/`
+pub fn account_dir(account_name: &str) -> PathBuf {
+    mailypoppins_data_dir().join("accounts").join(account_name)
 }
 
-/// Resolve the root directory from an account config
-pub fn resolve_root_dir(account: &AccountConfig) -> Option<PathBuf> {
-    resolve_dir(&account.directories.root)
+/// `<account_dir>/<role_or_slug>/`. Roles (`inbox`, `archive`, `sent`,
+/// `drafts`) land verbatim; arbitrary server names get slugified.
+pub fn mailbox_dir(account_name: &str, role_or_server: &str) -> PathBuf {
+    let leaf = match role_or_server {
+        "inbox" | "archive" | "sent" | "drafts" => role_or_server.to_string(),
+        other => slugify_mailbox_name(other),
+    };
+    account_dir(account_name).join(leaf)
 }
 
-/// Resolve a MailboxMapping's local path, relative to root if not absolute
-pub fn resolve_mailbox_local_path(account: &AccountConfig, mapping: &MailboxMapping) -> PathBuf {
-    let root = resolve_root_dir(account);
-    expand_path(&mapping.local, root.as_deref())
+/// `<account_dir>/drafts/`
+pub fn drafts_dir(account_name: &str) -> PathBuf {
+    account_dir(account_name).join("drafts")
+}
+
+/// `<account_dir>/contacts-cache.json`
+pub fn contacts_cache_path(account_name: &str) -> PathBuf {
+    account_dir(account_name).join("contacts-cache.json")
+}
+
+/// `<data_dir>/tokens/`
+pub fn tokens_dir() -> PathBuf {
+    mailypoppins_data_dir().join("tokens")
+}
+
+/// `<data_dir>/logs/`
+pub fn logs_dir() -> PathBuf {
+    mailypoppins_data_dir().join("logs")
 }
 
 /// Resolve the sent mailbox server name from config
@@ -422,12 +482,6 @@ pub fn resolve_sent_mailbox(account: &AccountConfig) -> String {
         .as_ref()
         .map(|m| m.server.clone())
         .unwrap_or_else(|| "Sent".to_string())
-}
-
-/// Resolve the drafts directory from config (relative to root or absolute)
-pub fn resolve_drafts_dir_from_config(account: &AccountConfig) -> Option<PathBuf> {
-    let root = resolve_root_dir(account);
-    account.directories.drafts.as_ref().map(|s| expand_path(s, root.as_deref()))
 }
 
 /// Find a mailbox mapping by server name (case-insensitive match against configured mailboxes)
@@ -459,16 +513,38 @@ fn find_mailbox_mapping<'a>(account: &'a AccountConfig, mailbox: &str) -> Option
     None
 }
 
-/// Resolve a mailbox name to its local directory from the config
+/// Resolve a mailbox name to its local directory from the config.
+/// The directory is derived from the app data dir + account name + role/slug;
+/// the config only confirms that the named mailbox is configured for the account.
 pub fn resolve_mailbox_dir(account: &AccountConfig, mailbox: &str) -> Result<PathBuf> {
-    let mapping = find_mailbox_mapping(account, mailbox).with_context(|| {
-        format!(
-            "No mailbox configured for '{}'. Check [mailboxes] in {}",
-            mailbox,
-            config_path().display()
-        )
-    })?;
-    Ok(resolve_mailbox_local_path(account, mapping))
+    // Determine the role label for this mailbox.
+    if let Some(ref m) = account.mailboxes.inbox {
+        if m.server.eq_ignore_ascii_case(mailbox) || mailbox.eq_ignore_ascii_case("inbox") {
+            return Ok(mailbox_dir(&account.name, "inbox"));
+        }
+    }
+    if let Some(ref m) = account.mailboxes.archive {
+        if m.server.eq_ignore_ascii_case(mailbox) || mailbox.eq_ignore_ascii_case("archive") {
+            return Ok(mailbox_dir(&account.name, "archive"));
+        }
+    }
+    if let Some(ref m) = account.mailboxes.sent {
+        if m.server.eq_ignore_ascii_case(mailbox) || mailbox.eq_ignore_ascii_case("sent") {
+            return Ok(mailbox_dir(&account.name, "sent"));
+        }
+    }
+    if let Some(ref extras) = account.mailboxes.extra {
+        for m in extras {
+            if m.server.eq_ignore_ascii_case(mailbox) {
+                return Ok(mailbox_dir(&account.name, &m.server));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "No mailbox configured for '{}'. Check [mailboxes] in {}",
+        mailbox,
+        config_path().display()
+    ))
 }
 
 /// Return all configured mailboxes: (role_or_server_name, mapping)
@@ -536,10 +612,10 @@ pub fn slugify_mailbox_name(name: &str) -> String {
 // Logging (unchanged)
 // ---------------------------------------------------------------------------
 
-/// Initialize file-based logging to ~/.mailypoppins/logs/mailypoppins-YYYY-MM-DD.log.
+/// Initialize file-based logging to `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`.
 /// Non-fatal: prints a warning and continues if setup fails.
 pub fn init_logging() {
-    let log_dir = log_base_dir().join("logs");
+    let log_dir = logs_dir();
     if let Err(e) = fs::create_dir_all(&log_dir) {
         eprintln!(
             "{} Could not create log directory {}: {}",
@@ -587,12 +663,6 @@ pub fn init_logging() {
     )]) {
         eprintln!("{} Could not initialize logger: {}", "⚠".yellow(), e);
     }
-}
-
-/// Return the base directory for mailypoppins data: ~/.mailypoppins
-fn log_base_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".mailypoppins")
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +818,6 @@ host = "imap.example.com"
             mailboxes: MailboxesConfig {
                 sent: Some(MailboxMapping {
                     server: "Sent Items".to_string(),
-                    local: "sent".to_string(),
                 }),
                 ..Default::default()
             },
@@ -769,16 +838,13 @@ host = "imap.example.com"
             mailboxes: MailboxesConfig {
                 inbox: Some(MailboxMapping {
                     server: "INBOX".to_string(),
-                    local: "inbox".to_string(),
                 }),
                 archive: Some(MailboxMapping {
                     server: "Archive".to_string(),
-                    local: "archive".to_string(),
                 }),
                 sent: None,
                 extra: Some(vec![MailboxMapping {
                     server: "Spam".to_string(),
-                    local: "spam".to_string(),
                 }]),
             },
             ..Default::default()
@@ -812,44 +878,42 @@ host = "imap.example.com"
     #[test]
     fn test_resolve_mailbox_dir_by_role_name() {
         let account = AccountConfig {
+            name: "acc1".to_string(),
             mailboxes: MailboxesConfig {
                 inbox: Some(MailboxMapping {
                     server: "INBOX".to_string(),
-                    local: "inbox".to_string(),
                 }),
                 ..Default::default()
             },
             ..Default::default()
         };
-        // "inbox" (role name) should resolve
-        let result = resolve_mailbox_dir(&account, "inbox");
-        assert!(result.is_ok());
+        let result = resolve_mailbox_dir(&account, "inbox").unwrap();
+        assert!(result.ends_with("accounts/acc1/inbox"));
     }
 
     #[test]
     fn test_resolve_mailbox_dir_by_server_name() {
         let account = AccountConfig {
+            name: "acc1".to_string(),
             mailboxes: MailboxesConfig {
                 inbox: Some(MailboxMapping {
                     server: "INBOX".to_string(),
-                    local: "inbox".to_string(),
                 }),
                 ..Default::default()
             },
             ..Default::default()
         };
-        // "INBOX" (server name) should also resolve
-        let result = resolve_mailbox_dir(&account, "INBOX");
-        assert!(result.is_ok());
+        let result = resolve_mailbox_dir(&account, "INBOX").unwrap();
+        assert!(result.ends_with("accounts/acc1/inbox"));
     }
 
     #[test]
     fn test_resolve_mailbox_dir_case_insensitive() {
         let account = AccountConfig {
+            name: "acc1".to_string(),
             mailboxes: MailboxesConfig {
                 archive: Some(MailboxMapping {
                     server: "Archive".to_string(),
-                    local: "archive".to_string(),
                 }),
                 ..Default::default()
             },
@@ -870,17 +934,17 @@ host = "imap.example.com"
     #[test]
     fn test_resolve_mailbox_dir_extra_mailbox() {
         let account = AccountConfig {
+            name: "acc1".to_string(),
             mailboxes: MailboxesConfig {
                 extra: Some(vec![MailboxMapping {
-                    server: "Spam".to_string(),
-                    local: "spam".to_string(),
+                    server: "Junk Mail".to_string(),
                 }]),
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert!(resolve_mailbox_dir(&account, "Spam").is_ok());
-        assert!(resolve_mailbox_dir(&account, "spam").is_ok());
+        let dir = resolve_mailbox_dir(&account, "Junk Mail").unwrap();
+        assert!(dir.ends_with("accounts/acc1/junk-mail"));
     }
 
     // -----------------------------------------------------------------------
@@ -893,7 +957,6 @@ host = "imap.example.com"
             mailboxes: MailboxesConfig {
                 inbox: Some(MailboxMapping {
                     server: "INBOX".to_string(),
-                    local: "inbox".to_string(),
                 }),
                 ..Default::default()
             },
@@ -950,41 +1013,106 @@ host = "imap.example.com"
     }
 
     // -----------------------------------------------------------------------
-    // resolve_mailbox_local_path with root
+    // mailypoppins_data_dir + derived path helpers
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_resolve_mailbox_local_path_relative_to_root() {
-        let account = AccountConfig {
-            directories: DirectorySettings {
-                root: Some("/home/user/email".to_string()),
-                drafts: None,
-            },
-            ..Default::default()
-        };
-        let mapping = MailboxMapping {
-            server: "INBOX".to_string(),
-            local: "inbox".to_string(),
-        };
-        let result = resolve_mailbox_local_path(&account, &mapping);
-        assert_eq!(result, PathBuf::from("/home/user/email/inbox"));
+    /// Serialize tests that mutate `MAILYPOPPINS_DATA_DIR` so they don't race.
+    fn data_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
-    fn test_resolve_mailbox_local_path_absolute() {
-        let account = AccountConfig {
-            directories: DirectorySettings {
-                root: Some("/home/user/email".to_string()),
-                drafts: None,
-            },
-            ..Default::default()
-        };
-        let mapping = MailboxMapping {
-            server: "INBOX".to_string(),
-            local: "/absolute/inbox".to_string(),
-        };
-        let result = resolve_mailbox_local_path(&account, &mapping);
-        assert_eq!(result, PathBuf::from("/absolute/inbox"));
+    fn data_dir_env_override() {
+        let _g = data_dir_lock();
+        let prev = std::env::var("MAILYPOPPINS_DATA_DIR").ok();
+        std::env::set_var("MAILYPOPPINS_DATA_DIR", "/tmp/mailypoppins-test");
+        assert_eq!(
+            mailypoppins_data_dir(),
+            PathBuf::from("/tmp/mailypoppins-test")
+        );
+        match prev {
+            Some(v) => std::env::set_var("MAILYPOPPINS_DATA_DIR", v),
+            None => std::env::remove_var("MAILYPOPPINS_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn account_dir_layout() {
+        let _g = data_dir_lock();
+        let prev = std::env::var("MAILYPOPPINS_DATA_DIR").ok();
+        std::env::set_var("MAILYPOPPINS_DATA_DIR", "/tmp/x");
+        assert_eq!(account_dir("alice"), PathBuf::from("/tmp/x/accounts/alice"));
+        assert_eq!(
+            mailbox_dir("alice", "inbox"),
+            PathBuf::from("/tmp/x/accounts/alice/inbox")
+        );
+        assert_eq!(
+            mailbox_dir("alice", "My Folder"),
+            PathBuf::from("/tmp/x/accounts/alice/my-folder")
+        );
+        assert_eq!(
+            drafts_dir("alice"),
+            PathBuf::from("/tmp/x/accounts/alice/drafts")
+        );
+        assert_eq!(
+            contacts_cache_path("alice"),
+            PathBuf::from("/tmp/x/accounts/alice/contacts-cache.json")
+        );
+        assert_eq!(tokens_dir(), PathBuf::from("/tmp/x/tokens"));
+        assert_eq!(logs_dir(), PathBuf::from("/tmp/x/logs"));
+        match prev {
+            Some(v) => std::env::set_var("MAILYPOPPINS_DATA_DIR", v),
+            None => std::env::remove_var("MAILYPOPPINS_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn reject_legacy_directories_block() {
+        let toml = r#"
+[[accounts]]
+name = "x"
+
+[accounts.directories]
+root = "~/notes/email"
+"#;
+        let path = std::path::PathBuf::from("/tmp/fake.toml");
+        let err = reject_legacy_keys(toml, &path).unwrap_err();
+        assert!(err.to_string().contains("directories"));
+    }
+
+    #[test]
+    fn reject_legacy_local_field() {
+        let toml = r#"
+[[accounts]]
+name = "x"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+local = "inbox"
+"#;
+        let path = std::path::PathBuf::from("/tmp/fake.toml");
+        let err = reject_legacy_keys(toml, &path).unwrap_err();
+        assert!(err.to_string().contains("local"));
+    }
+
+    #[test]
+    fn reject_legacy_passes_clean_config() {
+        let toml = r#"
+[[accounts]]
+name = "x"
+
+[accounts.smtp]
+host = "smtp.example.com"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+"#;
+        let path = std::path::PathBuf::from("/tmp/fake.toml");
+        assert!(reject_legacy_keys(toml, &path).is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -1022,15 +1150,12 @@ host = "smtp.example.com"
 
 [accounts.mailboxes.inbox]
 server = "INBOX"
-local = "inbox"
 
 [[accounts.mailboxes.extra]]
 server = "Spam"
-local = "spam"
 
 [[accounts.mailboxes.extra]]
 server = "Newsletters"
-local = "newsletters"
 "#;
         let config: GlobalConfig = toml::from_str(toml_str).unwrap();
         let extras = config.accounts[0].mailboxes.extra.as_ref().unwrap();
@@ -1057,28 +1182,6 @@ local = "newsletters"
         assert!(default_account(&config).is_none());
     }
 
-    // -----------------------------------------------------------------------
-    // resolve_drafts_dir_from_config
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_resolve_drafts_dir_from_config_with_root() {
-        let account = AccountConfig {
-            directories: DirectorySettings {
-                root: Some("/home/user/email".to_string()),
-                drafts: Some("drafts".to_string()),
-            },
-            ..Default::default()
-        };
-        let result = resolve_drafts_dir_from_config(&account);
-        assert_eq!(result, Some(PathBuf::from("/home/user/email/drafts")));
-    }
-
-    #[test]
-    fn test_resolve_drafts_dir_from_config_none() {
-        let account = AccountConfig::default();
-        assert!(resolve_drafts_dir_from_config(&account).is_none());
-    }
 }
 
 /// Load signature HTML content

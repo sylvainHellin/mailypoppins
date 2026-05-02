@@ -115,7 +115,7 @@ When you run `email config oauth2-login`, the CLI will:
 3. Enter the code and sign in with your Microsoft account
 4. Grant the requested permissions
 
-The token is cached at `~/.mailypoppins/tokens/<account>.json` and will be automatically refreshed when it expires (access tokens last ~1 hour, refresh tokens ~90 days).
+The token is cached encrypted at `<mailypoppins_data_dir>/tokens/<account>.enc` (e.g. `~/Library/Application Support/mailypoppins/tokens/` on macOS) and is automatically refreshed when it expires (access tokens last ~1 hour, refresh tokens ~90 days).
 
 ## Troubleshooting
 

@@ -1,6 +1,6 @@
 //! CLI handlers for `email contacts …`.
 
-use crate::config::{resolve_root_dir, AccountConfig, GlobalConfig};
+use crate::config::{account_dir, AccountConfig, GlobalConfig};
 use crate::contacts::{
     build_index_for_account, cache_path, load_cache, save_cache, search, Contact, ContactIndex,
 };
@@ -137,8 +137,7 @@ fn pick_account<'a>(config: &'a GlobalConfig, name: Option<&str>) -> Result<&'a 
 }
 
 fn account_root(account: &AccountConfig) -> Result<PathBuf> {
-    resolve_root_dir(account)
-        .ok_or_else(|| anyhow!("account '{}' has no directories.root", account.name))
+    Ok(account_dir(&account.name))
 }
 
 fn load_or_build(account: &AccountConfig, root: &Path) -> Result<ContactIndex> {

@@ -3,7 +3,7 @@
 // Implements the device authorization grant for acquiring access tokens
 // to use with IMAP (XOAUTH2) and SMTP (XOAUTH2) on Exchange Online.
 //
-// Token cache is stored encrypted at ~/.mailypoppins/tokens/<account>.enc
+// Token cache is stored encrypted at `<mailypoppins_data_dir>/tokens/<account>.enc`
 // using the same machine-bound key as the secrets store (see `secrets.rs`).
 
 use anyhow::{anyhow, Context, Result};
@@ -73,18 +73,13 @@ impl TokenCache {
     }
 }
 
-fn token_cache_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".mailypoppins").join("tokens")
-}
-
 /// Path to the encrypted token cache for `account_name`.
 pub fn token_cache_path(account_name: &str) -> PathBuf {
-    token_cache_dir().join(format!("{}.enc", account_name))
+    crate::config::tokens_dir().join(format!("{}.enc", account_name))
 }
 
 fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
-    let dir = token_cache_dir();
+    let dir = crate::config::tokens_dir();
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create token cache dir: {}", dir.display()))?;
     let path = token_cache_path(account_name);
