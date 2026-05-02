@@ -5,7 +5,7 @@
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 
-use crate::config::{resolve_root_dir, AccountConfig};
+use crate::config::{account_dir, AccountConfig};
 use crate::contacts::{load_cache, observe, save_cache, ObservedIn};
 use crate::imap_client::FreshObservation;
 use crate::types::EmailDraft;
@@ -14,9 +14,7 @@ use log::{debug, warn};
 
 /// Merge the recipients of a just-sent draft into the account's contact index.
 pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) {
-    let Some(root) = resolve_root_dir(account) else {
-        return;
-    };
+    let root = account_dir(&account.name);
     let mut index = match load_cache(&root) {
         Ok(Some(idx)) => idx,
         Ok(None) => {
@@ -77,9 +75,7 @@ pub fn bump_after_sync(account: &AccountConfig, observations: &[FreshObservation
     if observations.is_empty() {
         return;
     }
-    let Some(root) = resolve_root_dir(account) else {
-        return;
-    };
+    let root = account_dir(&account.name);
     let mut index = match load_cache(&root) {
         Ok(Some(idx)) => idx,
         Ok(None) => {
@@ -170,27 +166,58 @@ fn rfc2822_to_rfc3339(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DirectorySettings, MailboxMapping, MailboxesConfig};
+    use crate::config::{account_dir, MailboxMapping, MailboxesConfig};
     use crate::contacts::{build_index_for_account, cache_path};
     use crate::types::{EmailFrontmatter, EmailStatus};
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    fn mk_account(root: &std::path::Path) -> AccountConfig {
+    /// Serialize tests that mutate `MAILYPOPPINS_DATA_DIR`.
+    fn data_dir_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Test fixture: point `MAILYPOPPINS_DATA_DIR` at a tempdir for the
+    /// duration of the returned guard, and create the account directory.
+    struct DataDirFixture {
+        _guard: MutexGuard<'static, ()>,
+        prev: Option<String>,
+        pub account_root: PathBuf,
+        pub _tmp: tempfile::TempDir,
+    }
+
+    impl Drop for DataDirFixture {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("MAILYPOPPINS_DATA_DIR", v),
+                None => std::env::remove_var("MAILYPOPPINS_DATA_DIR"),
+            }
+        }
+    }
+
+    fn fixture(account_name: &str) -> DataDirFixture {
+        let guard = data_dir_lock();
+        let prev = std::env::var("MAILYPOPPINS_DATA_DIR").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("MAILYPOPPINS_DATA_DIR", tmp.path());
+        let account_root = account_dir(account_name);
+        std::fs::create_dir_all(&account_root).unwrap();
+        DataDirFixture { _guard: guard, prev, account_root, _tmp: tmp }
+    }
+
+    fn mk_account() -> AccountConfig {
         AccountConfig {
             name: "testaccount".into(),
             default_from: "me@example.com".into(),
-            directories: DirectorySettings {
-                root: Some(root.to_string_lossy().into_owned()),
-                drafts: None,
-            },
             mailboxes: MailboxesConfig {
                 inbox: Some(MailboxMapping {
                     server: "INBOX".into(),
-                    local: "inbox".into(),
                 }),
                 sent: Some(MailboxMapping {
                     server: "Sent".into(),
-                    local: "sent".into(),
                 }),
                 ..Default::default()
             },
@@ -221,29 +248,29 @@ mod tests {
 
     #[test]
     fn bump_after_send_is_noop_without_cache() {
-        let tmp = tempfile::tempdir().unwrap();
-        let account = mk_account(tmp.path());
+        let f = fixture("testaccount");
+        let account = mk_account();
         let draft = mk_draft("alice@example.com", None);
         // No cache file exists yet.
         bump_after_send(&account, &draft);
         // No cache should have been created.
-        assert!(!cache_path(tmp.path()).exists());
+        assert!(!cache_path(&f.account_root).exists());
     }
 
     #[test]
     fn bump_after_send_bumps_sent_to_counter() {
-        let tmp = tempfile::tempdir().unwrap();
-        let account = mk_account(tmp.path());
+        let f = fixture("testaccount");
+        let account = mk_account();
 
         // Seed an empty cache via build_index_for_account (empty mailboxes).
         let index = build_index_for_account(&account).unwrap();
-        save_cache(tmp.path(), &index).unwrap();
-        assert!(cache_path(tmp.path()).exists());
+        save_cache(&f.account_root, &index).unwrap();
+        assert!(cache_path(&f.account_root).exists());
 
         let draft = mk_draft("Alice <alice@example.com>", Some("bob@example.com"));
         bump_after_send(&account, &draft);
 
-        let loaded = load_cache(tmp.path()).unwrap().unwrap();
+        let loaded = load_cache(&f.account_root).unwrap().unwrap();
         let alice = loaded.contacts.get("alice@example.com").expect("alice");
         assert_eq!(alice.sent_to, 1);
         assert_eq!(alice.display_name, "Alice");
@@ -253,10 +280,10 @@ mod tests {
 
     #[test]
     fn bump_after_sync_merges_fresh_observations() {
-        let tmp = tempfile::tempdir().unwrap();
-        let account = mk_account(tmp.path());
+        let f = fixture("testaccount");
+        let account = mk_account();
         let index = build_index_for_account(&account).unwrap();
-        save_cache(tmp.path(), &index).unwrap();
+        save_cache(&f.account_root, &index).unwrap();
 
         let observations = vec![
             FreshObservation {
@@ -276,7 +303,7 @@ mod tests {
         ];
         bump_after_sync(&account, &observations);
 
-        let loaded = load_cache(tmp.path()).unwrap().unwrap();
+        let loaded = load_cache(&f.account_root).unwrap().unwrap();
         assert_eq!(
             loaded.contacts.get("carol@example.com").unwrap().received,
             1

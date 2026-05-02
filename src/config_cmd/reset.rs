@@ -3,7 +3,7 @@ use colored::*;
 use std::fs;
 use std::io::{self, Write};
 
-use crate::config::{load_global_config, set_secret, AuthMethod};
+use crate::config::{load_global_config, set_secret, tokens_dir, AuthMethod};
 use crate::secrets::secrets_path;
 
 /// Wipe the encrypted secrets file and OAuth2 token caches, then walk
@@ -14,9 +14,7 @@ use crate::secrets::secrets_path;
 /// `machine-uid` returns a new value for any reason).
 pub fn cmd_reset_secrets() -> Result<()> {
     let secrets_file = secrets_path();
-    let token_dir = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".mailypoppins").join("tokens"))
-        .unwrap_or_else(|_| std::path::PathBuf::from(".mailypoppins/tokens"));
+    let token_dir = tokens_dir();
 
     println!("{}", "=== Reset Secrets ===".bold().cyan());
     println!();

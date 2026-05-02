@@ -4,12 +4,15 @@ use std::fs;
 use std::io::{self, Write};
 
 use crate::config::{
-    config_path, load_global_config, set_secret,
-    slugify_mailbox_name, AccountConfig,
+    account_dir, config_path, drafts_dir, load_global_config, mailbox_dir,
+    mailypoppins_data_dir, set_secret, tokens_dir, AccountConfig,
 };
 use crate::imap_client::list_mailboxes;
 
-use super::helpers::{prompt_input, select_mailbox, test_imap_connection, test_smtp_connection};
+use super::helpers::{
+    prompt_input, run_async_blocking, select_mailbox, test_imap_connection,
+    test_smtp_connection,
+};
 
 /// Interactive setup wizard for creating the config file.
 pub fn cmd_config_init() -> Result<()> {
@@ -138,13 +141,17 @@ pub fn cmd_config_init() -> Result<()> {
         // Run device code flow
         println!();
         println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
-        let rt = tokio::runtime::Runtime::new()?;
-        let cache = rt.block_on(crate::oauth2::device_code_flow(
-            &oauth2_client_id,
-            &oauth2_tenant_id,
-            &account_name,
-            crate::oauth2::IMAP_SMTP_SCOPES,
-        ))?;
+        let cid = oauth2_client_id.clone();
+        let tid = oauth2_tenant_id.clone();
+        let acct = account_name.clone();
+        let cache = run_async_blocking(async move {
+            crate::oauth2::device_code_flow(
+                &cid,
+                &tid,
+                &acct,
+                crate::oauth2::IMAP_SMTP_SCOPES,
+            ).await
+        })?;
         println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
         imap_password = cache.access_token;
     } else {
@@ -285,8 +292,8 @@ pub fn cmd_config_init() -> Result<()> {
         },
     };
 
-    let rt = tokio::runtime::Runtime::new()?;
-    let server_mailboxes = match rt.block_on(list_mailboxes(&imap_config)) {
+    let imap_config_for_list = imap_config.clone();
+    let server_mailboxes = match run_async_blocking(async move { list_mailboxes(&imap_config_for_list).await }) {
         Ok(mbs) => {
             println!("{} ({} mailboxes)", "OK".green(), mbs.len());
             mbs
@@ -361,25 +368,21 @@ pub fn cmd_config_init() -> Result<()> {
 
     println!();
 
-    // -- Directories
-    println!("{}", "Directory Configuration".bold());
-    let root_dir = prompt_input("Root directory for email storage", "~/notes/email")?;
-    let drafts_dir = prompt_input("Drafts directory (relative to root)", "drafts")?;
-
-    // Derive local directory names from mailbox server names
-    let inbox_local = slugify_mailbox_name(&inbox_server);
-    let archive_local = slugify_mailbox_name(&archive_server);
-    let sent_local = slugify_mailbox_name(&sent_server);
-
-    println!();
-    println!("{}", "Derived local paths:".bold());
-    println!("  Inbox:   {}/{}", root_dir, inbox_local);
-    println!("  Archive: {}/{}", root_dir, archive_local);
-    println!("  Sent:    {}/{}", root_dir, sent_local);
+    // -- Derived local paths (from mailypoppins data dir)
+    println!("{}", "Local mail tree:".bold());
+    let acct_dir = account_dir(&account_name);
+    println!("  Inbox:   {}", mailbox_dir(&account_name, "inbox").display());
+    println!("  Drafts:  {}", drafts_dir(&account_name).display());
+    println!("  Sent:    {}", mailbox_dir(&account_name, "sent").display());
+    println!("  Archive: {}", mailbox_dir(&account_name, "archive").display());
     for mb in &extra_mailboxes {
-        println!("  {}:   {}/{}", mb, root_dir, slugify_mailbox_name(mb));
+        println!("  {}: {}", mb, mailbox_dir(&account_name, mb).display());
     }
-    println!("  Drafts:  {}/{}", root_dir, drafts_dir);
+    println!(
+        "  ({} symlink {} into your Obsidian vault if you want it visible there.)",
+        "\u{2139}".blue(),
+        acct_dir.display(),
+    );
 
     // Check if existing config.toml has account signature settings to preserve
     let existing_config: Option<crate::config::GlobalConfig> = if path.exists() {
@@ -402,10 +405,9 @@ pub fn cmd_config_init() -> Result<()> {
         &account_name, &default_from,
         &smtp_host, smtp_port, &smtp_username, accept_invalid_certs,
         &imap_host_input, imap_port, &imap_username_input,
-        &root_dir, &drafts_dir,
-        &inbox_server, &inbox_local,
-        &archive_server, &archive_local,
-        &sent_server, &sent_local,
+        &inbox_server,
+        &archive_server,
+        &sent_server,
         &extra_mailboxes,
         existing_sigs,
         oauth2_cfg,
@@ -423,10 +425,16 @@ pub fn cmd_config_init() -> Result<()> {
         "\u{2713}".green().bold(),
         path.display()
     );
+    println!(
+        "{} Mail data dir: {}",
+        "\u{2713}".green().bold(),
+        mailypoppins_data_dir().display()
+    );
     if is_exchange {
         println!(
-            "{} OAuth2 token cached at ~/.mailypoppins/tokens/<account>.enc",
-            "\u{2713}".green().bold()
+            "{} OAuth2 token cached at {}/<account>.enc",
+            "\u{2713}".green().bold(),
+            tokens_dir().display()
         );
     } else {
         println!(
@@ -563,13 +571,17 @@ pub fn cmd_config_add_account() -> Result<()> {
 
         println!();
         println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
-        let rt = tokio::runtime::Runtime::new()?;
-        let cache = rt.block_on(crate::oauth2::device_code_flow(
-            &oauth2_client_id,
-            &oauth2_tenant_id,
-            &account_name,
-            crate::oauth2::IMAP_SMTP_SCOPES,
-        ))?;
+        let cid = oauth2_client_id.clone();
+        let tid = oauth2_tenant_id.clone();
+        let acct = account_name.clone();
+        let cache = run_async_blocking(async move {
+            crate::oauth2::device_code_flow(
+                &cid,
+                &tid,
+                &acct,
+                crate::oauth2::IMAP_SMTP_SCOPES,
+            ).await
+        })?;
         println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
         imap_password = cache.access_token;
     } else {
@@ -670,8 +682,8 @@ pub fn cmd_config_add_account() -> Result<()> {
             crate::config::AuthMethod::Password
         },
     };
-    let rt = tokio::runtime::Runtime::new()?;
-    let server_mailboxes = match rt.block_on(list_mailboxes(&imap_config)) {
+    let imap_config_for_list = imap_config.clone();
+    let server_mailboxes = match run_async_blocking(async move { list_mailboxes(&imap_config_for_list).await }) {
         Ok(mbs) => { println!("{} ({} mailboxes)", "OK".green(), mbs.len()); mbs }
         Err(e) => { println!("{}", "FAILED".red()); eprintln!("  Error: {}", e); Vec::new() }
     };
@@ -704,25 +716,21 @@ pub fn cmd_config_add_account() -> Result<()> {
     } else { Vec::new() };
     println!();
 
-    // -- Directories
-    println!("{}", "Directory Configuration".bold());
-    let default_root = format!("~/notes/email/{}", account_name);
-    let root_dir = prompt_input("Root directory for this account", &default_root)?;
-    let drafts_dir = prompt_input("Drafts directory (relative to root)", "drafts")?;
-
-    let inbox_local = slugify_mailbox_name(&inbox_server);
-    let archive_local = slugify_mailbox_name(&archive_server);
-    let sent_local = slugify_mailbox_name(&sent_server);
-
-    println!();
-    println!("{}", "Derived local paths:".bold());
-    println!("  Inbox:   {}/{}", root_dir, inbox_local);
-    println!("  Archive: {}/{}", root_dir, archive_local);
-    println!("  Sent:    {}/{}", root_dir, sent_local);
+    // -- Derived local paths (from mailypoppins data dir)
+    println!("{}", "Local mail tree:".bold());
+    let acct_dir = account_dir(&account_name);
+    println!("  Inbox:   {}", mailbox_dir(&account_name, "inbox").display());
+    println!("  Drafts:  {}", drafts_dir(&account_name).display());
+    println!("  Sent:    {}", mailbox_dir(&account_name, "sent").display());
+    println!("  Archive: {}", mailbox_dir(&account_name, "archive").display());
     for mb in &extra_mailboxes {
-        println!("  {}:   {}/{}", mb, root_dir, slugify_mailbox_name(mb));
+        println!("  {}: {}", mb, mailbox_dir(&account_name, mb).display());
     }
-    println!("  Drafts:  {}/{}", root_dir, drafts_dir);
+    println!(
+        "  ({} symlink {} into your Obsidian vault if you want it visible there.)",
+        "\u{2139}".blue(),
+        acct_dir.display(),
+    );
 
     // -- Append to config file
     let oauth2_cfg = if is_exchange {
@@ -734,10 +742,9 @@ pub fn cmd_config_add_account() -> Result<()> {
         &account_name, &default_from,
         &smtp_host, smtp_port, &smtp_username, accept_invalid_certs,
         &imap_host_input, imap_port, &imap_username_input,
-        &root_dir, &drafts_dir,
-        &inbox_server, &inbox_local,
-        &archive_server, &archive_local,
-        &sent_server, &sent_local,
+        &inbox_server,
+        &archive_server,
+        &sent_server,
         &extra_mailboxes,
         oauth2_cfg,
     );
@@ -756,8 +763,9 @@ pub fn cmd_config_add_account() -> Result<()> {
     );
     if is_exchange {
         println!(
-            "{} OAuth2 token cached at ~/.mailypoppins/tokens/<account>.enc",
-            "\u{2713}".green().bold()
+            "{} OAuth2 token cached at {}/<account>.enc",
+            "\u{2713}".green().bold(),
+            tokens_dir().display()
         );
     } else {
         println!(
@@ -799,13 +807,14 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
 
     // -- Device code flow
     println!("{} Running OAuth2 device code flow (Graph API)...", "\u{2139}".blue());
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(crate::oauth2::device_code_flow(
-        &oauth2_client_id,
-        &oauth2_tenant_id,
-        &account_name,
-        crate::oauth2::GRAPH_SCOPES,
-    ))?;
+    {
+        let cid = oauth2_client_id.clone();
+        let tid = oauth2_tenant_id.clone();
+        let acct = account_name.clone();
+        run_async_blocking(async move {
+            crate::oauth2::device_code_flow(&cid, &tid, &acct, crate::oauth2::GRAPH_SCOPES).await
+        })?;
+    }
     println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
     println!();
 
@@ -818,12 +827,17 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
         username: default_from.clone(),
         account_name: account_name.clone(),
     };
-    match rt.block_on(crate::graph::GraphClient::new_async(&graph_config)) {
-        Ok(_client) => println!("{}", "OK".green()),
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
-            eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+    {
+        let gc = graph_config.clone();
+        match run_async_blocking(async move {
+            crate::graph::GraphClient::new_async(&gc).await.map(|_| ())
+        }) {
+            Ok(()) => println!("{}", "OK".green()),
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
+                eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+            }
         }
     }
     println!();
@@ -833,19 +847,22 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     print!("  Fetching folder list from Graph API... ");
     io::stdout().flush()?;
 
-    let folder_names: Vec<String> = match rt.block_on(async {
-        let client = crate::graph::GraphClient::new_async(&graph_config).await?;
-        client.list_folders().await
-    }) {
-        Ok(folders) => {
-            println!("{} ({} folders)", "OK".green(), folders.len());
-            folders.iter().map(|f| f.display_name.clone()).collect()
-        }
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!("  Error: {}", e);
-            eprintln!("  Continuing with manual mailbox configuration.");
-            Vec::new()
+    let folder_names: Vec<String> = {
+        let gc = graph_config.clone();
+        match run_async_blocking(async move {
+            let client = crate::graph::GraphClient::new_async(&gc).await?;
+            client.list_folders().await
+        }) {
+            Ok(folders) => {
+                println!("{} ({} folders)", "OK".green(), folders.len());
+                folders.iter().map(|f| f.display_name.clone()).collect()
+            }
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!("  Error: {}", e);
+                eprintln!("  Continuing with manual mailbox configuration.");
+                Vec::new()
+            }
         }
     };
 
@@ -892,24 +909,21 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     };
     println!();
 
-    // -- Directories
-    println!("{}", "Directory Configuration".bold());
-    let root_dir = prompt_input("Root directory for email storage", "~/notes/email")?;
-    let drafts_dir = prompt_input("Drafts directory (relative to root)", "drafts")?;
-
-    let inbox_local = slugify_mailbox_name(&inbox_server);
-    let archive_local = slugify_mailbox_name(&archive_server);
-    let sent_local = slugify_mailbox_name(&sent_server);
-
-    println!();
-    println!("{}", "Derived local paths:".bold());
-    println!("  Inbox:   {}/{}", root_dir, inbox_local);
-    println!("  Archive: {}/{}", root_dir, archive_local);
-    println!("  Sent:    {}/{}", root_dir, sent_local);
+    // -- Derived local paths (from mailypoppins data dir)
+    println!("{}", "Local mail tree:".bold());
+    let acct_dir = account_dir(&account_name);
+    println!("  Inbox:   {}", mailbox_dir(&account_name, "inbox").display());
+    println!("  Drafts:  {}", drafts_dir(&account_name).display());
+    println!("  Sent:    {}", mailbox_dir(&account_name, "sent").display());
+    println!("  Archive: {}", mailbox_dir(&account_name, "archive").display());
     for mb in &extra_mailboxes {
-        println!("  {}:   {}/{}", mb, root_dir, slugify_mailbox_name(mb));
+        println!("  {}: {}", mb, mailbox_dir(&account_name, mb).display());
     }
-    println!("  Drafts:  {}/{}", root_dir, drafts_dir);
+    println!(
+        "  ({} symlink {} into your Obsidian vault if you want it visible there.)",
+        "\u{2139}".blue(),
+        acct_dir.display(),
+    );
 
     // -- Build config TOML
     let mut toml_content = String::new();
@@ -920,10 +934,9 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     toml_content.push_str(&build_graph_account_toml(
         &account_name, &default_from,
         &oauth2_client_id, &oauth2_tenant_id,
-        &root_dir, &drafts_dir,
-        &inbox_server, &inbox_local,
-        &archive_server, &archive_local,
-        &sent_server, &sent_local,
+        &inbox_server,
+        &archive_server,
+        &sent_server,
         &extra_mailboxes,
     ));
 
@@ -940,8 +953,14 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
         path.display()
     );
     println!(
-        "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
-        "\u{2713}".green().bold()
+        "{} Mail data dir: {}",
+        "\u{2713}".green().bold(),
+        mailypoppins_data_dir().display()
+    );
+    println!(
+        "{} OAuth2 token cached at {}/",
+        "\u{2713}".green().bold(),
+        tokens_dir().display()
     );
 
     Ok(())
@@ -980,13 +999,14 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
 
     // -- Device code flow
     println!("{} Running OAuth2 device code flow (Graph API)...", "\u{2139}".blue());
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(crate::oauth2::device_code_flow(
-        &oauth2_client_id,
-        &oauth2_tenant_id,
-        &account_name,
-        crate::oauth2::GRAPH_SCOPES,
-    ))?;
+    {
+        let cid = oauth2_client_id.clone();
+        let tid = oauth2_tenant_id.clone();
+        let acct = account_name.clone();
+        run_async_blocking(async move {
+            crate::oauth2::device_code_flow(&cid, &tid, &acct, crate::oauth2::GRAPH_SCOPES).await
+        })?;
+    }
     println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
     println!();
 
@@ -999,12 +1019,17 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
         username: default_from.clone(),
         account_name: account_name.clone(),
     };
-    match rt.block_on(crate::graph::GraphClient::new_async(&graph_config)) {
-        Ok(_client) => println!("{}", "OK".green()),
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
-            eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+    {
+        let gc = graph_config.clone();
+        match run_async_blocking(async move {
+            crate::graph::GraphClient::new_async(&gc).await.map(|_| ())
+        }) {
+            Ok(()) => println!("{}", "OK".green()),
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
+                eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+            }
         }
     }
     println!();
@@ -1014,19 +1039,22 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
     print!("  Fetching folder list from Graph API... ");
     io::stdout().flush()?;
 
-    let folder_names: Vec<String> = match rt.block_on(async {
-        let client = crate::graph::GraphClient::new_async(&graph_config).await?;
-        client.list_folders().await
-    }) {
-        Ok(folders) => {
-            println!("{} ({} folders)", "OK".green(), folders.len());
-            folders.iter().map(|f| f.display_name.clone()).collect()
-        }
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!("  Error: {}", e);
-            eprintln!("  Continuing with manual mailbox configuration.");
-            Vec::new()
+    let folder_names: Vec<String> = {
+        let gc = graph_config.clone();
+        match run_async_blocking(async move {
+            let client = crate::graph::GraphClient::new_async(&gc).await?;
+            client.list_folders().await
+        }) {
+            Ok(folders) => {
+                println!("{} ({} folders)", "OK".green(), folders.len());
+                folders.iter().map(|f| f.display_name.clone()).collect()
+            }
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!("  Error: {}", e);
+                eprintln!("  Continuing with manual mailbox configuration.");
+                Vec::new()
+            }
         }
     };
 
@@ -1071,34 +1099,29 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
     };
     println!();
 
-    // -- Directories
-    println!("{}", "Directory Configuration".bold());
-    let default_root = format!("~/notes/email/{}", account_name);
-    let root_dir = prompt_input("Root directory for this account", &default_root)?;
-    let drafts_dir = prompt_input("Drafts directory (relative to root)", "drafts")?;
-
-    let inbox_local = slugify_mailbox_name(&inbox_server);
-    let archive_local = slugify_mailbox_name(&archive_server);
-    let sent_local = slugify_mailbox_name(&sent_server);
-
-    println!();
-    println!("{}", "Derived local paths:".bold());
-    println!("  Inbox:   {}/{}", root_dir, inbox_local);
-    println!("  Archive: {}/{}", root_dir, archive_local);
-    println!("  Sent:    {}/{}", root_dir, sent_local);
+    // -- Derived local paths (from mailypoppins data dir)
+    println!("{}", "Local mail tree:".bold());
+    let acct_dir = account_dir(&account_name);
+    println!("  Inbox:   {}", mailbox_dir(&account_name, "inbox").display());
+    println!("  Drafts:  {}", drafts_dir(&account_name).display());
+    println!("  Sent:    {}", mailbox_dir(&account_name, "sent").display());
+    println!("  Archive: {}", mailbox_dir(&account_name, "archive").display());
     for mb in &extra_mailboxes {
-        println!("  {}:   {}/{}", mb, root_dir, slugify_mailbox_name(mb));
+        println!("  {}: {}", mb, mailbox_dir(&account_name, mb).display());
     }
-    println!("  Drafts:  {}/{}", root_dir, drafts_dir);
+    println!(
+        "  ({} symlink {} into your Obsidian vault if you want it visible there.)",
+        "\u{2139}".blue(),
+        acct_dir.display(),
+    );
 
     // -- Append to config file
     let block = format!("\n{}", build_graph_account_toml(
         &account_name, &default_from,
         &oauth2_client_id, &oauth2_tenant_id,
-        &root_dir, &drafts_dir,
-        &inbox_server, &inbox_local,
-        &archive_server, &archive_local,
-        &sent_server, &sent_local,
+        &inbox_server,
+        &archive_server,
+        &sent_server,
         &extra_mailboxes,
     ));
 
@@ -1114,8 +1137,9 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
         path.display()
     );
     println!(
-        "{} OAuth2 token cached at ~/.mailypoppins/tokens/",
-        "\u{2713}".green().bold()
+        "{} OAuth2 token cached at {}/",
+        "\u{2713}".green().bold(),
+        tokens_dir().display()
     );
 
     Ok(())
@@ -1132,10 +1156,9 @@ pub(crate) fn build_init_toml(
     account_name: &str, default_from: &str,
     smtp_host: &str, smtp_port: u16, smtp_username: &str, accept_invalid_certs: bool,
     imap_host_input: &str, imap_port: u16, imap_username_input: &str,
-    root_dir: &str, drafts_dir: &str,
-    inbox_server: &str, inbox_local: &str,
-    archive_server: &str, archive_local: &str,
-    sent_server: &str, sent_local: &str,
+    inbox_server: &str,
+    archive_server: &str,
+    sent_server: &str,
     extra_mailboxes: &[String],
     existing_sigs: Option<&AccountConfig>,
     oauth2: Option<(&str, &str)>,
@@ -1177,26 +1200,18 @@ pub(crate) fn build_init_toml(
         out.push_str("accept_invalid_certs = true\n");
     }
 
-    out.push_str("\n[accounts.directories]\n");
-    out.push_str(&format!("root = \"{}\"\n", root_dir));
-    out.push_str(&format!("drafts = \"{}\"\n", drafts_dir));
-
     out.push_str("\n[accounts.mailboxes.inbox]\n");
     out.push_str(&format!("server = \"{}\"\n", inbox_server));
-    out.push_str(&format!("local = \"{}\"\n", inbox_local));
 
     out.push_str("\n[accounts.mailboxes.archive]\n");
     out.push_str(&format!("server = \"{}\"\n", archive_server));
-    out.push_str(&format!("local = \"{}\"\n", archive_local));
 
     out.push_str("\n[accounts.mailboxes.sent]\n");
     out.push_str(&format!("server = \"{}\"\n", sent_server));
-    out.push_str(&format!("local = \"{}\"\n", sent_local));
 
     for mb in extra_mailboxes {
         out.push_str("\n[[accounts.mailboxes.extra]]\n");
         out.push_str(&format!("server = \"{}\"\n", mb));
-        out.push_str(&format!("local = \"{}\"\n", slugify_mailbox_name(mb)));
     }
 
     // Preserve signature settings from existing config
@@ -1226,10 +1241,9 @@ pub(crate) fn build_add_account_toml(
     account_name: &str, default_from: &str,
     smtp_host: &str, smtp_port: u16, smtp_username: &str, accept_invalid_certs: bool,
     imap_host_input: &str, imap_port: u16, imap_username_input: &str,
-    root_dir: &str, drafts_dir: &str,
-    inbox_server: &str, inbox_local: &str,
-    archive_server: &str, archive_local: &str,
-    sent_server: &str, sent_local: &str,
+    inbox_server: &str,
+    archive_server: &str,
+    sent_server: &str,
     extra_mailboxes: &[String],
     oauth2: Option<(&str, &str)>,
 ) -> String {
@@ -1257,19 +1271,15 @@ pub(crate) fn build_add_account_toml(
     if !imap_username_input.is_empty() { block.push_str(&format!("username = \"{}\"\n", imap_username_input)); }
     if accept_invalid_certs { block.push_str("accept_invalid_certs = true\n"); }
 
-    block.push_str("\n[accounts.directories]\n");
-    block.push_str(&format!("root = \"{}\"\n", root_dir));
-    block.push_str(&format!("drafts = \"{}\"\n", drafts_dir));
-
     block.push_str("\n[accounts.mailboxes.inbox]\n");
-    block.push_str(&format!("server = \"{}\"\nlocal = \"{}\"\n", inbox_server, inbox_local));
+    block.push_str(&format!("server = \"{}\"\n", inbox_server));
     block.push_str("\n[accounts.mailboxes.archive]\n");
-    block.push_str(&format!("server = \"{}\"\nlocal = \"{}\"\n", archive_server, archive_local));
+    block.push_str(&format!("server = \"{}\"\n", archive_server));
     block.push_str("\n[accounts.mailboxes.sent]\n");
-    block.push_str(&format!("server = \"{}\"\nlocal = \"{}\"\n", sent_server, sent_local));
+    block.push_str(&format!("server = \"{}\"\n", sent_server));
     for mb in extra_mailboxes {
         block.push_str("\n[[accounts.mailboxes.extra]]\n");
-        block.push_str(&format!("server = \"{}\"\nlocal = \"{}\"\n", mb, slugify_mailbox_name(mb)));
+        block.push_str(&format!("server = \"{}\"\n", mb));
     }
 
     block
@@ -1280,10 +1290,9 @@ pub(crate) fn build_add_account_toml(
 pub(crate) fn build_graph_account_toml(
     account_name: &str, default_from: &str,
     client_id: &str, tenant_id: &str,
-    root_dir: &str, drafts_dir: &str,
-    inbox_server: &str, inbox_local: &str,
-    archive_server: &str, archive_local: &str,
-    sent_server: &str, sent_local: &str,
+    inbox_server: &str,
+    archive_server: &str,
+    sent_server: &str,
     extra_mailboxes: &[String],
 ) -> String {
     let mut out = String::new();
@@ -1296,26 +1305,18 @@ pub(crate) fn build_graph_account_toml(
     out.push_str(&format!("client_id = \"{}\"\n", client_id));
     out.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
 
-    out.push_str("\n[accounts.directories]\n");
-    out.push_str(&format!("root = \"{}\"\n", root_dir));
-    out.push_str(&format!("drafts = \"{}\"\n", drafts_dir));
-
     out.push_str("\n[accounts.mailboxes.inbox]\n");
     out.push_str(&format!("server = \"{}\"\n", inbox_server));
-    out.push_str(&format!("local = \"{}\"\n", inbox_local));
 
     out.push_str("\n[accounts.mailboxes.archive]\n");
     out.push_str(&format!("server = \"{}\"\n", archive_server));
-    out.push_str(&format!("local = \"{}\"\n", archive_local));
 
     out.push_str("\n[accounts.mailboxes.sent]\n");
     out.push_str(&format!("server = \"{}\"\n", sent_server));
-    out.push_str(&format!("local = \"{}\"\n", sent_local));
 
     for mb in extra_mailboxes {
         out.push_str("\n[[accounts.mailboxes.extra]]\n");
         out.push_str(&format!("server = \"{}\"\n", mb));
-        out.push_str(&format!("local = \"{}\"\n", slugify_mailbox_name(mb)));
     }
 
     out

@@ -12,9 +12,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{App, EmailEntry, SearchHit, SearchTarget};
 
-use crate::config::{
-    all_configured_mailboxes, resolve_mailbox_local_path, AccountConfig, ImapConfig,
-};
+use crate::config::{all_configured_mailboxes, mailbox_dir, AccountConfig, ImapConfig};
 use crate::draft::parse_email_draft;
 use crate::imap_client::{
     fetch_emails_on_session, open_imap_session, parse_search_query, sync_mailboxes,
@@ -239,7 +237,7 @@ pub(super) async fn lib_do_sync(
         .map(|(role, mapping)| SyncTarget {
             role: role.clone(),
             server_name: mapping.server.clone(),
-            local_dir: resolve_mailbox_local_path(account_config, mapping),
+            local_dir: mailbox_dir(&account_config.name, role),
             status: mailbox_status(role).to_string(),
         })
         .collect();
@@ -350,7 +348,7 @@ pub(super) async fn lib_do_sync_graph(
         .map(|(role, mapping)| SyncTarget {
             role: role.clone(),
             server_name: mapping.server.clone(),
-            local_dir: resolve_mailbox_local_path(account_config, mapping),
+            local_dir: mailbox_dir(&account_config.name, role),
             status: mailbox_status(role).to_string(),
         })
         .collect();

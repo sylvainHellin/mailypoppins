@@ -2,8 +2,8 @@ use anyhow::Result;
 use colored::*;
 
 use crate::config::{
-    all_configured_mailboxes, config_path, get_secret, load_global_config,
-    resolve_mailbox_local_path, AuthMethod,
+    all_configured_mailboxes, config_path, drafts_dir, get_secret, load_global_config,
+    mailbox_dir, mailypoppins_data_dir, AuthMethod,
 };
 
 /// Print the config file path.
@@ -17,6 +17,7 @@ pub fn cmd_config_show() -> Result<()> {
 
     println!("{}", "=== Email CLI Configuration ===".bold().cyan());
     println!("{}: {}", "Config file".bold(), config_path().display());
+    println!("{}: {}", "Data dir".bold(), mailypoppins_data_dir().display());
 
     println!("\n{}", "[email]".bold());
     println!("  font_family       = {}", config.email.font_family);
@@ -126,15 +127,8 @@ pub fn cmd_config_show() -> Result<()> {
             }
         }
 
-        println!("\n  {}", "[directories]".bold());
-        println!(
-            "    root   = {}",
-            account.directories.root.as_deref().unwrap_or("(not set)")
-        );
-        println!(
-            "    drafts = {}",
-            account.directories.drafts.as_deref().unwrap_or("(not set)")
-        );
+        println!("\n  {}", "[local paths]".bold());
+        println!("    drafts = {}", drafts_dir(&account.name).display());
 
         println!("\n  {}", "[mailboxes]".bold());
         let all = all_configured_mailboxes(account);
@@ -142,7 +136,7 @@ pub fn cmd_config_show() -> Result<()> {
             println!("    (none configured)");
         } else {
             for (role, mapping) in &all {
-                let resolved = resolve_mailbox_local_path(account, mapping);
+                let resolved = mailbox_dir(&account.name, role);
                 println!(
                     "    {} {} -> {}",
                     format!("[{}]", role).bold(),

@@ -68,7 +68,7 @@ The plaintext is a TOML document of the form:
 
 The same crypto helpers (`secrets::encrypt_blob` / `secrets::decrypt_blob`)
 are reused by `oauth2.rs` to encrypt OAuth2 token caches at
-`~/.mailypoppins/tokens/<account>.enc` (raw blob format -- the plaintext is
+`<mailypoppins_data_dir>/tokens/<account>.enc` (raw blob format -- the plaintext is
 JSON, not TOML, but the wrapping is identical).
 
 ## Recovery
@@ -85,7 +85,7 @@ Cannot decrypt secrets store on this machine. Run `email config reset-secrets` t
 
 1. Confirms the destructive operation interactively.
 2. Removes `~/.config/email/secrets.enc`.
-3. Removes all `*.enc` files under `~/.mailypoppins/tokens/`.
+3. Removes all `*.enc` files under `<mailypoppins_data_dir>/tokens/`.
 4. Walks each configured `[[accounts]]` and re-prompts for SMTP / IMAP
    passwords. For OAuth2 / Graph accounts, prints a hint to re-run
    `email config oauth2-login --account <name>`.

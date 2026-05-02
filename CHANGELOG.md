@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **All app data moved to a single OS-conventional data directory.**
+  Mail tree, drafts, contacts cache, OAuth2 tokens, and logs now live
+  under `mailypoppins_data_dir()`:
+  - macOS: `~/Library/Application Support/mailypoppins/`
+  - Linux (incl. WSL): `$XDG_DATA_HOME/mailypoppins/` (default `~/.local/share/mailypoppins/`)
+
+  Layout: `accounts/<name>/{inbox,archive,sent,drafts,<extra>}/`,
+  `accounts/<name>/contacts-cache.json`, `tokens/<name>.enc`, `logs/`.
+  `~/.mailypoppins/` is retired entirely. Override the root with the
+  `MAILYPOPPINS_DATA_DIR` env var (test seam + portable-install escape
+  hatch).
+- New `src/config.rs` helpers: `mailypoppins_data_dir`, `account_dir`,
+  `mailbox_dir`, `drafts_dir`, `contacts_cache_path`, `tokens_dir`,
+  `logs_dir`. Replace the removed `resolve_root_dir`,
+  `resolve_mailbox_local_path`, `resolve_drafts_dir_from_config`,
+  `resolve_dir`, `expand_path`, `log_base_dir`.
+- Wizard prints the derived data-dir paths instead of asking the user to
+  pick one. The Obsidian-vault workflow is preserved via a symlink hint:
+  `ln -s ~/Library/Application\ Support/mailypoppins/accounts/<name> ~/notes/email/<name>`.
+
+### Removed
+- Per-account `[accounts.directories]` block (`root`, `drafts` keys).
+- Per-mailbox `local = "..."` field on `[accounts.mailboxes.{inbox,archive,sent}]`
+  and `[[accounts.mailboxes.extra]]`. `MailboxMapping` now carries only `server`.
+- `email config migrate` subcommand (legacy single-account -> multi-account
+  migrator). Per the v1.0 "no migrations" policy, configs that still use the
+  old keys are rejected at parse time with a clear message instructing the
+  user to re-run `email config init`.
+
+### Breaking
+- Existing configs containing `[accounts.directories]` or per-mailbox
+  `local = "..."` fail to load. Run `email config init` to regenerate.
+- Existing local mail trees at user-chosen roots (e.g. `~/notes/email/`)
+  are no longer read or written. Re-run `email config init`, then
+  `email sync` to repopulate the new data dir from the server. (Or move
+  the existing tree manually into
+  `<data_dir>/accounts/<name>/{inbox,archive,sent,...}/`.)
+- OAuth2 token caches at `~/.mailypoppins/tokens/<account>.enc` are
+  ignored. Re-run `email config oauth2-login --account <name>`.
+
+### Added
+- `dirs = "5"` dependency for cross-platform data-dir resolution.
+
+### Fixed
+- `email config init` and `email config add-account` no longer panic with
+  "Cannot start a runtime from within a runtime" when the wizard reaches
+  the IMAP test, OAuth2 device-code flow, or Graph folder discovery.
+  `main` is `#[tokio::main]`, so the wizard's sync code paths now drive
+  nested async work via a new `config_cmd::helpers::run_async_blocking`
+  helper that detects the existing runtime and spawns a fresh one in a
+  dedicated OS thread (mirrors `oauth2::load_or_refresh_token_blocking`).
+
+## [0.8.0] -- previous
+
+### Changed
 - **Default password store switched from OS keyring to a machine-bound
   encrypted file** at `~/.config/email/secrets.enc`. Built on
   ChaCha20-Poly1305 + HKDF-SHA256 with the key derived from

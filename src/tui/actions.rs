@@ -1365,8 +1365,10 @@ pub(super) fn handle_action(
 
 fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
     // Load contact cache (if any) for the active account.
-    let contacts = crate::config::resolve_root_dir(&app.account_config)
-        .and_then(|root| crate::contacts::load_cache(&root).ok().flatten());
+    let contacts = {
+        let root = crate::config::account_dir(&app.account_config.name);
+        crate::contacts::load_cache(&root).ok().flatten()
+    };
 
     let (to, cc, bcc, subject) = match &mode {
         ComposeMode::New => (String::new(), String::new(), String::new(), String::new()),

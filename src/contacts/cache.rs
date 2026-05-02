@@ -1,15 +1,16 @@
 //! JSON cache for the per-account contact index.
 //!
-//! Each account's index lives at `<directories.root>/.contacts-cache.json`.
+//! Each account's index lives at `<account_dir>/contacts-cache.json` (where
+//! `account_dir` resolves under `mailypoppins_data_dir()`).
 
 use crate::contacts::types::ContactIndex;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Cache file for a given account lives inside that account's root directory.
+/// Cache file for a given account lives inside that account's data directory.
 pub fn cache_path(account_root: &Path) -> PathBuf {
-    account_root.join(".contacts-cache.json")
+    account_root.join("contacts-cache.json")
 }
 
 pub fn load_cache(account_root: &Path) -> Result<Option<ContactIndex>> {

@@ -259,8 +259,6 @@ enum ConfigAction {
         #[arg(long)]
         account: Option<String>,
     },
-    /// Migrate old single-account config to new [[accounts]] format
-    Migrate,
     /// Print config file path
     Path,
 }
@@ -386,14 +384,23 @@ async fn main() -> Result<()> {
             .and_then(|s| load_signature(&account_config, Some(s)))
     };
 
-    // Resolve directories from config (mailbox-based)
-    let sent_dir: Option<PathBuf> = account_config.mailboxes.sent.as_ref()
-        .map(|m| resolve_mailbox_local_path(&account_config, m));
-    let drafts_dir: Option<PathBuf> = resolve_drafts_dir_from_config(&account_config);
-    let inbox_dir: Option<PathBuf> = account_config.mailboxes.inbox.as_ref()
-        .map(|m| resolve_mailbox_local_path(&account_config, m));
-    let archive_dir: Option<PathBuf> = account_config.mailboxes.archive.as_ref()
-        .map(|m| resolve_mailbox_local_path(&account_config, m));
+    // Resolve directories from config (mailbox-based -> derived from data dir)
+    let sent_dir: Option<PathBuf> = account_config
+        .mailboxes
+        .sent
+        .as_ref()
+        .map(|_| email::config::mailbox_dir(&account_config.name, "sent"));
+    let drafts_dir: Option<PathBuf> = Some(email::config::drafts_dir(&account_config.name));
+    let inbox_dir: Option<PathBuf> = account_config
+        .mailboxes
+        .inbox
+        .as_ref()
+        .map(|_| email::config::mailbox_dir(&account_config.name, "inbox"));
+    let archive_dir: Option<PathBuf> = account_config
+        .mailboxes
+        .archive
+        .as_ref()
+        .map(|_| email::config::mailbox_dir(&account_config.name, "archive"));
 
     match cli.command {
         Some(Commands::Send { file, yes }) => {
@@ -1081,7 +1088,7 @@ async fn main() -> Result<()> {
                     imap_client::SyncTarget {
                         role: role.clone(),
                         server_name: mapping.server.clone(),
-                        local_dir: resolve_mailbox_local_path(&account_config, mapping),
+                        local_dir: email::config::mailbox_dir(&account_config.name, role),
                         status: mailbox_status(role).to_string(),
                     }
                 }).collect()
@@ -1421,7 +1428,7 @@ async fn main() -> Result<()> {
                         .or_else(|| cli.account.clone());
                     cmd_oauth2_login(acct_name.as_deref()).await?;
                 }
-                ConfigAction::Migrate => cmd_config_migrate()?,
+
                 ConfigAction::ResetSecrets => cmd_reset_secrets()?,
                 ConfigAction::Path => cmd_config_path(),
             }
