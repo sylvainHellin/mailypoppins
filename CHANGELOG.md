@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Performance
+- **TUI cold start is now ~instant instead of ~1.4 s black screen.**
+  `AccountState::new` no longer walks every mailbox directory to build
+  the in-memory `message_id_index` synchronously. The scan is extracted
+  into a free function `build_message_id_index` and dispatched on a
+  background thread per account from `run_loop`; results arrive via the
+  new `BgResult::IndexReady` variant, which sets `acct.message_id_index`
+  and clears `acct.indexing`. The status bar shows "Indexing..." with
+  the existing spinner; sync/fetch actions queue via the existing
+  `bg_count > 0` gate and fire automatically when the last account
+  finishes. Local benchmark: per-account `AccountState::new` dropped
+  from 1183 ms / 234 ms (TUM / Proton) to 13 ms / 4 ms.
+  Closes [#0003](docs/tickets/0003-cold-start-async-indexing.md).
 - **First quick sync after launch is now <2 s instead of ~14 s.** Persist
   per-role IMAP `MailboxState` (`uid_validity`, `uid_next`, `exists`) to
   `<account_dir>/mailbox-states.json` after every successful Fetch /

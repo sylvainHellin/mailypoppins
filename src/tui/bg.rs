@@ -204,6 +204,22 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
+        BgResult::IndexReady { account_index, index } => {
+            if let Some(acct) = app.accounts.get_mut(account_index) {
+                acct.message_id_index = index;
+                acct.indexing = false;
+            }
+            // Clear status only when the LAST account finishes. Each
+            // account spawns its own indexing thread; we want the
+            // "Indexing..." spinner to remain visible until they all
+            // arrive. The per-thread `bg_count` decrement above keeps
+            // the spinner spinning; setting a Success message here on
+            // the final arrival mirrors the other bg-result UX.
+            if !app.accounts.iter().any(|a| a.indexing) {
+                app.set_status_level("Index ready".to_string(), StatusLevel::Success);
+            }
+        }
+
         BgResult::ServerSearch { result } => {
             app.server_search_loading = false;
             match result {

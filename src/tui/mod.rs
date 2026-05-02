@@ -63,6 +63,32 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     // Background task results channel
     let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();
 
+    // Kick off the per-account message-ID index scan on background
+    // threads so the first frame paints without waiting on the
+    // ~1.4 s walkdir over ~17 k frontmatter files (ticket #0003).
+    // Each thread sends `BgResult::IndexReady` when done; the
+    // existing `bg_count > 0` gate in `Action::Fetch` / `Action::Sync`
+    // queues sync operations until the index arrives.
+    if !app.accounts.is_empty() {
+        for (i, acct) in app.accounts.iter().enumerate() {
+            let mailboxes = acct.mailboxes.clone();
+            let account_name = acct.account_config.name.clone();
+            let tx = bg_tx.clone();
+            app.bg_count += 1;
+            std::thread::spawn(move || {
+                let index = app::build_message_id_index(&mailboxes, &account_name);
+                let _ = tx.send(BgResult::IndexReady {
+                    account_index: i,
+                    index,
+                });
+            });
+        }
+        app.set_status_level(
+            "Indexing...".to_string(),
+            app::StatusLevel::Progress,
+        );
+    }
+
     while app.running {
         terminal.draw(|frame| ui::view(&mut app, frame))?;
 
