@@ -8,7 +8,7 @@ use gray_matter::Matter;
 use serde::Deserialize;
 
 use crate::parse::{FetchedEmail, scan_mailbox_message_ids};
-use crate::imap_client::{MailboxState, MessageIdIndex};
+use crate::imap_client::{load_mailbox_states_cache, MailboxState, MessageIdIndex};
 
 // ---------------------------------------------------------------------------
 // EmailEntry (ported from beautifulmail's email.rs)
@@ -289,6 +289,16 @@ impl AccountState {
         }
         span.mark(&format!("indexed {} files total", total_indexed));
 
+        // Load persisted IMAP mailbox states so the first quick sync after
+        // launch can take the reconcile-skip branch (avoiding the ~14 s
+        // full Message-ID scan that would otherwise fire when prev_states
+        // is empty). `uid_validity` mismatch on the next SELECT falls back
+        // to a full reconcile, so this is safe across other-client
+        // mutations / mailbox renumbering.
+        let account_root = crate::config::account_dir(&account_config.name);
+        let mailbox_states = load_mailbox_states_cache(&account_root);
+        span.mark(&format!("loaded {} mailbox state(s)", mailbox_states.len()));
+
         Self {
             account_config,
             imap_config,
@@ -315,7 +325,7 @@ impl AccountState {
             watcher_active: false,
             has_unseen: false,
             message_id_index,
-            mailbox_states: std::collections::HashMap::new(),
+            mailbox_states,
         }
     }
 
