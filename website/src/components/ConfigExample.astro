@@ -1,0 +1,56 @@
+---
+import { Code } from 'astro:components';
+
+interface Props {
+  code: string;
+  title?: string;
+  description?: string;
+}
+
+const { code, title, description } = Astro.props;
+---
+
+<div class="config-example">
+  {title && <h3>{title}</h3>}
+  {description && <p class="config-desc">{description}</p>}
+  <div class="config-code">
+    <Code code={code} lang="toml" theme="catppuccin-mocha" />
+  </div>
+</div>
+
+<style>
+  .config-example {
+    margin-bottom: var(--space-8);
+  }
+
+  .config-desc {
+    color: var(--color-subtext1);
+    margin-bottom: var(--space-4);
+  }
+
+  .config-code {
+    background: var(--color-crust);
+    border: 1px solid var(--color-surface0);
+    border-radius: 8px;
+    padding: var(--space-4);
+    overflow-x: auto;
+  }
+
+  .config-code :global(pre) {
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+
+  .config-code :global(code) {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+    color: inherit;
+  }
+</style>

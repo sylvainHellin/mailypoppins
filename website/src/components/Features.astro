@@ -1,0 +1,89 @@
+---
+import FeatureCard from './FeatureCard.astro';
+
+const iconDocument = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>`;
+
+const iconSync = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10"/><path d="M3.51 15A9 9 0 0 0 18.36 18.36L23 14"/></svg>`;
+
+const iconCheck = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>`;
+
+const iconTerminal = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="2"/><polyline points="6 9 10 13 6 17"/><line x1="14" y1="17" x2="18" y2="17"/></svg>`;
+
+const iconUsers = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`;
+
+const iconKey = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
+
+const features = [
+  {
+    icon: iconDocument,
+    title: 'Markdown Drafts',
+    description: 'Write emails in Markdown with YAML frontmatter. Version control your drafts alongside your notes.',
+  },
+  {
+    icon: iconSync,
+    title: 'IMAP Sync',
+    description: 'Two-way sync with your mail server. Fetch, archive, and delete with Message-ID deduplication.',
+  },
+  {
+    icon: iconCheck,
+    title: 'Draft Workflow',
+    description: 'Auditable pipeline: draft, approve, send. No accidental sends. Full control over what goes out.',
+  },
+  {
+    icon: iconTerminal,
+    title: 'Terminal UI',
+    description: 'Full-featured ratatui interface with vim bindings, real-time IMAP IDLE, and background operations.',
+  },
+  {
+    icon: iconUsers,
+    title: 'Multi-Account',
+    description: 'Manage multiple email accounts from a single config. Switch between them in the TUI with a keystroke.',
+  },
+  {
+    icon: iconKey,
+    title: 'OAuth2 + Graph',
+    description: 'Native Microsoft 365 support via OAuth2 device flow. Works with IMAP/SMTP or Graph API.',
+  },
+];
+---
+
+<section class="features">
+  <div class="content-wide">
+    <h2 class="features-heading">What it does</h2>
+    <div class="features-grid">
+      {features.map((f) => (
+        <FeatureCard icon={f.icon} title={f.title} description={f.description} />
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .features {
+    padding: var(--space-20) 0;
+  }
+
+  .features-heading {
+    text-align: center;
+    margin-top: 0;
+    margin-bottom: var(--space-12);
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-6);
+  }
+
+  @media (max-width: 1024px) {
+    .features-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 600px) {
+    .features-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

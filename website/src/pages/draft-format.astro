@@ -1,0 +1,240 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import CommandTable from '../components/CommandTable.astro';
+import WorkflowDiagram from '../components/WorkflowDiagram.astro';
+import { Code } from 'astro:components';
+
+const frontmatterFields = [
+  { command: 'to', description: 'Recipient address(es). Required. Comma-separated for multiple.' },
+  { command: 'cc', description: 'Carbon copy address(es). Optional.' },
+  { command: 'bcc', description: 'Blind carbon copy address(es). Optional.' },
+  { command: 'subject', description: 'Email subject line. Required.' },
+  { command: 'status', description: 'Workflow state: draft, approved, sent, inbox, or archived. Required.' },
+  { command: 'from', description: 'Sender address. Optional -- overrides default_from from config.' },
+  { command: 'reply_to', description: 'Reply-to address. Optional.' },
+  { command: 'attachments', description: 'List of absolute file paths to attach. Optional.' },
+];
+
+const basicDraft = `---
+to: recipient@example.com
+cc: optional@example.com
+bcc: hidden@example.com
+subject: "Your subject line"
+status: draft
+from: alternate@example.com
+reply_to: reply@example.com
+attachments:
+  - /path/to/file.pdf
+---
+
+Email body in **Markdown** format.`;
+
+const replyExample = `---
+to: original-sender@example.com
+subject: "Re: Original subject"
+status: draft
+in_reply_to: "<message-id@example.com>"
+references: "<message-id@example.com>"
+---
+
+Your reply goes here.
+
+{{SIGNATURE}}
+
+> On 2026-01-15, sender wrote:
+>
+> Original message text quoted here.`;
+
+const forwardExample = `---
+to: ""
+subject: "Fwd: Original subject"
+status: draft
+attachments:
+  - /path/to/original-attachment.pdf
+---
+
+Your note to the recipient.
+
+{{SIGNATURE}}
+
+---------- Forwarded message ----------
+From: Original Sender <sender@example.com>
+Date: 2026-01-15
+Subject: Original subject
+To: you@example.com
+
+Original message body here.`;
+
+const signatureExample = `<div style="font-family: Helvetica, Arial, sans-serif; font-size: 12pt;">
+<p style="margin: 0;">
+<b>Your Name</b><br>
+Title | Organization<br>
+your.name@example.com
+</p>
+</div>`;
+
+const attachmentStructure = `inbox/2024-01-01-1200_sender_subject.md
+inbox/2024-01-01-1200_sender_subject.html
+inbox/2024-01-01-1200_sender_subject_attachments/
+  document.pdf
+  image.png`;
+
+const attachmentFrontmatter = `---
+from: sender@example.com
+subject: "Document delivery"
+status: inbox
+has_attachments: true
+attachments:
+  - "document.pdf"
+  - "image.png"
+---`;
+
+const sentExample = `---
+to: recipient@example.com
+subject: "Project update"
+status: sent
+sent_at: "2026-04-22T10:30:00Z"
+sent_via: "mailypoppins 0.6.0"
+message_id: "<unique-id@example.com>"
+---
+
+Email body here.`;
+---
+
+<Layout title="Draft Format -- mailypoppins" description="Markdown email drafts with YAML frontmatter -- fields, status workflow, attachments, and signatures.">
+  <Nav />
+  <main id="main-content" class="content page">
+    <header class="page-header">
+      <h1>Draft Format</h1>
+      <p class="subtitle">Markdown email drafts with YAML frontmatter.</p>
+    </header>
+
+    <section>
+      <h2 id="basic-format">Basic Format</h2>
+      <p>
+        Email drafts are plain Markdown files with YAML frontmatter. The frontmatter holds
+        metadata (recipients, subject, status), and the body below the second <code>---</code>
+        is the email content written in Markdown, which gets converted to HTML when sent.
+      </p>
+      <Code code={basicDraft} lang="markdown" theme="catppuccin-mocha" />
+    </section>
+
+    <section>
+      <h2 id="frontmatter-fields">Frontmatter Fields</h2>
+      <CommandTable commands={frontmatterFields} />
+    </section>
+
+    <section>
+      <h2 id="status-workflow">Status Workflow</h2>
+      <p>
+        Emails follow a strict workflow. Only approved emails can be sent -- the <code>send</code>
+        command rejects drafts that have not been approved first. Inbox emails follow a separate
+        path from inbox to archived.
+      </p>
+      <WorkflowDiagram />
+    </section>
+
+    <section>
+      <h2 id="after-sending">After Sending</h2>
+      <p>
+        When an email is sent, the file is updated in-place. The <code>status</code> changes
+        to <code>sent</code>, and three fields are added: <code>sent_at</code> (ISO 8601 timestamp),
+        <code>sent_via</code> (tool version), and <code>message_id</code> (the RFC 822 Message-ID,
+        used for sync deduplication). If a sent directory is configured, the file is moved there.
+      </p>
+      <Code code={sentExample} lang="markdown" theme="catppuccin-mocha" />
+      <p>
+        The raw RFC 822 message is also appended to the server-side Sent folder
+        via IMAP APPEND with the <code>\Seen</code> flag. This is best-effort -- a failed
+        APPEND is logged but does not fail the send.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="reply-drafts">Reply Drafts</h2>
+      <p>
+        Reply drafts are created with <code>email reply</code> (or <code>r</code>/<code>R</code>
+        in the TUI). They include <code>in_reply_to</code> and <code>references</code>
+        headers for proper threading, and a <code>{"{{SIGNATURE}}"}</code> placeholder between the reply
+        area and the quoted original message.
+      </p>
+      <p>
+        When sent, the placeholder is replaced with the configured signature HTML.
+        If the placeholder is removed, the signature falls back to being appended at the end.
+      </p>
+      <Code code={replyExample} lang="markdown" theme="catppuccin-mocha" />
+    </section>
+
+    <section>
+      <h2 id="forward-drafts">Forward Drafts</h2>
+      <p>
+        Forward drafts are created with <code>email forward</code> (or <code>w</code> in the TUI).
+        The <code>to:</code> field is left empty for you to fill in. The subject gets a
+        "Fwd:" prefix, and any attachments from the original email are listed in the
+        <code>attachments:</code> array with their absolute file paths.
+      </p>
+      <Code code={forwardExample} lang="markdown" theme="catppuccin-mocha" />
+    </section>
+
+    <section>
+      <h2 id="signatures">Signatures</h2>
+      <p>
+        Signatures are HTML snippet files referenced in <code>config.toml</code> under
+        the <code>[signatures]</code> section. A default signature name is set with
+        <code>signatures.default</code>, and each named entry has a <code>path</code>
+        to the HTML file (supports <code>~</code> expansion).
+      </p>
+      <p>
+        For regular drafts, the signature is appended after the email body.
+        For reply and forward drafts, the <code>{"{{SIGNATURE}}"}</code> placeholder controls
+        placement -- the signature appears between your message and the quoted/forwarded content.
+      </p>
+      <Code code={signatureExample} lang="html" theme="catppuccin-mocha" />
+      <p>
+        Use <code>-s &lt;name&gt;</code> to select a specific signature, or
+        <code>--no-signature</code> to skip it entirely.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="attachments">Attachments</h2>
+      <p>
+        Incoming attachments are saved next to the <code>.md</code> file in a
+        <code>_attachments/</code> subdirectory. The frontmatter records filenames only (not paths),
+        and a <code>has_attachments</code> flag is set to <code>true</code>.
+      </p>
+      <Code code={attachmentStructure} lang="text" theme="catppuccin-mocha" />
+      <Code code={attachmentFrontmatter} lang="yaml" theme="catppuccin-mocha" />
+      <p>
+        The <code>_attachments/</code> directory is moved or deleted alongside the
+        <code>.md</code> and <code>.html</code> companion files during archive, delete, sync
+        move, and reconciliation operations. In the TUI, press <code>o</code> to open
+        an attachment in the default app, or <code>O</code> to save attachments to a
+        chosen directory.
+      </p>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-4);
+  }
+</style>

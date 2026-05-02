@@ -1,0 +1,231 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import { Code } from 'astro:components';
+---
+
+<Layout title="Getting Started -- mailypoppins" description="Install mailypoppins and send your first email in under 5 minutes.">
+  <Nav />
+  <main id="main-content" class="content page">
+    <header class="page-header">
+      <h1>Getting Started</h1>
+      <p class="subtitle">Install mailypoppins and send your first email in under 5 minutes.</p>
+    </header>
+
+    <!-- Prerequisites -->
+    <section>
+      <h2>Prerequisites</h2>
+      <p>
+        You need the Rust toolchain installed. If you don't have it yet, install it from
+        <a href="https://rustup.rs" target="_blank" rel="noopener noreferrer">rustup.rs</a>.
+      </p>
+    </section>
+
+    <!-- Installation -->
+    <section>
+      <h2>Installation</h2>
+      <p>Clone the repository and build from source:</p>
+      <CodeBlock
+        lang="bash"
+        code={`git clone https://github.com/sylvainhellin/mailypoppins
+cd mailypoppins
+cargo install --path .`}
+      />
+      <p>
+        This installs the <code>email</code> binary to <code>~/.cargo/bin/</code>.
+        Make sure that directory is in your <code>PATH</code>.
+      </p>
+    </section>
+
+    <!-- Setup -->
+    <section>
+      <h2>Setup</h2>
+      <p>Run the interactive setup wizard:</p>
+      <CodeBlock lang="bash" code="email config init" />
+      <p>The wizard walks through these steps:</p>
+      <ol class="steps">
+        <li>Choose a provider: standard IMAP/SMTP, Microsoft 365 with OAuth2, or Graph API.</li>
+        <li>Enter credentials (server host, port, username, email address).</li>
+        <li>Automatic connection test to verify everything works.</li>
+        <li>Mailbox discovery: the wizard lists server mailboxes and lets you assign the inbox, archive, and sent roles.</li>
+        <li>Config is written to <code>~/.config/email/config.toml</code>.</li>
+        <li>Password is stored securely in the OS keyring (macOS Keychain, Windows Credential Manager, or Linux Secret Service).</li>
+      </ol>
+      <p>
+        For Microsoft 365 accounts, the wizard runs the OAuth2 device code flow: it
+        displays a URL and a code, you sign in via your browser, and the token is
+        cached locally.
+      </p>
+    </section>
+
+    <!-- First Sync -->
+    <section>
+      <h2>First Sync</h2>
+      <p>After setup, pull your emails from the server:</p>
+      <CodeBlock lang="bash" code="email sync" />
+      <p>
+        This syncs all configured mailboxes (inbox, archive, sent, plus any extras).
+        Each email is saved as a <code>.md</code> file with YAML frontmatter and an
+        accompanying <code>.html</code> file. Attachments are saved in a sibling
+        <code>_attachments/</code> directory.
+      </p>
+      <p>
+        Sync is additive by default: it only downloads new messages, deduplicating by
+        Message-ID. Add <code>--reconcile</code> to also detect server-side moves and
+        deletes.
+      </p>
+    </section>
+
+    <!-- Launch the TUI -->
+    <section>
+      <h2>Launch the TUI</h2>
+      <p>Run the binary with no arguments to open the interactive terminal UI:</p>
+      <CodeBlock lang="bash" code="email" />
+      <p>
+        The TUI shows a sidebar with your mailboxes, an email list, and a headers/body
+        preview pane. Core navigation:
+      </p>
+      <ul class="key-list">
+        <li><code>j</code> / <code>k</code> to move up and down the email list</li>
+        <li><code>1</code>-<code>9</code> to jump to a mailbox by index</li>
+        <li><code>Enter</code> or <code>e</code> to open an email in your <code>$EDITOR</code></li>
+        <li><code>/</code> to filter, <code>\</code> to search (includes body text)</li>
+        <li><code>?</code> for the full help overlay</li>
+        <li><code>q</code> to quit</li>
+      </ul>
+      <p>
+        The TUI watches your inbox in the background (via IMAP IDLE or Graph polling)
+        and fetches new mail automatically when it arrives.
+      </p>
+    </section>
+
+    <!-- Your First Draft -->
+    <section>
+      <h2>Your First Draft</h2>
+      <p>
+        The draft workflow goes through three stages: <code>draft</code> (writing),
+        <code>approved</code> (reviewed), and <code>sent</code> (delivered). Here is
+        the end-to-end flow from the CLI:
+      </p>
+      <CodeBlock
+        lang="bash"
+        code={`# Create a new draft
+email new meeting-followup
+
+# Open and edit the file in your editor -- fill in recipients, subject, body
+
+# Mark it as reviewed and ready to send
+email mark-approved ~/notes/email/drafts/meeting-followup.md
+
+# Send it
+email send ~/notes/email/drafts/meeting-followup.md`}
+      />
+      <p>Or from the TUI:</p>
+      <ol class="steps">
+        <li>Press <code>n</code> to create a new draft. It opens in your <code>$EDITOR</code>.</li>
+        <li>Write your email in Markdown with YAML frontmatter (to, subject, body).</li>
+        <li>Save and close the editor. The draft appears in the list.</li>
+        <li>Press <code>A</code> to mark it as approved.</li>
+        <li>Press <code>x</code> to send. Confirm when prompted.</li>
+      </ol>
+      <p>A draft file looks like this:</p>
+      <CodeBlock
+        lang="yaml"
+        filename="meeting-followup.md"
+        code={`---
+to: colleague@example.com
+cc: team@example.com
+subject: "Meeting follow-up"
+status: draft
+---
+
+Hi,
+
+Here are the action items from today's meeting:
+
+- Item one
+- Item two
+
+Let me know if I missed anything.`}
+      />
+    </section>
+
+    <!-- What's Next -->
+    <section>
+      <h2>What's Next</h2>
+      <ul class="next-links">
+        <li><a href="/commands/">Commands</a> -- full reference for every CLI command</li>
+        <li><a href="/draft-format/">Draft Format</a> -- frontmatter fields, status workflow, attachments</li>
+        <li><a href="/config/">Configuration</a> -- multi-account setup, OAuth2, Graph API, signatures</li>
+        <li><a href="/faq/">FAQ</a> -- troubleshooting and common questions</li>
+      </ul>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-8);
+  }
+
+  .steps {
+    list-style: decimal;
+    padding-left: var(--space-6);
+    color: var(--color-subtext1);
+    margin-bottom: var(--space-6);
+  }
+
+  .steps li {
+    margin-bottom: var(--space-3);
+    line-height: 1.6;
+  }
+
+  .key-list {
+    list-style: disc;
+    padding-left: var(--space-6);
+    color: var(--color-subtext1);
+    margin-bottom: var(--space-6);
+  }
+
+  .key-list li {
+    margin-bottom: var(--space-2);
+    line-height: 1.6;
+  }
+
+  .next-links {
+    list-style: none;
+    padding: 0;
+  }
+
+  .next-links li {
+    margin-bottom: var(--space-3);
+    color: var(--color-subtext1);
+    line-height: 1.6;
+  }
+
+  .next-links a {
+    color: var(--color-mauve);
+    font-weight: 500;
+  }
+
+  .next-links a:hover {
+    color: var(--color-peach);
+  }
+</style>

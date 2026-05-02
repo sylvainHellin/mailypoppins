@@ -1,0 +1,97 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import Hero from '../components/Hero.astro';
+import Features from '../components/Features.astro';
+---
+
+<Layout title="mailypoppins -- Your email, as plaintext files">
+  <Nav />
+  <main id="main-content">
+    <Hero />
+    <Features />
+
+    <section class="final-cta">
+      <div class="content">
+        <h2 class="section-heading">Ready to take control of your email?</h2>
+        <p class="section-sub">Install in under a minute. Works with any IMAP provider and Microsoft 365.</p>
+        <div class="cta-buttons">
+          <a href="/getting-started/" class="btn btn-primary">Get Started</a>
+          <a href="/commands/" class="btn btn-secondary">Explore Commands</a>
+        </div>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .section-heading {
+    text-align: center;
+    margin-top: 0;
+    margin-bottom: var(--space-3);
+  }
+
+  .section-sub {
+    text-align: center;
+    color: var(--color-subtext0);
+    margin-bottom: var(--space-8);
+  }
+
+  .final-cta {
+    padding: var(--space-16) 0 var(--space-24);
+    text-align: center;
+  }
+
+  .cta-buttons {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-4);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-3) var(--space-6);
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 8px;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    text-decoration: none;
+  }
+
+  .btn-primary {
+    background: var(--color-mauve);
+    color: var(--color-crust);
+  }
+
+  .btn-primary:hover {
+    background: color-mix(in srgb, var(--color-mauve) 85%, white);
+    color: var(--color-crust);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--color-mauve);
+    border: 1.5px solid var(--color-mauve);
+  }
+
+  .btn-secondary:hover {
+    background: color-mix(in srgb, var(--color-mauve) 10%, transparent);
+    color: var(--color-mauve);
+  }
+
+  @media (max-width: 768px) {
+    .cta-buttons {
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .btn {
+      width: 100%;
+      max-width: 280px;
+      justify-content: center;
+    }
+  }
+</style>

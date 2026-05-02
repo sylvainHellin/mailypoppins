@@ -1,0 +1,80 @@
+---
+interface Props {
+  bindings: Array<{ key: string; action: string }>;
+}
+
+const { bindings } = Astro.props;
+---
+
+<div class="table-wrap">
+  <table class="keybinding-table">
+    <thead>
+      <tr>
+        <th>Key</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {bindings.map((bind) => (
+        <tr>
+          <td><kbd>{bind.key}</kbd></td>
+          <td>{bind.action}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+</div>
+
+<style>
+  .table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    margin-bottom: var(--space-6);
+    border-radius: 8px;
+    border: 1px solid var(--color-surface0);
+  }
+
+  .keybinding-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+
+  .keybinding-table thead tr {
+    background: var(--color-surface0);
+  }
+
+  .keybinding-table th {
+    text-align: left;
+    padding: var(--space-3) var(--space-4);
+    color: var(--color-subtext1);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .keybinding-table td {
+    padding: var(--space-3) var(--space-4);
+    color: var(--color-subtext1);
+    border-top: 1px solid var(--color-surface0);
+  }
+
+  .keybinding-table tbody tr:nth-child(even) {
+    background: color-mix(in srgb, var(--color-surface0) 30%, transparent);
+  }
+
+  .keybinding-table td kbd {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.8em;
+    color: var(--color-text);
+    background: var(--color-surface0);
+    border: 1px solid var(--color-surface1);
+    border-bottom-width: 2px;
+    padding: 0.1em 0.45em;
+    border-radius: 4px;
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+</style>

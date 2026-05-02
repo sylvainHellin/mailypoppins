@@ -1,0 +1,173 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+
+const cloneCode = `git clone https://github.com/sylvainhellin/mailypoppins
+cd mailypoppins
+cargo build --release`;
+
+const installCode = `cargo install --path .`;
+---
+
+<Layout title="Open Source -- mailypoppins">
+  <Nav />
+  <main id="main-content" class="content page">
+    <header class="page-header">
+      <h1>Open Source</h1>
+      <p class="subtitle">mailypoppins is free and open source, licensed under MIT.</p>
+    </header>
+
+    <section class="repo-section">
+      <div class="repo-card">
+        <svg class="repo-icon" width="36" height="36" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        <span class="repo-name">sylvainhellin/mailypoppins</span>
+        <p class="repo-description">A CLI and TUI for managing email from Markdown drafts.</p>
+        <a
+          href="https://github.com/sylvainhellin/mailypoppins"
+          class="btn btn-primary"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View on GitHub
+        </a>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="contributing">Contributing</h2>
+      <p>
+        Contributions are welcome. Here are some ways to get involved:
+      </p>
+      <ul class="contribute-list">
+        <li>Report bugs via <a href="https://github.com/sylvainhellin/mailypoppins/issues" target="_blank" rel="noopener noreferrer">GitHub Issues</a></li>
+        <li>Submit feature requests -- describe the use case and expected behavior</li>
+        <li>Open pull requests for bug fixes or new features</li>
+      </ul>
+      <h3 id="workflow">Workflow</h3>
+      <ol class="contribute-list">
+        <li>Fork the repository</li>
+        <li>Create a feature branch (<code>git checkout -b feat/my-feature</code>)</li>
+        <li>Make your changes and test them (<code>cargo test</code>, <code>cargo clippy</code>)</li>
+        <li>Push and open a pull request against <code>main</code></li>
+      </ol>
+    </section>
+
+    <section>
+      <h2 id="building">Building from Source</h2>
+      <p>
+        Prerequisites: a Rust toolchain. Install one via
+        <a href="https://rustup.rs" target="_blank" rel="noopener noreferrer">rustup.rs</a>
+        if you do not have one already.
+      </p>
+      <CodeBlock code={cloneCode} lang="bash" filename="terminal" />
+      <p>To install the binary to <code>~/.cargo/bin/</code>:</p>
+      <CodeBlock code={installCode} lang="bash" filename="terminal" />
+    </section>
+
+    <section>
+      <h2 id="license">License</h2>
+      <p>
+        mailypoppins is released under the
+        <a href="https://github.com/sylvainhellin/mailypoppins/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a>.
+        You are free to use, modify, and distribute it.
+      </p>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  .repo-section {
+    margin-bottom: var(--space-12);
+  }
+
+  .repo-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: var(--space-10) var(--space-8);
+    gap: var(--space-3);
+  }
+
+  .repo-icon {
+    color: var(--color-text);
+    margin-bottom: var(--space-2);
+  }
+
+  .repo-name {
+    font-family: var(--font-mono);
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .repo-description {
+    color: var(--color-subtext0);
+    margin-bottom: var(--space-4);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-3) var(--space-6);
+    font-size: 1rem;
+    font-weight: 600;
+    border-radius: 8px;
+    transition: background 0.15s ease, color 0.15s ease;
+    text-decoration: none;
+  }
+
+  .btn-primary {
+    background: var(--color-mauve);
+    color: var(--color-crust);
+  }
+
+  .btn-primary:hover {
+    background: color-mix(in srgb, var(--color-mauve) 85%, white);
+    color: var(--color-crust);
+  }
+
+  section {
+    margin-bottom: var(--space-8);
+  }
+
+  .contribute-list {
+    color: var(--color-subtext1);
+    padding-left: var(--space-6);
+    margin-bottom: var(--space-6);
+  }
+
+  .contribute-list li {
+    margin-bottom: var(--space-2);
+  }
+
+  .contribute-list a {
+    color: var(--color-link);
+  }
+
+  .contribute-list a:hover {
+    color: var(--color-link-hover);
+  }
+</style>

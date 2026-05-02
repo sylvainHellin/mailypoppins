@@ -1,0 +1,80 @@
+---
+interface Props {
+  question: string;
+}
+const { question } = Astro.props;
+---
+
+<details class="accordion-item">
+  <summary class="accordion-question">
+    <span>{question}</span>
+    <svg class="chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+      <polyline points="4,6 8,10 12,6" />
+    </svg>
+  </summary>
+  <div class="accordion-answer">
+    <slot />
+  </div>
+</details>
+
+<style>
+  .accordion-item {
+    border-bottom: 1px solid var(--color-surface0);
+  }
+
+  .accordion-question {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    width: 100%;
+    padding: var(--space-4) 0;
+    font-size: 1.125rem;
+    font-weight: 500;
+    color: var(--color-text);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .accordion-question::-webkit-details-marker {
+    display: none;
+  }
+
+  .accordion-question::marker {
+    display: none;
+    content: '';
+  }
+
+  .chevron {
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+    color: var(--color-overlay0);
+  }
+
+  details[open] .chevron {
+    transform: rotate(180deg);
+  }
+
+  .accordion-answer {
+    padding-bottom: var(--space-6);
+    color: var(--color-subtext1);
+    line-height: 1.65;
+  }
+
+  .accordion-answer :global(p) {
+    margin-bottom: var(--space-2);
+  }
+
+  .accordion-answer :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .accordion-answer :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background: var(--color-bg-code);
+    padding: 0.15em 0.35em;
+    border-radius: 4px;
+    color: var(--color-peach);
+  }
+</style>

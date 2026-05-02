@@ -1,0 +1,241 @@
+---
+---
+
+<section class="hero">
+  <div class="hero-glow" aria-hidden="true"></div>
+  <div class="hero-inner">
+    <div class="hero-intro">
+      <h1 class="hero-headline">
+        <span class="hero-maily">maily</span><span class="hero-poppins">poppins</span>
+      </h1>
+      <p class="hero-tagline">Your email, as plaintext files.</p>
+      <p class="hero-description">
+        A CLI and TUI for managing email drafts in Markdown.
+        Write, approve, send -- all from your terminal.
+      </p>
+      <div class="hero-cta">
+        <a href="/getting-started/" class="btn btn-primary">Get Started</a>
+        <a
+          href="https://github.com/sylvainhellin/mailypoppins"
+          class="btn btn-secondary"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View on GitHub
+        </a>
+      </div>
+    </div>
+
+    <div class="hero-preview">
+      <div class="terminal-chrome">
+        <span class="terminal-dot" style="background: var(--color-red);" aria-hidden="true"></span>
+        <span class="terminal-dot" style="background: var(--color-yellow);" aria-hidden="true"></span>
+        <span class="terminal-dot" style="background: var(--color-green);" aria-hidden="true"></span>
+        <span class="terminal-title">email</span>
+      </div>
+      <img
+        src="/tui-screenshot.png"
+        alt="mailypoppins TUI showing mailbox sidebar, email list, and preview pane"
+        class="hero-screenshot"
+        width="2496"
+        height="1356"
+        loading="eager"
+      />
+    </div>
+  </div>
+</section>
+
+<style>
+  .hero {
+    position: relative;
+    padding: var(--space-8) 0 var(--space-12);
+    overflow: hidden;
+  }
+
+  .hero-glow {
+    position: absolute;
+    top: 0;
+    left: 25%;
+    width: 700px;
+    height: 500px;
+    transform: translate(-50%, -20%);
+    background: radial-gradient(
+      ellipse,
+      color-mix(in srgb, var(--color-mauve) 5%, transparent) 0%,
+      transparent 70%
+    );
+    pointer-events: none;
+  }
+
+  .hero-inner {
+    position: relative;
+    display: grid;
+    grid-template-columns: 5fr 7fr;
+    gap: var(--space-10);
+    align-items: center;
+    max-width: 72rem;
+    margin-inline: auto;
+    padding-inline: var(--space-6);
+  }
+
+  /* Left: intro */
+  .hero-intro {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .hero-headline {
+    font-size: 2.75rem;
+    letter-spacing: -0.03em;
+    margin-bottom: 0;
+    line-height: 1;
+  }
+
+  .hero-maily {
+    color: var(--color-text);
+  }
+
+  .hero-poppins {
+    color: var(--color-mauve);
+  }
+
+  .hero-tagline {
+    font-size: 1.25rem;
+    color: var(--color-subtext0);
+    margin-bottom: 0;
+    font-weight: 500;
+    margin-top: var(--space-2);
+  }
+
+  .hero-description {
+    font-size: 1rem;
+    color: var(--color-overlay1);
+    line-height: 1.6;
+    margin-bottom: 0;
+  }
+
+  .hero-cta {
+    display: flex;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+
+  /* Right: TUI screenshot */
+  .hero-preview {
+    border: 1px solid var(--color-surface0);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.4),
+      0 0 0 1px rgba(203, 166, 247, 0.04);
+  }
+
+  .terminal-chrome {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--color-mantle);
+    border-bottom: 1px solid var(--color-surface0);
+  }
+
+  .terminal-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    opacity: 0.7;
+  }
+
+  .terminal-title {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    color: var(--color-overlay0);
+    margin-left: auto;
+  }
+
+  .hero-screenshot {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-2) var(--space-5);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    border-radius: 8px;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    text-decoration: none;
+  }
+
+  .btn-primary {
+    background: var(--color-mauve);
+    color: var(--color-crust);
+  }
+
+  .btn-primary:hover {
+    background: color-mix(in srgb, var(--color-mauve) 85%, white);
+    color: var(--color-crust);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--color-mauve);
+    border: 1.5px solid var(--color-mauve);
+  }
+
+  .btn-secondary:hover {
+    background: color-mix(in srgb, var(--color-mauve) 10%, transparent);
+    color: var(--color-mauve);
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .hero-inner {
+      grid-template-columns: 1fr;
+      gap: var(--space-8);
+    }
+
+    .hero-intro {
+      align-items: center;
+      text-align: center;
+    }
+
+    .hero-headline {
+      font-size: 2.25rem;
+    }
+
+    .hero-cta {
+      justify-content: center;
+    }
+
+    .hero-preview {
+      max-width: 540px;
+      margin-inline: auto;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .hero {
+      padding: var(--space-6) 0 var(--space-8);
+    }
+
+    .hero-headline {
+      font-size: 1.875rem;
+    }
+
+    .hero-cta {
+      flex-direction: column;
+      width: 100%;
+      max-width: 260px;
+    }
+
+    .btn {
+      justify-content: center;
+    }
+  }
+</style>

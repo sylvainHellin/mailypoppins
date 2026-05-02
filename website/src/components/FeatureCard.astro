@@ -1,0 +1,57 @@
+---
+interface Props {
+  icon: string;
+  title: string;
+  description: string;
+}
+
+const { icon, title, description } = Astro.props;
+---
+
+<div class="card">
+  <div class="card-icon">
+    <Fragment set:html={icon} />
+  </div>
+  <h3 class="card-title">{title}</h3>
+  <p class="card-desc">{description}</p>
+</div>
+
+<style>
+  .card {
+    background: var(--color-surface0);
+    border: 1px solid var(--color-surface1);
+    border-radius: 12px;
+    padding: var(--space-6);
+    transition: border-color 0.2s ease;
+  }
+
+  .card:hover {
+    border-color: color-mix(in srgb, var(--color-mauve) 50%, transparent);
+  }
+
+  .card-icon {
+    width: 24px;
+    height: 24px;
+    color: var(--color-mauve);
+    margin-bottom: var(--space-4);
+  }
+
+  .card-icon :global(svg) {
+    width: 24px;
+    height: 24px;
+  }
+
+  .card-title {
+    font-size: 1.125rem;
+    color: var(--color-text);
+    margin-top: 0;
+    margin-bottom: var(--space-2);
+  }
+
+  .card-desc {
+    color: var(--color-subtext0);
+    margin-bottom: 0;
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+</style>
