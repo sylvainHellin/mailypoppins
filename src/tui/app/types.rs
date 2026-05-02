@@ -211,8 +211,15 @@ pub struct AccountState {
     pub watcher_active: bool,
     pub has_unseen: bool,
     /// In-memory index: local_dir -> {message_id -> file_path}.
-    /// Built once at startup; updated incrementally during sync/mutations.
+    /// Initialised empty at startup and populated asynchronously by a
+    /// background indexing thread (see `BgResult::IndexReady`); updated
+    /// incrementally during sync/mutations.
     pub message_id_index: MessageIdIndex,
+    /// True between `AccountState::new` and the arrival of
+    /// `BgResult::IndexReady` for this account. While true,
+    /// `message_id_index` is empty (or partially populated) and
+    /// sync/fetch actions are queued via the existing `bg_count` gate.
+    pub indexing: bool,
     /// Last-seen IMAP mailbox states, keyed by role (e.g. "inbox", "archive").
     /// Used to decide whether reconciliation is needed on quick sync.
     pub mailbox_states: std::collections::HashMap<String, MailboxState>,
@@ -257,37 +264,21 @@ impl AccountState {
             .as_ref()
             .map(|_| crate::config::mailbox_dir(&account_config.name, "inbox"));
 
+        let mut span = crate::timing::TimingSpan::with_context(
+            "AccountState::new",
+            account_config.name.clone(),
+        );
         let mailboxes = build_mailboxes(&account_config);
         let n = mailboxes.len();
         let counts = count_all_emails(&mailboxes);
+        span.mark(&format!("built {} mailbox(es)", n));
 
-        // Build in-memory message ID index from all mailbox directories.
-        // This blocks first-frame render -- instrument per-dir to see which
-        // mailboxes dominate the cold-start cost.
-        let mut span = crate::timing::TimingSpan::with_context(
-            "AccountState::new (index build)",
-            account_config.name.clone(),
-        );
-        let mut message_id_index: MessageIdIndex = std::collections::HashMap::new();
-        let mut total_indexed = 0usize;
-        for mb in &mailboxes {
-            if mb.dir.is_dir() {
-                let t0 = std::time::Instant::now();
-                if let Ok(ids) = scan_mailbox_message_ids(&mb.dir) {
-                    let n = ids.len();
-                    total_indexed += n;
-                    log::info!(
-                        "[TIMING] AccountState::new [{}] scan {} ({} files): {} ms",
-                        account_config.name,
-                        mb.dir.display(),
-                        n,
-                        t0.elapsed().as_millis()
-                    );
-                    message_id_index.insert(mb.dir.clone(), ids);
-                }
-            }
-        }
-        span.mark(&format!("indexed {} files total", total_indexed));
+        // The in-memory message-ID index is built off the main thread
+        // (see `build_message_id_index` and `BgResult::IndexReady`) so
+        // first-frame render is not blocked by walking ~17 k frontmatter
+        // files. Until the index arrives, sync/fetch actions are queued
+        // via the existing `bg_count` gate in `tui/actions.rs`.
+        let message_id_index: MessageIdIndex = std::collections::HashMap::new();
 
         // Load persisted IMAP mailbox states so the first quick sync after
         // launch can take the reconcile-skip branch (avoiding the ~14 s
@@ -325,6 +316,7 @@ impl AccountState {
             watcher_active: false,
             has_unseen: false,
             message_id_index,
+            indexing: true,
             mailbox_states,
         }
     }
@@ -378,6 +370,50 @@ pub enum BgResult {
     ServerSearch {
         result: Result<Vec<SearchHit>, String>,
     },
+    /// The async startup index scan has finished for one account.
+    /// Carries the freshly built `message_id_index` to be merged into
+    /// `AccountState`. See `build_message_id_index` and ticket #0003.
+    IndexReady {
+        account_index: usize,
+        index: MessageIdIndex,
+    },
+}
+
+/// Walk every mailbox directory of an account and build the
+/// `message_id_index` (`local_dir -> {message_id -> file_path}`).
+///
+/// Extracted from `AccountState::new` so it can run on a background
+/// thread at TUI launch (ticket #0003). Per-dir `[TIMING]` log lines
+/// are preserved verbatim so cold-start observability is unchanged.
+pub fn build_message_id_index(
+    mailboxes: &[MailboxInfo],
+    account_name: &str,
+) -> MessageIdIndex {
+    let mut span = crate::timing::TimingSpan::with_context(
+        "build_message_id_index",
+        account_name.to_string(),
+    );
+    let mut message_id_index: MessageIdIndex = std::collections::HashMap::new();
+    let mut total_indexed = 0usize;
+    for mb in mailboxes {
+        if mb.dir.is_dir() {
+            let t0 = std::time::Instant::now();
+            if let Ok(ids) = scan_mailbox_message_ids(&mb.dir) {
+                let n = ids.len();
+                total_indexed += n;
+                log::info!(
+                    "[TIMING] AccountState::new [{}] scan {} ({} files): {} ms",
+                    account_name,
+                    mb.dir.display(),
+                    n,
+                    t0.elapsed().as_millis()
+                );
+                message_id_index.insert(mb.dir.clone(), ids);
+            }
+        }
+    }
+    span.mark(&format!("indexed {} files total", total_indexed));
+    message_id_index
 }
 
 /// A mailbox target for server search.
@@ -840,5 +876,81 @@ mod tests {
         let (display, sort) = resolve_date(&None, &None, path);
         assert_eq!(display, "");
         assert_eq!(sort, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_message_id_index (ticket #0003)
+    // -----------------------------------------------------------------------
+
+    fn write_msg(dir: &Path, filename: &str, message_id: &str) {
+        std::fs::write(
+            dir.join(filename),
+            format!(
+                "---\nmessage_id: {}\nsubject: test\n---\n\nbody\n",
+                message_id
+            ),
+        )
+        .unwrap();
+    }
+
+    fn mb(label: &str, dir: PathBuf, kind: MailboxKind) -> MailboxInfo {
+        MailboxInfo {
+            label: label.to_string(),
+            icon: "",
+            dir,
+            kind,
+            server_name: None,
+        }
+    }
+
+    #[test]
+    fn test_build_message_id_index_collects_per_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox = tmp.path().join("inbox");
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+
+        write_msg(&inbox, "a.md", "<a@example.com>");
+        write_msg(&inbox, "b.md", "<b@example.com>");
+        write_msg(&archive, "c.md", "<c@example.com>");
+
+        let mailboxes = vec![
+            mb("Inbox", inbox.clone(), MailboxKind::Inbox),
+            mb("Archive", archive.clone(), MailboxKind::Archive),
+        ];
+
+        let index = build_message_id_index(&mailboxes, "test-account");
+
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.get(&inbox).unwrap().len(), 2);
+        assert_eq!(index.get(&archive).unwrap().len(), 1);
+        assert!(index.get(&inbox).unwrap().contains_key("<a@example.com>"));
+        assert!(index.get(&archive).unwrap().contains_key("<c@example.com>"));
+    }
+
+    #[test]
+    fn test_build_message_id_index_skips_missing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exists = tmp.path().join("inbox");
+        std::fs::create_dir_all(&exists).unwrap();
+        write_msg(&exists, "a.md", "<a@example.com>");
+        let missing = tmp.path().join("does-not-exist");
+
+        let mailboxes = vec![
+            mb("Inbox", exists.clone(), MailboxKind::Inbox),
+            mb("Archive", missing.clone(), MailboxKind::Archive),
+        ];
+
+        let index = build_message_id_index(&mailboxes, "test-account");
+        // Missing dirs are silently skipped (no panic, no entry).
+        assert!(index.contains_key(&exists));
+        assert!(!index.contains_key(&missing));
+    }
+
+    #[test]
+    fn test_build_message_id_index_empty_mailboxes() {
+        let index = build_message_id_index(&[], "test-account");
+        assert!(index.is_empty());
     }
 }

@@ -7,7 +7,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 ## Now
 
 - [#0001 Auto-fetch on TUI startup](docs/tickets/0001-auto-fetch-on-tui-startup.md) -- feature
-- [#0003 Move AccountState index scan to background thread](docs/tickets/0003-cold-start-async-indexing.md) -- perf, P1
 - [#0004 Fix read/unread sync behaviour](docs/tickets/0004-fix-read-unread-sync.md) -- bug
 - [#0001 hotkey to mark email as draft](docs/tickets/0001-hotkey-to-mark-email-as-draft.md) -- feature
 - [#0021 mark as draft](docs/tickets/0021-mark-as-draft.md) -- feature
@@ -20,6 +19,7 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
 - [#0009 Desktop notifications](docs/tickets/0009-desktop-notifications.md) -- feature
+- [#0023 enable theme config](docs/tickets/0023-enable-theme-config.md) -- feature
 
 ## Later
 
