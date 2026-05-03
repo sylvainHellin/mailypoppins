@@ -1201,6 +1201,85 @@ pub(super) fn handle_action(
             }
         }
 
+        Action::FetchAccount(acct_idx) => {
+            // Per-account quick sync used by the startup auto-fetch path.
+            // Triggered from `BgResult::IndexReady` once that account's
+            // `message_id_index` has been populated. Unlike `Action::Fetch`,
+            // does *not* gate on `bg_count > 0` -- multiple accounts'
+            // fetches must be allowed to run concurrently.
+            let acct = match app.accounts.get(acct_idx) {
+                Some(a) => a,
+                None => return Ok(()),
+            };
+            let account_config = acct.account_config.clone();
+            let account_name = account_config.name.clone();
+            let tx = bg_tx.clone();
+
+            if acct.is_graph() {
+                let graph_config = match acct.graph_config.clone() {
+                    Some(c) => c,
+                    None => return Ok(()),
+                };
+                app.bg_count += 1;
+                app.set_status_level(
+                    format!("Quick sync ({account_name}, Graph)..."),
+                    StatusLevel::Progress,
+                );
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .expect("failed to create tokio runtime");
+                    let result = rt
+                        .block_on(lib_do_sync_graph(&account_config, &graph_config, 100, true))
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(BgResult::Fetch {
+                        account_index: acct_idx,
+                        result,
+                        new_index: None,
+                        new_mailbox_states: None,
+                    });
+                });
+            } else {
+                let imap_config = match acct.imap_config.clone() {
+                    Some(c) => c,
+                    None => return Ok(()), // local-only / no IMAP -- no-op
+                };
+                let mut index_clone = acct.message_id_index.clone();
+                let prev_states = acct.mailbox_states.clone();
+
+                app.bg_count += 1;
+                app.set_status_level(
+                    format!("Quick sync ({account_name})..."),
+                    StatusLevel::Progress,
+                );
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .expect("failed to create tokio runtime");
+                    let sync_result = rt.block_on(super::helpers::lib_do_sync(
+                        &account_config,
+                        &imap_config,
+                        100,
+                        true,
+                        Some(&mut index_clone),
+                        Some(&prev_states),
+                    ));
+                    let (result, new_index, new_states) = match sync_result {
+                        Ok((msg, meta)) => (
+                            Ok(msg),
+                            Some(index_clone),
+                            Some(meta.mailbox_states),
+                        ),
+                        Err(e) => (Err(e.to_string()), None, None),
+                    };
+                    let _ = tx.send(BgResult::Fetch {
+                        account_index: acct_idx,
+                        result,
+                        new_index,
+                        new_mailbox_states: new_states,
+                    });
+                });
+            }
+        }
+
         Action::ServerSearch { query, targets } => {
             app.server_search_loading = true;
             app.server_search_status = Some("Searching...".to_string());

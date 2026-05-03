@@ -1,4 +1,4 @@
-use super::app::{App, BgResult, MailboxKind, SearchOverlayFocus, SearchResultEntry, StatusLevel};
+use super::app::{Action, App, BgResult, MailboxKind, SearchOverlayFocus, SearchResultEntry, StatusLevel};
 use crate::imap_client::{save_mailbox_states_cache, update_read_status_locally};
 
 /// Persist the account's `mailbox_states` cache to disk. Best-effort: logs
@@ -205,9 +205,15 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
         }
 
         BgResult::IndexReady { account_index, index } => {
+            let mut should_auto_fetch = false;
             if let Some(acct) = app.accounts.get_mut(account_index) {
                 acct.message_id_index = index;
                 acct.indexing = false;
+                // Trigger the per-account startup auto-fetch (#0001) iff
+                // the account has a remote source configured. Local-only
+                // accounts (no IMAP, no Graph) get nothing to fetch.
+                should_auto_fetch =
+                    acct.imap_config.is_some() || acct.graph_config.is_some();
             }
             // Clear status only when the LAST account finishes. Each
             // account spawns its own indexing thread; we want the
@@ -217,6 +223,14 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             // the final arrival mirrors the other bg-result UX.
             if !app.accounts.iter().any(|a| a.indexing) {
                 app.set_status_level("Index ready".to_string(), StatusLevel::Success);
+            }
+            // Push *after* the status update so the per-account
+            // "Quick sync (...)" message wins over "Index ready". Use
+            // `push_action` rather than `push_action_dedup` -- different
+            // `FetchAccount(idx)` values share a discriminant and would
+            // otherwise be falsely deduplicated.
+            if should_auto_fetch {
+                app.push_action(Action::FetchAccount(account_index));
             }
         }
 

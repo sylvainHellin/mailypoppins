@@ -6,7 +6,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Now
 
-- [#0001 Auto-fetch on TUI startup](docs/tickets/0001-auto-fetch-on-tui-startup.md) -- feature
 - [#0004 Fix read/unread sync behaviour](docs/tickets/0004-fix-read-unread-sync.md) -- bug
 - [#0001 hotkey to mark email as draft](docs/tickets/0001-hotkey-to-mark-email-as-draft.md) -- feature
 - [#0021 mark as draft](docs/tickets/0021-mark-as-draft.md) -- feature

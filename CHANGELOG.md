@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Features
+- **Auto-fetch on TUI startup.** Each account now runs an automatic
+  per-account quick sync at launch, so mail that arrived between TUI
+  sessions appears without pressing `s`. New `Action::FetchAccount(idx)`
+  variant performs a quick sync against a specific account using that
+  account's own `imap_config` / `graph_config` / `message_id_index` /
+  `mailbox_states`; the trigger lives in the `BgResult::IndexReady`
+  handler in `src/tui/bg.rs`, so each account fires as soon as its own
+  index lands -- a slow reconcile on one account does not block a fast
+  one. Local-only accounts (no IMAP, no Graph) are skipped. Combined
+  with #0002, the cold-start fetch is now the warm-state ~1-2 s path
+  instead of the previous 14 s reconcile, so the user sees fresh mail
+  almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
+
 ### Performance
 - **TUI cold start is now ~instant instead of ~1.4 s black screen.**
   `AccountState::new` no longer walks every mailbox directory to build
