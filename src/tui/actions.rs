@@ -18,7 +18,8 @@ use super::ui;
 
 use crate::config::resolve_sent_mailbox;
 use crate::draft::{
-    create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, parse_email_draft,
+    create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, mark_as_draft,
+    parse_email_draft,
     update_status_to_sent, validate_draft,
 };
 use crate::imap_client::{
@@ -545,6 +546,44 @@ pub(super) fn handle_action(
             } else {
                 app.set_status_level(
                     format!("Approved {}/{} drafts ({} failed)", succeeded, total, failed),
+                    StatusLevel::Warning,
+                );
+            }
+            app.selection.clear();
+            app.reload_current_mailbox();
+        }
+
+        Action::MarkDraft => {
+            if let Some(path) = app.selected_email_path() {
+                match mark_as_draft(&path) {
+                    Ok(msg) => {
+                        app.set_status(msg);
+                        app.reload_current_mailbox();
+                    }
+                    Err(e) => app
+                        .set_status_level(format!("Mark-draft failed: {e}"), StatusLevel::Error),
+                }
+            }
+        }
+
+        Action::BatchMarkDraft(paths) => {
+            let total = paths.len();
+            let mut succeeded = 0usize;
+            let mut failed = 0usize;
+            for path in &paths {
+                match mark_as_draft(path) {
+                    Ok(_) => succeeded += 1,
+                    Err(e) => {
+                        log::warn!("Mark-draft failed for {}: {e}", path.display());
+                        failed += 1;
+                    }
+                }
+            }
+            if failed == 0 {
+                app.set_status(format!("Marked {} as draft", succeeded));
+            } else {
+                app.set_status_level(
+                    format!("Marked {}/{} as draft ({} failed)", succeeded, total, failed),
                     StatusLevel::Warning,
                 );
             }

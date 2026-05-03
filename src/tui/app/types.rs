@@ -588,6 +588,11 @@ pub enum Action {
     NewDraft,
     Approve,
     BatchApprove(Vec<PathBuf>),
+    /// Demote a single approved draft back to `draft` status (#0021).
+    MarkDraft,
+    /// Batch variant for `Action::MarkDraft` -- run mark_as_draft over
+    /// the current selection.
+    BatchMarkDraft(Vec<PathBuf>),
     Archive,
     Delete,
     BatchArchive(Vec<PathBuf>),
@@ -630,6 +635,7 @@ pub enum Action {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     Approve,
+    MarkDraft,
     Archive,
     Delete,
     Send,

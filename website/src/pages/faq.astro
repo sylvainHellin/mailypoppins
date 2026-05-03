@@ -37,7 +37,8 @@ import AccordionItem from '../components/AccordionItem.astro';
             The draft workflow requires explicit approval before sending. Run
             <code>email mark-approved &lt;file&gt;</code> or press <code>A</code> in the TUI to
             change a draft's status from <code>draft</code> to <code>approved</code>. Only approved
-            emails can be sent.
+            emails can be sent. To reverse an accidental approval, press <code>D</code> in the TUI
+            (or run <code>email mark-draft &lt;file&gt;</code>) and the draft is editable again.
           </p>
         </AccordionItem>
 

@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Features
+- **Mark approved drafts back as draft.** New TUI hotkey `D` in the
+  email list demotes an approved draft back to `draft` status -- the
+  exact reverse of `A`. Useful when `A` was pressed by mistake or
+  the draft needs another round of edits before sending. Single-email
+  path is direct (no confirm, since it is non-destructive and fully
+  reversible by `A`); multi-select uses the same confirm dialog
+  pattern as `BatchApprove`. Status guard rejects `sent` / `inbox` /
+  `archived` so we never silently rewrite a synced server email.
+  CLI parity via `email mark-draft <file>`. Help overlay and website
+  pages (`commands.astro`, `faq.astro`) updated alongside.
+  Closes [#0021](docs/tickets/0021-mark-as-draft.md).
+
 - **Auto-fetch on TUI startup.** Each account now runs an automatic
   per-account quick sync at launch, so mail that arrived between TUI
   sessions appears without pressing `s`. New `Action::FetchAccount(idx)`

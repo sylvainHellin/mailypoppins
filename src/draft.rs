@@ -760,3 +760,38 @@ pub fn mark_as_approved(path: &Path) -> Result<String> {
 
     Ok(format!("Marked as approved: {}", path.display()))
 }
+
+/// Reverse of [`mark_as_approved`] -- demote a draft back to `draft` status.
+///
+/// Useful when the user pressed `A` by mistake and wants to keep editing.
+/// Only `approved` drafts can be demoted: `draft` is a no-op (returns an
+/// `Already a draft` message), and `sent` / `inbox` / `archived` files are
+/// rejected with an error -- those have left the draft pipeline and must
+/// not be silently rewritten.
+pub fn mark_as_draft(path: &Path) -> Result<String> {
+    let draft = parse_email_draft(path)?;
+
+    match draft.frontmatter.status {
+        EmailStatus::Draft => return Ok(format!("Already a draft: {}", path.display())),
+        EmailStatus::Approved => {}
+        EmailStatus::Sent => {
+            return Err(anyhow!("Cannot revert a sent email back to draft"));
+        }
+        EmailStatus::Inbox | EmailStatus::Archived => {
+            return Err(anyhow!(
+                "Only approved drafts can be marked as draft (status was {})",
+                draft.frontmatter.status
+            ));
+        }
+    }
+
+    let mut frontmatter = draft.frontmatter.clone();
+    frontmatter.status = EmailStatus::Draft;
+
+    let yaml = serde_yaml::to_string(&frontmatter)?;
+    let new_content = format!("---\n{}---\n\n{}", yaml, draft.body_markdown);
+
+    fs::write(path, new_content)?;
+
+    Ok(format!("Marked as draft: {}", path.display()))
+}

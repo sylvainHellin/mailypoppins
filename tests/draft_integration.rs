@@ -1,6 +1,6 @@
 use email::draft::{
-    create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, parse_email_draft,
-    update_status_to_sent, validate_draft,
+    create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, mark_as_draft,
+    parse_email_draft, update_status_to_sent, validate_draft,
 };
 use email::types::EmailStatus;
 use std::fs;
@@ -227,6 +227,61 @@ fn test_mark_as_approved_sent_fails() {
 
     let result = mark_as_approved(&path);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_mark_as_draft_demotes_approved() {
+    let tmp = tempdir().unwrap();
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "approved",
+    );
+
+    let msg = mark_as_draft(&path).unwrap();
+    assert!(msg.contains("Marked as draft"));
+
+    let draft = parse_email_draft(&path).unwrap();
+    assert_eq!(draft.frontmatter.status, EmailStatus::Draft);
+}
+
+#[test]
+fn test_mark_as_draft_already_draft() {
+    let tmp = tempdir().unwrap();
+    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "draft");
+
+    let msg = mark_as_draft(&path).unwrap();
+    assert!(msg.contains("Already a draft"));
+
+    // Status unchanged.
+    let draft = parse_email_draft(&path).unwrap();
+    assert_eq!(draft.frontmatter.status, EmailStatus::Draft);
+}
+
+#[test]
+fn test_mark_as_draft_sent_fails() {
+    let tmp = tempdir().unwrap();
+    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "sent");
+
+    let result = mark_as_draft(&path);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_mark_as_draft_inbox_fails() {
+    let tmp = tempdir().unwrap();
+    // write_draft expects a draft-shaped frontmatter; inbox emails are
+    // shaped slightly differently (`from:` instead of `to:`), but for
+    // mark_as_draft's status guard it's the parsed status that matters.
+    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "inbox");
+
+    let result = mark_as_draft(&path);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("Only approved drafts"), "unexpected error: {err}");
 }
 
 #[test]
