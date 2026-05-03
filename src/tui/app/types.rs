@@ -602,6 +602,11 @@ pub enum Action {
         dest_dir: PathBuf,
     },
     Fetch,
+    /// Quick-sync a specific account by index. Used for the per-account
+    /// startup auto-fetch (#0001) -- caller must guarantee that account's
+    /// `message_id_index` is ready (i.e. its `BgResult::IndexReady`
+    /// has already been handled).
+    FetchAccount(usize),
     Sync,
     ServerSearch {
         query: String,

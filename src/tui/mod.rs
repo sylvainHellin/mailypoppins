@@ -68,7 +68,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     // ~1.4 s walkdir over ~17 k frontmatter files (ticket #0003).
     // Each thread sends `BgResult::IndexReady` when done; the
     // existing `bg_count > 0` gate in `Action::Fetch` / `Action::Sync`
-    // queues sync operations until the index arrives.
+    // queues user-triggered sync operations until the index arrives.
+    // The `IndexReady` handler in `bg.rs` also pushes a per-account
+    // `Action::FetchAccount` to drive the startup auto-fetch (#0001),
+    // which staggers naturally because each account fires as soon as
+    // its own index lands.
     if !app.accounts.is_empty() {
         for (i, acct) in app.accounts.iter().enumerate() {
             let mailboxes = acct.mailboxes.clone();
