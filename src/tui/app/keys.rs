@@ -166,6 +166,10 @@ impl App {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
                             self.push_action(Action::BatchApprove(paths));
                         }
+                        ConfirmAction::MarkDraft if !self.selection.is_empty() => {
+                            let paths: Vec<PathBuf> = self.selection.drain().collect();
+                            self.push_action(Action::BatchMarkDraft(paths));
+                        }
                         ConfirmAction::Archive if !self.selection.is_empty() => {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
                             self.push_action(Action::BatchArchive(paths));
@@ -177,6 +181,7 @@ impl App {
                         _ => {
                             self.push_action(match dialog.action {
                                 ConfirmAction::Approve => Action::Approve,
+                                ConfirmAction::MarkDraft => Action::MarkDraft,
                                 ConfirmAction::Archive => Action::Archive,
                                 ConfirmAction::Delete => Action::Delete,
                                 ConfirmAction::Send => Action::Send,
@@ -367,6 +372,22 @@ impl App {
                     });
                 } else {
                     self.push_action(Action::Approve);
+                }
+            }
+            KeyCode::Char('D') => {
+                // Reverse of `A`: demote approved drafts back to `draft`
+                // status (#0021). No confirm for the single-email path --
+                // it is a non-destructive, fully reversible toggle of `A`.
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.confirm_dialog = Some(ConfirmDialog {
+                        title: format!("Mark {} drafts as draft?", count),
+                        detail: format!("{} selected drafts", count),
+                        action: ConfirmAction::MarkDraft,
+                    });
+                } else {
+                    self.push_action(Action::MarkDraft);
                 }
             }
             KeyCode::Char('x') => {

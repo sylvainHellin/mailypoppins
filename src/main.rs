@@ -77,6 +77,11 @@ enum Commands {
         /// File to mark as approved
         file: PathBuf,
     },
+    /// Demote an approved draft back to `draft` status (reverse of `mark-approved`)
+    MarkDraft {
+        /// File to mark as draft
+        file: PathBuf,
+    },
     /// Create a new email draft from template
     New {
         /// Name for the new draft file
@@ -871,6 +876,15 @@ async fn main() -> Result<()> {
                 println!("{} {}", "ℹ".blue(), msg);
             } else {
                 println!("{} {}", "✓".green(), msg);
+            }
+        }
+
+        Some(Commands::MarkDraft { file }) => {
+            let msg = mark_as_draft(&file)?;
+            if msg.starts_with("Already") {
+                println!("{} {}", "\u{2139}".blue(), msg);
+            } else {
+                println!("{} {}", "\u{2713}".green(), msg);
             }
         }
 

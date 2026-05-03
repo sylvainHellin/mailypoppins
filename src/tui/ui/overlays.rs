@@ -436,6 +436,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("d", "Delete"),
                 ("m", "Toggle read/unread"),
                 ("A", "Approve draft"),
+                ("D", "Mark approved as draft (reverse A)"),
                 ("x / X", "Send / Send all approved"),
                 ("y", "Copy file path"),
                 ("o", "Open attachment"),
