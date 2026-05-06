@@ -98,6 +98,16 @@ All notable changes to this project are documented in this file.
 - `dirs = "5"` dependency for cross-platform data-dir resolution.
 
 ### Fixed
+- **Inbox sort key now respects hours / minutes across timezones.**
+  `resolve_date` previously formatted the RFC2822 / RFC3339 timestamp
+  in the sender's local offset, so two emails on the same calendar day
+  sent from different timezones sorted by sender-local wallclock instead
+  of by actual UTC instant -- making same-day ordering look random.
+  The sort key is now normalised to UTC (`with_timezone(&chrono::Utc)`)
+  before formatting; display strings stay in sender-local time so dates
+  still match other clients. Regression test
+  `test_resolve_date_sort_normalises_timezone` covers both branches.
+  Closes [#0024](docs/tickets/0024-sorting-email-inbox.md).
 - `email config init` and `email config add-account` no longer panic with
   "Cannot start a runtime from within a runtime" when the wizard reaches
   the IMAP test, OAuth2 device-code flow, or Graph folder discovery.
