@@ -324,6 +324,70 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // normalize_address_for_smtp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_quotes_brackets_in_display_name() {
+        // Real-world TUM mailing list: square brackets are not RFC 5322 atext.
+        let raw = "CCBE_Researchers [TUBVCMS] <researchers.ccbe@ed.tum.de>";
+        let normalized = normalize_address_for_smtp(raw);
+        assert_eq!(
+            normalized,
+            "\"CCBE_Researchers [TUBVCMS]\" <researchers.ccbe@ed.tum.de>"
+        );
+        let _: lettre::message::Mailbox =
+            normalized.parse().expect("lettre must parse normalized form");
+    }
+
+    #[test]
+    fn normalize_leaves_already_quoted_name_untouched() {
+        let raw = "\"Doe, Jane\" <jane@x.com>";
+        assert_eq!(normalize_address_for_smtp(raw), raw);
+    }
+
+    #[test]
+    fn normalize_leaves_atext_only_name_untouched() {
+        let raw = "Alice Smith <alice@x.com>";
+        assert_eq!(normalize_address_for_smtp(raw), raw);
+    }
+
+    #[test]
+    fn normalize_leaves_bare_address_untouched() {
+        assert_eq!(normalize_address_for_smtp("bob@x.com"), "bob@x.com");
+    }
+
+    #[test]
+    fn normalize_quotes_unquoted_comma_in_display_name() {
+        // "Doe, Jane <s@x>" -- one entry, but the comma inside the
+        // display name was not quoted. After splitting (which will treat
+        // the whole thing as one because there's no separating comma between
+        // entries), normalization must quote it so lettre accepts it.
+        let raw = "Doe, Jane <jane@example.com>";
+        let normalized = normalize_address_for_smtp(raw);
+        assert_eq!(
+            normalized,
+            "\"Doe, Jane\" <jane@example.com>"
+        );
+        let _: lettre::message::Mailbox =
+            normalized.parse().expect("lettre must parse normalized form");
+    }
+
+    #[test]
+    fn normalize_escapes_inner_quotes_and_backslashes() {
+        let raw = "Weird \\ \"name\" <w@x.com>";
+        let normalized = normalize_address_for_smtp(raw);
+        // backslash and inner double-quotes must be escaped inside the
+        // resulting quoted-string.
+        assert_eq!(
+            normalized,
+            "\"Weird \\\\ \\\"name\\\"\" <w@x.com>"
+        );
+        let _: lettre::message::Mailbox =
+            normalized.parse().expect("lettre must parse escaped form");
+    }
+
+    // -----------------------------------------------------------------------
     // markdown_to_html edge cases
     // -----------------------------------------------------------------------
 
@@ -363,6 +427,77 @@ mod tests {
         assert!(html.contains("Original HTML"));
         assert!(html.contains("sig"));
     }
+}
+
+/// Normalize a single address so lettre's strict RFC 5322 `Mailbox` parser
+/// accepts it.
+///
+/// Many real-world senders ship `Display Name <user@host>` headers where the
+/// display name contains characters that are not RFC 5322 `atext` (e.g.
+/// `[`, `]`, `:`, `;`, `(`, `)`, `,`). The fix is to wrap such display names
+/// in a quoted-string. We only touch the display name; the address part is
+/// left as-is.
+///
+/// Examples:
+/// - `CCBE_Researchers [TUBVCMS] <r@x>` → `"CCBE_Researchers [TUBVCMS]" <r@x>`
+/// - `"Doe, Jane" <j@x>` → unchanged (already quoted)
+/// - `Alice <a@x>` → unchanged (atext-only display name)
+/// - `bob@x.com` → unchanged (no display name)
+pub fn normalize_address_for_smtp(addr: &str) -> String {
+    let trimmed = addr.trim();
+    let (open, close) = match (trimmed.rfind('<'), trimmed.rfind('>')) {
+        (Some(o), Some(c)) if o < c => (o, c),
+        _ => return trimmed.to_string(),
+    };
+
+    let name_part = trimmed[..open].trim();
+    let email_part = trimmed[open + 1..close].trim();
+
+    if name_part.is_empty() {
+        return format!("<{}>", email_part);
+    }
+
+    // Already a single quoted-string spanning the whole display name -- keep.
+    if name_part.len() >= 2 && name_part.starts_with('"') && name_part.ends_with('"') {
+        return format!("{} <{}>", name_part, email_part);
+    }
+
+    // RFC 5322 atext, plus FWS (space/tab) and `.` (allowed in dot-atom phrases).
+    fn is_atext_or_fws(c: char) -> bool {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '!' | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '/'
+                    | '='
+                    | '?'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '{'
+                    | '|'
+                    | '}'
+                    | '~'
+                    | '.'
+                    | ' '
+                    | '\t'
+            )
+    }
+
+    if name_part.chars().all(is_atext_or_fws) {
+        return format!("{} <{}>", name_part, email_part);
+    }
+
+    // Quote it. Escape backslashes and double quotes per RFC 5322 quoted-string.
+    let escaped = name_part.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\" <{}>", escaped, email_part)
 }
 
 /// Split a comma-separated address list respecting quoted display names.
@@ -415,7 +550,7 @@ pub async fn send_email(
         .as_ref()
         .unwrap_or(&smtp_config.default_from);
 
-    let from_mailbox: Mailbox = from_address
+    let from_mailbox: Mailbox = normalize_address_for_smtp(from_address)
         .parse()
         .context("Invalid 'from' email address")?;
 
@@ -474,15 +609,21 @@ pub async fn send_email(
     for (addr, role) in &recipients {
         match role {
             RecipientRole::To => {
-                let mbox: Mailbox = addr.parse().context("Invalid 'to' email address")?;
+                let mbox: Mailbox = normalize_address_for_smtp(addr)
+                    .parse()
+                    .context("Invalid 'to' email address")?;
                 builder = builder.to(mbox);
             }
             RecipientRole::Cc => {
-                let mbox: Mailbox = addr.parse().context("Invalid 'cc' email address")?;
+                let mbox: Mailbox = normalize_address_for_smtp(addr)
+                    .parse()
+                    .context("Invalid 'cc' email address")?;
                 builder = builder.cc(mbox);
             }
             RecipientRole::Bcc => {
-                let mbox: Mailbox = addr.parse().context("Invalid 'bcc' email address")?;
+                let mbox: Mailbox = normalize_address_for_smtp(addr)
+                    .parse()
+                    .context("Invalid 'bcc' email address")?;
                 builder = builder.bcc(mbox);
             }
         }
@@ -490,7 +631,7 @@ pub async fn send_email(
 
     // Add Reply-To
     if let Some(reply_to) = &draft.frontmatter.reply_to {
-        let reply_mailbox: Mailbox = reply_to
+        let reply_mailbox: Mailbox = normalize_address_for_smtp(reply_to)
             .parse()
             .context("Invalid 'reply_to' email address")?;
         builder = builder.reply_to(reply_mailbox);

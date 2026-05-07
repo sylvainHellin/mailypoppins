@@ -467,14 +467,28 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
         warnings.push("Email body is empty".to_string());
     }
 
-    // Validate email format (basic check)
-    if let Some(ref to) = draft.frontmatter.to {
-        for email in crate::send::split_addresses(to) {
-            if email.parse::<lettre::message::Mailbox>().is_err() {
-                return Err(anyhow!("Invalid email address: {}", email));
+    // Validate email format (basic check). Display names that are not raw
+    // RFC 5322 atext are auto-quoted before parsing, mirroring what
+    // `send_email` does, so the validator does not flag addresses that we
+    // know we will be able to send.
+    let validate_field = |field: Option<&String>, name: &str| -> Result<()> {
+        if let Some(value) = field {
+            for email in crate::send::split_addresses(value) {
+                let normalized = crate::send::normalize_address_for_smtp(&email);
+                if normalized.parse::<lettre::message::Mailbox>().is_err() {
+                    return Err(anyhow!(
+                        "Invalid email address in '{}': {}",
+                        name,
+                        email
+                    ));
+                }
             }
         }
-    }
+        Ok(())
+    };
+    validate_field(draft.frontmatter.to.as_ref(), "to")?;
+    validate_field(draft.frontmatter.cc.as_ref(), "cc")?;
+    validate_field(draft.frontmatter.bcc.as_ref(), "bcc")?;
 
     // Check attachments exist
     if let Some(attachments) = &draft.frontmatter.attachments {
