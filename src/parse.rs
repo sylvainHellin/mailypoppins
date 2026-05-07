@@ -280,6 +280,74 @@ pub fn attachments_dir_for(md_path: &Path) -> PathBuf {
     parent.join(format!("{}_attachments", stem))
 }
 
+/// Sanitize a Message-ID for use as a directory name.
+/// Strips angle brackets, replaces path-unsafe characters with `_`, drops control
+/// chars, trims, and truncates to 200 bytes (UTF-8-safe). If the result is empty,
+/// returns `unknown-mid-<sha256[:16]>` of the original input.
+pub fn sanitize_message_id_for_path(mid: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let trimmed = mid.trim().trim_start_matches('<').trim_end_matches('>');
+    let replaced: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '\0') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = replaced.trim().to_string();
+    if cleaned.is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(mid.as_bytes());
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+        return format!("unknown-mid-{}", hex);
+    }
+    if cleaned.len() > 200 {
+        cleaned[..floor_char_boundary(&cleaned, 200)].to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Return the per-account stable attachments directory for a Message-ID:
+/// `<account_dir>/attachments/<sanitized-message-id>/`.
+pub fn stable_attachments_dir(account_dir: &Path, message_id: &str) -> PathBuf {
+    account_dir
+        .join("attachments")
+        .join(sanitize_message_id_for_path(message_id))
+}
+
+/// Best-effort hardlink from `src` to `dst`, falling back to `fs::copy` on
+/// errors that indicate the filesystem doesn't support hardlinks for this
+/// pair (cross-device, permission, unsupported FS, etc.). If `dst` already
+/// exists, this is a no-op (caller assumes the existing entry is correct).
+pub(crate) fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::hard_link(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(src, dst)?;
+            Ok(())
+        }
+    }
+}
+
+/// Given a path to an email `.md` file at `<account>/<mailbox>/<file>.md`,
+/// return `<account>` (i.e. `parent().parent()`).
+/// Returns `None` if the path doesn't have at least two ancestors.
+pub fn account_dir_for_email(md_path: &Path) -> Option<PathBuf> {
+    md_path.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf())
+}
+
 /// List all attachment files for a given email .md file.
 /// Returns an empty Vec if the attachments directory doesn't exist or is empty.
 pub fn list_attachments(email_path: &Path) -> Result<Vec<PathBuf>> {
@@ -594,6 +662,14 @@ pub fn save_fetched_emails_with_known_ids(
             let att_dir = attachments_dir_for(&dest);
             fs::create_dir_all(&att_dir)?;
 
+            // Stable per-account mirror, keyed by Message-ID (ticket #0006).
+            // `inbox_dir` is `<account>/<mailbox>` -> account is `parent()`.
+            let stable_dir = email.message_id.as_deref().and_then(|mid| {
+                inbox_dir
+                    .parent()
+                    .map(|acct| stable_attachments_dir(acct, mid))
+            });
+
             let mut used_names: HashSet<String> = HashSet::new();
             for att in &email.attachments {
                 let mut name = att.filename.clone();
@@ -617,7 +693,18 @@ pub fn save_fetched_emails_with_known_ids(
                     }
                 }
                 used_names.insert(name.clone());
-                fs::write(att_dir.join(&name), &att.content)?;
+                let written_path = att_dir.join(&name);
+                fs::write(&written_path, &att.content)?;
+                if let Some(stable) = stable_dir.as_ref() {
+                    // Best-effort: log but don't fail the fetch on link/copy errors.
+                    if let Err(e) = link_or_copy(&written_path, &stable.join(&name)) {
+                        log::warn!(
+                            "failed to mirror attachment {} into stable store: {}",
+                            written_path.display(),
+                            e
+                        );
+                    }
+                }
                 saved_filenames.push(name);
             }
         }
@@ -955,6 +1042,120 @@ mod tests {
         let long = "a".repeat(250);
         let result = sanitize_attachment_filename(&long);
         assert!(result.len() <= 200);
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_message_id_for_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sanitize_message_id_for_path_normal() {
+        assert_eq!(
+            sanitize_message_id_for_path("<abc123@example.com>"),
+            "abc123@example.com"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_message_id_for_path_no_brackets() {
+        assert_eq!(
+            sanitize_message_id_for_path("abc123@example.com"),
+            "abc123@example.com"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_message_id_for_path_slashes_and_colons() {
+        assert_eq!(
+            sanitize_message_id_for_path("<a/b\\c:d@x.com>"),
+            "a_b_c_d@x.com"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_message_id_for_path_control_chars() {
+        assert_eq!(
+            sanitize_message_id_for_path("<a\nb\tc@x.com>"),
+            "a_b_c@x.com"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_message_id_for_path_empty_falls_back_to_hash() {
+        let result = sanitize_message_id_for_path("");
+        assert!(result.starts_with("unknown-mid-"));
+        assert_eq!(result.len(), "unknown-mid-".len() + 16);
+    }
+
+    #[test]
+    fn test_sanitize_message_id_for_path_only_brackets_falls_back() {
+        let result = sanitize_message_id_for_path("<>");
+        assert!(result.starts_with("unknown-mid-"));
+    }
+
+    #[test]
+    fn test_sanitize_message_id_for_path_truncates() {
+        let long = format!("<{}@example.com>", "a".repeat(300));
+        let result = sanitize_message_id_for_path(&long);
+        assert!(result.len() <= 200);
+    }
+
+    // -----------------------------------------------------------------------
+    // stable_attachments_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stable_attachments_dir_layout() {
+        let acct = Path::new("/data/accounts/tum");
+        assert_eq!(
+            stable_attachments_dir(acct, "<m@x.com>"),
+            PathBuf::from("/data/accounts/tum/attachments/m@x.com")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // link_or_copy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_link_or_copy_creates_link_or_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("sub/dst.bin");
+        std::fs::write(&src, b"hello").unwrap();
+        link_or_copy(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_link_or_copy_idempotent_when_dst_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dst, b"old").unwrap();
+        link_or_copy(&src, &dst).unwrap();
+        // Existing destination is left untouched.
+        assert_eq!(std::fs::read(&dst).unwrap(), b"old");
+    }
+
+    // -----------------------------------------------------------------------
+    // account_dir_for_email
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_account_dir_for_email_basic() {
+        let p = Path::new("/data/accounts/tum/inbox/2024-01-01_x.md");
+        assert_eq!(
+            account_dir_for_email(p),
+            Some(PathBuf::from("/data/accounts/tum"))
+        );
+    }
+
+    #[test]
+    fn test_account_dir_for_email_too_shallow() {
+        // Single component path has no grandparent.
+        assert_eq!(account_dir_for_email(Path::new("foo.md")), None);
     }
 
     // -----------------------------------------------------------------------
@@ -1437,6 +1638,11 @@ mod tests {
     #[test]
     fn test_save_fetched_emails_with_attachments() {
         let dir = tempfile::tempdir().unwrap();
+        // Use an account/inbox layout so the stable mirror lands inside the
+        // tempdir instead of in the parent of the bare tempdir.
+        let account_dir = dir.path().join("account");
+        let inbox_dir = account_dir.join("inbox");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
         let emails = vec![FetchedEmail {
             from: "alice@example.com".to_string(),
             to: "bob@example.com".to_string(),
@@ -1462,10 +1668,10 @@ mod tests {
             is_read: false,
         }];
 
-        save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
+        save_fetched_emails(&emails, &inbox_dir, "inbox").unwrap();
 
         // Find the md file and check its attachments dir
-        let md_files: Vec<_> = std::fs::read_dir(dir.path())
+        let md_files: Vec<_> = std::fs::read_dir(&inbox_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
@@ -1478,6 +1684,24 @@ mod tests {
         assert!(att_dir.join("image.png").exists());
         assert_eq!(
             std::fs::read(att_dir.join("report.pdf")).unwrap(),
+            b"pdf content"
+        );
+
+        // The stable per-account mirror exists for the same Message-ID and
+        // shares an inode with the per-mailbox copy (hardlink).
+        let stable = stable_attachments_dir(&account_dir, "<att@example.com>");
+        assert!(stable.is_dir(), "stable dir missing: {}", stable.display());
+        assert!(stable.join("report.pdf").exists());
+        assert!(stable.join("image.png").exists());
+        assert_eq!(
+            std::fs::read(stable.join("report.pdf")).unwrap(),
+            b"pdf content"
+        );
+        // Same inode: deleting the per-mailbox copy must leave the stable
+        // copy readable. (This is the property the bug-fix relies on.)
+        std::fs::remove_dir_all(&att_dir).unwrap();
+        assert_eq!(
+            std::fs::read(stable.join("report.pdf")).unwrap(),
             b"pdf content"
         );
     }

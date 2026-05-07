@@ -148,6 +148,51 @@ fn test_forward_with_attachments() {
     assert!(draft_content.contains("report.pdf"));
 }
 
+/// Ticket #0006: forwarding an email and then archiving the source must not
+/// invalidate the attachment paths in the draft. The forward draft should
+/// reference the per-account stable attachments mirror, which survives
+/// `move_local_email` of the source.
+#[test]
+fn test_forward_then_archive_source_keeps_attachment_resolvable() {
+    let tmp = tempdir().unwrap();
+    let account = tmp.path().join("account");
+    let inbox = account.join("inbox");
+    let archive = account.join("archive");
+    let drafts = account.join("drafts");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::create_dir_all(&archive).unwrap();
+    fs::create_dir_all(&drafts).unwrap();
+
+    let source = inbox.join("email.md");
+    let att_dir = inbox.join("email_attachments");
+    fs::create_dir_all(&att_dir).unwrap();
+    fs::write(att_dir.join("report.pdf"), b"fake pdf").unwrap();
+
+    let content = "---\nfrom: \"alice@example.com\"\nto: \"me@example.com\"\nsubject: \"With attachment\"\ndate: \"Mon, 01 Jan 2024 12:00:00 +0000\"\nmessage_id: \"<att-archive@example.com>\"\nstatus: inbox\nhas_attachments: true\nattachments:\n  - \"report.pdf\"\n---\n\nSee attached";
+    fs::write(&source, content).unwrap();
+
+    let draft_path =
+        create_forward_draft(&source, "me@example.com", Some(drafts.as_path())).unwrap();
+
+    // Move the source into archive (this also moves the per-mailbox _attachments/).
+    email::sync::move_local_email(&source, &archive, "inbox", "archived").unwrap();
+    assert!(!source.exists());
+
+    // Re-parse the draft and resolve every attachment path on disk.
+    let draft = parse_email_draft(&draft_path).unwrap();
+    let attachments = draft.frontmatter.attachments.expect("attachments");
+    assert!(!attachments.is_empty());
+    for path in &attachments {
+        assert!(
+            std::path::Path::new(path).exists(),
+            "attachment must still be readable after archive: {}",
+            path
+        );
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(bytes, b"fake pdf");
+    }
+}
+
 // -----------------------------------------------------------------------
 // Reply with companion HTML
 // -----------------------------------------------------------------------

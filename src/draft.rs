@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::config::{EmailSettings, SmtpConfig};
-use crate::parse::{attachments_dir_for, extract_email_address, slugify_sender, slugify_subject};
+use crate::parse::{
+    account_dir_for_email, attachments_dir_for, extract_email_address, link_or_copy,
+    slugify_sender, slugify_subject, stable_attachments_dir,
+};
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
 pub fn select_inbox_email(inbox_dir: &Path, prompt: &str) -> Result<PathBuf> {
@@ -259,21 +262,61 @@ pub fn create_forward_draft(
         format!("Fwd: {}", inbox.subject)
     };
 
-    // Resolve attachment paths (absolute paths to source attachment files)
+    // Resolve attachment paths. Prefer the per-account stable store keyed by
+    // Message-ID so the draft survives the source email being archived
+    // (ticket #0006). Lazy-hydrate the stable dir from the per-mailbox
+    // `_attachments/` for emails fetched before this scheme existed.
     let attachment_paths: Vec<String> = if let Some(ref filenames) = inbox.attachments {
-        let att_dir = attachments_dir_for(source_path);
+        let per_mailbox_dir = attachments_dir_for(source_path);
+        let stable_dir = match (
+            account_dir_for_email(source_path),
+            inbox.message_id.as_deref(),
+        ) {
+            (Some(acct), Some(mid)) => Some(stable_attachments_dir(&acct, mid)),
+            _ => None,
+        };
+
+        if let Some(stable) = stable_dir.as_ref() {
+            // Ensure the stable mirror exists for every named attachment.
+            // Idempotent: link_or_copy is a no-op when dst already exists.
+            if let Err(e) = fs::create_dir_all(stable) {
+                log::warn!(
+                    "failed to create stable attachments dir {}: {}",
+                    stable.display(),
+                    e
+                );
+            } else {
+                for name in filenames {
+                    let from = per_mailbox_dir.join(name);
+                    let to = stable.join(name);
+                    if from.exists() && !to.exists() {
+                        if let Err(e) = link_or_copy(&from, &to) {
+                            log::warn!(
+                                "failed to hydrate stable attachment {}: {}",
+                                to.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         filenames
             .iter()
             .filter_map(|name| {
-                let abs_path = att_dir.join(name);
-                if abs_path.exists() {
-                    abs_path
-                        .canonicalize()
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                } else {
-                    None
-                }
+                let candidate = stable_dir
+                    .as_ref()
+                    .map(|d| d.join(name))
+                    .filter(|p| p.exists())
+                    .or_else(|| {
+                        let p = per_mailbox_dir.join(name);
+                        p.exists().then_some(p)
+                    })?;
+                candidate
+                    .canonicalize()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
             })
             .collect()
     } else {
@@ -736,6 +779,123 @@ mod tests {
     fn test_resolve_drafts_dir_default_fallback() {
         let result = resolve_drafts_dir(Path::new("."), &None);
         assert_eq!(result, PathBuf::from("."));
+    }
+
+    // -----------------------------------------------------------------------
+    // create_forward_draft attachment-path resolution (ticket #0006)
+    // -----------------------------------------------------------------------
+
+    /// Helper: write a synthetic inbox email + per-mailbox `_attachments/`.
+    /// Returns the path to the .md file. Uses an `<account>/inbox/` layout so
+    /// `account_dir_for_email` resolves the per-account stable directory.
+    fn write_inbox_with_attachments(
+        account_dir: &Path,
+        message_id: &str,
+        files: &[(&str, &[u8])],
+    ) -> PathBuf {
+        let inbox = account_dir.join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        let md = inbox.join("2024-01-01-1200_alice_subj.md");
+        let mut fm = String::from("---\n");
+        fm.push_str("from: \"alice@example.com\"\n");
+        fm.push_str("to: \"me@example.com\"\n");
+        fm.push_str("subject: \"Subj\"\n");
+        fm.push_str("date: \"Mon, 01 Jan 2024 12:00:00 +0000\"\n");
+        fm.push_str(&format!("message_id: \"{}\"\n", message_id));
+        fm.push_str("status: inbox\n");
+        fm.push_str("has_attachments: true\n");
+        fm.push_str("attachments:\n");
+        for (name, _) in files {
+            fm.push_str(&format!("  - \"{}\"\n", name));
+        }
+        fm.push_str("fetched_at: \"2024-01-01T12:00:00Z\"\n");
+        fm.push_str("---\n\nHi.");
+        fs::write(&md, fm).unwrap();
+        let att_dir = crate::parse::attachments_dir_for(&md);
+        fs::create_dir_all(&att_dir).unwrap();
+        for (name, content) in files {
+            fs::write(att_dir.join(name), content).unwrap();
+        }
+        md
+    }
+
+    #[test]
+    fn test_forward_draft_uses_stable_attachment_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = tmp.path().join("account");
+        let mid = "<fwd1@example.com>";
+        let src = write_inbox_with_attachments(&acct, mid, &[("report.pdf", b"PDF")]);
+        let drafts = acct.join("drafts");
+
+        let draft_path =
+            create_forward_draft(&src, "me@example.com", Some(&drafts)).unwrap();
+        let body = fs::read_to_string(&draft_path).unwrap();
+
+        let stable = crate::parse::stable_attachments_dir(&acct, mid);
+        let stable_file = stable.join("report.pdf");
+        assert!(
+            stable_file.exists(),
+            "stable file should be hydrated: {}",
+            stable_file.display()
+        );
+        let canon = stable_file.canonicalize().unwrap();
+        assert!(
+            body.contains(canon.to_string_lossy().as_ref()),
+            "forward draft frontmatter should reference stable path; body={}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_forward_draft_survives_archive_of_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = tmp.path().join("account");
+        let mid = "<fwd2@example.com>";
+        let src = write_inbox_with_attachments(&acct, mid, &[("report.pdf", b"PDF")]);
+        let drafts = acct.join("drafts");
+        let archive = acct.join("archive");
+        fs::create_dir_all(&archive).unwrap();
+
+        let draft_path =
+            create_forward_draft(&src, "me@example.com", Some(&drafts)).unwrap();
+
+        // Move the source from inbox to archive (this also moves _attachments/).
+        crate::sync::move_local_email(&src, &archive, "inbox", "archived").unwrap();
+
+        // Re-parse the draft and verify every attachment path still exists.
+        let draft = parse_email_draft(&draft_path).unwrap();
+        let attachments = draft.frontmatter.attachments.expect("attachments");
+        assert!(!attachments.is_empty());
+        for path in &attachments {
+            assert!(
+                Path::new(path).exists(),
+                "attachment path should survive archive move: {}",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_draft_falls_back_when_no_message_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let acct = tmp.path().join("account");
+        let inbox = acct.join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        let md = inbox.join("no-mid.md");
+        let body = "---\nfrom: \"a@x.com\"\nto: \"b@x.com\"\nsubject: \"S\"\nstatus: inbox\nhas_attachments: true\nattachments:\n  - \"f.txt\"\n---\n\nHi";
+        fs::write(&md, body).unwrap();
+        let att_dir = crate::parse::attachments_dir_for(&md);
+        fs::create_dir_all(&att_dir).unwrap();
+        fs::write(att_dir.join("f.txt"), b"x").unwrap();
+        let drafts = acct.join("drafts");
+
+        // No message_id -> falls back to per-mailbox path. Should still succeed.
+        let draft_path =
+            create_forward_draft(&md, "me@example.com", Some(&drafts)).unwrap();
+        let draft = parse_email_draft(&draft_path).unwrap();
+        let attachments = draft.frontmatter.attachments.expect("attachments");
+        assert_eq!(attachments.len(), 1);
+        assert!(Path::new(&attachments[0]).exists());
     }
 }
 
