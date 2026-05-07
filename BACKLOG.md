@@ -12,7 +12,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 ## Next
 
 - [#0005 Parallel IMAP fetch per mailbox](docs/tickets/0005-parallel-imap-fetch-per-mailbox.md) -- perf
-- [#0006 Attachment paths break when source archived](docs/tickets/0006-attachment-paths-after-archive.md) -- bug
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
 - [#0009 Desktop notifications](docs/tickets/0009-desktop-notifications.md) -- feature

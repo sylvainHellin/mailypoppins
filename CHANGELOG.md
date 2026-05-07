@@ -53,6 +53,26 @@ All notable changes to this project are documented in this file.
   to a full reconcile, so other-client moves / mailbox renumbering
   remain safe. Closes [#0002](docs/tickets/0002-persist-mailbox-states.md).
 
+### Fixed
+- **Forward drafts no longer break when the source email is archived.**
+  `create_forward_draft` previously canonicalised the per-mailbox
+  `<inbox>/<stem>_attachments/<file>` paths into the draft frontmatter.
+  As soon as the source moved (manually, or via reconcile after an
+  archive on the server), the draft pointed at a path that no longer
+  existed and `email send` failed with `Failed to read attachment`.
+  Each fetched attachment is now also hardlinked into a per-account
+  stable mirror at `<account>/attachments/<sanitized-message-id>/`
+  (with a copy fallback on filesystems that disallow hardlinks).
+  Forward drafts reference the stable path, which survives any
+  subsequent inbox -> archive move. Pre-existing emails lazy-hydrate
+  the stable dir on first forward, so the fix applies to historical
+  mail without a one-shot migration. The reconcile "no longer on
+  server" branch in `src/sync.rs` cleans up the stable dir alongside
+  the per-mailbox copy. New helpers in `src/parse.rs`:
+  `sanitize_message_id_for_path`, `stable_attachments_dir`,
+  `link_or_copy`, `account_dir_for_email`. Closes
+  [#0006](docs/tickets/0006-attachment-paths-after-archive.md).
+
 ### Changed
 - **All app data moved to a single OS-conventional data directory.**
   Mail tree, drafts, contacts cache, OAuth2 tokens, and logs now live

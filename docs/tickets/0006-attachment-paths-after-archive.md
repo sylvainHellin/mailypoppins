@@ -3,9 +3,14 @@ id: 0006
 title: Attachment paths break when source email is archived
 type: bug
 priority: next
-status: open
+status: done
 created: 2026-05-01
 ---
+
+> Resolution (2026-05-06): option 2 -- per-account stable attachment
+> store at `<account>/attachments/<sanitized-message-id>/`, populated
+> via hardlink at fetch time and lazy-hydrated for pre-existing emails
+> on first forward. See `CHANGELOG.md` `[Unreleased] / Fixed` entry.
 
 `create_forward_draft` (and reply scaffolding) resolves attachment paths to absolute paths at draft creation time (`src/draft.rs:262-278`). If the source email is subsequently archived (moved from `inbox/` to `archive/`), the hardcoded paths in the draft frontmatter become stale and `send` fails with "Failed to read attachment".
 

@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::parse::{attachments_dir_for, scan_mailbox_message_ids};
+use crate::parse::{
+    account_dir_for_email, attachments_dir_for, scan_mailbox_message_ids, stable_attachments_dir,
+};
 
 /// Scan a directory for .md files and extract their Message-IDs from frontmatter.
 /// Returns a map from message_id to file path.
@@ -127,6 +129,15 @@ pub fn reconcile_local_files(
                 let att_dir = attachments_dir_for(file_path);
                 if att_dir.is_dir() {
                     fs::remove_dir_all(&att_dir)?;
+                }
+                // Also drop the per-account stable mirror for this Message-ID
+                // (ticket #0006). Best-effort -- nothing else references it once
+                // the email is gone from every synced mailbox.
+                if let Some(account_dir) = account_dir_for_email(file_path) {
+                    let stable = stable_attachments_dir(&account_dir, mid);
+                    if stable.is_dir() {
+                        let _ = fs::remove_dir_all(&stable);
+                    }
                 }
                 info!("Removed (no longer on server): {}", file_path.display());
                 removed += 1;
@@ -357,6 +368,47 @@ mod tests {
         assert_eq!(moved, 0);
         assert_eq!(removed, 1);
         assert!(!inbox_dir.path().join("email.md").exists());
+    }
+
+    #[test]
+    fn test_reconcile_remove_clears_stable_attachments_dir() {
+        // Lay out a real account/inbox and a stable attachments dir for the
+        // gone Message-ID. Reconcile must drop the stable dir too.
+        let base = tempfile::tempdir().unwrap();
+        let acct = base.path().join("account");
+        let inbox_dir = acct.join("inbox");
+        let archive_dir = acct.join("archive");
+        std::fs::create_dir_all(&inbox_dir).unwrap();
+        std::fs::create_dir_all(&archive_dir).unwrap();
+
+        let mid = "<gone@x.com>";
+        let content = format!(
+            "---\nmessage_id: \"{}\"\nstatus: inbox\n---\n\nBody",
+            mid
+        );
+        let md = inbox_dir.join("email.md");
+        std::fs::write(&md, content).unwrap();
+
+        let stable = stable_attachments_dir(&acct, mid);
+        std::fs::create_dir_all(&stable).unwrap();
+        std::fs::write(stable.join("x.bin"), b"data").unwrap();
+
+        let mut server_ids = HashMap::new();
+        server_ids.insert("INBOX".to_string(), std::collections::HashSet::new());
+        server_ids.insert("Archive".to_string(), std::collections::HashSet::new());
+
+        let mut local_dirs = HashMap::new();
+        local_dirs.insert("INBOX".to_string(), inbox_dir.clone());
+        local_dirs.insert("Archive".to_string(), archive_dir.clone());
+
+        let (_moved, removed) = reconcile_local_files(&server_ids, &local_dirs).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!md.exists());
+        assert!(
+            !stable.exists(),
+            "stable attachments dir should be removed: {}",
+            stable.display()
+        );
     }
 
     #[test]

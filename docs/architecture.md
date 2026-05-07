@@ -17,7 +17,7 @@ Single crate, library + binary. All logic lives in `src/lib.rs` modules so the T
 - **Multi-account.** Config uses a `[[accounts]]` array. Each account has independent IMAP/SMTP/directories/signatures. The TUI shows one account at a time, switching via backtick or Ctrl+1-9. All accounts are watched for new mail simultaneously. CLI commands target an account via `--account` (defaults to first). Secret keys are namespaced: `smtp-password-{name}`, `imap-password-{name}`.
 - **TUI follows The Elm Architecture (TEA).** `App::update()` is a pure state machine (`Message -> State`). Side effects (IMAP, SMTP, filesystem) are dispatched as `Action` variants and executed in `tui/actions.rs::handle_action()`. Background operations run on threads and report back via `mpsc` as `BgResult` variants (each tagged with `account_index`). Mutations (archive, delete) are optimistic: local state updates immediately, server follows async.
 - **Account state proxy pattern.** `App` holds a `Vec<AccountState>` plus top-level proxy fields (mailboxes, list_index, etc.) that mirror the active account. `save_to_account()` / `load_from_account()` sync state on account switch. This avoids refactoring every key handler to use indirect access.
-- **Emails are files.** Each email is a `.md` file with YAML frontmatter. Incoming HTML bodies are saved as a companion `.html` file. Attachments go in a `<stem>_attachments/` directory alongside the `.md`. The three companion files (`.md`, `.html`, `_attachments/`) are always moved/deleted together.
+- **Emails are files.** Each email is a `.md` file with YAML frontmatter. Incoming HTML bodies are saved as a companion `.html` file. Attachments go in a `<stem>_attachments/` directory alongside the `.md`. The three companion files (`.md`, `.html`, `_attachments/`) are always moved/deleted together. In addition, every fetched attachment is hardlinked into a per-account stable mirror at `<account_dir>/attachments/<sanitized-message-id>/<file>` (copy fallback on filesystems that disallow hardlinks). The mirror exists so forward drafts keep working when the source email is later archived; it is removed only when the email disappears from every synced mailbox. See [tickets/0006-attachment-paths-after-archive.md](tickets/0006-attachment-paths-after-archive.md).
 - **IMAP uses one session per operation.** `sync_mailboxes()` opens one TLS connection for the entire sync. A two-pass fetch (headers first, full body only for new UIDs) minimizes bandwidth. Core functions have `_on_session` variants for session reuse, plus thin wrappers for standalone use. IMAP supports both implicit TLS (port 993) and STARTTLS (any other port, e.g. 1143 for Proton Bridge). The `ImapStream` wrapper injects a fake greeting for STARTTLS connections since `async_imap` expects one.
 - **Sending is per-recipient.** Each recipient gets an individual SMTP envelope, while the visible To/Cc headers are preserved for all. This gives per-recipient success/failure tracking. After a successful send, the raw RFC 822 message is appended to the server Sent folder (best-effort, non-fatal on failure). SMTP uses implicit TLS for port 465, STARTTLS for other ports. Both paths support `accept_invalid_certs` for self-signed certificates (e.g. Proton Bridge).
 - **Two transports.** IMAP/SMTP for password and OAuth2-XOAUTH2 accounts; Microsoft Graph REST for tenants that block IMAP/SMTP. TUI actions branch on `app.is_graph()`. See [auth.md](auth.md).
@@ -33,7 +33,7 @@ Single crate, library + binary. All logic lives in `src/lib.rs` modules so the T
 | `src/graph.rs` | Microsoft Graph REST client: list folders, fetch / sync / send / archive / delete / mark-read / search. Used when `auth_method = "graph"`. |
 | `src/contacts/` + `src/contacts_cmd.rs` | Contact mining from local mail, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `email contacts {rebuild,stats,list}`. |
 | `src/config_cmd/` | Config subcommands: init wizard, add-account, show, set-password, oauth2-login, reset-secrets, path |
-| `src/parse.rs` | RFC822 parsing, saving emails to disk, attachment extraction, `open_file_with_system()`, `attachments_dir_for()`, `ensure_utf8_charset()` |
+| `src/parse.rs` | RFC822 parsing, saving emails to disk, attachment extraction, `open_file_with_system()`, `attachments_dir_for()`, `stable_attachments_dir()`, `link_or_copy()`, `account_dir_for_email()`, `ensure_utf8_charset()` |
 | `src/draft.rs` | Draft parsing/validation, reply/forward creation, status transitions |
 | `src/send.rs` | `markdown_to_html`, per-recipient `send_email`, IMAP APPEND to Sent |
 | `src/sync.rs` | Local file scanning, mailbox dir resolution, reconciliation helpers |
@@ -105,6 +105,7 @@ Layout under the data dir:
 ```
 <data_dir>/
   accounts/<name>/{inbox,archive,sent,drafts,<extra_slug>}/
+  accounts/<name>/attachments/<sanitized-message-id>/   # stable hardlink mirror (#0006)
   accounts/<name>/contacts-cache.json
   tokens/<name>.enc       # OAuth2 / Graph encrypted refresh tokens
   logs/mailypoppins-YYYY-MM-DD.log
