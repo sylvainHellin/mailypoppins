@@ -246,10 +246,16 @@ pub(super) fn handle_action(
                                         send_result.results.len()
                                     ))
                                 } else {
+                                    let failed: Vec<String> = send_result
+                                        .failed()
+                                        .iter()
+                                        .map(|r| r.address.clone())
+                                        .collect();
                                     Ok(format!(
-                                        "Partial: {}/{} succeeded",
+                                        "Partial: {}/{} succeeded -- failed: {}",
                                         send_result.succeeded().len(),
-                                        send_result.results.len()
+                                        send_result.results.len(),
+                                        failed.join(", ")
                                     ))
                                 }
                             } else {

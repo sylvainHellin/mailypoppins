@@ -374,6 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn normalize_extracts_email_via_mailbox_for_envelope() {
+        // Regression for "Partial: 1/2 succeeded": send_email's per-recipient
+        // RCPT TO loop parses the address again to extract `mbox.email` for
+        // the SMTP envelope. If we forget to normalize there, lettre rejects
+        // bracketed display names and that recipient silently fails while
+        // the other one goes through.
+        let raw = "CCBE_Researchers [TUBVCMS] <researchers.ccbe@ed.tum.de>";
+        let mbox: lettre::message::Mailbox = normalize_address_for_smtp(raw)
+            .parse()
+            .expect("lettre must parse normalized form for envelope");
+        assert_eq!(mbox.email.to_string(), "researchers.ccbe@ed.tum.de");
+    }
+
+    #[test]
     fn normalize_escapes_inner_quotes_and_backslashes() {
         let raw = "Weird \\ \"name\" <w@x.com>";
         let normalized = normalize_address_for_smtp(raw);
@@ -762,7 +776,7 @@ pub async fn send_email(
     let mut results = Vec::with_capacity(recipients.len());
 
     for (addr, role) in &recipients {
-        let rcpt_addr: lettre::Address = match addr.parse::<Mailbox>() {
+        let rcpt_addr: lettre::Address = match normalize_address_for_smtp(addr).parse::<Mailbox>() {
             Ok(mbox) => mbox.email,
             Err(e) => {
                 let err_msg = format!("Invalid address '{}': {}", addr, e);
