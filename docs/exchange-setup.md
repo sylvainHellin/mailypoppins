@@ -67,7 +67,7 @@ Add to `~/.config/email/config.toml`:
 
 ```toml
 [[accounts]]
-name = "hines"
+name = "work"
 default_from = "user@example.com"
 auth_method = "oauth2"
 
@@ -86,7 +86,7 @@ port = 993
 username = "user@example.com"
 
 [accounts.directories]
-root = "~/notes/email/hines"
+root = "~/notes/email/work"
 drafts = "drafts"
 
 [accounts.mailboxes.inbox]
@@ -104,7 +104,7 @@ local = "sent-items"
 
 Then run the device code flow to acquire a token:
 ```
-email config oauth2-login --account hines
+email config oauth2-login --account work
 ```
 
 ## Step 6: Authenticate
@@ -128,7 +128,7 @@ The `IMAP.AccessAsUser.All` permission often requires admin consent. Request you
 ### Token expired
 If you see "OAuth2 token expired" errors, run:
 ```
-email config oauth2-login --account hines
+email config oauth2-login --account work
 ```
 to re-authenticate. Refresh tokens expire after ~90 days of inactivity.
 

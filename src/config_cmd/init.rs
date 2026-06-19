@@ -792,7 +792,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     println!();
 
     // -- Account name
-    let account_name = prompt_input("Account name (unique slug, e.g. 'exchange', 'hines')", "exchange")?;
+    let account_name = prompt_input("Account name (unique slug, e.g. 'exchange', 'work')", "exchange")?;
     println!();
 
     // -- Email address

@@ -181,7 +181,7 @@ fn test_build_add_account_toml_appended_is_valid() {
 #[test]
 fn test_build_init_toml_oauth2_exchange() {
     let toml_str = build_init_toml(
-        "hines", "user@example.com",
+        "work", "user@example.com",
         "smtp.office365.com", 587, "user@example.com", false,
         "outlook.office365.com", 993, "",
         "INBOX",
@@ -202,7 +202,7 @@ fn test_build_init_toml_oauth2_exchange() {
 
     let config: crate::config::GlobalConfig = toml::from_str(&toml_str)
         .expect("OAuth2 TOML should be parseable");
-    assert_eq!(config.accounts[0].name, "hines");
+    assert_eq!(config.accounts[0].name, "work");
     assert_eq!(config.accounts[0].auth_method, crate::config::AuthMethod::OAuth2);
     let oauth2 = config.accounts[0].oauth2.as_ref().unwrap();
     assert_eq!(oauth2.client_id, "test-client-id");

@@ -16,6 +16,7 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
 - [#0009 Desktop notifications](docs/tickets/0009-desktop-notifications.md) -- feature
 - [#0023 enable theme config](docs/tickets/0023-enable-theme-config.md) -- feature
+- [#0025 access detailed logs](docs/tickets/0025-access-detailed-logs.md) -- feature
 
 ## Later
 

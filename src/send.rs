@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn normalize_quotes_unquoted_comma_in_display_name() {
-        // "Doe, Jane <s@x>" -- one entry, but the comma inside the
+        // "Doe, Jane <j@x>" -- one entry, but the comma inside the
         // display name was not quoted. After splitting (which will treat
         // the whole thing as one because there's no separating comma between
         // entries), normalization must quote it so lettre accepts it.

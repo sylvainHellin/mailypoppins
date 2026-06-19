@@ -2010,9 +2010,9 @@ mod tests {
     fn normalize_strips_trailing_comma_and_space() {
         // The exact case the user reported: wizard leaves `, ` dangling after
         // an accepted suggestion.
-        let input = "\"Doe, Jane\" <user@example.com>, ";
+        let input = "\"Doe, Jane\" <jane@example.com>, ";
         let out = normalize_recipient_field(input);
-        assert_eq!(out, "\"Doe, Jane\" <user@example.com>");
+        assert_eq!(out, "\"Doe, Jane\" <jane@example.com>");
     }
 
     #[test]
@@ -2054,7 +2054,7 @@ mod tests {
     #[test]
     fn normalized_field_parses_cleanly_with_mailparse() {
         let cases = [
-            "\"Doe, Jane\" <user@example.com>, ",
+            "\"Doe, Jane\" <jane@example.com>, ",
             "alice@x.com, bob@x.com, ",
             "Alice <alice@x.com>,",
         ];

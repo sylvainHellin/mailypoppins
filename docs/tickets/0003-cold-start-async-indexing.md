@@ -7,7 +7,7 @@ status: done
 created: 2026-05-01
 ---
 
-`AccountState::new()` blocks ~1.4 s scanning ~17k frontmatter files (TUM 1183 ms / Proton 234 ms / Hines 1 ms) on TUI launch. This shows as a black screen between command and first frame.
+`AccountState::new()` blocks ~1.4 s scanning ~17k frontmatter files (TUM 1183 ms / Proton 234 ms / Work 1 ms) on TUI launch. This shows as a black screen between command and first frame.
 
 ## Fix
 
