@@ -86,17 +86,9 @@ fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
     let json = serde_json::to_vec(cache).context("Failed to serialize token cache")?;
     let blob = crate::secrets::encrypt_blob(&json)
         .context("Failed to encrypt token cache")?;
-    // Atomic write with 0600 mode.
-    let tmp = path.with_extension("enc.tmp");
-    fs::write(&tmp, &blob)
-        .with_context(|| format!("Failed to write token cache: {}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-    }
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
+    // Atomic write, created with 0600 from the start (no umask window).
+    crate::secrets::write_secret_file_atomic(&path, &blob)
+        .with_context(|| format!("Failed to write token cache: {}", path.display()))?;
     debug!("Token cache saved: {}", path.display());
     Ok(())
 }

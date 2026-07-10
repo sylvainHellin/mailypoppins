@@ -34,7 +34,7 @@ Only INBOX and Archive participate in server-driven reconciliation (move/delete 
 
 ## Self-signed certificates need `accept_invalid_certs` per account
 
-Proton Bridge ships with a self-signed cert. Both IMAP and SMTP code paths honour an `accept_invalid_certs` flag per account. Don't disable cert validation globally -- keep it per-account.
+Proton Bridge ships with a self-signed cert. Both IMAP and SMTP code paths honour an `accept_invalid_certs` flag per account. Don't disable cert validation globally -- keep it per-account. Since the S2 hardening, the flag is additionally restricted to loopback hosts (`localhost` / `127.0.0.0/8` / `::1`) via `ensure_invalid_certs_allowed` in `src/config.rs`; setting it for a remote host is a hard error at connect time.
 
 ## Inline images count as attachments
 

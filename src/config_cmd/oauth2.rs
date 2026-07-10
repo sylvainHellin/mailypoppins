@@ -209,6 +209,9 @@ async fn test_graph_api(access_token: &str) -> Result<(String, String)> {
 fn test_smtp_oauth2(smtp_config: &crate::config::SmtpConfig) -> Result<()> {
     use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 
+    if smtp_config.accept_invalid_certs {
+        crate::config::ensure_invalid_certs_allowed(&smtp_config.host)?;
+    }
     let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
 
     let mailer = if smtp_config.port == 465 {

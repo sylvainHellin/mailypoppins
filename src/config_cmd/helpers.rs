@@ -73,6 +73,9 @@ pub(crate) fn select_mailbox(prompt: &str, options: &[String], preferred: &[&str
 pub(crate) fn test_smtp_connection(host: &str, port: u16, username: &str, password: &str, accept_invalid_certs: bool) -> Result<()> {
     use lettre::transport::smtp::authentication::Credentials;
 
+    if accept_invalid_certs {
+        crate::config::ensure_invalid_certs_allowed(host)?;
+    }
     let creds = Credentials::new(username.to_string(), password.to_string());
 
     let mailer = if port == 465 {

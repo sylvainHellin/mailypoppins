@@ -235,6 +235,42 @@ impl GraphConfig {
 // by `GlobalConfig::secrets_backend`. Callers must call
 // `init_secrets_backend()` once at startup.
 
+// ---------------------------------------------------------------------------
+// TLS certificate-validation opt-out guard
+// ---------------------------------------------------------------------------
+
+/// True if `host` is a loopback destination: `localhost`, 127.0.0.0/8 or ::1.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Refuse to disable TLS certificate validation for non-loopback hosts.
+///
+/// `accept_invalid_certs` exists for Proton Mail Bridge, which always listens
+/// on loopback with a self-signed cert. For any remote host, skipping cert
+/// validation hands credentials to an active man-in-the-middle, so we refuse
+/// instead of connecting insecurely.
+pub fn ensure_invalid_certs_allowed(host: &str) -> Result<()> {
+    if is_loopback_host(host) {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "accept_invalid_certs is enabled for non-loopback host '{}'. \
+         Disabling TLS certificate validation for a remote server exposes your \
+         credentials to man-in-the-middle attacks, so this is only allowed for \
+         loopback hosts (localhost / 127.x.x.x / ::1), e.g. Proton Mail Bridge. \
+         Remove `accept_invalid_certs = true` from this account in config.toml, \
+         or reach the server through a loopback tunnel.",
+        host
+    ))
+}
+
 pub fn get_secret(key: &str) -> Result<String> {
     crate::secrets::get(key)
 }
@@ -1180,6 +1216,35 @@ server = "Newsletters"
     fn test_default_account_empty() {
         let config = GlobalConfig::default();
         assert!(default_account(&config).is_none());
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        // Loopback: localhost, 127.0.0.0/8, ::1
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.1.2.3"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(is_loopback_host(" localhost "));
+
+        // Not loopback
+        assert!(!is_loopback_host("smtp.example.com"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("128.0.0.1"));
+        assert!(!is_loopback_host("::2"));
+        assert!(!is_loopback_host("localhost.evil.com"));
+        assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn test_ensure_invalid_certs_allowed() {
+        assert!(ensure_invalid_certs_allowed("127.0.0.1").is_ok());
+        assert!(ensure_invalid_certs_allowed("localhost").is_ok());
+        let err = ensure_invalid_certs_allowed("imap.example.com").unwrap_err();
+        assert!(err.to_string().contains("accept_invalid_certs"));
+        assert!(err.to_string().contains("imap.example.com"));
     }
 
 }

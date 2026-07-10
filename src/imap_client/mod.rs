@@ -174,6 +174,10 @@ pub async fn open_imap_session(imap_config: &ImapConfig) -> anyhow::Result<ImapS
     let addr = format!("{}:{}", imap_config.host, imap_config.port);
     let mut span = TimingSpan::with_context("open_imap_session", addr.clone());
 
+    if imap_config.accept_invalid_certs {
+        crate::config::ensure_invalid_certs_allowed(&imap_config.host)?;
+    }
+
     let tls = async_native_tls::TlsConnector::new()
         .danger_accept_invalid_certs(imap_config.accept_invalid_certs);
 

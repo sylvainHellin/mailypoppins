@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Security
+- **`accept_invalid_certs` is now restricted to loopback hosts.** The
+  per-account cert-validation opt-out exists for Proton Mail Bridge,
+  which always listens on `127.0.0.1` with a self-signed cert. It was
+  previously honoured for *any* host, so a config pointing at a remote
+  server with `accept_invalid_certs = true` would silently hand
+  credentials to an active man-in-the-middle. All four TLS paths (IMAP
+  connect, SMTP send, config-wizard connection tests, OAuth2 SMTP test)
+  now call a shared guard (`ensure_invalid_certs_allowed` in
+  `src/config.rs`) that refuses with a clear error when the flag is set
+  for a non-loopback host (anything other than `localhost`, `127.0.0.0/8`
+  or `::1`). Loopback behavior is unchanged. There is no override: no
+  documented setup needs invalid certs on a remote host, and a user who
+  genuinely does can tunnel through loopback.
+
+- **Secret files are created with mode 0600 atomically.** The encrypted
+  secrets store (`secrets.enc`) and OAuth2 token caches (`tokens/*.enc`)
+  were written first and chmod'd 0600 afterwards, leaving a brief window
+  where umask-default (often world-readable) permissions applied. A new
+  shared helper (`write_secret_file_atomic` in `src/secrets.rs`) opens
+  the temp file with `create_new(true)` and `mode(0o600)` so the
+  restrictive mode holds from the very first byte, then renames over the
+  destination -- overwrite semantics and crash-safe atomic replacement
+  are preserved, and a stale temp file from a crashed run is cleaned up
+  instead of blocking the write.
+
 - **Saved HTML email bodies now carry a restrictive Content-Security-Policy.**
   Fetched HTML companions (`.html` next to the `.md`) are opened via
   `file://` in the default browser (`b` in the TUI), so a hostile email

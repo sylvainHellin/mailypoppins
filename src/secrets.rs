@@ -204,6 +204,48 @@ fn encrypt_with_key(key: &DerivedKey, plaintext: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Atomically write `data` to `path` with owner-only permissions.
+///
+/// The file is *created* with mode 0600 (unix), so there is no window where
+/// umask-default permissions apply (chmod-after-write leaks that window).
+/// Writes to a `.tmp` sibling then renames over the destination, preserving
+/// overwrite semantics for existing files.
+pub fn write_secret_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let tmp = path.with_extension("enc.tmp");
+    // `create_new(true)` fails if the tmp file exists; remove any stale one
+    // left behind by a previous crashed run.
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow!(e)).with_context(|| {
+                format!("Failed to remove stale temp file: {}", tmp.display())
+            })
+        }
+    }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(&tmp)
+        .with_context(|| format!("Failed to create secret temp file: {}", tmp.display()))?;
+    file.write_all(data)
+        .with_context(|| format!("Failed to write secret file: {}", tmp.display()))?;
+    drop(file);
+
+    fs::rename(&tmp, path).with_context(|| {
+        format!("Failed to rename {} -> {}", tmp.display(), path.display())
+    })?;
+    Ok(())
+}
+
 fn decrypt_with_key(key: &DerivedKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
     if ciphertext.len() < HEADER_LEN {
         return Err(anyhow!("secrets blob too short"));
@@ -312,22 +354,8 @@ impl EncryptedFileBackend {
         let plaintext = toml::to_string(&state.file)
             .context("Failed to serialize secrets to TOML")?;
         let blob = encrypt_with_key(&state.key, plaintext.as_bytes())?;
-        // Best-effort atomic write: write to tmp then rename.
-        let tmp = self.path.with_extension("enc.tmp");
-        fs::write(&tmp, &blob)
-            .with_context(|| format!("Failed to write secrets file: {}", tmp.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-        }
-        fs::rename(&tmp, &self.path).with_context(|| {
-            format!(
-                "Failed to rename {} -> {}",
-                tmp.display(),
-                self.path.display()
-            )
-        })?;
+        // Atomic write, created with 0600 from the start (no umask window).
+        write_secret_file_atomic(&self.path, &blob)?;
         // Drop our copy of the TOML plaintext.
         let mut s = plaintext.into_bytes();
         s.zeroize();
@@ -561,6 +589,32 @@ mod tests {
         assert!(bytes.len() > HEADER_LEN);
         assert_eq!(&bytes[..MAGIC.len()], MAGIC);
         assert_eq!(bytes[MAGIC.len()], VERSION);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_atomic_creates_with_0600_and_overwrites() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("secret.enc");
+
+        write_secret_file_atomic(&path, b"first").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret file should be created with mode 0600");
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+
+        // Overwrite semantics preserved for existing destination files.
+        write_secret_file_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // A stale tmp file from a crashed run must not block the write.
+        let tmp = path.with_extension("enc.tmp");
+        fs::write(&tmp, b"stale").unwrap();
+        write_secret_file_atomic(&path, b"third").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"third");
+        assert!(!tmp.exists(), "tmp file should be renamed away");
     }
 
     #[cfg(unix)]

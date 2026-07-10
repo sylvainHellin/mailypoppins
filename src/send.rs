@@ -734,6 +734,9 @@ pub async fn send_email(
         .email;
 
     // Create SMTP transport (branching on auth method)
+    if smtp_config.accept_invalid_certs {
+        crate::config::ensure_invalid_certs_allowed(&smtp_config.host)?;
+    }
     let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
 
     let mailer: AsyncSmtpTransport<Tokio1Executor> = if smtp_config.port == 465 {
