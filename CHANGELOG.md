@@ -11,7 +11,7 @@ All notable changes to this project are documented in this file.
   could previously run scripts and load remote tracking pixels. At save
   time we now inject
   `<meta http-equiv="Content-Security-Policy" content="script-src 'none';
-  connect-src 'none'; img-src data: cid: file:">` into the HTML head
+  connect-src 'none'; img-src data: cid: file:">` into the HTML
   (`inject_csp_meta` in `src/parse.rs`): scripts and script-initiated
   network access are blocked, and remote (http/https) images -- i.e.
   tracking pixels -- are blocked by default. `file:` stays allowed for
@@ -24,6 +24,22 @@ All notable changes to this project are documented in this file.
   config opt-out for remote images yet: the save path does not currently
   receive the global config, so plumbing it through would touch four
   call sites -- deferred until someone actually wants remote images.
+
+  *Hardened after security review:* the initial implementation searched
+  for the first `<head>`/`<html>` in a lowercased copy of the HTML.
+  Two blockers: (1) a fake head hidden in a comment
+  (`<!--<head>-->`) or attribute value lured the tag to a spot the
+  browser never parses as head content, fully neutralizing the CSP;
+  (2) byte offsets computed on `to_lowercase()` output misalign in the
+  original for characters like `İ` (U+0130, 2 bytes → 3 bytes), so a
+  crafted email could panic the sync on a non-char-boundary slice. The
+  tag is now *prepended* at the very start of the document (after a
+  leading doctype) -- the HTML parser hoists an early `<meta>` into the
+  implicitly created `<head>` before any attacker bytes are parsed, so
+  no search and no offset math on transformed strings. The same
+  Unicode-offset fix was applied to `ensure_utf8_charset` (worst case
+  there was mojibake or the same panic). Regression tests cover
+  comment-fake-head, attribute-fake-head, and the `İ` expansion case.
 
 ### Features
 - **Mark approved drafts back as draft.** New TUI hotkey `D` in the
