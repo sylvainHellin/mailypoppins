@@ -680,19 +680,29 @@ pub fn scan_existing_message_ids(dir: &Path) -> Result<HashSet<String>> {
 
 pub fn save_fetched_emails(emails: &[FetchedEmail], inbox_dir: &Path, status: &str) -> Result<(usize, usize)> {
     let mut existing_ids = scan_existing_message_ids(inbox_dir)?;
-    save_fetched_emails_with_known_ids(emails, inbox_dir, status, &mut existing_ids)
+    let (saved, skipped, _paths) =
+        save_fetched_emails_with_known_ids(emails, inbox_dir, status, &mut existing_ids)?;
+    Ok((saved, skipped))
 }
 
+/// `(message_id, path)` for each email written by `save_fetched_emails_with_known_ids`.
+pub type SavedEmailPaths = Vec<(Option<String>, PathBuf)>;
+
+/// Save fetched emails, skipping any whose message_id is already in `existing_ids`.
+/// Returns `(saved, skipped, saved_paths)` where `saved_paths` contains the
+/// destination path of every email actually written (so callers can update
+/// their indexes without re-scanning the directory).
 pub fn save_fetched_emails_with_known_ids(
     emails: &[FetchedEmail],
     inbox_dir: &Path,
     status: &str,
     existing_ids: &mut HashSet<String>,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, SavedEmailPaths)> {
     fs::create_dir_all(inbox_dir)?;
 
     let mut saved = 0;
     let mut skipped = 0;
+    let mut saved_paths: SavedEmailPaths = Vec::new();
 
     for email in emails {
         // Skip duplicates by message_id
@@ -829,10 +839,11 @@ pub fn save_fetched_emails_with_known_ids(
             existing_ids.insert(mid.clone());
         }
 
+        saved_paths.push((email.message_id.clone(), dest));
         saved += 1;
     }
 
-    Ok((saved, skipped))
+    Ok((saved, skipped, saved_paths))
 }
 
 /// Remove duplicate emails in a directory by message_id.

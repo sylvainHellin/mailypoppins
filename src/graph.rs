@@ -601,7 +601,7 @@ pub async fn sync_mailboxes_graph(
                             &target.status,
                             &mut global_known_ids,
                         ) {
-                            Ok((saved, dup)) => {
+                            Ok((saved, dup, _saved_paths)) => {
                                 total_saved += saved;
                                 total_skipped += dup;
                                 // Collect fresh observations

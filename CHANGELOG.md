@@ -93,6 +93,18 @@ All notable changes to this project are documented in this file.
   almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
 
 ### Performance
+- **Saving fetched emails no longer triggers a full-directory re-scan per
+  new email.** `save_fetched_emails_with_known_ids` now returns the
+  `(message_id, path)` of every file it writes, and `sync_mailboxes`
+  updates its in-memory index directly from those paths instead of
+  re-walking the whole mailbox directory and substring-matching each
+  Message-ID against full file contents (previously O(new_emails ×
+  files), and a Message-ID quoted in another email's body could
+  false-match). The TUI search-result save path uses the returned path
+  too; its duplicate-hit fallback now looks up the Message-ID in
+  frontmatter only (via `scan_mailbox_message_ids`) rather than
+  substring-matching whole files. Both `find_file_by_message_id*`
+  helpers are deleted. The Graph sync path never had this re-scan.
 - **TUI cold start is now ~instant instead of ~1.4 s black screen.**
   `AccountState::new` no longer walks every mailbox directory to build
   the in-memory `message_id_index` synchronously. The scan is extracted

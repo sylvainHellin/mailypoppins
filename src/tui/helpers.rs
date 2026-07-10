@@ -531,28 +531,33 @@ pub(super) fn ensure_search_result_saved(app: &mut App) -> Option<PathBuf> {
         &status,
         &mut known_ids,
     ) {
-        Ok((saved, _skipped)) => {
+        Ok((saved, _skipped, saved_paths)) => {
             if saved > 0 {
-                if let Some(ref mid) = message_id {
-                    if let Some(path) = find_file_by_message_id(&save_dir, mid) {
-                        let result = app.server_search_results.get_mut(idx)?;
-                        result.saved_path = Some(path.clone());
-                        if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
-                            app.invalidate_cache_idx(cache_idx);
-                        }
-                        return Some(path);
+                if let Some((_mid, path)) = saved_paths.into_iter().next() {
+                    let result = app.server_search_results.get_mut(idx)?;
+                    result.saved_path = Some(path.clone());
+                    if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
+                        app.invalidate_cache_idx(cache_idx);
                     }
+                    return Some(path);
                 }
                 if let Some(cache_idx) = app.mailbox_index_for_dir(&save_dir) {
                     app.invalidate_cache_idx(cache_idx);
                 }
                 None
             } else {
+                // Skipped as duplicate: the email already exists on disk, so no
+                // path was returned. Look it up by message_id in frontmatter
+                // (never by whole-file substring, which could false-match an
+                // ID quoted in another email's body).
                 if let Some(ref mid) = message_id {
-                    if let Some(path) = find_file_by_message_id(&save_dir, mid) {
-                        let result = app.server_search_results.get_mut(idx)?;
-                        result.saved_path = Some(path.clone());
-                        return Some(path);
+                    if let Ok(ids) = crate::parse::scan_mailbox_message_ids(&save_dir) {
+                        if let Some(path) = ids.get(mid) {
+                            let path = path.clone();
+                            let result = app.server_search_results.get_mut(idx)?;
+                            result.saved_path = Some(path.clone());
+                            return Some(path);
+                        }
                     }
                 }
                 None
@@ -560,18 +565,4 @@ pub(super) fn ensure_search_result_saved(app: &mut App) -> Option<PathBuf> {
         }
         Err(_) => None,
     }
-}
-
-fn find_file_by_message_id(dir: &Path, message_id: &str) -> Option<PathBuf> {
-    let walker = walkdir::WalkDir::new(dir).max_depth(1);
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
-        if entry.path().extension().is_some_and(|ext| ext == "md") {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if content.contains(message_id) {
-                    return Some(entry.path().to_path_buf());
-                }
-            }
-        }
-    }
-    None
 }

@@ -299,7 +299,7 @@ pub async fn sync_mailboxes(
 
                     total_skipped += skipped;
                     if !new_emails.is_empty() {
-                        let (saved, _dup) = save_fetched_emails_with_known_ids(
+                        let (saved, _dup, saved_paths) = save_fetched_emails_with_known_ids(
                             &new_emails,
                             &target.local_dir,
                             &target.status,
@@ -307,18 +307,13 @@ pub async fn sync_mailboxes(
                         )?;
                         total_saved += saved;
 
-                        // Update in-memory index with newly saved emails
+                        // Update in-memory index with newly saved emails using the
+                        // paths returned by the save (no directory re-scan needed).
                         if let Some(ref mut index) = known_index {
                             let dir_map = index.entry(target.local_dir.clone()).or_default();
-                            for email in &new_emails {
-                                if let Some(ref mid) = email.message_id {
-                                    // Find the file that was just saved for this message_id
-                                    if let Some(path) = find_file_by_message_id_in_dir(
-                                        &target.local_dir,
-                                        mid,
-                                    ) {
-                                        dir_map.insert(mid.clone(), path);
-                                    }
+                            for (mid, path) in saved_paths {
+                                if let Some(mid) = mid {
+                                    dir_map.insert(mid, path);
                                 }
                             }
                         }
@@ -575,22 +570,6 @@ fn read_local_read_status(path: &std::path::Path) -> bool {
         }
     }
     false
-}
-
-/// Find a file containing a specific message_id in a directory.
-/// Used to update the in-memory index after saving new emails.
-fn find_file_by_message_id_in_dir(dir: &std::path::Path, message_id: &str) -> Option<PathBuf> {
-    let walker = walkdir::WalkDir::new(dir).max_depth(1);
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
-        if entry.path().extension().is_some_and(|ext| ext == "md") {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if content.contains(message_id) {
-                    return Some(entry.path().to_path_buf());
-                }
-            }
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------

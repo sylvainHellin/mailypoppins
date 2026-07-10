@@ -1,4 +1,4 @@
-use email::parse::attachments_dir_for;
+use email::parse::{attachments_dir_for, save_fetched_emails_with_known_ids, FetchedEmail};
 use email::sync::{move_local_email, reconcile_local_files, scan_local_message_ids};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,6 +17,117 @@ fn write_email_with_id(
     );
     fs::write(&path, content).unwrap();
     path
+}
+
+fn make_fetched_email(subject: &str, message_id: Option<&str>) -> FetchedEmail {
+    FetchedEmail {
+        from: "sender@example.com".to_string(),
+        to: "me@example.com".to_string(),
+        cc: None,
+        subject: subject.to_string(),
+        date: "Mon, 01 Jan 2024 12:00:00 +0000".to_string(),
+        body_text: "Body".to_string(),
+        html_body: None,
+        has_attachments: false,
+        message_id: message_id.map(|s| s.to_string()),
+        attachments: Vec::new(),
+        is_read: false,
+    }
+}
+
+// -----------------------------------------------------------------------
+// save_fetched_emails_with_known_ids: returned paths (index plumbing)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_save_with_known_ids_returns_saved_paths() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+
+    let emails = vec![
+        make_fetched_email("First", Some("<one@example.com>")),
+        make_fetched_email("Second", Some("<two@example.com>")),
+    ];
+
+    let mut known = HashSet::new();
+    let (saved, skipped, paths) =
+        save_fetched_emails_with_known_ids(&emails, &inbox, "inbox", &mut known).unwrap();
+
+    assert_eq!(saved, 2);
+    assert_eq!(skipped, 0);
+    assert_eq!(paths.len(), 2);
+
+    // Each returned path must exist and carry the matching message_id in
+    // its frontmatter (this is what sync uses to update its index without
+    // re-scanning the directory).
+    let scanned = scan_local_message_ids(&inbox).unwrap();
+    for (mid, path) in &paths {
+        assert!(path.exists(), "returned path should exist: {}", path.display());
+        let mid = mid.as_deref().expect("message_id should be present");
+        assert_eq!(scanned.get(mid), Some(path), "returned path must match frontmatter scan");
+    }
+    assert_eq!(paths[0].0.as_deref(), Some("<one@example.com>"));
+    assert_eq!(paths[1].0.as_deref(), Some("<two@example.com>"));
+}
+
+#[test]
+fn test_save_with_known_ids_no_path_for_duplicates() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+
+    let email = make_fetched_email("Dup", Some("<dup@example.com>"));
+
+    let mut known = HashSet::new();
+    let (saved1, _, paths1) =
+        save_fetched_emails_with_known_ids(&[email.clone()], &inbox, "inbox", &mut known).unwrap();
+    assert_eq!(saved1, 1);
+    assert_eq!(paths1.len(), 1);
+
+    // Second save of the same message_id is skipped and returns no path
+    let (saved2, skipped2, paths2) =
+        save_fetched_emails_with_known_ids(&[email], &inbox, "inbox", &mut known).unwrap();
+    assert_eq!(saved2, 0);
+    assert_eq!(skipped2, 1);
+    assert!(paths2.is_empty());
+}
+
+#[test]
+fn test_save_with_known_ids_path_without_message_id() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+
+    // Emails without a Message-ID are always saved; the path is still returned
+    let email = make_fetched_email("No id", None);
+    let mut known = HashSet::new();
+    let (saved, _, paths) =
+        save_fetched_emails_with_known_ids(&[email], &inbox, "inbox", &mut known).unwrap();
+    assert_eq!(saved, 1);
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].0.is_none());
+    assert!(paths[0].1.exists());
+}
+
+#[test]
+fn test_save_with_known_ids_paths_on_filename_collision() {
+    let tmp = tempdir().unwrap();
+    let inbox = tmp.path().join("inbox");
+
+    // Same sender/subject/date -> same base filename, different message_ids.
+    // The collision counter kicks in; returned paths must be the real ones.
+    let emails = vec![
+        make_fetched_email("Same subject", Some("<c1@example.com>")),
+        make_fetched_email("Same subject", Some("<c2@example.com>")),
+    ];
+    let mut known = HashSet::new();
+    let (saved, _, paths) =
+        save_fetched_emails_with_known_ids(&emails, &inbox, "inbox", &mut known).unwrap();
+    assert_eq!(saved, 2);
+    assert_eq!(paths.len(), 2);
+    assert_ne!(paths[0].1, paths[1].1);
+
+    let scanned = scan_local_message_ids(&inbox).unwrap();
+    assert_eq!(scanned.get("<c1@example.com>"), Some(&paths[0].1));
+    assert_eq!(scanned.get("<c2@example.com>"), Some(&paths[1].1));
 }
 
 // -----------------------------------------------------------------------
