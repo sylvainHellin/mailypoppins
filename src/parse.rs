@@ -1028,6 +1028,15 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_attachment_filename_path_traversal() {
+        assert_eq!(sanitize_attachment_filename("../../evil"), ".._.._evil");
+        assert_eq!(
+            sanitize_attachment_filename("..\\..\\evil.exe"),
+            ".._.._evil.exe"
+        );
+    }
+
+    #[test]
     fn test_sanitize_attachment_filename_control_chars() {
         assert_eq!(sanitize_attachment_filename("file\x00name.pdf"), "file_name.pdf");
     }

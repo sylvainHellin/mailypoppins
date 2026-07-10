@@ -54,6 +54,9 @@ All notable changes to this project are documented in this file.
   remain safe. Closes [#0002](docs/tickets/0002-persist-mailbox-states.md).
 
 ### Fixed
+- **Graph attachment filenames are now sanitized before writing to disk.**
+  The Graph fetch path used the server-provided attachment name verbatim, so a malicious sender could name an attachment `../../evil` and have it written outside the `_attachments/` directory.
+  The name now goes through the same `sanitize_attachment_filename` helper the IMAP path already used, which replaces path separators and control characters and caps the length.
 - **New-draft skeletons no longer hard-code `attachments: []`.**
   The CLI `email new`, TUI `n`, and compose wizard skeletons wrote flow-style `attachments: []`, which deserializes to `Some(vec![])` instead of `None` and diverges from every other empty frontmatter key.
   They now emit the bare `attachments:` key, matching `to:` / `cc:` / `reply_to:`, and the CLI/TUI skeletons are deduplicated into a shared `new_draft_skeleton` helper in `src/draft.rs`.

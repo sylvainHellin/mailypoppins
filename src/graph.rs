@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::config::GraphConfig;
 use crate::imap_client::{FreshObservation, SyncResult, SyncTarget};
-use crate::parse::{AttachmentData, FetchedEmail};
+use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
@@ -351,7 +351,10 @@ impl GraphClient {
 
         let mut result = Vec::new();
         for att in att_list.value {
-            let filename = att.name.unwrap_or_else(|| "attachment".to_string());
+            // Server-provided name is untrusted: strip path separators so it cannot
+            // escape the attachments directory (the IMAP path does the same).
+            let filename =
+                sanitize_attachment_filename(&att.name.unwrap_or_else(|| "attachment".to_string()));
             let content = if let Some(b64) = att.content_bytes {
                 use base64::Engine;
                 base64::engine::general_purpose::STANDARD
