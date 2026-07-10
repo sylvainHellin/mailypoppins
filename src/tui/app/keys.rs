@@ -1354,29 +1354,47 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.search_query.push(c);
-                self.apply_search_filter();
+                // Appending a character can only shrink the match set
+                // (substring containment is monotone), so narrow the
+                // current visible set instead of rescanning everything.
+                self.apply_search_filter(true);
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
-                self.apply_search_filter();
+                self.apply_search_filter(false);
             }
             _ => {}
         }
         None
     }
 
-    /// Recompute the visible view for the current `search_query`: the
-    /// filter now yields indices into the (unfiltered, Arc-shared) full
-    /// list instead of cloning matching entries (P2).
-    pub(crate) fn apply_search_filter(&mut self) {
+    /// Recompute the visible view for the current `search_query` (P3).
+    ///
+    /// `narrow` may be true only when the query changed by appending
+    /// characters to the query the current view was built from (i.e. a
+    /// keystroke in search mode): substring matching is monotone under
+    /// query extension, so the new match set is a subset of the current
+    /// one and we can retain-filter `visible` instead of rescanning the
+    /// full list. Backspace/edits/resets must pass `narrow = false`.
+    ///
+    /// The needle is lowercased once per call, not once per email.
+    pub(crate) fn apply_search_filter(&mut self, narrow: bool) {
         self.selection.clear();
 
-        self.visible = filter_visible(
-            &self.emails,
-            &self.search_query,
-            self.active_kind(),
-            self.search_includes_body,
-        );
+        if self.search_query.is_empty() {
+            self.visible = (0..self.emails.len()).collect();
+        } else {
+            let kind = self.active_kind();
+            let includes_body = self.search_includes_body;
+            if narrow {
+                let needle = self.search_query.to_lowercase();
+                narrow_visible(&self.emails, &mut self.visible, &needle, kind, includes_body);
+            } else {
+                // `filter_visible` lowercases the needle once internally.
+                self.visible =
+                    filter_visible(&self.emails, &self.search_query, kind, includes_body);
+            }
+        }
 
         self.list_index = 0;
         self.headers_scroll = 0;
@@ -1437,7 +1455,22 @@ pub(super) fn filter_visible(
         .collect()
 }
 
-
+/// Narrow an existing visible set in place: keep only the indices whose
+/// email still matches the (extended) needle. Valid only when the new
+/// query is an extension of the one `visible` was built from.
+fn narrow_visible(
+    emails: &[EmailEntry],
+    visible: &mut Vec<usize>,
+    needle_lower: &str,
+    kind: MailboxKind,
+    includes_body: bool,
+) {
+    visible.retain(|&i| {
+        emails
+            .get(i)
+            .is_some_and(|e| email_matches(e, needle_lower, kind, includes_body))
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Compose wizard free helpers
@@ -1641,6 +1674,42 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // narrow_visible (P3: incremental search narrowing)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn narrowing_equals_full_recompute_on_append() {
+        let emails = sample();
+        // Simulate typing "inv" then "invo": narrow from the "inv" view.
+        let mut visible = filter_visible(&emails, "inv", MailboxKind::Inbox, true);
+        narrow_visible(&emails, &mut visible, "invo", MailboxKind::Inbox, true);
+        assert_eq!(
+            visible,
+            filter_visible(&emails, "invo", MailboxKind::Inbox, true)
+        );
+    }
+
+    #[test]
+    fn narrowing_removes_entries_that_stop_matching() {
+        let emails = sample();
+        let mut visible = filter_visible(&emails, "invoice", MailboxKind::Inbox, false);
+        assert_eq!(visible, vec![0, 1]);
+        narrow_visible(&emails, &mut visible, "invoice m", MailboxKind::Inbox, false);
+        assert_eq!(visible, vec![0]);
+        narrow_visible(&emails, &mut visible, "invoice mx", MailboxKind::Inbox, false);
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn narrowing_ignores_out_of_range_indices() {
+        let emails = sample();
+        // A stale index beyond the list must be dropped, not panic.
+        let mut visible = vec![0, 99];
+        narrow_visible(&emails, &mut visible, "invoice", MailboxKind::Inbox, false);
+        assert_eq!(visible, vec![0]);
+    }
+
+    // -----------------------------------------------------------------------
     // App-level: selection mapping through the visible view
     // -----------------------------------------------------------------------
 
@@ -1658,7 +1727,7 @@ mod tests {
         let mut app = app_with_emails(sample());
         app.search_query = "invoice".to_string();
         app.search_includes_body = true;
-        app.apply_search_filter();
+        app.apply_search_filter(false);
         // View: [Invoice March, Invoice April, Weekly report]
         app.list_index = 2;
         assert_eq!(app.selected_email().unwrap().subject, "Weekly report");
@@ -1669,7 +1738,7 @@ mod tests {
         let mut app = app_with_emails(sample());
         app.search_query = "invoice".to_string();
         app.search_includes_body = true;
-        app.apply_search_filter();
+        app.apply_search_filter(false);
         app.list_index = 2; // "Weekly report" via body match
 
         let removed = app.remove_selected_from_list().unwrap();
@@ -1710,7 +1779,7 @@ mod tests {
     fn clearing_search_restores_full_view() {
         let mut app = app_with_emails(sample());
         app.search_query = "holiday".to_string();
-        app.apply_search_filter();
+        app.apply_search_filter(false);
         assert_eq!(app.visible, vec![3]);
         app.search_query.clear();
         app.reload_from_cache();

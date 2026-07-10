@@ -93,6 +93,16 @@ All notable changes to this project are documented in this file.
   almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
 
 ### Performance
+- **Search narrows incrementally per keystroke.** Appending a
+  character in `/` or `\` search now retain-filters the current
+  visible set instead of rescanning the full mailbox: substring
+  matching is monotone under query extension, so the new match set is
+  a subset of the previous one and each keystroke only tests the
+  emails that still matched the previous prefix (a big win for content
+  search, which lowercases whole bodies per comparison). The needle is
+  lowercased once per keystroke. Backspace and query resets recompute
+  from the full list. Unit tests assert narrow-equals-full equivalence
+  and stale-index safety.
 - **Mailbox switches, account switches and search no longer deep-clone
   the email list.** Cache slots and the active list are now
   `Arc<Vec<EmailEntry>>` (P2): switching mailboxes/accounts and
