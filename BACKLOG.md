@@ -6,7 +6,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Now
 
-- [#0004 Fix read/unread sync behaviour](docs/tickets/0004-fix-read-unread-sync.md) -- bug
 - [#0022 consistent naming](docs/tickets/0022-consistent-naming.md) -- refactor
 
 ## Next

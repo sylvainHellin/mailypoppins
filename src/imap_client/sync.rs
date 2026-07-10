@@ -289,15 +289,17 @@ pub async fn sync_mailboxes(
                 }
             }
         } else {
-            // Adaptive probe: for quick sync (limit < usize::MAX), probe with
-            // 10 UIDs first. If all known, skip the full 100-header check.
-            let probe = if limit < usize::MAX { Some(10) } else { None };
+            // Snapshot-staleness cutoff for read-flag sync: any local file
+            // modified at or after this instant may carry a user change made
+            // *while* this sync was reading the server, so its \Seen state
+            // must not be overwritten with the (older) server snapshot.
+            // Captured before the server fetch so the guard is conservative.
+            let flags_cutoff = std::time::SystemTime::now();
             match fetch_new_emails_on_session(
                 &mut session,
                 &target.server_name,
                 Some(limit),
                 &global_known_ids,
-                probe,
             )
             .await
             {
@@ -349,11 +351,19 @@ pub async fn sync_mailboxes(
                             index
                                 .get(&target.local_dir)
                                 .map(|dir_map| {
-                                    sync_local_read_flags_with_index(dir_map, &known_read_flags)
+                                    sync_local_read_flags_with_index(
+                                        dir_map,
+                                        &known_read_flags,
+                                        Some(flags_cutoff),
+                                    )
                                 })
                                 .unwrap_or(0)
                         } else {
-                            sync_local_read_flags(&target.local_dir, &known_read_flags)
+                            sync_local_read_flags(
+                                &target.local_dir,
+                                &known_read_flags,
+                                Some(flags_cutoff),
+                            )
                         };
                         total_read_updated += updated;
                         if updated > 0 {
@@ -548,30 +558,70 @@ pub async fn sync_mailboxes(
 // Read-flag sync helpers
 // ---------------------------------------------------------------------------
 
+/// Slack subtracted from the snapshot cutoff to tolerate coarse filesystem
+/// mtime granularity (some filesystems store whole seconds). Erring toward
+/// skipping is safe: a skipped file just converges on the next sync.
+const READ_FLAG_CUTOFF_SLACK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a local file was modified at-or-after the sync's server-snapshot
+/// cutoff, meaning the server flags in hand may be older than the local
+/// state and must not overwrite it (ticket #0004). Unreadable mtimes count
+/// as "recently modified" (skip -- conservative).
+fn modified_since_cutoff(path: &std::path::Path, cutoff: std::time::SystemTime) -> bool {
+    let effective = cutoff
+        .checked_sub(READ_FLAG_CUTOFF_SLACK)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(mtime) => mtime >= effective,
+        Err(_) => true,
+    }
+}
+
 /// Update local emails' `read:` frontmatter to match server \Seen flags.
 /// Scans the directory from disk to find files. Returns the number of files updated.
-fn sync_local_read_flags(
+///
+/// `snapshot_cutoff` is the instant the server flags were captured (i.e. just
+/// before the fetch). Files modified at-or-after it are skipped: their local
+/// state is newer than the server snapshot (e.g. the user marked an email
+/// read while the sync was in flight), and blindly applying the snapshot
+/// would revert that change. This is a staleness guard, not a 3-way merge.
+pub fn sync_local_read_flags(
     local_dir: &std::path::Path,
     server_flags: &HashMap<String, bool>,
+    snapshot_cutoff: Option<std::time::SystemTime>,
 ) -> usize {
     let local_ids = match scan_mailbox_message_ids(local_dir) {
         Ok(ids) => ids,
         Err(_) => return 0,
     };
-    sync_local_read_flags_with_index(&local_ids, server_flags)
+    sync_local_read_flags_with_index(&local_ids, server_flags, snapshot_cutoff)
 }
 
 /// Update local emails' `read:` frontmatter using a pre-built index map.
 /// Avoids re-scanning the directory. Returns the number of files updated.
-fn sync_local_read_flags_with_index(
+/// See [`sync_local_read_flags`] for the `snapshot_cutoff` semantics.
+pub(crate) fn sync_local_read_flags_with_index(
     local_ids: &HashMap<String, PathBuf>,
     server_flags: &HashMap<String, bool>,
+    snapshot_cutoff: Option<std::time::SystemTime>,
 ) -> usize {
     let mut updated = 0usize;
     for (message_id, is_seen) in server_flags {
         if let Some(file_path) = local_ids.get(message_id) {
             let local_read = read_local_read_status(file_path);
-            if local_read != *is_seen && update_read_status_locally(file_path, *is_seen).is_ok() {
+            if local_read == *is_seen {
+                continue;
+            }
+            if let Some(cutoff) = snapshot_cutoff {
+                if modified_since_cutoff(file_path, cutoff) {
+                    info!(
+                        "Read-flag sync: skipping {} (modified after sync started; local state wins)",
+                        file_path.display()
+                    );
+                    continue;
+                }
+            }
+            if update_read_status_locally(file_path, *is_seen).is_ok() {
                 updated += 1;
             }
         }
@@ -927,7 +977,7 @@ mod tests {
         let mut flags = HashMap::new();
         flags.insert("<msg1@x.com>".to_string(), true);
 
-        let updated = sync_local_read_flags(dir.path(), &flags);
+        let updated = sync_local_read_flags(dir.path(), &flags, None);
         assert_eq!(updated, 1);
 
         let content = fs::read_to_string(&path).unwrap();
@@ -946,7 +996,7 @@ mod tests {
         let mut flags = HashMap::new();
         flags.insert("<msg1@x.com>".to_string(), true);
 
-        let updated = sync_local_read_flags(dir.path(), &flags);
+        let updated = sync_local_read_flags(dir.path(), &flags, None);
         assert_eq!(updated, 0);
     }
 
@@ -962,7 +1012,7 @@ mod tests {
         let mut flags = HashMap::new();
         flags.insert("<msg1@x.com>".to_string(), false);
 
-        let updated = sync_local_read_flags(dir.path(), &flags);
+        let updated = sync_local_read_flags(dir.path(), &flags, None);
         assert_eq!(updated, 1);
 
         let content = fs::read_to_string(&path).unwrap();
@@ -989,9 +1039,88 @@ mod tests {
         let mut flags = HashMap::new();
         flags.insert("<msg1@x.com>".to_string(), true);
 
-        let updated = sync_local_read_flags_with_index(&index, &flags);
+        let updated = sync_local_read_flags_with_index(&index, &flags, None);
         assert_eq!(updated, 1);
 
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: true"));
+    }
+
+    // -----------------------------------------------------------------------
+    // snapshot-cutoff guard (ticket #0004): a fetch must not clobber a local
+    // read-status change made while the sync was in flight
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sync_local_read_flags_skips_file_modified_after_cutoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+
+        // Cutoff BEFORE the local change: simulates the sync capturing the
+        // server snapshot, then the user marking the email read locally
+        // while the fetch was still in flight.
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: true\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        // Server snapshot still says unread -- must NOT revert the local mark.
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), false);
+
+        let updated = sync_local_read_flags(dir.path(), &flags, Some(cutoff));
+        assert_eq!(updated, 0, "stale server snapshot must not clobber newer local state");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: true"), "local read mark must survive the fetch");
+    }
+
+    #[test]
+    fn test_sync_local_read_flags_applies_when_file_older_than_cutoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: false\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        // Backdate the file well past the 1s mtime-granularity slack, then
+        // use a cutoff of "now": the file predates the sync, so the server
+        // flag must be applied.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), true);
+
+        let updated = sync_local_read_flags(dir.path(), &flags, Some(std::time::SystemTime::now()));
+        assert_eq!(updated, 1, "server->local propagation must still work for untouched files");
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("read: true"));
+    }
+
+    #[test]
+    fn test_sync_local_read_flags_with_index_respects_cutoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("email.md");
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+        fs::write(
+            &path,
+            "---\nfrom: a@x.com\nmessage_id: \"<msg1@x.com>\"\nread: true\nstatus: inbox\n---\n\nBody",
+        ).unwrap();
+
+        let mut index = HashMap::new();
+        index.insert("<msg1@x.com>".to_string(), path.clone());
+        let mut flags = HashMap::new();
+        flags.insert("<msg1@x.com>".to_string(), false);
+
+        let updated = sync_local_read_flags_with_index(&index, &flags, Some(cutoff));
+        assert_eq!(updated, 0);
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("read: true"));
     }

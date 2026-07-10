@@ -22,6 +22,10 @@ pub use sync::{
     save_mailbox_states_cache, sync_mailboxes, FreshObservation, MailboxState, MessageIdIndex,
     SyncResult, SyncTarget,
 };
+// Shared with the Graph sync path (src/graph.rs) so both backends apply
+// server read flags through the same frontmatter-aware, cutoff-guarded
+// helper. Public for integration-test coverage of the #0004 regression.
+pub use sync::sync_local_read_flags;
 pub use watch::watch_mailbox;
 
 use std::fmt;

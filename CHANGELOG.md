@@ -212,6 +212,33 @@ All notable changes to this project are documented in this file.
   remain safe. Closes [#0002](docs/tickets/0002-persist-mailbox-states.md).
 
 ### Fixed
+- **Read/unread status now survives fetches and syncs reliably in both
+  directions.** Three bugs conspired to make `\Seen`/`isRead` sync flaky
+  (ticket [#0004](docs/tickets/0004-fix-read-unread-sync.md)):
+  1. *Fetches clobbered in-flight local marks.* Sync captured the server
+     read flags first and applied them to local frontmatter seconds
+     later, so marking an email read while a sync was running (previewing
+     mail during the startup auto-fetch, for instance) was silently
+     reverted to the older server snapshot. The flag-apply helpers now
+     take a snapshot cutoff captured before the server read and skip any
+     file modified at-or-after it (with 1 s slack for coarse filesystem
+     mtimes): the newer local state wins, and its own server propagation
+     -- already in flight -- converges everything on the next sync.
+  2. *Webmail read changes rarely propagated to local files (IMAP).* The
+     quick-sync "adaptive probe" returned early when the newest 10 UIDs
+     were all known -- the common no-new-mail case -- so read/unread
+     changes made in another client on anything but the 10 newest
+     messages never reached the local `read:` field. Pass 1
+     (headers + FLAGS, ~50 bytes/msg) now always covers the full
+     quick-sync window; pass 2 (body download) is still skipped when
+     nothing is new, so the latency cost is one small FETCH.
+  3. *Graph accounts could never mark some emails read.* The Graph read
+     sync substring-matched `read: true` against the whole file, so an
+     email whose body merely quoted that string was permanently stuck
+     unread locally. Both backends now share the same frontmatter-aware,
+     cutoff-guarded helper (`sync_local_read_flags`).
+  Regression tests cover both backends through the shared helper in
+  `tests/sync_integration.rs` and `src/imap_client/sync.rs`.
 - **Graph attachment filenames are now sanitized before writing to disk.**
   The Graph fetch path used the server-provided attachment name verbatim, so a malicious sender could name an attachment `../../evil` and have it written outside the `_attachments/` directory.
   The name now goes through the same `sanitize_attachment_filename` helper the IMAP path already used, which replaces path separators and control characters and caps the length.

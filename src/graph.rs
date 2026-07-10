@@ -635,8 +635,19 @@ pub async fn sync_mailboxes_graph(
 
                 // Sync read status for existing local files
                 if !dry_run {
-                    match sync_read_status_graph(&client, &target.server_name, &target.local_dir)
-                        .await
+                    // Snapshot-staleness cutoff: local files modified at or
+                    // after this instant may carry a user change made while
+                    // this sync was reading the server; the (older) server
+                    // snapshot must not overwrite them. Captured before the
+                    // server read below (ticket #0004).
+                    let flags_cutoff = std::time::SystemTime::now();
+                    match sync_read_status_graph(
+                        &client,
+                        &target.server_name,
+                        &target.local_dir,
+                        flags_cutoff,
+                    )
+                    .await
                     {
                         Ok(updated) => {
                             total_read_updated += updated;
@@ -757,29 +768,23 @@ pub async fn sync_mailboxes_graph(
 }
 
 /// Sync read status: compare server read flags against local frontmatter.
+///
+/// Delegates to the shared `sync_local_read_flags` helper (same as the IMAP
+/// path) so the local read state is parsed from *frontmatter*, not via a
+/// body-matching substring search, and so files modified after
+/// `snapshot_cutoff` are left alone (see ticket #0004).
 async fn sync_read_status_graph(
     client: &GraphClient,
     folder: &str,
     local_dir: &std::path::Path,
+    snapshot_cutoff: std::time::SystemTime,
 ) -> Result<usize> {
-    let server_ids = client.fetch_message_ids(folder).await?;
-    let local_ids = crate::parse::scan_mailbox_message_ids(local_dir)?;
-    let mut updated = 0usize;
-
-    for (mid, local_path) in &local_ids {
-        if let Some(&server_read) = server_ids.get(mid) {
-            // Read the local frontmatter to check current read status
-            if let Ok(content) = std::fs::read_to_string(local_path) {
-                let is_local_read = content.contains("read: true");
-                if server_read != is_local_read {
-                    crate::imap_client::update_read_status_locally(local_path, server_read).ok();
-                    updated += 1;
-                }
-            }
-        }
-    }
-
-    Ok(updated)
+    let server_flags = client.fetch_message_ids(folder).await?;
+    Ok(crate::imap_client::sync_local_read_flags(
+        local_dir,
+        &server_flags,
+        Some(snapshot_cutoff),
+    ))
 }
 
 fn remove_local_email(path: &std::path::Path) {

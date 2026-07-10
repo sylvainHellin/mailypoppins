@@ -1,7 +1,9 @@
+use email::imap_client::sync_local_read_flags;
 use email::parse::{attachments_dir_for, save_fetched_emails_with_known_ids, FetchedEmail};
 use email::sync::{move_local_email, reconcile_local_files, scan_local_message_ids};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 
 /// Write a minimal .md file with a message_id in frontmatter.
@@ -128,6 +130,132 @@ fn test_save_with_known_ids_paths_on_filename_collision() {
     let scanned = scan_local_message_ids(&inbox).unwrap();
     assert_eq!(scanned.get("<c1@example.com>"), Some(&paths[0].1));
     assert_eq!(scanned.get("<c2@example.com>"), Some(&paths[1].1));
+}
+
+// -----------------------------------------------------------------------
+// Read-status sync (#0004). `sync_local_read_flags` is the single seam
+// through which BOTH backends apply server flags to local files: the IMAP
+// orchestrator (`sync_mailboxes`) feeds it the \Seen flags collected in
+// pass 1, and the Graph orchestrator (`sync_read_status_graph`) feeds it
+// the isRead map from `fetch_message_ids`. Covering it here covers both.
+// -----------------------------------------------------------------------
+
+fn write_email_with_read(
+    dir: &std::path::Path,
+    filename: &str,
+    message_id: &str,
+    read: bool,
+    body: &str,
+) -> std::path::PathBuf {
+    let path = dir.join(filename);
+    let content = format!(
+        "---\nfrom: \"sender@example.com\"\nto: \"me@example.com\"\nsubject: \"Test\"\nmessage_id: \"{message_id}\"\nstatus: inbox\nread: {read}\n---\n\n{body}"
+    );
+    fs::write(&path, content).unwrap();
+    path
+}
+
+/// Backdate a file's mtime so it clearly predates a "sync started" cutoff
+/// (well beyond the 1s mtime-granularity slack in the guard).
+fn backdate(path: &std::path::Path, secs: u64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(secs))
+        .unwrap();
+}
+
+/// Server-side read changes (webmail, another client) propagate to the
+/// local frontmatter on fetch -- both directions.
+#[test]
+fn test_read_flags_server_change_propagates_to_local_file() {
+    let tmp = tempdir().unwrap();
+    let read_path = write_email_with_read(tmp.path(), "a.md", "<a@example.com>", false, "Body");
+    let unread_path = write_email_with_read(tmp.path(), "b.md", "<b@example.com>", true, "Body");
+    backdate(&read_path, 3600);
+    backdate(&unread_path, 3600);
+
+    let mut server_flags = HashMap::new();
+    server_flags.insert("<a@example.com>".to_string(), true); // read in webmail
+    server_flags.insert("<b@example.com>".to_string(), false); // marked unread in webmail
+
+    let updated = sync_local_read_flags(tmp.path(), &server_flags, Some(SystemTime::now()));
+    assert_eq!(updated, 2);
+    assert!(fs::read_to_string(&read_path).unwrap().contains("read: true"));
+    assert!(fs::read_to_string(&unread_path).unwrap().contains("read: false"));
+}
+
+/// A fetch must NOT clobber a local read mark made while the sync was in
+/// flight: the file's mtime is at/after the snapshot cutoff, so the (older)
+/// server flags are ignored for it. Regression test for the "read status
+/// resets after each fetch" symptom of #0004.
+#[test]
+fn test_read_flags_fetch_does_not_clobber_local_mark_made_during_sync() {
+    let tmp = tempdir().unwrap();
+
+    // Cutoff captured when the (simulated) sync started reading the server.
+    let cutoff = SystemTime::now() - Duration::from_secs(30);
+
+    // AFTER the cutoff, the user marks the email read locally (fresh mtime).
+    let path = write_email_with_read(tmp.path(), "a.md", "<a@example.com>", true, "Body");
+
+    // The sync's server snapshot still says unread.
+    let mut server_flags = HashMap::new();
+    server_flags.insert("<a@example.com>".to_string(), false);
+
+    let updated = sync_local_read_flags(tmp.path(), &server_flags, Some(cutoff));
+    assert_eq!(updated, 0, "stale server snapshot must not revert the local mark");
+    assert!(
+        fs::read_to_string(&path).unwrap().contains("read: true"),
+        "local read mark must survive the fetch"
+    );
+}
+
+/// The local read state must be parsed from frontmatter, not substring-
+/// matched against the whole file. Regression test for the Graph-path bug
+/// where a body containing "read: true" masked the frontmatter's
+/// `read: false` and blocked unread->read syncing forever.
+#[test]
+fn test_read_flags_body_text_does_not_mask_frontmatter() {
+    let tmp = tempdir().unwrap();
+    let path = write_email_with_read(
+        tmp.path(),
+        "a.md",
+        "<a@example.com>",
+        false,
+        "Quoting docs: set read: true in the frontmatter to mark an email read.",
+    );
+    backdate(&path, 3600);
+
+    let mut server_flags = HashMap::new();
+    server_flags.insert("<a@example.com>".to_string(), true);
+
+    let updated = sync_local_read_flags(tmp.path(), &server_flags, Some(SystemTime::now()));
+    assert_eq!(updated, 1, "body text must not be mistaken for the read: frontmatter field");
+    // The frontmatter flips; the body stays untouched.
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("\nread: true\n"));
+    assert!(content.contains("set read: true in the frontmatter"));
+}
+
+/// Flags for messages with no matching local file are ignored (no panic,
+/// no spurious writes), and agreement is a no-op.
+#[test]
+fn test_read_flags_unknown_ids_and_agreement_are_noops() {
+    let tmp = tempdir().unwrap();
+    let path = write_email_with_read(tmp.path(), "a.md", "<a@example.com>", true, "Body");
+    backdate(&path, 3600);
+    let mtime_before = fs::metadata(&path).unwrap().modified().unwrap();
+
+    let mut server_flags = HashMap::new();
+    server_flags.insert("<a@example.com>".to_string(), true); // agrees
+    server_flags.insert("<ghost@example.com>".to_string(), false); // no local file
+
+    let updated = sync_local_read_flags(tmp.path(), &server_flags, Some(SystemTime::now()));
+    assert_eq!(updated, 0);
+    // Agreement must not rewrite the file (would defeat the mtime guard).
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), mtime_before);
 }
 
 // -----------------------------------------------------------------------
