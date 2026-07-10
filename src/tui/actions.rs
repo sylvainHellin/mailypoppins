@@ -19,7 +19,7 @@ use super::ui;
 use crate::config::resolve_sent_mailbox;
 use crate::draft::{
     create_forward_draft, create_reply_draft, find_drafts, mark_as_approved, mark_as_draft,
-    parse_email_draft,
+    new_draft_skeleton, parse_email_draft,
     update_status_to_sent, validate_draft,
 };
 use crate::imap_client::{
@@ -501,7 +501,7 @@ pub(super) fn handle_action(
                     .map(|s| s.default_from.clone())
                     .unwrap_or_else(|| app.account_config.default_from.clone());
                 let from = default_from.as_str();
-                let skeleton = format!("---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom: {from}\ndate: {now}\nreply_to:\nattachments: []\n---\n\n");
+                let skeleton = new_draft_skeleton(from, &now);
                 match std::fs::write(&path, skeleton) {
                     Ok(()) => {
                         suspend_terminal(terminal)?;
@@ -1639,7 +1639,7 @@ fn write_new_draft_from_wizard(app: &App, wizard: &ComposeWizard) -> Result<Path
     fm.push_str(&format!("from: \"{from}\"\n"));
     fm.push_str(&format!("date: {now}\n"));
     fm.push_str("reply_to:\n");
-    fm.push_str("attachments: []\n");
+    fm.push_str("attachments:\n");
     fm.push_str("---\n\n");
 
     std::fs::write(&path, fm)?;

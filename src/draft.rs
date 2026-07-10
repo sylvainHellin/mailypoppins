@@ -14,6 +14,13 @@ use crate::parse::{
 };
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
+/// Frontmatter skeleton for a brand-new empty draft (CLI `email new` and TUI `n`).
+/// `attachments:` is intentionally a bare key: it deserializes to `None` via the
+/// serde default, unlike `attachments: []` which yields `Some(vec![])`.
+pub fn new_draft_skeleton(from: &str, date: &str) -> String {
+    format!("---\nto:\ncc:\nbcc:\nsubject:\nstatus: draft\nfrom: {from}\ndate: {date}\nreply_to:\nattachments:\n---\n\n")
+}
+
 pub fn select_inbox_email(inbox_dir: &Path, prompt: &str) -> Result<PathBuf> {
     let mut entries: Vec<(PathBuf, InboxFrontmatter)> = Vec::new();
 
@@ -705,6 +712,20 @@ mod tests {
             },
             body_markdown: body.to_string(),
         }
+    }
+
+    #[test]
+    fn test_new_draft_skeleton_attachments_none() {
+        let skeleton = new_draft_skeleton("me@example.com", "Thu, 10 Jul 2026 08:00:00 +0000");
+        // `subject` is a mandatory String, so the skeleton only parses once the
+        // user has filled it in; simulate that minimal edit.
+        let filled = skeleton.replace("subject:\n", "subject: Hello\n");
+        let matter = Matter::<YAML>::new();
+        let parsed = matter.parse(&filled);
+        let fm: EmailFrontmatter = parsed.data.unwrap().deserialize().unwrap();
+        assert_eq!(fm.attachments, None);
+        assert_eq!(fm.status, EmailStatus::Draft);
+        assert_eq!(fm.from.as_deref(), Some("me@example.com"));
     }
 
     #[test]
