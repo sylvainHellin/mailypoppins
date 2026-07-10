@@ -52,7 +52,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(Line::from(spans)), search_rect);
     }
 
-    if app.emails.is_empty() {
+    if app.visible.is_empty() {
         let msg = if !app.search_query.is_empty() {
             "  No matching emails".to_string()
         } else {
@@ -92,8 +92,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         let header = Row::new(header_cells).height(1);
 
         let rows: Vec<Row> = app
-            .emails
-            .iter()
+            .visible_emails()
             .enumerate()
             .map(|(i, email)| {
                 let is_cursor = i == app.list_index;
@@ -182,8 +181,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         let header = Row::new(header_cells).height(1);
 
         let rows: Vec<Row> = app
-            .emails
-            .iter()
+            .visible_emails()
             .enumerate()
             .map(|(i, email)| {
                 let is_cursor = i == app.list_index;

@@ -29,7 +29,7 @@ pub(super) fn render_headers(app: &App, frame: &mut Frame, area: Rect) {
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
-    let selected = app.emails.get(app.list_index);
+    let selected = app.selected_email();
     if selected.is_none() {
         let inner = block.inner(area);
         frame.render_widget(block, area);

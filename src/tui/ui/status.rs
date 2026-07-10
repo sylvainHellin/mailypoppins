@@ -10,8 +10,8 @@ use super::util::{desc_span, hint_span};
 
 pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let total = app.mailbox_counts[app.active_mailbox];
-    let shown = app.emails.len();
-    let unread_count = app.emails.iter().filter(|e| !e.read).count();
+    let shown = app.visible.len();
+    let unread_count = app.visible_emails().filter(|e| !e.read).count();
     let any_watching = app.accounts.iter().any(|a| a.watcher_active);
     let watch_prefix = if any_watching { "WATCHING " } else { "" };
     let sel_text = if app.selection.is_empty() {

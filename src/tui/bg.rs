@@ -265,14 +265,9 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                     let reverted = !new_read_state;
                     update_read_status_locally(&path, reverted).ok();
                     if account_index == app.active_account {
-                        if let Some(entry) = app.emails.iter_mut().find(|e| e.path == path) {
-                            entry.read = reverted;
-                        }
-                        if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
-                            if let Some(ce) = cached.iter_mut().find(|e| e.path == path) {
-                                ce.read = reverted;
-                            }
-                        }
+                        // Updates both the in-memory list and the shared
+                        // cache slot (they are the same Arc).
+                        app.set_email_read(&path, reverted);
                     }
                     app.push_status(format!("Read status sync failed: {e}"), StatusLevel::Warning);
                 }
@@ -326,14 +321,20 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                 // `None`, so the next visit triggers a fresh load.
                 return;
             }
+            let entries = std::sync::Arc::new(entries);
             if let Some(slot) = app.email_cache.get_mut(mailbox_idx) {
-                *slot = Some(entries.clone());
+                // Cache slot and `app.emails` share the allocation (P2):
+                // no deep clone on delivery.
+                *slot = Some(std::sync::Arc::clone(&entries));
             }
             app.emails = entries;
-            // Preserve selection the way the old synchronous reload did:
-            // clamp the cursor against the fresh list.
-            if !app.emails.is_empty() {
-                app.list_index = app.list_index.min(app.emails.len() - 1);
+            // Reapply the active search filter (if any) to the fresh
+            // entries, then clamp the cursor against the resulting view
+            // -- same selection preservation as the old synchronous
+            // reload.
+            app.rebuild_visible();
+            if !app.visible.is_empty() {
+                app.list_index = app.list_index.min(app.visible.len() - 1);
             } else {
                 app.list_index = 0;
             }

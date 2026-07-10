@@ -897,16 +897,9 @@ pub(super) fn handle_action(
                 let path = email.path.clone();
                 let message_id = get_message_id_from_file(&path);
 
-                // Optimistic local update
+                // Optimistic local update (list + shared cache slot).
                 update_read_status_locally(&path, new_read).ok();
-                if let Some(entry) = app.emails.get_mut(app.list_index) {
-                    entry.read = new_read;
-                }
-                if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
-                    if let Some(ce) = cached.iter_mut().find(|e| e.path == path) {
-                        ce.read = new_read;
-                    }
-                }
+                app.set_email_read(&path, new_read);
 
                 let label = if new_read {
                     "Marked as read"
@@ -973,16 +966,9 @@ pub(super) fn handle_action(
                 let path = email.path.clone();
                 let message_id = get_message_id_from_file(&path);
 
-                // Optimistic local update (silent)
+                // Optimistic local update (silent; list + shared cache slot).
                 update_read_status_locally(&path, true).ok();
-                if let Some(entry) = app.emails.get_mut(app.list_index) {
-                    entry.read = true;
-                }
-                if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
-                    if let Some(ce) = cached.iter_mut().find(|e| e.path == path) {
-                        ce.read = true;
-                    }
-                }
+                app.set_email_read(&path, true);
 
                 // Async server update (no status message for auto-mark)
                 if let Some(mid) = message_id {
@@ -1038,17 +1024,10 @@ pub(super) fn handle_action(
                 .any(|p| app.emails.iter().any(|e| e.path == *p && !e.read));
             let new_read = any_unread;
 
-            // Optimistic local update
+            // Optimistic local update (list + shared cache slot).
             for path in &paths {
                 update_read_status_locally(path, new_read).ok();
-                if let Some(entry) = app.emails.iter_mut().find(|e| &e.path == path) {
-                    entry.read = new_read;
-                }
-                if let Some(Some(cached)) = app.email_cache.get_mut(app.active_mailbox) {
-                    if let Some(ce) = cached.iter_mut().find(|e| &e.path == path) {
-                        ce.read = new_read;
-                    }
-                }
+                app.set_email_read(path, new_read);
             }
             app.selection.clear();
 

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -209,7 +210,11 @@ pub struct AccountState {
     pub inbox_dir: Option<PathBuf>,
     pub mailboxes: Vec<MailboxInfo>,
     pub mailbox_counts: Vec<usize>,
-    pub email_cache: Vec<Option<Vec<EmailEntry>>>,
+    /// Per-mailbox cache of parsed entries. `Arc` so switching mailboxes
+    /// or accounts shares the allocation with `App::emails` instead of
+    /// deep-cloning thousands of entries (P2); see
+    /// `App::with_emails_mut` for the mutation strategy.
+    pub email_cache: Vec<Option<Arc<Vec<EmailEntry>>>>,
     pub sidebar_index: usize,
     pub active_mailbox: usize,
     pub list_index: usize,

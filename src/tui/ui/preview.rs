@@ -17,7 +17,7 @@ pub(super) fn render_body(app: &App, frame: &mut Frame, area: Rect) {
         .border_style(border_style)
         .style(Style::default().bg(theme::BASE));
 
-    let selected = app.emails.get(app.list_index);
+    let selected = app.selected_email();
     if selected.is_none() {
         frame.render_widget(block, area);
         return;

@@ -5,6 +5,7 @@ pub use types::*;
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Top-level application state.
 pub struct App {
@@ -22,13 +23,22 @@ pub struct App {
     pub sidebar_index: usize,
     pub active_mailbox: usize,
     pub mailbox_counts: Vec<usize>,
-    pub emails: Vec<EmailEntry>,
+    /// Full entry list of the active mailbox, shared with the cache slot
+    /// (P2). Never filtered: the search view is expressed by `visible`.
+    /// Mutate only through `with_emails_mut`.
+    pub emails: Arc<Vec<EmailEntry>>,
+    /// Indices into `emails` forming the current view (search-filtered,
+    /// or all entries when no search is active). `list_index` indexes
+    /// into THIS vec; rendering, navigation and selection all go through
+    /// it. Invariant: `visible == filter(search_query, emails)` -- every
+    /// reassignment of `emails` must call `rebuild_visible`.
+    pub visible: Vec<usize>,
     pub list_index: usize,
     pub g_pending: bool,
     pub headers_scroll: u16,
     pub preview_scroll: u16,
     pub selection: HashSet<PathBuf>,
-    pub email_cache: Vec<Option<Vec<EmailEntry>>>,
+    pub email_cache: Vec<Option<Arc<Vec<EmailEntry>>>>,
     pub search_query: String,
     pub search_includes_body: bool,
     pub watcher_active: bool,
@@ -123,7 +133,8 @@ impl App {
             sidebar_index: 0,
             active_mailbox: 0,
             mailbox_counts: Vec::new(),
-            emails: Vec::new(),
+            emails: Arc::new(Vec::new()),
+            visible: Vec::new(),
             list_index: 0,
             g_pending: false,
             headers_scroll: 0,
@@ -182,12 +193,88 @@ impl App {
 
         app.load_from_account(0);
         if !app.mailboxes.is_empty() {
-            let loaded = load_emails(&app.mailboxes[0].dir);
-            app.email_cache[0] = Some(loaded.clone());
+            let loaded = Arc::new(load_emails(&app.mailboxes[0].dir));
+            app.email_cache[0] = Some(Arc::clone(&loaded));
             app.emails = loaded;
+            app.rebuild_visible();
         }
 
         app
+    }
+
+    /// Bare App for unit tests: no config load, no directory walks, no
+    /// accounts. Tests populate `emails` / `email_cache` / `mailboxes`
+    /// directly.
+    #[cfg(test)]
+    pub(crate) fn default_for_tests() -> Self {
+        Self {
+            focus: Focus::List,
+            running: true,
+            terminal_width: 0,
+            terminal_height: 0,
+            accounts: Vec::new(),
+            active_account: 0,
+            mailboxes: Vec::new(),
+            sidebar_index: 0,
+            active_mailbox: 0,
+            mailbox_counts: Vec::new(),
+            emails: Arc::new(Vec::new()),
+            visible: Vec::new(),
+            list_index: 0,
+            g_pending: false,
+            headers_scroll: 0,
+            preview_scroll: 0,
+            selection: HashSet::new(),
+            email_cache: Vec::new(),
+            search_query: String::new(),
+            search_includes_body: false,
+            watcher_active: false,
+            bg_mutations: 0,
+            imap_config: None,
+            smtp_config: None,
+            graph_config: None,
+            signature_content: None,
+            sent_dir: None,
+            archive_dir: None,
+            archive_server_name: "Archive".to_string(),
+            drafts_dir: None,
+            inbox_dir: None,
+            account_config: crate::config::AccountConfig::default(),
+            pending_actions: VecDeque::new(),
+            confirm_dialog: None,
+            status_message: None,
+            status_ticks: 0,
+            show_help: false,
+            help_scroll: 0,
+            help_filter: String::new(),
+            help_filter_active: false,
+            bg_count: 0,
+            bg_spin_tick: 0,
+            mailbox_load_generation: 0,
+            queued_action: None,
+            persistent_error: None,
+            attachment_picker: None,
+            dir_picker: None,
+            last_save_dir: None,
+            status_log: VecDeque::new(),
+            show_activity_log: true,
+            show_activity_overlay: false,
+            activity_filter: String::new(),
+            activity_filter_active: false,
+            activity_scroll: 0,
+            show_search_overlay: false,
+            server_search_query: String::new(),
+            server_search_focus: SearchOverlayFocus::Input,
+            server_search_results: Vec::new(),
+            server_search_index: 0,
+            server_search_headers_scroll: 0,
+            server_search_scroll: 0,
+            server_search_loading: false,
+            server_search_status: None,
+            server_search_scope_label: "All".to_string(),
+            compose_wizard: None,
+            global_config: crate::config::GlobalConfig::default(),
+        }
     }
 
     // ---------------------------------------------------------------
@@ -332,17 +419,27 @@ impl App {
         self.load_from_account(idx);
         let am = self.active_mailbox;
         if let Some(cached) = self.email_cache.get(am).and_then(|c| c.as_ref()) {
-            self.emails = cached.clone();
+            self.emails = Arc::clone(cached);
         } else if let Some(mb) = self.mailboxes.get(am) {
             // Cache miss: same off-thread load as `switch_mailbox` (P1
             // step 2) -- show an empty list + loading status until the
             // new account's entries arrive via `BgResult::MailboxLoaded`.
             let label = mb.label.clone();
-            self.emails = Vec::new();
+            self.emails = Arc::new(Vec::new());
             self.set_status_level(format!("Loading {label}..."), StatusLevel::Progress);
             self.request_mailbox_load(am);
         } else {
-            self.emails = Vec::new();
+            self.emails = Arc::new(Vec::new());
+        }
+        // Reapply the restored account's search query to the fresh list.
+        // (Pre-P2, the raw cache was restored even with a saved query, so
+        // the filter was silently lost on switch-back; now it survives.)
+        self.rebuild_visible();
+        // The restored cursor may exceed the filtered view -- clamp.
+        if !self.visible.is_empty() {
+            self.list_index = self.list_index.min(self.visible.len() - 1);
+        } else {
+            self.list_index = 0;
         }
         self.focus = Focus::List;
     }
@@ -406,7 +503,74 @@ impl App {
     }
 
     pub fn selected_email(&self) -> Option<&EmailEntry> {
-        self.emails.get(self.list_index)
+        self.visible
+            .get(self.list_index)
+            .and_then(|&i| self.emails.get(i))
+    }
+
+    /// Iterate the entries of the current (filtered) view in display
+    /// order. Position `i` in this iterator corresponds to `list_index
+    /// == i`.
+    pub fn visible_emails(&self) -> impl Iterator<Item = &EmailEntry> {
+        self.visible.iter().filter_map(|&i| self.emails.get(i))
+    }
+
+    /// Recompute `visible` from scratch: apply the active search query
+    /// to the full entry list. Must be called after every reassignment
+    /// or structural mutation of `self.emails` so the view never holds
+    /// dangling indices.
+    pub(crate) fn rebuild_visible(&mut self) {
+        self.visible = keys::filter_visible(
+            &self.emails,
+            &self.search_query,
+            self.active_kind(),
+            self.search_includes_body,
+        );
+    }
+
+    /// Run a mutation against the full entry list of the active mailbox,
+    /// keeping the cache slot in sync (P2 mutation strategy).
+    ///
+    /// The cache slot's strong reference is released first, so when the
+    /// slot and `self.emails` share the allocation (the normal case)
+    /// `Arc::make_mut` mutates in place instead of deep-cloning the
+    /// whole Vec. A deep clone only happens when another strong ref
+    /// still shares the allocation (e.g. the mirrored
+    /// `AccountState::email_cache` from the last account switch) -- at
+    /// most once per such sharing. If the slot was `None` (invalidated /
+    /// load in flight) it stays `None`, matching the old semantics of
+    /// skipping the cache update.
+    pub(crate) fn with_emails_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut Vec<EmailEntry>) -> R,
+    ) -> R {
+        let slot_populated = self
+            .email_cache
+            .get(self.active_mailbox)
+            .is_some_and(|c| c.is_some());
+        if slot_populated {
+            if let Some(slot) = self.email_cache.get_mut(self.active_mailbox) {
+                *slot = None;
+            }
+        }
+        let r = f(Arc::make_mut(&mut self.emails));
+        if slot_populated {
+            if let Some(slot) = self.email_cache.get_mut(self.active_mailbox) {
+                *slot = Some(Arc::clone(&self.emails));
+            }
+        }
+        r
+    }
+
+    /// Optimistically set the read flag of one entry (by path) in both
+    /// the in-memory list and the cache slot. No-op if the path is not
+    /// in the active mailbox's list.
+    pub(crate) fn set_email_read(&mut self, path: &Path, read: bool) {
+        self.with_emails_mut(|entries| {
+            if let Some(e) = entries.iter_mut().find(|e| e.path == path) {
+                e.read = read;
+            }
+        });
     }
 
     pub fn selected_email_path(&self) -> Option<PathBuf> {
@@ -414,20 +578,15 @@ impl App {
     }
 
     pub fn remove_selected_from_list(&mut self) -> Option<PathBuf> {
-        if self.emails.is_empty() {
-            return None;
-        }
-
-        let path = self.emails[self.list_index].path.clone();
-        self.emails.remove(self.list_index);
+        let path = self.selected_email()?.path.clone();
+        self.with_emails_mut(|entries| entries.retain(|e| e.path != path));
         self.invalidate_pending_mailbox_loads();
 
-        if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
-            cached.retain(|e| e.path != path);
-        }
-
-        if !self.emails.is_empty() {
-            self.list_index = self.list_index.min(self.emails.len() - 1);
+        // Underlying indices shifted -- recompute the view, then clamp
+        // the cursor against it (same clamp as before the refactor).
+        self.rebuild_visible();
+        if !self.visible.is_empty() {
+            self.list_index = self.list_index.min(self.visible.len() - 1);
         } else {
             self.list_index = 0;
         }
@@ -450,15 +609,12 @@ impl App {
             .map(|e| e.path.clone())
             .collect();
 
-        self.emails.retain(|e| !paths.contains(&e.path));
+        self.with_emails_mut(|entries| entries.retain(|e| !paths.contains(&e.path)));
         self.invalidate_pending_mailbox_loads();
 
-        if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
-            cached.retain(|e| !paths.contains(&e.path));
-        }
-
-        if !self.emails.is_empty() {
-            self.list_index = self.list_index.min(self.emails.len() - 1);
+        self.rebuild_visible();
+        if !self.visible.is_empty() {
+            self.list_index = self.list_index.min(self.visible.len() - 1);
         } else {
             self.list_index = 0;
         }
@@ -560,8 +716,8 @@ impl App {
         // meanwhile. Clamp the cursor against it so the UI stays valid --
         // the arrival handler clamps again against the fresh list and
         // updates the mailbox count.
-        if !self.emails.is_empty() {
-            self.list_index = self.list_index.min(self.emails.len() - 1);
+        if !self.visible.is_empty() {
+            self.list_index = self.list_index.min(self.visible.len() - 1);
         } else {
             self.list_index = 0;
         }
@@ -583,7 +739,8 @@ impl App {
         }
 
         if let Some(cached) = self.email_cache.get(idx).and_then(|c| c.as_ref()) {
-            self.emails = cached.clone();
+            self.emails = Arc::clone(cached);
+            self.rebuild_visible();
             if let Some(count) = self.mailbox_counts.get_mut(idx) {
                 *count = self.emails.len();
             }
@@ -597,17 +754,20 @@ impl App {
                 // empty list with the existing bg spinner (same loading
                 // indication as `BgResult::IndexReady`) rather than the
                 // previous mailbox's entries.
-                self.emails = Vec::new();
+                self.emails = Arc::new(Vec::new());
+                self.rebuild_visible();
                 self.set_status_level(
                     format!("Loading {label}..."),
                     StatusLevel::Progress,
                 );
             }
-            // else: same-mailbox reload -- keep the stale list visible
-            // until the fresh entries arrive (no flicker, no empty state).
+            // else: same-mailbox reload -- keep the stale list (and its
+            // view) visible until the fresh entries arrive (no flicker,
+            // no empty state).
             self.request_mailbox_load(idx);
         } else {
-            self.emails = Vec::new();
+            self.emails = Arc::new(Vec::new());
+            self.rebuild_visible();
         }
 
         if changing {

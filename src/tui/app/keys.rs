@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     Action, App, AttachmentPicker, AttachmentPickerMode, ComposeField, ComposeMode,
     ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
-    Focus, Message, SearchOverlayFocus,
+    EmailEntry, Focus, MailboxKind, Message, SearchOverlayFocus,
 };
 
 impl App {
@@ -256,7 +256,7 @@ impl App {
     }
 
     fn handle_list_key(&mut self, key: KeyEvent) -> Option<Message> {
-        if self.emails.is_empty() {
+        if self.visible.is_empty() {
             self.g_pending = false;
             match key.code {
                 KeyCode::Char('s') => self.push_action(Action::Fetch),
@@ -293,11 +293,11 @@ impl App {
             }
             KeyCode::Char('G') => {
                 self.g_pending = false;
-                self.list_index = self.emails.len().saturating_sub(1);
+                self.list_index = self.visible.len().saturating_sub(1);
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.g_pending = false;
-                if self.list_index < self.emails.len() - 1 {
+                if self.list_index < self.visible.len() - 1 {
                     self.list_index += 1;
                 }
             }
@@ -328,7 +328,9 @@ impl App {
             KeyCode::Char('a') => {
                 self.g_pending = false;
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.selection = self.emails.iter().map(|e| e.path.clone()).collect();
+                    // Select-all applies to the current (filtered) view,
+                    // same as before the visible-indices refactor.
+                    self.selection = self.visible_emails().map(|e| e.path.clone()).collect();
                 } else if !self.selection.is_empty() {
                     let count = self.selection.len();
                     self.confirm_dialog = Some(ConfirmDialog {
@@ -473,7 +475,7 @@ impl App {
                     } else {
                         self.selection.insert(path);
                     }
-                    if self.list_index < self.emails.len() - 1 {
+                    if self.list_index < self.visible.len() - 1 {
                         self.list_index += 1;
                     }
                 }
@@ -1363,50 +1365,79 @@ impl App {
         None
     }
 
+    /// Recompute the visible view for the current `search_query`: the
+    /// filter now yields indices into the (unfiltered, Arc-shared) full
+    /// list instead of cloning matching entries (P2).
     pub(crate) fn apply_search_filter(&mut self) {
         self.selection.clear();
-        let idx = self.active_mailbox;
-        let all_emails = self
-            .email_cache
-            .get(idx)
-            .and_then(|c| c.as_ref())
-            .cloned()
-            .unwrap_or_default();
 
-        if self.search_query.is_empty() {
-            self.emails = all_emails;
-        } else {
-            let query = self.search_query.to_lowercase();
-            let kind = self.active_kind();
-            let includes_body = self.search_includes_body;
-            self.emails = all_emails
-                .into_iter()
-                .filter(|e| {
-                    e.subject.to_lowercase().contains(&query)
-                        || e.display_contact(kind).to_lowercase().contains(&query)
-                        || e.date_display.to_lowercase().contains(&query)
-                        || e.from.to_lowercase().contains(&query)
-                        || e.to.to_lowercase().contains(&query)
-                        || (includes_body && e.body.to_lowercase().contains(&query))
-                })
-                .collect();
-        }
+        self.visible = filter_visible(
+            &self.emails,
+            &self.search_query,
+            self.active_kind(),
+            self.search_includes_body,
+        );
 
         self.list_index = 0;
         self.headers_scroll = 0;
         self.preview_scroll = 0;
     }
 
+    /// Reset the view after clearing/entering search: reapply the (now
+    /// usually empty) query to the full list and reset the cursor. The
+    /// full list is always at hand in `self.emails` (it is never
+    /// filtered in place anymore), so no cache round-trip is needed.
     pub(crate) fn reload_from_cache(&mut self) {
-        let idx = self.active_mailbox;
-        if let Some(Some(cached)) = self.email_cache.get(idx) {
-            self.emails = cached.clone();
-        }
+        self.rebuild_visible();
         self.list_index = 0;
         self.headers_scroll = 0;
         self.preview_scroll = 0;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Search filter helpers (P2/P3: visible-indices model)
+// ---------------------------------------------------------------------------
+
+/// Does `email` match the (already lowercased) search needle?
+fn email_matches(
+    email: &EmailEntry,
+    needle_lower: &str,
+    kind: MailboxKind,
+    includes_body: bool,
+) -> bool {
+    email.subject.to_lowercase().contains(needle_lower)
+        || email
+            .display_contact(kind)
+            .to_lowercase()
+            .contains(needle_lower)
+        || email.date_display.to_lowercase().contains(needle_lower)
+        || email.from.to_lowercase().contains(needle_lower)
+        || email.to.to_lowercase().contains(needle_lower)
+        || (includes_body && email.body.to_lowercase().contains(needle_lower))
+}
+
+/// Build the visible-index view of `emails` for `query` from scratch.
+/// Empty query -> all indices (in order). The needle is lowercased once.
+pub(super) fn filter_visible(
+    emails: &[EmailEntry],
+    query: &str,
+    kind: MailboxKind,
+    includes_body: bool,
+) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..emails.len()).collect();
+    }
+    let needle = query.to_lowercase();
+    emails
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| email_matches(e, &needle, kind, includes_body))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Compose wizard free helpers
@@ -1521,4 +1552,169 @@ fn refresh_browser_entries(picker: &mut DirPicker) {
         }
         Err(_) => Vec::new(),
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn entry(subject: &str, from: &str, body: &str) -> EmailEntry {
+        EmailEntry {
+            path: PathBuf::from(format!("/mail/inbox/{subject}.md")),
+            from: from.to_string(),
+            to: "me@example.com".to_string(),
+            cc: None,
+            subject: subject.to_string(),
+            status: "inbox".to_string(),
+            date_display: "2026-07-01".to_string(),
+            date_sort: "2026-07-01T00:00:00".to_string(),
+            body: body.to_string(),
+            has_attachments: false,
+            read: false,
+        }
+    }
+
+    fn sample() -> Vec<EmailEntry> {
+        vec![
+            entry("Invoice March", "Alice", "please pay"),
+            entry("Invoice April", "Bob", "reminder"),
+            entry("Weekly report", "Alice", "invoice attached"),
+            entry("Holiday plans", "Carol", "beach"),
+        ]
+    }
+
+    // -----------------------------------------------------------------------
+    // filter_visible (P2: visible-index mapping)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_query_yields_all_indices_in_order() {
+        let emails = sample();
+        assert_eq!(
+            filter_visible(&emails, "", MailboxKind::Inbox, false),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn filter_matches_subject_case_insensitively() {
+        let emails = sample();
+        assert_eq!(
+            filter_visible(&emails, "INVOICE", MailboxKind::Inbox, false),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn filter_matches_contact_field() {
+        let emails = sample();
+        // Inbox displays `from`; Alice appears in entries 0 and 2.
+        assert_eq!(
+            filter_visible(&emails, "alice", MailboxKind::Inbox, false),
+            vec![0, 2]
+        );
+    }
+
+    #[test]
+    fn body_matches_only_when_included() {
+        let emails = sample();
+        assert_eq!(
+            filter_visible(&emails, "beach", MailboxKind::Inbox, false),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            filter_visible(&emails, "beach", MailboxKind::Inbox, true),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn filter_indices_map_back_to_underlying_entries() {
+        let emails = sample();
+        let visible = filter_visible(&emails, "invoice", MailboxKind::Inbox, true);
+        // "invoice" hits subjects 0/1 and the body of 2 (content search).
+        assert_eq!(visible, vec![0, 1, 2]);
+        // Selecting position 2 of the view must resolve to "Weekly report":
+        // the actions layer operates on the underlying entry via this map.
+        assert_eq!(emails[visible[2]].subject, "Weekly report");
+    }
+
+    // -----------------------------------------------------------------------
+    // App-level: selection mapping through the visible view
+    // -----------------------------------------------------------------------
+
+    fn app_with_emails(emails: Vec<EmailEntry>) -> App {
+        let mut app = App::default_for_tests();
+        app.emails = std::sync::Arc::new(emails);
+        app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
+        app.mailbox_counts = vec![app.emails.len()];
+        app.rebuild_visible();
+        app
+    }
+
+    #[test]
+    fn selected_email_resolves_through_visible_indices() {
+        let mut app = app_with_emails(sample());
+        app.search_query = "invoice".to_string();
+        app.search_includes_body = true;
+        app.apply_search_filter();
+        // View: [Invoice March, Invoice April, Weekly report]
+        app.list_index = 2;
+        assert_eq!(app.selected_email().unwrap().subject, "Weekly report");
+    }
+
+    #[test]
+    fn remove_selected_maps_back_to_underlying_entry_under_filter() {
+        let mut app = app_with_emails(sample());
+        app.search_query = "invoice".to_string();
+        app.search_includes_body = true;
+        app.apply_search_filter();
+        app.list_index = 2; // "Weekly report" via body match
+
+        let removed = app.remove_selected_from_list().unwrap();
+        assert!(removed.ends_with("Weekly report.md"));
+        // The underlying list lost exactly that entry...
+        assert_eq!(app.emails.len(), 3);
+        assert!(app.emails.iter().all(|e| e.subject != "Weekly report"));
+        // ...the cache slot shares the same (updated) allocation...
+        let cached = app.email_cache[0].as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(cached, &app.emails));
+        // ...and the filtered view is rebuilt with the cursor clamped.
+        assert_eq!(app.visible, vec![0, 1]);
+        assert_eq!(app.list_index, 1);
+    }
+
+    #[test]
+    fn set_email_read_updates_shared_cache_without_deep_clone() {
+        let mut app = app_with_emails(sample());
+        let path = app.emails[1].path.clone();
+        app.set_email_read(&path, true);
+        assert!(app.emails[1].read);
+        let cached = app.email_cache[0].as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(cached, &app.emails));
+        assert!(cached[1].read);
+    }
+
+    #[test]
+    fn with_emails_mut_leaves_invalidated_cache_slot_none() {
+        let mut app = app_with_emails(sample());
+        app.email_cache[0] = None; // e.g. load in flight
+        let path = app.emails[0].path.clone();
+        app.set_email_read(&path, true);
+        assert!(app.emails[0].read);
+        assert!(app.email_cache[0].is_none());
+    }
+
+    #[test]
+    fn clearing_search_restores_full_view() {
+        let mut app = app_with_emails(sample());
+        app.search_query = "holiday".to_string();
+        app.apply_search_filter();
+        assert_eq!(app.visible, vec![3]);
+        app.search_query.clear();
+        app.reload_from_cache();
+        assert_eq!(app.visible, vec![0, 1, 2, 3]);
+        assert_eq!(app.list_index, 0);
+    }
 }

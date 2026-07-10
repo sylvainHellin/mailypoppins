@@ -93,6 +93,31 @@ All notable changes to this project are documented in this file.
   almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
 
 ### Performance
+- **Mailbox switches, account switches and search no longer deep-clone
+  the email list.** Cache slots and the active list are now
+  `Arc<Vec<EmailEntry>>` (P2): switching mailboxes/accounts and
+  delivering a background `MailboxLoaded` result share the allocation
+  (`Arc::clone`) instead of cloning every entry (each `EmailEntry`
+  carries the full parsed body -- on a multi-thousand-email mailbox
+  every switch previously copied megabytes). The search filter is now a
+  `visible: Vec<usize>` index view over the unfiltered list instead of
+  a cloned filtered `Vec`; rendering, navigation, selection and all
+  actions resolve the selected email through this indirection
+  (`App::selected_email` / `visible_emails`), so actions under an
+  active filter still target the right underlying entry. Mutations
+  (optimistic archive/delete removal, read-flag updates) go through
+  `App::with_emails_mut`, which drops the cache slot's strong reference
+  first so `Arc::make_mut` mutates in place in the common case and
+  re-shares the updated Arc with the slot afterwards -- a deep clone
+  only happens when another owner (the per-account cache mirror from
+  `save_to_account`) still shares the allocation. Behavior preserved:
+  cursor clamping on switch/removal, ordering, read-status display,
+  empty-search shows all, optimistic list updates, and the
+  `MailboxLoaded` generation guard from the previous entry. One
+  deliberate fix on top: switching back to an account with a saved
+  search query now reapplies the filter instead of silently showing
+  the unfiltered cache. Unit tests cover the visible-index mapping,
+  removal-under-filter, and Arc sharing (`src/tui/app/keys.rs`).
 - **Mailbox loads no longer block the UI thread.** `load_emails`
   (walkdir + frontmatter parse of every `.md` in a mailbox, seconds on
   large mailboxes) previously ran synchronously on every cache miss:
