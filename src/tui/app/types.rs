@@ -393,6 +393,18 @@ pub enum BgResult {
         account_index: usize,
         index: MessageIdIndex,
     },
+    /// A background `load_emails` walk of one mailbox directory has
+    /// finished (P1 step 2: the walk blocks for seconds on large
+    /// mailboxes, so it runs off the UI thread). Applied only while
+    /// `generation` still matches `App::mailbox_load_generation` --
+    /// stale/out-of-order results are dropped (see
+    /// `mailbox_loaded_disposition` in `tui/bg.rs`).
+    MailboxLoaded {
+        account_index: usize,
+        mailbox_idx: usize,
+        generation: u64,
+        entries: Vec<EmailEntry>,
+    },
 }
 
 /// Walk every mailbox directory of an account and build the
@@ -623,6 +635,14 @@ pub enum Action {
         dest_dir: PathBuf,
     },
     Fetch,
+    /// Walk one mailbox directory of the active account off the UI
+    /// thread (P1 step 2). Queued by `App::request_mailbox_load` on
+    /// every cache-miss switch/reload; the result arrives as
+    /// `BgResult::MailboxLoaded` carrying the same `generation`.
+    LoadMailbox {
+        mailbox_idx: usize,
+        generation: u64,
+    },
     /// Quick-sync a specific account by index. Used for the per-account
     /// startup auto-fetch (#0001) -- caller must guarantee that account's
     /// `message_id_index` is ready (i.e. its `BgResult::IndexReady`

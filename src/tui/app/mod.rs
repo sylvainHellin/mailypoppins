@@ -56,6 +56,12 @@ pub struct App {
 
     pub bg_count: usize,
     pub bg_spin_tick: usize,
+    /// Monotonic counter guarding background mailbox loads (P1 step 2).
+    /// Every `request_mailbox_load` bumps it and stamps the spawned walk;
+    /// a `BgResult::MailboxLoaded` whose stamp no longer matches (the user
+    /// switched account/mailbox, requested a newer reload, or mutated the
+    /// list optimistically) is dropped in `tui/bg.rs`.
+    pub mailbox_load_generation: u64,
     pub queued_action: Option<Action>,
     pub persistent_error: Option<PersistentError>,
     pub attachment_picker: Option<AttachmentPicker>,
@@ -148,6 +154,7 @@ impl App {
             help_filter_active: false,
             bg_count: 0,
             bg_spin_tick: 0,
+            mailbox_load_generation: 0,
             queued_action: None,
             persistent_error: None,
             attachment_picker: None,
@@ -327,11 +334,13 @@ impl App {
         if let Some(cached) = self.email_cache.get(am).and_then(|c| c.as_ref()) {
             self.emails = cached.clone();
         } else if let Some(mb) = self.mailboxes.get(am) {
-            let loaded = load_emails(&mb.dir);
-            if let Some(slot) = self.email_cache.get_mut(am) {
-                *slot = Some(loaded.clone());
-            }
-            self.emails = loaded;
+            // Cache miss: same off-thread load as `switch_mailbox` (P1
+            // step 2) -- show an empty list + loading status until the
+            // new account's entries arrive via `BgResult::MailboxLoaded`.
+            let label = mb.label.clone();
+            self.emails = Vec::new();
+            self.set_status_level(format!("Loading {label}..."), StatusLevel::Progress);
+            self.request_mailbox_load(am);
         } else {
             self.emails = Vec::new();
         }
@@ -411,6 +420,7 @@ impl App {
 
         let path = self.emails[self.list_index].path.clone();
         self.emails.remove(self.list_index);
+        self.invalidate_pending_mailbox_loads();
 
         if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
             cached.retain(|e| e.path != path);
@@ -441,6 +451,7 @@ impl App {
             .collect();
 
         self.emails.retain(|e| !paths.contains(&e.path));
+        self.invalidate_pending_mailbox_loads();
 
         if let Some(Some(cached)) = self.email_cache.get_mut(self.active_mailbox) {
             cached.retain(|e| !paths.contains(&e.path));
@@ -544,14 +555,15 @@ impl App {
         self.invalidate_cache_idx(am);
         self.switch_mailbox(am);
 
+        // The fresh entries arrive asynchronously via
+        // `BgResult::MailboxLoaded`; the stale list stays visible
+        // meanwhile. Clamp the cursor against it so the UI stays valid --
+        // the arrival handler clamps again against the fresh list and
+        // updates the mailbox count.
         if !self.emails.is_empty() {
             self.list_index = self.list_index.min(self.emails.len() - 1);
         } else {
             self.list_index = 0;
-        }
-        // Only update count for the active mailbox (not all)
-        if let Some(count) = self.mailbox_counts.get_mut(am) {
-            *count = self.emails.len();
         }
     }
 
@@ -572,21 +584,54 @@ impl App {
 
         if let Some(cached) = self.email_cache.get(idx).and_then(|c| c.as_ref()) {
             self.emails = cached.clone();
-        } else if let Some(mb) = self.mailboxes.get(idx) {
-            let loaded = load_emails(&mb.dir);
-            if let Some(slot) = self.email_cache.get_mut(idx) {
-                *slot = Some(loaded.clone());
+            if let Some(count) = self.mailbox_counts.get_mut(idx) {
+                *count = self.emails.len();
             }
-            self.emails = loaded;
+        } else if let Some(mb) = self.mailboxes.get(idx) {
+            // Cache miss: walk the directory off the UI thread (P1 step 2).
+            // The entries arrive via `BgResult::MailboxLoaded`; the mailbox
+            // count is updated then.
+            if changing {
+                let label = mb.label.clone();
+                // The user expects the NEW mailbox's content -- show an
+                // empty list with the existing bg spinner (same loading
+                // indication as `BgResult::IndexReady`) rather than the
+                // previous mailbox's entries.
+                self.emails = Vec::new();
+                self.set_status_level(
+                    format!("Loading {label}..."),
+                    StatusLevel::Progress,
+                );
+            }
+            // else: same-mailbox reload -- keep the stale list visible
+            // until the fresh entries arrive (no flicker, no empty state).
+            self.request_mailbox_load(idx);
         } else {
             self.emails = Vec::new();
         }
 
-        if let Some(count) = self.mailbox_counts.get_mut(idx) {
-            *count = self.emails.len();
-        }
         if changing {
             self.list_index = 0;
         }
+    }
+
+    /// Queue a background `load_emails` walk for mailbox `idx` of the
+    /// active account (P1 step 2). Bumping the generation first makes any
+    /// still-in-flight older walk stale, so out-of-order arrivals cannot
+    /// clobber a newer result.
+    fn request_mailbox_load(&mut self, idx: usize) {
+        self.mailbox_load_generation = self.mailbox_load_generation.wrapping_add(1);
+        self.push_action(Action::LoadMailbox {
+            mailbox_idx: idx,
+            generation: self.mailbox_load_generation,
+        });
+    }
+
+    /// Drop any in-flight background mailbox load. Called after optimistic
+    /// list mutations (archive/delete remove entries before the server
+    /// confirms): a walk that started before the mutation could otherwise
+    /// resurrect the removed email when it lands.
+    fn invalidate_pending_mailbox_loads(&mut self) {
+        self.mailbox_load_generation = self.mailbox_load_generation.wrapping_add(1);
     }
 }

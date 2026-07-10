@@ -4,6 +4,25 @@ use super::app::{
 };
 use crate::imap_client::{save_mailbox_states_cache, update_read_status_locally};
 
+/// Whether a `BgResult::MailboxLoaded` may be applied or must be dropped
+/// as stale (P1 step 2). A background walk is only valid if the user is
+/// still looking at the same account and mailbox it was requested for,
+/// AND no newer request or optimistic list mutation has bumped the
+/// generation since (an older walk could resurrect an archived/deleted
+/// email or clobber a newer reload's result).
+fn mailbox_loaded_is_current(
+    active_account: usize,
+    active_mailbox: usize,
+    current_generation: u64,
+    account_index: usize,
+    mailbox_idx: usize,
+    generation: u64,
+) -> bool {
+    account_index == active_account
+        && mailbox_idx == active_mailbox
+        && generation == current_generation
+}
+
 /// Map the local directories a sync actually touched to mailbox indices.
 /// Used after a fetch to invalidate only the affected mailbox caches
 /// instead of all of them.
@@ -290,6 +309,45 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
+        BgResult::MailboxLoaded { account_index, mailbox_idx, generation, entries } => {
+            if !mailbox_loaded_is_current(
+                app.active_account,
+                app.active_mailbox,
+                app.mailbox_load_generation,
+                account_index,
+                mailbox_idx,
+                generation,
+            ) {
+                // Stale: the user switched account/mailbox, a newer reload
+                // superseded this one, or an optimistic mutation
+                // (archive/delete) made this walk's snapshot unsafe to
+                // apply. Do NOT populate the cache either -- the walk may
+                // predate an in-flight file move. The cache slot stays
+                // `None`, so the next visit triggers a fresh load.
+                return;
+            }
+            if let Some(slot) = app.email_cache.get_mut(mailbox_idx) {
+                *slot = Some(entries.clone());
+            }
+            app.emails = entries;
+            // Preserve selection the way the old synchronous reload did:
+            // clamp the cursor against the fresh list.
+            if !app.emails.is_empty() {
+                app.list_index = app.list_index.min(app.emails.len() - 1);
+            } else {
+                app.list_index = 0;
+            }
+            if let Some(count) = app.mailbox_counts.get_mut(mailbox_idx) {
+                *count = app.emails.len();
+            }
+            // Clear the "Loading <mailbox>..." indication set by a
+            // cache-miss mailbox switch (harmless no-op otherwise).
+            if matches!(&app.status_message, Some(m) if m.starts_with("Loading ")) {
+                app.status_message = None;
+                app.status_ticks = 0;
+            }
+        }
+
         BgResult::ServerSearch { result } => {
             app.server_search_loading = false;
             match result {
@@ -392,5 +450,43 @@ mod tests {
             PathBuf::from("/mail/acct/inbox"),
         ];
         assert_eq!(mailbox_indices_for_dirs(&mailboxes, &touched), vec![0, 3]);
+    }
+
+    // -----------------------------------------------------------------------
+    // mailbox_loaded_is_current (P1 step 2: background mailbox loads)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mailbox_loaded_applies_when_everything_matches() {
+        assert!(mailbox_loaded_is_current(0, 2, 7, 0, 2, 7));
+    }
+
+    /// User switched account while the walk was in flight.
+    #[test]
+    fn mailbox_loaded_dropped_on_account_switch() {
+        assert!(!mailbox_loaded_is_current(1, 2, 7, 0, 2, 7));
+    }
+
+    /// User switched to another mailbox (e.g. a cached one, which does not
+    /// bump the generation) while the walk was in flight.
+    #[test]
+    fn mailbox_loaded_dropped_on_mailbox_switch() {
+        assert!(!mailbox_loaded_is_current(0, 3, 7, 0, 2, 7));
+    }
+
+    /// A newer reload (or an optimistic archive/delete mutation) bumped
+    /// the generation; the older walk must not clobber it / resurrect
+    /// removed entries.
+    #[test]
+    fn mailbox_loaded_dropped_on_stale_generation() {
+        assert!(!mailbox_loaded_is_current(0, 2, 8, 0, 2, 7));
+    }
+
+    /// Out-of-order delivery: a walk stamped with a *newer* generation
+    /// than the app's counter can only happen through wraparound or a
+    /// bug -- treated as stale either way.
+    #[test]
+    fn mailbox_loaded_dropped_on_future_generation() {
+        assert!(!mailbox_loaded_is_current(0, 2, 7, 0, 2, 8));
     }
 }

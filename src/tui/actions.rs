@@ -48,11 +48,15 @@ pub(super) fn handle_action(
                     Ok(()) => app.set_status("Returned from editor".to_string()),
                     Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
                 }
-                app.reload_current_mailbox();
-                // Auto-mark as read after opening in editor
+                // Auto-mark as read after opening in editor. Queued
+                // BEFORE the reload so the read-flag file write happens
+                // before the background mailbox walk spawns -- otherwise
+                // the walk could read the file pre-write and the fresh
+                // list would briefly show the email as unread again.
                 if was_unread {
                     app.push_action(Action::MarkAsRead);
                 }
+                app.reload_current_mailbox();
             }
         }
 
@@ -1250,6 +1254,32 @@ pub(super) fn handle_action(
                     });
                 });
             }
+        }
+
+        Action::LoadMailbox { mailbox_idx, generation } => {
+            // Background mailbox walk (P1 step 2). Queued by
+            // `App::request_mailbox_load` on cache-miss switches/reloads so
+            // `load_emails` (seconds on large mailboxes) never blocks the
+            // UI thread. Follows the `BgResult::IndexReady` pattern:
+            // bump `bg_count` (spinner), spawn, deliver via `bg_tx`. The
+            // handler in `tui/bg.rs` drops the result if the generation
+            // or account/mailbox indices went stale meanwhile.
+            let dir = match app.mailboxes.get(mailbox_idx) {
+                Some(mb) => mb.dir.clone(),
+                None => return Ok(()),
+            };
+            let account_index = app.active_account;
+            app.bg_count += 1;
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let entries = super::app::load_emails(&dir);
+                let _ = tx.send(BgResult::MailboxLoaded {
+                    account_index,
+                    mailbox_idx,
+                    generation,
+                    entries,
+                });
+            });
         }
 
         Action::FetchAccount(acct_idx) => {

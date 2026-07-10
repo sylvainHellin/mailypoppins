@@ -93,6 +93,24 @@ All notable changes to this project are documented in this file.
   almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
 
 ### Performance
+- **Mailbox loads no longer block the UI thread.** `load_emails`
+  (walkdir + frontmatter parse of every `.md` in a mailbox, seconds on
+  large mailboxes) previously ran synchronously on every cache miss:
+  post-fetch reloads, editor returns, and sidebar/hotkey mailbox
+  switches would all freeze the TUI. The walk now runs on a background
+  thread (following the `BgResult::IndexReady` pattern) via a new
+  `Action::LoadMailbox` / `BgResult::MailboxLoaded` pair; the spinner
+  shows while it runs. Same-mailbox reloads keep the stale list visible
+  until the fresh entries arrive (no flicker, no empty state), then swap
+  it in with the cursor clamped as before. Cache-miss switches to a
+  *different* mailbox (or account) show an empty list with a
+  "Loading <mailbox>..." status instead of the previous mailbox's
+  content. Stale results are dropped via account/mailbox index checks
+  plus a generation counter (`App::mailbox_load_generation`) that is
+  bumped on every request and on optimistic archive/delete list
+  mutations, so an out-of-order or pre-mutation walk can never clobber a
+  newer list or resurrect a removed email (guard logic + tests in
+  `src/tui/bg.rs::mailbox_loaded_is_current`).
 - **No-op fetches no longer invalidate caches or reload the open mailbox.**
   `SyncResult` (IMAP and Graph) now carries `touched_dirs`: the local
   mailbox directories the sync actually modified on disk (new emails
