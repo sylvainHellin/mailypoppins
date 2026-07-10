@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **Saved HTML email bodies now carry a restrictive Content-Security-Policy.**
+  Fetched HTML companions (`.html` next to the `.md`) are opened via
+  `file://` in the default browser (`b` in the TUI), so a hostile email
+  could previously run scripts and load remote tracking pixels. At save
+  time we now inject
+  `<meta http-equiv="Content-Security-Policy" content="script-src 'none';
+  connect-src 'none'; img-src data: cid: file:">` into the HTML head
+  (`inject_csp_meta` in `src/parse.rs`): scripts and script-initiated
+  network access are blocked, and remote (http/https) images -- i.e.
+  tracking pixels -- are blocked by default. `file:` stays allowed for
+  images because inline `cid:` references are rewritten to local
+  `file://` attachment paths at save time; with scripts and connections
+  blocked there is no exfiltration channel, so local images are safe.
+  Sender-supplied CSP meta tags are stripped and replaced so our policy
+  always wins; injection is idempotent on re-save. Applies to newly
+  fetched emails (previously saved `.html` files are unchanged). No
+  config opt-out for remote images yet: the save path does not currently
+  receive the global config, so plumbing it through would touch four
+  call sites -- deferred until someone actually wants remote images.
+
 ### Features
 - **Mark approved drafts back as draft.** New TUI hotkey `D` in the
   email list demotes an approved draft back to `draft` status -- the

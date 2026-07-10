@@ -45,6 +45,48 @@ pub(crate) fn ensure_utf8_charset(html: &str) -> String {
     }
 }
 
+/// Inject a restrictive Content-Security-Policy `<meta>` tag into saved HTML so
+/// that opening the companion `.html` file in a browser (via `file://`) cannot
+/// execute scripts, phone home, or load remote tracking pixels.
+///
+/// Policy rationale:
+/// - `script-src 'none'` / `connect-src 'none'`: no script execution, no network
+///   requests from script -- neutralizes active content in hostile emails.
+/// - `img-src data: cid: file:`: remote (http/https) images -- i.e. tracking
+///   pixels -- are blocked by default. `file:` is required because inline
+///   `cid:` image references are rewritten to local `file://` paths at save
+///   time (see `rewrite_cid_references`); with scripts and connections blocked
+///   there is no exfiltration channel, so allowing local files is safe.
+///
+/// Any pre-existing CSP meta tag (e.g. supplied by the sender) is removed and
+/// replaced with ours, so our policy always wins. Idempotent: re-saving
+/// already-tagged HTML does not duplicate the tag.
+pub(crate) fn inject_csp_meta(html: &str) -> String {
+    use regex::Regex;
+
+    const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="script-src 'none'; connect-src 'none'; img-src data: cid: file:">"#;
+
+    // Strip any existing CSP meta tags (ours from a previous save, or
+    // sender-supplied ones), handling case variations and single/double quotes.
+    let re_csp = Regex::new(
+        r#"(?i)<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["']\s+content\s*=\s*(?:"[^"]*"|'[^']*')\s*/?>"#,
+    )
+    .unwrap();
+    let html = re_csp.replace_all(html, "").into_owned();
+
+    // Insert our tag using the same head-finding logic as `ensure_utf8_charset`.
+    let lower = html.to_lowercase();
+    if let Some(pos) = lower.find("<head>") {
+        let insert = pos + "<head>".len();
+        format!("{}{}{}", &html[..insert], CSP_META, &html[insert..])
+    } else if let Some(pos) = lower.find("<html") {
+        let tag_end = html[pos..].find('>').map(|i| pos + i + 1).unwrap_or(pos + 6);
+        format!("{}<head>{}</head>{}", &html[..tag_end], CSP_META, &html[tag_end..])
+    } else {
+        format!("{}{}", CSP_META, html)
+    }
+}
+
 /// Rewrite `cid:` references in HTML to point to local attachment files.
 /// `attachments` is the list of extracted attachments (with Content-ID populated for
 /// inline images). `att_dir` is the directory where the files were saved.
@@ -727,7 +769,11 @@ pub fn save_fetched_emails_with_known_ids(
             let html_path = dest.with_extension("html");
             let att_dir = attachments_dir_for(&dest);
             let html = rewrite_cid_references(html, &email.attachments, &att_dir);
-            fs::write(&html_path, ensure_utf8_charset(&html))?;
+            let html = ensure_utf8_charset(&html);
+            // Neutralize scripts and remote tracking pixels when the file is
+            // later opened in a browser (see `inject_csp_meta`).
+            let html = inject_csp_meta(&html);
+            fs::write(&html_path, html)?;
         }
 
         // Track the new message_id to prevent duplicates within the same batch
@@ -884,6 +930,66 @@ mod tests {
         let html = "<div>hello</div>";
         let result = ensure_utf8_charset(html);
         assert!(result.starts_with(r#"<meta charset="UTF-8">"#));
+    }
+
+    // -----------------------------------------------------------------------
+    // inject_csp_meta
+    // -----------------------------------------------------------------------
+
+    const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="script-src 'none'; connect-src 'none'; img-src data: cid: file:">"#;
+
+    #[test]
+    fn test_inject_csp_meta_normal_html() {
+        let html = "<html><head><title>Test</title></head><body>hi</body></html>";
+        let result = inject_csp_meta(html);
+        // Injected right after <head>, before existing content
+        assert!(result.contains(&format!("<head>{}<title>", CSP_META)));
+    }
+
+    #[test]
+    fn test_inject_csp_meta_without_head() {
+        let html = "<html><body>hi</body></html>";
+        let result = inject_csp_meta(html);
+        assert!(result.contains(CSP_META));
+        assert!(result.contains("<head>"));
+    }
+
+    #[test]
+    fn test_inject_csp_meta_bare_fragment() {
+        let html = "<div>hello</div>";
+        let result = inject_csp_meta(html);
+        assert!(result.starts_with(CSP_META));
+        assert!(result.ends_with("<div>hello</div>"));
+    }
+
+    #[test]
+    fn test_inject_csp_meta_idempotent() {
+        let html = "<html><head><title>t</title></head><body>hi</body></html>";
+        let once = inject_csp_meta(html);
+        let twice = inject_csp_meta(&once);
+        assert_eq!(once, twice);
+        assert_eq!(twice.matches("Content-Security-Policy").count(), 1);
+    }
+
+    #[test]
+    fn test_inject_csp_meta_replaces_existing_csp() {
+        // A sender-supplied (permissive) CSP must be replaced by ours, even
+        // with case variations and single quotes.
+        let html = r#"<html><head><META HTTP-EQUIV='content-security-policy' CONTENT='default-src *'></head><body>hi</body></html>"#;
+        let result = inject_csp_meta(html);
+        assert!(!result.contains("default-src *"));
+        assert!(result.contains(CSP_META));
+        assert_eq!(
+            result.to_lowercase().matches("content-security-policy").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_inject_csp_meta_uppercase_head() {
+        let html = "<HTML><HEAD></HEAD><BODY>hi</BODY></HTML>";
+        let result = inject_csp_meta(html);
+        assert!(result.contains(CSP_META));
     }
 
     // -----------------------------------------------------------------------
@@ -1642,6 +1748,9 @@ mod tests {
         assert_eq!(html_files.len(), 1);
         let html_content = std::fs::read_to_string(html_files[0].path()).unwrap();
         assert!(html_content.contains("Rich text"));
+        // Saved HTML must carry the restrictive CSP (S1 security fix)
+        assert!(html_content.contains("Content-Security-Policy"));
+        assert!(html_content.contains("script-src 'none'"));
     }
 
     #[test]
