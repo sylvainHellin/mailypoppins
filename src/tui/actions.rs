@@ -1189,14 +1189,18 @@ pub(super) fn handle_action(
                 std::thread::spawn(move || {
                     let rt =
                         tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-                    let result = rt
-                        .block_on(lib_do_sync_graph(&account_config, &graph_config, 100, true))
-                        .map_err(|e| e.to_string());
+                    let sync_result = rt
+                        .block_on(lib_do_sync_graph(&account_config, &graph_config, 100, true));
+                    let (result, touched_dirs) = match sync_result {
+                        Ok((msg, dirs)) => (Ok(msg), Some(dirs)),
+                        Err(e) => (Err(e.to_string()), None),
+                    };
                     let _ = tx.send(BgResult::Fetch {
                         account_index: acct_idx,
                         result,
                         new_index: None,
                         new_mailbox_states: None,
+                        touched_dirs,
                     });
                 });
             } else {
@@ -1228,19 +1232,21 @@ pub(super) fn handle_action(
                             Some(&mut index_clone),
                             Some(&prev_states),
                         ));
-                    let (result, new_index, new_states) = match sync_result {
+                    let (result, new_index, new_states, touched_dirs) = match sync_result {
                         Ok((msg, meta)) => (
                             Ok(msg),
                             Some(index_clone),
                             Some(meta.mailbox_states),
+                            Some(meta.touched_dirs),
                         ),
-                        Err(e) => (Err(e.to_string()), None, None),
+                        Err(e) => (Err(e.to_string()), None, None, None),
                     };
                     let _ = tx.send(BgResult::Fetch {
                         account_index: acct_idx,
                         result,
                         new_index,
                         new_mailbox_states: new_states,
+                        touched_dirs,
                     });
                 });
             }
@@ -1273,14 +1279,18 @@ pub(super) fn handle_action(
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new()
                         .expect("failed to create tokio runtime");
-                    let result = rt
-                        .block_on(lib_do_sync_graph(&account_config, &graph_config, 100, true))
-                        .map_err(|e| e.to_string());
+                    let sync_result = rt
+                        .block_on(lib_do_sync_graph(&account_config, &graph_config, 100, true));
+                    let (result, touched_dirs) = match sync_result {
+                        Ok((msg, dirs)) => (Ok(msg), Some(dirs)),
+                        Err(e) => (Err(e.to_string()), None),
+                    };
                     let _ = tx.send(BgResult::Fetch {
                         account_index: acct_idx,
                         result,
                         new_index: None,
                         new_mailbox_states: None,
+                        touched_dirs,
                     });
                 });
             } else {
@@ -1307,19 +1317,21 @@ pub(super) fn handle_action(
                         Some(&mut index_clone),
                         Some(&prev_states),
                     ));
-                    let (result, new_index, new_states) = match sync_result {
+                    let (result, new_index, new_states, touched_dirs) = match sync_result {
                         Ok((msg, meta)) => (
                             Ok(msg),
                             Some(index_clone),
                             Some(meta.mailbox_states),
+                            Some(meta.touched_dirs),
                         ),
-                        Err(e) => (Err(e.to_string()), None, None),
+                        Err(e) => (Err(e.to_string()), None, None, None),
                     };
                     let _ = tx.send(BgResult::Fetch {
                         account_index: acct_idx,
                         result,
                         new_index,
                         new_mailbox_states: new_states,
+                        touched_dirs,
                     });
                 });
             }
@@ -1412,6 +1424,7 @@ pub(super) fn handle_action(
                             usize::MAX,
                             true,
                         ))
+                        .map(|(msg, _touched_dirs)| msg)
                         .map_err(|e| e.to_string());
                     let _ = tx.send(BgResult::Sync {
                         account_index: acct_idx,

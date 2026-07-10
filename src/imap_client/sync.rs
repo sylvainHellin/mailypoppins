@@ -189,6 +189,12 @@ pub struct SyncResult {
     /// Mailbox states observed during this sync (from SELECT responses).
     /// Keyed by role (e.g. "inbox", "archive").
     pub mailbox_states: HashMap<String, MailboxState>,
+    /// Local mailbox directories that were actually modified by this sync
+    /// (new emails saved, read flags updated, duplicates removed, or files
+    /// moved/removed by reconciliation). Empty when nothing changed on disk,
+    /// letting the TUI skip cache invalidation entirely. Always empty on
+    /// `dry_run`.
+    pub touched_dirs: Vec<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +242,10 @@ pub async fn sync_mailboxes(
     let mut total_read_updated = 0usize;
     let mut fresh_observations: Vec<FreshObservation> = Vec::new();
     let mut new_mailbox_states: HashMap<String, MailboxState> = HashMap::new();
+    // Local dirs actually modified on disk by this sync (saves, read-flag
+    // updates, dedup, reconciliation moves/removals). Lets the TUI
+    // invalidate only the affected mailbox caches.
+    let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
 
     // Build the global known_ids set.
     // If we have an in-memory index, derive it from there (zero disk I/O).
@@ -306,6 +316,9 @@ pub async fn sync_mailboxes(
                             &mut global_known_ids,
                         )?;
                         total_saved += saved;
+                        if saved > 0 {
+                            touched_dirs.insert(target.local_dir.clone());
+                        }
 
                         // Update in-memory index with newly saved emails using the
                         // paths returned by the save (no directory re-scan needed).
@@ -332,14 +345,19 @@ pub async fn sync_mailboxes(
                     // Sync read status from server for existing local emails.
                     // Use the in-memory index if available to avoid re-scanning.
                     if !known_read_flags.is_empty() {
-                        if let Some(ref index) = known_index {
-                            if let Some(dir_map) = index.get(&target.local_dir) {
-                                total_read_updated +=
-                                    sync_local_read_flags_with_index(dir_map, &known_read_flags);
-                            }
+                        let updated = if let Some(ref index) = known_index {
+                            index
+                                .get(&target.local_dir)
+                                .map(|dir_map| {
+                                    sync_local_read_flags_with_index(dir_map, &known_read_flags)
+                                })
+                                .unwrap_or(0)
                         } else {
-                            total_read_updated +=
-                                sync_local_read_flags(&target.local_dir, &known_read_flags);
+                            sync_local_read_flags(&target.local_dir, &known_read_flags)
+                        };
+                        total_read_updated += updated;
+                        if updated > 0 {
+                            touched_dirs.insert(target.local_dir.clone());
                         }
                     }
                 }
@@ -366,6 +384,7 @@ pub async fn sync_mailboxes(
                     Ok(n) if n > 0 => {
                         info!("Deduplicated {} file(s) in {}", n, target.local_dir.display());
                         total_deduped += n;
+                        touched_dirs.insert(target.local_dir.clone());
                     }
                     Err(e) => warn!("Dedup failed for {}: {}", target.local_dir.display(), e),
                     _ => {}
@@ -446,6 +465,15 @@ pub async fn sync_mailboxes(
                 total_moved = moved;
                 total_removed = removed;
 
+                if moved > 0 || removed > 0 {
+                    // Reconciliation only ever mutates the dirs in `local_dirs`
+                    // (at most INBOX + Archive). Moves touch both source and
+                    // destination, so mark them all.
+                    for dir in local_dirs.values() {
+                        touched_dirs.insert(dir.clone());
+                    }
+                }
+
                 // Update in-memory index to reflect reconciliation changes
                 if let Some(ref mut index) = known_index {
                     for (_key, dir) in &local_dirs {
@@ -512,6 +540,7 @@ pub async fn sync_mailboxes(
         deduped: total_deduped,
         fresh_observations,
         mailbox_states: new_mailbox_states,
+        touched_dirs: touched_dirs.into_iter().collect(),
     })
 }
 

@@ -1,5 +1,23 @@
-use super::app::{Action, App, BgResult, MailboxKind, SearchOverlayFocus, SearchResultEntry, StatusLevel};
+use super::app::{
+    Action, App, BgResult, MailboxInfo, MailboxKind, SearchOverlayFocus, SearchResultEntry,
+    StatusLevel,
+};
 use crate::imap_client::{save_mailbox_states_cache, update_read_status_locally};
+
+/// Map the local directories a sync actually touched to mailbox indices.
+/// Used after a fetch to invalidate only the affected mailbox caches
+/// instead of all of them.
+fn mailbox_indices_for_dirs(
+    mailboxes: &[MailboxInfo],
+    touched: &[std::path::PathBuf],
+) -> Vec<usize> {
+    mailboxes
+        .iter()
+        .enumerate()
+        .filter(|(_, mb)| touched.contains(&mb.dir))
+        .map(|(i, _)| i)
+        .collect()
+}
 
 /// Persist the account's `mailbox_states` cache to disk. Best-effort: logs
 /// and continues on failure (the cache only buys us a faster first quick
@@ -127,7 +145,7 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Fetch { account_index, result, new_index, new_mailbox_states } => {
+        BgResult::Fetch { account_index, result, new_index, new_mailbox_states, touched_dirs } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Fetch complete".into() } else { msg };
@@ -142,11 +160,49 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                             persist_mailbox_states(acct);
                         }
                     }
-                    if account_index == app.active_account {
-                        app.invalidate_all_caches();
-                        app.reload_current_mailbox();
-                    } else {
-                        app.invalidate_all_caches_on(account_index);
+                    match touched_dirs {
+                        // No-op sync: nothing changed on disk (common for
+                        // IDLE-triggered fetches). Skip cache invalidation
+                        // and the mailbox reload entirely.
+                        Some(dirs) if dirs.is_empty() => {}
+                        // Sync reported exactly which local dirs it modified
+                        // (saves, read-flag updates, dedup, reconciliation
+                        // moves/removals -- moves list both source and
+                        // destination). Invalidate only those caches.
+                        Some(dirs) => {
+                            if account_index == app.active_account {
+                                let indices =
+                                    mailbox_indices_for_dirs(&app.mailboxes, &dirs);
+                                let reload_current = indices.contains(&app.active_mailbox);
+                                for idx in indices {
+                                    app.invalidate_cache_idx(idx);
+                                }
+                                if reload_current {
+                                    app.reload_current_mailbox();
+                                }
+                            } else {
+                                let indices = app
+                                    .accounts
+                                    .get(account_index)
+                                    .map(|acct| {
+                                        mailbox_indices_for_dirs(&acct.mailboxes, &dirs)
+                                    })
+                                    .unwrap_or_default();
+                                for idx in indices {
+                                    app.invalidate_cache_idx_on(account_index, idx);
+                                }
+                            }
+                        }
+                        // Unknown which dirs changed -- fall back to the
+                        // conservative full invalidation.
+                        None => {
+                            if account_index == app.active_account {
+                                app.invalidate_all_caches();
+                                app.reload_current_mailbox();
+                            } else {
+                                app.invalidate_all_caches_on(account_index);
+                            }
+                        }
                     }
                 }
                 Err(e) => app.set_status_level(format!("Fetch failed: {e}"), StatusLevel::Error),
@@ -267,5 +323,74 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn mb(label: &str, dir: &str, kind: MailboxKind) -> MailboxInfo {
+        MailboxInfo {
+            label: label.to_string(),
+            icon: "",
+            dir: PathBuf::from(dir),
+            kind,
+            server_name: None,
+        }
+    }
+
+    fn sample_mailboxes() -> Vec<MailboxInfo> {
+        vec![
+            mb("Inbox", "/mail/acct/inbox", MailboxKind::Inbox),
+            mb("Drafts", "/mail/acct/drafts", MailboxKind::Drafts),
+            mb("Sent", "/mail/acct/sent", MailboxKind::Sent),
+            mb("Archive", "/mail/acct/archive", MailboxKind::Archive),
+        ]
+    }
+
+    #[test]
+    fn no_touched_dirs_maps_to_no_indices() {
+        let mailboxes = sample_mailboxes();
+        assert!(mailbox_indices_for_dirs(&mailboxes, &[]).is_empty());
+    }
+
+    #[test]
+    fn single_touched_dir_maps_to_its_mailbox_only() {
+        let mailboxes = sample_mailboxes();
+        let touched = vec![PathBuf::from("/mail/acct/inbox")];
+        assert_eq!(mailbox_indices_for_dirs(&mailboxes, &touched), vec![0]);
+    }
+
+    /// A reconciliation move touches both source and destination; both
+    /// mailbox caches must be invalidated.
+    #[test]
+    fn move_touches_source_and_destination() {
+        let mailboxes = sample_mailboxes();
+        let touched = vec![
+            PathBuf::from("/mail/acct/inbox"),
+            PathBuf::from("/mail/acct/archive"),
+        ];
+        assert_eq!(mailbox_indices_for_dirs(&mailboxes, &touched), vec![0, 3]);
+    }
+
+    /// A touched dir not shown in the sidebar (e.g. a mailbox removed from
+    /// config between syncs) is simply ignored -- no panic, no bogus index.
+    #[test]
+    fn unknown_touched_dir_is_ignored() {
+        let mailboxes = sample_mailboxes();
+        let touched = vec![PathBuf::from("/mail/acct/junk")];
+        assert!(mailbox_indices_for_dirs(&mailboxes, &touched).is_empty());
+    }
+
+    #[test]
+    fn order_follows_mailbox_list_not_touched_list() {
+        let mailboxes = sample_mailboxes();
+        let touched = vec![
+            PathBuf::from("/mail/acct/archive"),
+            PathBuf::from("/mail/acct/inbox"),
+        ];
+        assert_eq!(mailbox_indices_for_dirs(&mailboxes, &touched), vec![0, 3]);
     }
 }

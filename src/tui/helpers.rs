@@ -266,6 +266,7 @@ pub(super) async fn lib_do_sync(
     }
     let meta = SyncResultMeta {
         mailbox_states: result.mailbox_states,
+        touched_dirs: result.touched_dirs,
     };
     Ok((msg, meta))
 }
@@ -274,6 +275,10 @@ pub(super) async fn lib_do_sync(
 /// Carries state that needs to be persisted back to AccountState.
 pub(super) struct SyncResultMeta {
     pub mailbox_states: std::collections::HashMap<String, MailboxState>,
+    /// Local mailbox directories the sync actually modified on disk.
+    /// Empty when the sync was a no-op (lets the UI skip cache
+    /// invalidation and mailbox reload entirely).
+    pub touched_dirs: Vec<std::path::PathBuf>,
 }
 
 pub(super) async fn lib_do_multi_search(
@@ -342,7 +347,7 @@ pub(super) async fn lib_do_sync_graph(
     graph_config: &crate::config::GraphConfig,
     limit: usize,
     reconcile: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Vec<std::path::PathBuf>)> {
     let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
         .iter()
         .map(|(role, mapping)| SyncTarget {
@@ -376,7 +381,7 @@ pub(super) async fn lib_do_sync_graph(
             msg.push_str(" | Already in sync");
         }
     }
-    Ok(msg)
+    Ok((msg, result.touched_dirs))
 }
 
 pub(super) async fn lib_do_multi_search_graph(

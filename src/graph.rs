@@ -6,6 +6,7 @@
 // storage layer (`.md` + `.html` + `_attachments/`).
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -563,6 +564,10 @@ pub async fn sync_mailboxes_graph(
     let mut total_skipped = 0usize;
     let mut total_read_updated = 0usize;
     let mut fresh_observations: Vec<FreshObservation> = Vec::new();
+    // Local dirs actually modified on disk by this sync (saves, read-flag
+    // updates, reconciliation moves/removals). Lets the TUI invalidate only
+    // the affected mailbox caches. Left empty on dry_run.
+    let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
 
     // Build global known IDs from all local directories
     let mut global_known_ids = HashSet::new();
@@ -604,6 +609,9 @@ pub async fn sync_mailboxes_graph(
                             Ok((saved, dup, _saved_paths)) => {
                                 total_saved += saved;
                                 total_skipped += dup;
+                                if saved > 0 {
+                                    touched_dirs.insert(target.local_dir.clone());
+                                }
                                 // Collect fresh observations
                                 for email in &new_emails {
                                     fresh_observations.push(FreshObservation {
@@ -615,7 +623,12 @@ pub async fn sync_mailboxes_graph(
                                     });
                                 }
                             }
-                            Err(e) => warn!("Failed to save emails for {}: {}", target.role, e),
+                            Err(e) => {
+                                warn!("Failed to save emails for {}: {}", target.role, e);
+                                // Save may have partially written files
+                                // before failing -- invalidate conservatively.
+                                touched_dirs.insert(target.local_dir.clone());
+                            }
                         }
                     }
                 }
@@ -625,9 +638,16 @@ pub async fn sync_mailboxes_graph(
                     match sync_read_status_graph(&client, &target.server_name, &target.local_dir)
                         .await
                     {
-                        Ok(updated) => total_read_updated += updated,
+                        Ok(updated) => {
+                            total_read_updated += updated;
+                            if updated > 0 {
+                                touched_dirs.insert(target.local_dir.clone());
+                            }
+                        }
                         Err(e) => {
-                            warn!("Failed to sync read status for {}: {}", target.role, e)
+                            warn!("Failed to sync read status for {}: {}", target.role, e);
+                            // May have partially updated files before failing.
+                            touched_dirs.insert(target.local_dir.clone());
                         }
                     }
                 }
@@ -692,6 +712,7 @@ pub async fn sync_mailboxes_graph(
                         info!("Reconcile: removing {} (not on server)", local_path.display());
                         remove_local_email(local_path);
                         total_removed += 1;
+                        touched_dirs.insert(target.local_dir.clone());
                     }
                 } else if let Some(server_folder) = server_id_to_folder.get(mid) {
                     // Check if it's in the right local folder
@@ -711,6 +732,9 @@ pub async fn sync_mailboxes_graph(
                                 );
                                 move_local_email(local_path, &expected.local_dir);
                                 total_moved += 1;
+                                // A move touches both source and destination
+                                touched_dirs.insert(target.local_dir.clone());
+                                touched_dirs.insert(expected.local_dir.clone());
                             }
                         }
                     }
@@ -728,6 +752,7 @@ pub async fn sync_mailboxes_graph(
         deduped: 0,
         fresh_observations,
         mailbox_states: std::collections::HashMap::new(),
+        touched_dirs: touched_dirs.into_iter().collect(),
     })
 }
 

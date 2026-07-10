@@ -93,6 +93,20 @@ All notable changes to this project are documented in this file.
   almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
 
 ### Performance
+- **No-op fetches no longer invalidate caches or reload the open mailbox.**
+  `SyncResult` (IMAP and Graph) now carries `touched_dirs`: the local
+  mailbox directories the sync actually modified on disk (new emails
+  saved, read flags updated, duplicates removed, reconciliation
+  moves/removals -- a move lists both source and destination). The TUI
+  quick-sync paths thread this through `BgResult::Fetch`, and the
+  handler in `src/tui/bg.rs` now: skips cache invalidation and the
+  UI-thread mailbox reload entirely when nothing changed (the common
+  case for IDLE-triggered fetches), and invalidates only the touched
+  mailboxes' caches otherwise -- reloading the open mailbox only when it
+  was among them. Full sync (`BgResult::Sync`) keeps the conservative
+  invalidate-everything behavior, as does the error path
+  (`touched_dirs: None`). Selection/scroll preservation in
+  `reload_current_mailbox` is unchanged.
 - **Saving fetched emails no longer triggers a full-directory re-scan per
   new email.** `save_fetched_emails_with_known_ids` now returns the
   `(message_id, path)` of every file it writes, and `sync_mailboxes`

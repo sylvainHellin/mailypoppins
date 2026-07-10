@@ -347,6 +347,11 @@ pub enum BgResult {
         new_index: Option<MessageIdIndex>,
         /// Updated mailbox states from IMAP SELECT (for state-based reconciliation).
         new_mailbox_states: Option<std::collections::HashMap<String, MailboxState>>,
+        /// Local mailbox directories the sync actually modified on disk.
+        /// `Some(vec![])` means the sync was a no-op (skip cache invalidation
+        /// and reload entirely); `None` means unknown (fall back to
+        /// invalidating everything, the pre-optimization behavior).
+        touched_dirs: Option<Vec<PathBuf>>,
     },
     Sync {
         account_index: usize,
