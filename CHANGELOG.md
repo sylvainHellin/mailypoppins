@@ -101,8 +101,13 @@ All notable changes to this project are documented in this file.
   emails that still matched the previous prefix (a big win for content
   search, which lowercases whole bodies per comparison). The needle is
   lowercased once per keystroke. Backspace and query resets recompute
-  from the full list. Unit tests assert narrow-equals-full equivalence
-  and stale-index safety.
+  from the full list, as do appends where lowercasing rewrites earlier
+  characters (Greek capital sigma is context-sensitive: "ΘΕΟΣ" lowers
+  to "θεος" but "ΘΕΟΣΦ" to "θεοσφ", so the extended query can match
+  entries the shorter one missed) — the narrow path is taken only when
+  the old lowercased query is a prefix of the new one. Unit tests
+  assert narrow-equals-full equivalence, stale-index safety, and the
+  final-sigma fallback.
 - **Mailbox switches, account switches and search no longer deep-clone
   the email list.** Cache slots and the active list are now
   `Arc<Vec<EmailEntry>>` (P2): switching mailboxes/accounts and

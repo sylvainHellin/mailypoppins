@@ -1353,11 +1353,20 @@ impl App {
                 self.focus = Focus::List;
             }
             KeyCode::Char(c) => {
+                let old_lower = self.search_query.to_lowercase();
                 self.search_query.push(c);
-                // Appending a character can only shrink the match set
-                // (substring containment is monotone), so narrow the
+                // Appending a character normally only shrinks the match
+                // set (substring containment is monotone), so narrow the
                 // current visible set instead of rescanning everything.
-                self.apply_search_filter(true);
+                // But lowercasing is not always append-monotone: Greek
+                // capital sigma is context-sensitive ("ΘΕΟΣ" -> "θεος"
+                // with final ς, yet "ΘΕΟΣΦ" -> "θεοσφ" with medial σ),
+                // so a haystack can match the extended query without
+                // matching the shorter one. Narrow only when the old
+                // lowercased query is a prefix of the new one; otherwise
+                // recompute from the full list.
+                let narrow = self.search_query.to_lowercase().starts_with(&old_lower);
+                self.apply_search_filter(narrow);
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
@@ -1370,12 +1379,15 @@ impl App {
 
     /// Recompute the visible view for the current `search_query` (P3).
     ///
-    /// `narrow` may be true only when the query changed by appending
-    /// characters to the query the current view was built from (i.e. a
-    /// keystroke in search mode): substring matching is monotone under
+    /// `narrow` may be true only when the *lowercased* query changed by
+    /// appending characters to the lowercased query the current view was
+    /// built from (i.e. a keystroke in search mode that keeps the old
+    /// lowered query as a prefix): substring matching is monotone under
     /// query extension, so the new match set is a subset of the current
     /// one and we can retain-filter `visible` instead of rescanning the
-    /// full list. Backspace/edits/resets must pass `narrow = false`.
+    /// full list. Backspace/edits/resets — and appends where lowercasing
+    /// rewrites earlier characters (Greek final sigma) — must pass
+    /// `narrow = false`.
     ///
     /// The needle is lowercased once per call, not once per email.
     pub(crate) fn apply_search_filter(&mut self, narrow: bool) {
@@ -1707,6 +1719,29 @@ mod tests {
         let mut visible = vec![0, 99];
         narrow_visible(&emails, &mut visible, "invoice", MailboxKind::Inbox, false);
         assert_eq!(visible, vec![0]);
+    }
+
+    #[test]
+    fn greek_final_sigma_append_falls_back_to_full_recompute() {
+        // Lowercasing is context-sensitive for Greek capital sigma:
+        // "ΘΕΟΣ".to_lowercase() == "θεος" (final ς) does NOT match the
+        // haystack "θεοσφανια", but "ΘΕΟΣΦ".to_lowercase() == "θεοσφ"
+        // (medial σ) does. Naive narrowing over the previous visible set
+        // would drop the entry forever; the fifth keystroke must fall
+        // back to a full recompute and bring it back.
+        let mut emails = sample();
+        emails.push(entry("θεοσφανια", "Dora", ""));
+        let theos_idx = emails.len() - 1;
+        let mut app = app_with_emails(emails);
+        app.focus = Focus::Search;
+        for c in "ΘΕΟΣ".chars() {
+            app.handle_search_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        // "θεος" matches nothing.
+        assert!(app.visible.is_empty());
+        app.handle_search_key(KeyEvent::from(KeyCode::Char('Φ')));
+        // "θεοσφ" matches the haystack again.
+        assert_eq!(app.visible, vec![theos_idx]);
     }
 
     // -----------------------------------------------------------------------
