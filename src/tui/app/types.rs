@@ -634,6 +634,8 @@ pub enum Action {
     MarkAsRead,
     BatchToggleRead(Vec<PathBuf>),
     CopyPath,
+    /// Open the newest log file from `logs_dir()` in `$EDITOR` (#0025).
+    OpenLogFile,
     OpenAttachment(PathBuf),
     SaveAttachments {
         sources: Vec<PathBuf>,

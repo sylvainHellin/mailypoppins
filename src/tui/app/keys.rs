@@ -91,6 +91,11 @@ impl App {
                 self.activity_scroll = 0;
                 return None;
             }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.g_pending = false;
+                self.push_action(Action::OpenLogFile);
+                return None;
+            }
             KeyCode::Char('/') => {
                 self.g_pending = false;
                 self.focus = Focus::Search;

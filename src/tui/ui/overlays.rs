@@ -412,6 +412,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("?", "Toggle this help"),
                 ("!", "Toggle activity log"),
                 ("L", "Open activity log overlay"),
+                ("Ctrl+l", "Open log file in $EDITOR"),
             ],
         ),
         (

@@ -510,6 +510,24 @@ pub fn logs_dir() -> PathBuf {
     mailypoppins_data_dir().join("logs")
 }
 
+/// Newest log file in `logs_dir()`, by filename. Daily files are named
+/// `mailypoppins-YYYY-MM-DD.log` (see `init_logging`), so lexicographic
+/// order equals date order. `None` when the directory is missing or
+/// contains no matching file.
+pub fn latest_log_file() -> Option<PathBuf> {
+    let entries = fs::read_dir(logs_dir()).ok()?;
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("mailypoppins-") && n.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .max()
+}
+
 /// Resolve the sent mailbox server name from config
 pub fn resolve_sent_mailbox(account: &AccountConfig) -> String {
     account
@@ -1100,6 +1118,42 @@ host = "imap.example.com"
         );
         assert_eq!(tokens_dir(), PathBuf::from("/tmp/x/tokens"));
         assert_eq!(logs_dir(), PathBuf::from("/tmp/x/logs"));
+        match prev {
+            Some(v) => std::env::set_var("MAILYPOPPINS_DATA_DIR", v),
+            None => std::env::remove_var("MAILYPOPPINS_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn latest_log_file_picks_newest_and_handles_missing_dir() {
+        let _g = data_dir_lock();
+        let prev = std::env::var("MAILYPOPPINS_DATA_DIR").ok();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mailypoppins-latest-log-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::set_var("MAILYPOPPINS_DATA_DIR", &tmp);
+
+        // Missing logs dir -> None, no crash.
+        assert_eq!(latest_log_file(), None);
+
+        // Empty logs dir -> None.
+        fs::create_dir_all(logs_dir()).unwrap();
+        assert_eq!(latest_log_file(), None);
+
+        // Newest daily file wins; non-matching files are ignored.
+        fs::write(logs_dir().join("mailypoppins-2026-05-01.log"), "").unwrap();
+        fs::write(logs_dir().join("mailypoppins-2026-05-03.log"), "").unwrap();
+        fs::write(logs_dir().join("mailypoppins-2026-05-02.log"), "").unwrap();
+        fs::write(logs_dir().join("unrelated.txt"), "").unwrap();
+        assert_eq!(
+            latest_log_file(),
+            Some(logs_dir().join("mailypoppins-2026-05-03.log"))
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
         match prev {
             Some(v) => std::env::set_var("MAILYPOPPINS_DATA_DIR", v),
             None => std::env::remove_var("MAILYPOPPINS_DATA_DIR"),

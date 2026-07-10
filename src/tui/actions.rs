@@ -1103,6 +1103,28 @@ pub(super) fn handle_action(
             }
         }
 
+        Action::OpenLogFile => match crate::config::latest_log_file() {
+            Some(path) => {
+                suspend_terminal(terminal)?;
+                let result = edit_file(&path);
+                resume_terminal(terminal)?;
+                match result {
+                    Ok(()) => app.set_status("Returned from log file".to_string()),
+                    Err(e) => app.set_status_level(
+                        format!("Open log failed: {e}"),
+                        StatusLevel::Error,
+                    ),
+                }
+            }
+            None => app.set_status_level(
+                format!(
+                    "No log file found in {}",
+                    crate::config::logs_dir().display()
+                ),
+                StatusLevel::Warning,
+            ),
+        },
+
         Action::OpenAttachment(path) => match crate::parse::open_file_with_system(&path) {
             Ok(()) => {
                 let name = path

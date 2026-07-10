@@ -67,6 +67,18 @@ All notable changes to this project are documented in this file.
   comment-fake-head, attribute-fake-head, and the `İ` expansion case.
 
 ### Features
+- **Open the log file from the TUI.** New global hotkey `Ctrl+l`
+  suspends the TUI and opens the newest daily log file
+  (`<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`) in `$EDITOR`, using
+  the same suspend/restore mechanism as draft editing. Complements the
+  in-app activity log overlay (`L`) which only shows recent status
+  messages -- the log file carries full debug-level detail. If no log
+  file exists yet, a warning status message is shown instead. Newest
+  file is picked by filename (`latest_log_file` in `src/config.rs`;
+  daily-dated names make lexicographic order equal date order). Help
+  overlay and website `commands.astro` updated alongside.
+  Closes [#0025](docs/tickets/0025-access-detailed-logs.md).
+
 - **Mark approved drafts back as draft.** New TUI hotkey `D` in the
   email list demotes an approved draft back to `draft` status -- the
   exact reverse of `A`. Useful when `A` was pressed by mistake or
