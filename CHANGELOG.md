@@ -169,6 +169,16 @@ All notable changes to this project are documented in this file.
   overlay and website `commands.astro` updated alongside.
   Closes [#0025](docs/tickets/0025-access-detailed-logs.md).
 
+- **Open config.toml from the TUI.** New global hotkey `Ctrl+e` suspends
+  the TUI and opens the global config file (`~/.config/email/config.toml`)
+  in `$EDITOR`, reusing the same suspend/edit/resume mechanism as draft
+  editing and the `Ctrl+l` log-open. Config is read once at startup (the
+  theme is an `OnceLock` by design), so there is no hot-reload: on return
+  the status line notes that changes apply on restart. A missing config
+  file yields a warning pointing at `email config init` rather than
+  launching the editor on a nonexistent path. Help overlay and website
+  `commands.astro` updated alongside.
+
 - **Mark approved drafts back as draft.** New TUI hotkey `D` in the
   email list demotes an approved draft back to `draft` status -- the
   exact reverse of `A`. Useful when `A` was pressed by mistake or

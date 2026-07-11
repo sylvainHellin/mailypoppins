@@ -100,6 +100,11 @@ impl App {
                 self.push_action(Action::OpenLogFile);
                 return None;
             }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.g_pending = false;
+                self.push_action(Action::OpenConfigFile);
+                return None;
+            }
             KeyCode::Char('/') => {
                 self.g_pending = false;
                 self.focus = Focus::Search;

@@ -659,6 +659,9 @@ pub enum Action {
     CopyPath,
     /// Open the newest log file from `logs_dir()` in `$EDITOR` (#0025).
     OpenLogFile,
+    /// Open the global config file (`config_path()`) in `$EDITOR`. Changes
+    /// apply on restart (theme is `OnceLock`; no hot-reload).
+    OpenConfigFile,
     OpenAttachment(PathBuf),
     SaveAttachments {
         sources: Vec<PathBuf>,

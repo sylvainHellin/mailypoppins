@@ -1262,6 +1262,34 @@ pub(super) fn handle_action(
             ),
         },
 
+        Action::OpenConfigFile => {
+            let path = crate::config::config_path();
+            if path.exists() {
+                suspend_terminal(terminal)?;
+                let result = edit_file(&path);
+                resume_terminal(terminal)?;
+                match result {
+                    // Theme and other settings are read once at startup
+                    // (theme is an `OnceLock`), so there is no hot-reload.
+                    Ok(()) => app.set_status(
+                        "Config saved \u{2014} restart mailypoppins to apply changes".to_string(),
+                    ),
+                    Err(e) => app.set_status_level(
+                        format!("Open config failed: {e}"),
+                        StatusLevel::Error,
+                    ),
+                }
+            } else {
+                app.set_status_level(
+                    format!(
+                        "Config file not found at {}. Run `email config init` to create it.",
+                        path.display()
+                    ),
+                    StatusLevel::Warning,
+                );
+            }
+        }
+
         Action::OpenAttachment(path) => match crate::parse::open_file_with_system(&path) {
             Ok(()) => {
                 let name = path
