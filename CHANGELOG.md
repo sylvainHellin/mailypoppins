@@ -66,6 +66,18 @@ All notable changes to this project are documented in this file.
   there was mojibake or the same panic). Regression tests cover
   comment-fake-head, attribute-fake-head, and the `İ` expansion case.
 
+### Infrastructure
+- **CI + release pipeline (#0011).** New GitHub Actions workflows:
+  `ci.yml` runs `cargo test` on every push to `main` and every PR;
+  `release.yml` fires on `v*` tag pushes, creates a GitHub release with
+  notes extracted from the matching CHANGELOG section, and attaches
+  `mailypoppins-<target>.tar.gz` + `.sha256` artifacts for
+  `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+  `x86_64-unknown-linux-gnu`, and a fully static
+  `x86_64-unknown-linux-musl` build (via a new optional
+  `vendored-openssl` cargo feature that statically links OpenSSL; not
+  compiled in default builds). Release procedure documented in
+  [docs/release-process.md](docs/release-process.md).
 ### Features
 - **Desktop notifications for new mail (#0009).** Opt-in via a new
   top-level `notifications = true` key in config.toml (default: off).

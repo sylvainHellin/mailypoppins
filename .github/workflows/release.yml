@@ -1,0 +1,86 @@
+# Release pipeline (ticket #0011).
+#
+# On every `v*` tag push:
+#   1. create a GitHub release for the tag, with notes extracted from
+#      the matching `## [X.Y.Z]` section of CHANGELOG.md;
+#   2. build release binaries for macOS (arm64 + x86_64) and Linux
+#      (x86_64 gnu + static musl) and upload them as
+#      `mailypoppins-<target>.tar.gz` plus `.sha256` checksums.
+#
+# See docs/release-process.md for the full release procedure.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if ! [ -s /tmp/notes.md ]; then
+            echo "::warning::No '## [$version]' section in CHANGELOG.md; release notes will be empty."
+          fi
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/notes.md
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is arm64; x86_64-apple-darwin is cross-compiled
+          # there. macOS TLS goes through Security.framework, no OpenSSL.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Static binary with vendored OpenSSL; this is the artifact the
+          # Homebrew formula uses on Linux (zero runtime dependencies).
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: vendored-openssl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: email
+          target: ${{ matrix.target }}
+          archive: mailypoppins-$target
+          features: ${{ matrix.features }}
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
+

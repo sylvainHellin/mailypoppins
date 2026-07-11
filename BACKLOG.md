@@ -27,7 +27,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 > Windows is targeted via WSL only. Native Windows (msvc, Credential Manager, Scoop, winget, EV signing) is out of scope.
 
-- [#0011 CI release pipeline](docs/tickets/0011-ci-release-pipeline.md) -- chore
 - [#0012 Apple Developer ID signing for macOS releases](docs/tickets/0012-apple-developer-id-signing.md) -- chore
 - [#0013 Homebrew tap](docs/tickets/0013-homebrew-tap.md) -- chore
 - [#0014 Linux packaging (.deb, .rpm, AUR, musl)](docs/tickets/0014-linux-packaging.md) -- chore
