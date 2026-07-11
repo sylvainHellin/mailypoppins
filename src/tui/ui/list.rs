@@ -24,7 +24,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .style(Style::default().bg(theme::BASE));
+        .style(Style::default().bg(theme::active().bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -43,11 +43,17 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(search_rect) = search_area {
         let prefix = if app.search_includes_body { "\\" } else { "/" };
         let mut spans = vec![
-            Span::styled(prefix, Style::default().fg(theme::BLUE)),
-            Span::styled(app.search_query.as_str(), Style::default().fg(theme::TEXT)),
+            Span::styled(prefix, Style::default().fg(theme::active().accent)),
+            Span::styled(
+                app.search_query.as_str(),
+                Style::default().fg(theme::active().text),
+            ),
         ];
         if app.focus == Focus::Search {
-            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::BLUE)));
+            spans.push(Span::styled(
+                "\u{2588}",
+                Style::default().fg(theme::active().accent),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), search_rect);
     }
@@ -61,7 +67,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 app.active_label()
             )
         };
-        let empty = Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
+        let empty = Paragraph::new(msg).style(Style::default().fg(theme::active().text_muted));
         frame.render_widget(empty, list_area);
         return;
     }
@@ -83,12 +89,16 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
 
         let mut header_cells = Vec::new();
         if has_selection {
-            header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
+            header_cells
+                .push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
         }
-        header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
-        header_cells.push(Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)));
-        header_cells.push(Cell::from("CONTACT").style(Style::default().fg(theme::SUBTEXT0)));
-        header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
+        header_cells.push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
+        header_cells
+            .push(Cell::from("DATE").style(Style::default().fg(theme::active().text_muted)));
+        header_cells
+            .push(Cell::from("CONTACT").style(Style::default().fg(theme::active().text_muted)));
+        header_cells
+            .push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
         let header = Row::new(header_cells).height(1);
 
         let rows: Vec<Row> = app
@@ -109,23 +119,27 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 );
 
                 let row_style = if is_cursor {
-                    Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
+                    Style::default()
+                        .bg(theme::active().surface)
+                        .fg(theme::active().selection)
                 } else if is_in_selection {
-                    Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
+                    Style::default()
+                        .bg(theme::active().surface)
+                        .fg(theme::active().text)
                 } else if !email.read {
                     Style::default()
-                        .fg(theme::TEXT)
+                        .fg(theme::active().text)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::SUBTEXT0)
+                    Style::default().fg(theme::active().text_muted)
                 };
 
                 let mut cells = Vec::new();
                 if has_selection {
                     let icon = if is_in_selection {
-                        Span::styled("\u{f0134}", Style::default().fg(theme::GREEN))
+                        Span::styled("\u{f0134}", Style::default().fg(theme::active().selection))
                     } else {
-                        Span::styled("\u{f0131}", Style::default().fg(theme::OVERLAY0))
+                        Span::styled("\u{f0131}", Style::default().fg(theme::active().text_faint))
                     };
                     cells.push(Cell::from(icon));
                 }
@@ -133,7 +147,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 let marker = if email.read {
                     Span::styled(" ", Style::default())
                 } else {
-                    Span::styled("\u{f444}", Style::default().fg(theme::BLUE))
+                    Span::styled("\u{f444}", Style::default().fg(theme::active().unread))
                 };
                 cells.push(Cell::from(marker));
                 cells.push(Cell::from(email.date_display.clone()));
@@ -158,8 +172,8 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .column_spacing(1)
             .row_highlight_style(
                 Style::default()
-                    .bg(theme::SURFACE0)
-                    .fg(theme::GREEN)
+                    .bg(theme::active().surface)
+                    .fg(theme::active().selection)
                     .add_modifier(Modifier::BOLD),
             );
 
@@ -173,11 +187,14 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
 
         let mut header_cells = Vec::new();
         if has_selection {
-            header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
+            header_cells
+                .push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
         }
-        header_cells.push(Cell::from("").style(Style::default().fg(theme::SUBTEXT0)));
-        header_cells.push(Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0)));
-        header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
+        header_cells.push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
+        header_cells
+            .push(Cell::from("DATE").style(Style::default().fg(theme::active().text_muted)));
+        header_cells
+            .push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
         let header = Row::new(header_cells).height(1);
 
         let rows: Vec<Row> = app
@@ -197,23 +214,27 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 );
 
                 let row_style = if is_cursor {
-                    Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
+                    Style::default()
+                        .bg(theme::active().surface)
+                        .fg(theme::active().selection)
                 } else if is_in_selection {
-                    Style::default().bg(theme::SURFACE0).fg(theme::TEXT)
+                    Style::default()
+                        .bg(theme::active().surface)
+                        .fg(theme::active().text)
                 } else if !email.read {
                     Style::default()
-                        .fg(theme::TEXT)
+                        .fg(theme::active().text)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::SUBTEXT0)
+                    Style::default().fg(theme::active().text_muted)
                 };
 
                 let mut cells = Vec::new();
                 if has_selection {
                     let icon = if is_in_selection {
-                        Span::styled("\u{f0134}", Style::default().fg(theme::GREEN))
+                        Span::styled("\u{f0134}", Style::default().fg(theme::active().selection))
                     } else {
-                        Span::styled("\u{f0131}", Style::default().fg(theme::OVERLAY0))
+                        Span::styled("\u{f0131}", Style::default().fg(theme::active().text_faint))
                     };
                     cells.push(Cell::from(icon));
                 }
@@ -221,7 +242,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 let marker = if email.read {
                     Span::styled(" ", Style::default())
                 } else {
-                    Span::styled("\u{f444}", Style::default().fg(theme::BLUE))
+                    Span::styled("\u{f444}", Style::default().fg(theme::active().unread))
                 };
                 cells.push(Cell::from(marker));
                 cells.push(Cell::from(email.date_display.clone()));
@@ -244,8 +265,8 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .column_spacing(1)
             .row_highlight_style(
                 Style::default()
-                    .bg(theme::SURFACE0)
-                    .fg(theme::GREEN)
+                    .bg(theme::active().surface)
+                    .fg(theme::active().selection)
                     .add_modifier(Modifier::BOLD),
             );
 

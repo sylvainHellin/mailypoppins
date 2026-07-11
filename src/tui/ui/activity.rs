@@ -31,7 +31,7 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
 
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme::BASE)),
+        Block::default().style(Style::default().bg(theme::active().bg)),
         area,
     );
 
@@ -57,14 +57,14 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
         " j/k scroll  gg/G top/bottom  d/u page  /filter  Esc: close ".to_string()
     };
 
-    let border_color = theme::TEAL;
+    let border_color = theme::active().accent_alt;
     let block = Block::default()
         .title(format!(" Activity Log ({total}) "))
         .title_bottom(Line::from(bottom_title).alignment(Alignment::Center))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme::BASE));
+        .style(Style::default().bg(theme::active().bg));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -84,11 +84,11 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
             .split(inner);
 
         let mut spans = vec![
-            Span::styled("/", Style::default().fg(theme::TEAL)),
-            Span::styled(app.activity_filter.as_str(), Style::default().fg(theme::TEXT)),
+            Span::styled("/", Style::default().fg(theme::active().accent_alt)),
+            Span::styled(app.activity_filter.as_str(), Style::default().fg(theme::active().text)),
         ];
         if app.activity_filter_active {
-            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::TEAL)));
+            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::active().accent_alt)));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
         chunks[1]
@@ -102,7 +102,7 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
         } else {
             "  No matching entries"
         };
-        let empty = Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
+        let empty = Paragraph::new(msg).style(Style::default().fg(theme::active().text_muted));
         frame.render_widget(empty, content_area);
         return;
     }
@@ -120,7 +120,7 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
 
         if msg_width == 0 || entry.message.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled(format!(" {time}  "), Style::default().fg(theme::OVERLAY0)),
+                Span::styled(format!(" {time}  "), Style::default().fg(theme::active().text_faint)),
                 Span::styled(&entry.message, Style::default().fg(color)),
             ]));
             continue;
@@ -133,7 +133,7 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!(" {time}  "),
-                        Style::default().fg(theme::OVERLAY0),
+                        Style::default().fg(theme::active().text_faint),
                     ),
                     Span::styled(chunk.to_string(), Style::default().fg(color)),
                 ]));
@@ -141,7 +141,7 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
                 // Continuation lines: indent to align with message start
                 let pad = " ".repeat(time_prefix_len);
                 lines.push(Line::from(vec![
-                    Span::styled(pad, Style::default().fg(theme::OVERLAY0)),
+                    Span::styled(pad, Style::default().fg(theme::active().text_faint)),
                     Span::styled(chunk.to_string(), Style::default().fg(color)),
                 ]));
             }
@@ -159,11 +159,11 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
 
 fn level_color(level: &StatusLevel) -> ratatui::style::Color {
     match level {
-        StatusLevel::Success => theme::GREEN,
-        StatusLevel::Error => theme::RED,
-        StatusLevel::Warning => theme::YELLOW,
-        StatusLevel::Info => theme::BLUE,
-        StatusLevel::Progress => theme::TEAL,
+        StatusLevel::Success => theme::active().success,
+        StatusLevel::Error => theme::active().error,
+        StatusLevel::Warning => theme::active().warning,
+        StatusLevel::Info => theme::active().info,
+        StatusLevel::Progress => theme::active().accent_alt,
     }
 }
 

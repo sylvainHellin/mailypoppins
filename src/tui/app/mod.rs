@@ -116,6 +116,11 @@ impl App {
     pub fn new() -> Self {
         let global_config = crate::config::load_global_config().unwrap_or_default();
 
+        // Select the TUI theme once, before the first frame. Unknown names
+        // warn (surfaced in the activity log below) and fall back to the
+        // default theme instead of failing.
+        let theme_warning = super::theme::init(&global_config.theme);
+
         let accounts: Vec<AccountState> = global_config
             .accounts
             .iter()
@@ -197,6 +202,10 @@ impl App {
             app.email_cache[0] = Some(Arc::clone(&loaded));
             app.emails = loaded;
             app.rebuild_visible();
+        }
+
+        if let Some(warning) = theme_warning {
+            app.push_status(warning, StatusLevel::Warning);
         }
 
         app

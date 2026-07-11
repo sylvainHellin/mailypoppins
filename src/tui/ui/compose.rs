@@ -39,7 +39,7 @@ pub(super) fn render_compose_wizard(app: &mut App, frame: &mut Frame, area: Rect
     // Dim and clear the background like the search overlay does.
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme::BASE)),
+        Block::default().style(Style::default().bg(theme::active().bg)),
         area,
     );
 
@@ -63,8 +63,8 @@ pub(super) fn render_compose_wizard(app: &mut App, frame: &mut Frame, area: Rect
         .title_bottom(Line::from(hint).alignment(Alignment::Center))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::TEAL))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().accent_alt))
+        .style(Style::default().bg(theme::active().bg));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -90,7 +90,7 @@ pub(super) fn render_compose_wizard(app: &mut App, frame: &mut Frame, area: Rect
     // Separator line.
     let sep = Line::from(Span::styled(
         "─".repeat(chunks[4].width as usize),
-        Style::default().fg(theme::OVERLAY0),
+        Style::default().fg(theme::active().text_faint),
     ));
     frame.render_widget(Paragraph::new(sep), chunks[4]);
 
@@ -101,10 +101,10 @@ fn render_field(wizard: &ComposeWizard, frame: &mut Frame, area: Rect, field: Co
     let is_focused = wizard.focus == field;
     let label_style = if is_focused {
         Style::default()
-            .fg(theme::YELLOW)
+            .fg(theme::active().emphasis)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::SUBTEXT0)
+        Style::default().fg(theme::active().text_muted)
     };
 
     let value = match field {
@@ -117,10 +117,13 @@ fn render_field(wizard: &ComposeWizard, frame: &mut Frame, area: Rect, field: Co
     let label = format!("{:>7}: ", field.label());
     let mut spans = vec![
         Span::styled(label, label_style),
-        Span::styled(value.as_str(), Style::default().fg(theme::TEXT)),
+        Span::styled(value.as_str(), Style::default().fg(theme::active().text)),
     ];
     if is_focused {
-        spans.push(Span::styled("\u{2588}", Style::default().fg(theme::TEAL)));
+        spans.push(Span::styled(
+            "\u{2588}",
+            Style::default().fg(theme::active().accent_alt),
+        ));
     }
 
     let label_row = Rect { height: 1, ..area };
@@ -135,7 +138,7 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
     // Placeholder text when we can't show a list.
     if wizard.focus == ComposeField::Subject {
         let msg = Paragraph::new("  Press Enter to submit the draft (or Tab to go back)")
-            .style(Style::default().fg(theme::SUBTEXT0));
+            .style(Style::default().fg(theme::active().text_muted));
         frame.render_widget(msg, area);
         return;
     }
@@ -145,12 +148,15 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
             Span::styled("  ", Style::default()),
             Span::styled(
                 "No contact cache for this account. Run ",
-                Style::default().fg(theme::SUBTEXT0),
+                Style::default().fg(theme::active().text_muted),
             ),
-            Span::styled("email contacts rebuild", Style::default().fg(theme::YELLOW)),
+            Span::styled(
+                "email contacts rebuild",
+                Style::default().fg(theme::active().emphasis),
+            ),
             Span::styled(
                 " to enable autocomplete.",
-                Style::default().fg(theme::SUBTEXT0),
+                Style::default().fg(theme::active().text_muted),
             ),
         ]));
         frame.render_widget(msg, area);
@@ -159,7 +165,7 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
 
     if wizard.suggestions.is_empty() {
         let msg = Paragraph::new("  Type to filter contacts…")
-            .style(Style::default().fg(theme::SUBTEXT0));
+            .style(Style::default().fg(theme::active().text_muted));
         frame.render_widget(msg, area);
         return;
     }
@@ -175,18 +181,21 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
             let name = if sug.display_name.is_empty() {
                 Span::styled(
                     "(no name)".to_string(),
-                    Style::default().fg(theme::OVERLAY0),
+                    Style::default().fg(theme::active().text_faint),
                 )
             } else {
-                Span::styled(sug.display_name.clone(), Style::default().fg(theme::TEXT))
+                Span::styled(
+                    sug.display_name.clone(),
+                    Style::default().fg(theme::active().text),
+                )
             };
             let addr = Span::styled(
                 format!("<{}>", sug.address),
-                Style::default().fg(theme::SUBTEXT0),
+                Style::default().fg(theme::active().text_muted),
             );
 
             let cell_style = if is_cursor {
-                Style::default().bg(theme::SURFACE0)
+                Style::default().bg(theme::active().surface)
             } else {
                 Style::default()
             };
@@ -225,8 +234,8 @@ fn tier_marker(tier: u8) -> &'static str {
 
 fn tier_marker_style(tier: u8) -> Style {
     match tier {
-        2 => Style::default().fg(theme::GREEN),
-        1 => Style::default().fg(theme::TEAL),
-        _ => Style::default().fg(theme::BLUE),
+        2 => Style::default().fg(theme::active().success),
+        1 => Style::default().fg(theme::active().accent_alt),
+        _ => Style::default().fg(theme::active().accent),
     }
 }

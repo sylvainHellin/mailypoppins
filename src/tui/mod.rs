@@ -3,7 +3,7 @@ mod actions;
 mod bg;
 mod event;
 mod helpers;
-mod theme;
+pub mod theme;
 mod ui;
 
 use std::io;

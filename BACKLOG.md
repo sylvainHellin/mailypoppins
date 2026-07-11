@@ -14,7 +14,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
 - [#0009 Desktop notifications](docs/tickets/0009-desktop-notifications.md) -- feature
-- [#0023 enable theme config](docs/tickets/0023-enable-theme-config.md) -- feature
 - [#0026 Send calendar invitations (iMIP REQUEST)](docs/tickets/0026-send-calendar-invitations.md) -- feature
 
 ## Later

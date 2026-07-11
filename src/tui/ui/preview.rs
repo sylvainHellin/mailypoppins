@@ -15,7 +15,7 @@ pub(super) fn render_body(app: &App, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .style(Style::default().bg(theme::BASE));
+        .style(Style::default().bg(theme::active().bg));
 
     let selected = app.selected_email();
     if selected.is_none() {
@@ -94,7 +94,9 @@ fn parse_inline_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
                 let inner: String = chars[i + 1..end].iter().collect();
                 spans.push(Span::styled(
                     inner,
-                    Style::default().fg(theme::PEACH).bg(theme::SURFACE0),
+                    Style::default()
+                        .fg(theme::active().code)
+                        .bg(theme::active().surface),
                 ));
                 i = end + 1;
                 continue;
@@ -109,7 +111,7 @@ fn parse_inline_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
                 spans.push(Span::styled(
                     link_text,
                     Style::default()
-                        .fg(theme::BLUE)
+                        .fg(theme::active().accent)
                         .add_modifier(Modifier::UNDERLINED),
                 ));
                 i = end;
@@ -245,7 +247,7 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
         if line.trim() == "[signature]" {
             result.push(Line::from(Span::styled(
                 "  -- signature --".to_string(),
-                Style::default().fg(theme::OVERLAY0),
+                Style::default().fg(theme::active().text_faint),
             )));
             continue;
         }
@@ -255,7 +257,7 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
             in_code_block = !in_code_block;
             result.push(Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(theme::OVERLAY0),
+                Style::default().fg(theme::active().text_faint),
             )));
             continue;
         }
@@ -263,7 +265,9 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
         if in_code_block {
             result.push(Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(theme::PEACH).bg(theme::SURFACE0),
+                Style::default()
+                    .fg(theme::active().code)
+                    .bg(theme::active().surface),
             )));
             continue;
         }
@@ -275,7 +279,7 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
                 let rule: String = "\u{2500}".repeat(width.min(40));
                 result.push(Line::from(Span::styled(
                     rule,
-                    Style::default().fg(theme::OVERLAY0),
+                    Style::default().fg(theme::active().text_faint),
                 )));
                 continue;
             }
@@ -283,13 +287,13 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
             if let Some((level, heading_text)) = parse_heading(content) {
                 let style = match level {
                     1 => Style::default()
-                        .fg(theme::MAUVE)
+                        .fg(theme::active().heading)
                         .add_modifier(Modifier::BOLD),
                     2 => Style::default()
-                        .fg(theme::BLUE)
+                        .fg(theme::active().accent)
                         .add_modifier(Modifier::BOLD),
                     _ => Style::default()
-                        .fg(theme::TEAL)
+                        .fg(theme::active().accent_alt)
                         .add_modifier(Modifier::BOLD),
                 };
                 for wrapped in word_wrap(heading_text, width) {
@@ -301,9 +305,12 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
             if let Some((prefix, item_content)) = parse_list_item(content) {
                 let prefix_width = prefix.chars().count();
                 let text_width = width.saturating_sub(prefix_width);
-                let base_style = Style::default().fg(theme::TEXT);
+                let base_style = Style::default().fg(theme::active().text);
                 if text_width < 5 {
-                    let mut spans = vec![Span::styled(prefix, Style::default().fg(theme::BLUE))];
+                    let mut spans = vec![Span::styled(
+                        prefix,
+                        Style::default().fg(theme::active().accent),
+                    )];
                     spans.extend(parse_inline_markdown(item_content, base_style));
                     result.push(Line::from(spans));
                 } else {
@@ -314,8 +321,10 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
                         } else {
                             " ".repeat(prefix_width)
                         };
-                        let mut spans =
-                            vec![Span::styled(line_prefix, Style::default().fg(theme::BLUE))];
+                        let mut spans = vec![Span::styled(
+                            line_prefix,
+                            Style::default().fg(theme::active().accent),
+                        )];
                         spans.extend(parse_inline_markdown(wrapped, base_style));
                         result.push(Line::from(spans));
                     }
@@ -325,13 +334,13 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
 
             if is_attribution(content.trim()) {
                 let style = Style::default()
-                    .fg(theme::SUBTEXT0)
+                    .fg(theme::active().text_muted)
                     .add_modifier(Modifier::ITALIC);
                 for wrapped in word_wrap(content, width) {
                     result.push(Line::from(Span::styled(wrapped, style)));
                 }
             } else {
-                let base_style = Style::default().fg(theme::TEXT);
+                let base_style = Style::default().fg(theme::active().text);
                 for wrapped in word_wrap(content, width) {
                     result.push(Line::from(parse_inline_markdown(&wrapped, base_style)));
                 }
@@ -344,17 +353,20 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
             let is_attr = is_attribution(content.trim());
             let text_style = if is_attr {
                 Style::default()
-                    .fg(theme::SUBTEXT0)
+                    .fg(theme::active().text_muted)
                     .add_modifier(Modifier::ITALIC)
             } else {
                 match depth {
-                    1 => Style::default().fg(theme::OVERLAY0),
-                    _ => Style::default().fg(theme::SURFACE0),
+                    1 => Style::default().fg(theme::active().text_faint),
+                    _ => Style::default().fg(theme::active().surface),
                 }
             };
 
             if text_width < 5 {
-                let mut spans = vec![Span::styled(prefix, Style::default().fg(theme::BLUE))];
+                let mut spans = vec![Span::styled(
+                    prefix,
+                    Style::default().fg(theme::active().accent),
+                )];
                 if is_attr {
                     spans.push(Span::styled(content.to_string(), text_style));
                 } else {
@@ -365,7 +377,7 @@ fn wrap_and_style_body<'a>(body: &'a str, width: usize) -> Vec<Line<'a>> {
                 for wrapped in word_wrap(content, text_width) {
                     let mut spans = vec![Span::styled(
                         prefix.clone(),
-                        Style::default().fg(theme::BLUE),
+                        Style::default().fg(theme::active().accent),
                     )];
                     if is_attr {
                         spans.push(Span::styled(wrapped, text_style));

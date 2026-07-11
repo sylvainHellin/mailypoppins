@@ -67,6 +67,22 @@ All notable changes to this project are documented in this file.
   comment-fake-head, attribute-fake-head, and the `İ` expansion case.
 
 ### Features
+- **Configurable TUI color themes.** New top-level `theme = "..."` key
+  in config.toml selects a named built-in theme, helix-style. Built-ins:
+  `catppuccin-mocha` (the default -- reproduces the previous hardcoded
+  appearance exactly), `catppuccin-latte` (light) and `tokyo-night`
+  (plus case-insensitive aliases like `catppuccin`, `latte`,
+  `tokyonight`). The old raw Catppuccin palette constants in
+  `src/tui/theme.rs` were replaced by a semantic `Theme` struct
+  (slots like `unread`, `selection`, `border_focused`, `error`, ...)
+  so themes only map meanings to colors and the renderers in
+  `src/tui/ui/` never hardcode a palette. The theme is resolved once at
+  TUI startup into a process-wide `OnceLock`; an unknown name falls
+  back to the default and logs a warning to the activity log instead of
+  failing. `email config show` prints the active theme; `config init`
+  templates include the key. Website config page documents the option.
+  Closes [#0023](docs/tickets/0023-enable-theme-config.md).
+
 - **Open the log file from the TUI.** New global hotkey `Ctrl+l`
   suspends the TUI and opens the newest daily log file
   (`<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`) in `$EDITOR`, using

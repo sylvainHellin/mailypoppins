@@ -56,11 +56,14 @@ pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         } else {
             format!(" {} {}", spinner, label)
         };
-        Line::from(Span::styled(text, Style::default().fg(theme::GREEN)))
+        Line::from(Span::styled(
+            text,
+            Style::default().fg(theme::active().success),
+        ))
     } else if let Some(msg) = &app.status_message {
         Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(msg.as_str(), Style::default().fg(theme::GREEN)),
+            Span::styled(msg.as_str(), Style::default().fg(theme::active().success)),
         ])
     } else {
         let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
@@ -71,41 +74,61 @@ pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 if i == app.active_account {
                     spans.push(Span::styled(
                         format!("[{}]", label),
-                        Style::default().fg(theme::BASE).bg(theme::BLUE),
+                        Style::default()
+                            .fg(theme::active().bg)
+                            .bg(theme::active().accent),
                     ));
                 } else {
                     let style = if acct.has_unseen {
-                        Style::default().fg(theme::GREEN)
+                        Style::default().fg(theme::active().success)
                     } else {
-                        Style::default().fg(theme::OVERLAY0)
+                        Style::default().fg(theme::active().text_faint)
                     };
                     spans.push(Span::styled(format!(" {} ", label), style));
                 }
             }
-            spans.push(Span::styled(" | ", Style::default().fg(theme::OVERLAY0)));
+            spans.push(Span::styled(
+                " | ",
+                Style::default().fg(theme::active().text_faint),
+            ));
         }
         spans.push(hint_span("?"));
         spans.push(desc_span(" help"));
         Line::from(spans)
     };
 
-    let left = Paragraph::new(left_content)
-        .style(Style::default().fg(theme::SUBTEXT0).bg(theme::SURFACE0));
+    let left = Paragraph::new(left_content).style(
+        Style::default()
+            .fg(theme::active().text_muted)
+            .bg(theme::active().surface),
+    );
     frame.render_widget(left, chunks[0]);
 
     let mut right_spans = vec![Span::styled(" ", Style::default())];
     if !sel_text.is_empty() {
-        right_spans.push(Span::styled(sel_text, Style::default().fg(theme::YELLOW)));
+        right_spans.push(Span::styled(
+            sel_text,
+            Style::default().fg(theme::active().emphasis),
+        ));
     }
     if !unread_text.is_empty() {
-        right_spans.push(Span::styled(unread_text, Style::default().fg(theme::PEACH)));
+        right_spans.push(Span::styled(
+            unread_text,
+            Style::default().fg(theme::active().unread_count),
+        ));
     }
     if any_watching {
-        right_spans.push(Span::styled(watch_prefix, Style::default().fg(theme::TEAL)));
+        right_spans.push(Span::styled(
+            watch_prefix,
+            Style::default().fg(theme::active().accent_alt),
+        ));
     }
-    right_spans.push(Span::styled(mailbox_text, Style::default().fg(theme::BLUE)));
+    right_spans.push(Span::styled(
+        mailbox_text,
+        Style::default().fg(theme::active().accent),
+    ));
     let right = Paragraph::new(Line::from(right_spans))
-        .style(Style::default().bg(theme::SURFACE0))
+        .style(Style::default().bg(theme::active().surface))
         .alignment(Alignment::Right);
     frame.render_widget(right, chunks[1]);
 }

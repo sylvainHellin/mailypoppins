@@ -15,6 +15,11 @@ use chrono::Utc;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct GlobalConfig {
+    /// TUI color theme name. Built-ins: "catppuccin-mocha" (the default,
+    /// today's exact appearance), "catppuccin-latte", "tokyo-night".
+    /// Unknown names warn and fall back to the default.
+    #[serde(default)]
+    pub theme: String,
     #[serde(default)]
     pub email: EmailSettings,
     #[serde(default)]
@@ -915,6 +920,28 @@ host = "imap.example.com"
         let account = AccountConfig::default();
         let all = all_configured_mailboxes(&account);
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_with_theme() {
+        let toml_str = r#"
+theme = "tokyo-night"
+
+[[accounts]]
+name = "test"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.theme, "tokyo-night");
+    }
+
+    #[test]
+    fn test_theme_defaults_to_empty() {
+        let toml_str = r#"
+[[accounts]]
+name = "test"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.theme, "");
     }
 
     #[test]

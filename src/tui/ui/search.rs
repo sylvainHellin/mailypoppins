@@ -33,7 +33,7 @@ pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect
 
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme::BASE)),
+        Block::default().style(Style::default().bg(theme::active().bg)),
         area,
     );
 
@@ -47,14 +47,14 @@ pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect
         " Enter: search | Tab: switch focus | Esc: close ".to_string()
     };
 
-    let border_color = theme::TEAL;
+    let border_color = theme::active().accent_alt;
     let block = Block::default()
         .title(format!(" Server Search ({}) ", mailbox_label))
         .title_bottom(Line::from(bottom_title).alignment(Alignment::Center))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme::BASE));
+        .style(Style::default().bg(theme::active().bg));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -77,7 +77,7 @@ pub(super) fn render_search_overlay(app: &mut App, frame: &mut Frame, area: Rect
         } else {
             "  No results"
         };
-        let empty = Paragraph::new(msg).style(Style::default().fg(theme::SUBTEXT0));
+        let empty = Paragraph::new(msg).style(Style::default().fg(theme::active().text_muted));
         frame.render_widget(empty, results_area);
         return;
     }
@@ -106,14 +106,17 @@ fn render_search_input(app: &App, frame: &mut Frame, area: Rect) {
 
     let input_area = Rect { height: 1, ..area };
     let mut spans = vec![
-        Span::styled("> ", Style::default().fg(theme::TEAL)),
+        Span::styled("> ", Style::default().fg(theme::active().accent_alt)),
         Span::styled(
             app.server_search_query.as_str(),
-            Style::default().fg(theme::TEXT),
+            Style::default().fg(theme::active().text),
         ),
     ];
     if input_focus {
-        spans.push(Span::styled("\u{2588}", Style::default().fg(theme::TEAL)));
+        spans.push(Span::styled(
+            "\u{2588}",
+            Style::default().fg(theme::active().accent_alt),
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), input_area);
 
@@ -124,14 +127,17 @@ fn render_search_input(app: &App, frame: &mut Frame, area: Rect) {
             ..area
         };
         let hints = Line::from(vec![
-            Span::styled("from:", Style::default().fg(theme::BLUE)),
-            Span::styled(" to:", Style::default().fg(theme::BLUE)),
-            Span::styled(" subject:", Style::default().fg(theme::BLUE)),
-            Span::styled(" body:", Style::default().fg(theme::BLUE)),
-            Span::styled(" since:", Style::default().fg(theme::BLUE)),
-            Span::styled(" before:", Style::default().fg(theme::BLUE)),
-            Span::styled(" in:", Style::default().fg(theme::BLUE)),
-            Span::styled("  or free text", Style::default().fg(theme::OVERLAY0)),
+            Span::styled("from:", Style::default().fg(theme::active().accent)),
+            Span::styled(" to:", Style::default().fg(theme::active().accent)),
+            Span::styled(" subject:", Style::default().fg(theme::active().accent)),
+            Span::styled(" body:", Style::default().fg(theme::active().accent)),
+            Span::styled(" since:", Style::default().fg(theme::active().accent)),
+            Span::styled(" before:", Style::default().fg(theme::active().accent)),
+            Span::styled(" in:", Style::default().fg(theme::active().accent)),
+            Span::styled(
+                "  or free text",
+                Style::default().fg(theme::active().text_faint),
+            ),
         ]);
         frame.render_widget(Paragraph::new(hints), hints_area);
     }
@@ -144,9 +150,9 @@ fn render_search_results_list(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(if list_focus {
-            theme::TEAL
+            theme::active().accent_alt
         } else {
-            theme::OVERLAY0
+            theme::active().text_faint
         }));
 
     let inner = block.inner(area);
@@ -160,12 +166,14 @@ fn render_search_results_list(app: &App, frame: &mut Frame, area: Rect) {
         date_width + mb_width + contact_width + 2 + if show_mailbox_col { 1 } else { 0 },
     );
 
-    let mut header_cells = vec![Cell::from("DATE").style(Style::default().fg(theme::SUBTEXT0))];
+    let mut header_cells =
+        vec![Cell::from("DATE").style(Style::default().fg(theme::active().text_muted))];
     if show_mailbox_col {
-        header_cells.push(Cell::from("MAILBOX").style(Style::default().fg(theme::SUBTEXT0)));
+        header_cells
+            .push(Cell::from("MAILBOX").style(Style::default().fg(theme::active().text_muted)));
     }
-    header_cells.push(Cell::from("CONTACT").style(Style::default().fg(theme::SUBTEXT0)));
-    header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::SUBTEXT0)));
+    header_cells.push(Cell::from("CONTACT").style(Style::default().fg(theme::active().text_muted)));
+    header_cells.push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
     let header = Row::new(header_cells);
 
     let rows: Vec<Row> = app
@@ -186,16 +194,18 @@ fn render_search_results_list(app: &App, frame: &mut Frame, area: Rect) {
             );
 
             let style = if is_cursor {
-                Style::default().bg(theme::SURFACE0).fg(theme::GREEN)
+                Style::default()
+                    .bg(theme::active().surface)
+                    .fg(theme::active().selection)
             } else {
-                Style::default().fg(theme::TEXT)
+                Style::default().fg(theme::active().text)
             };
 
             let mut cells = vec![Cell::from(result.entry.date_display.clone())];
             if show_mailbox_col {
                 cells.push(
                     Cell::from(truncate(&result.source_label, mb_width))
-                        .style(Style::default().fg(theme::OVERLAY0)),
+                        .style(Style::default().fg(theme::active().text_faint)),
                 );
             }
             cells.push(Cell::from(contact));
@@ -227,15 +237,16 @@ fn render_search_result_headers(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" Headers ")
         .borders(Borders::TOP | Borders::LEFT)
-        .border_style(Style::default().fg(theme::OVERLAY0))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().text_faint))
+        .style(Style::default().bg(theme::active().bg));
 
     let result = app.server_search_results.get(app.server_search_index);
     if result.is_none() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(
-            Paragraph::new("  No email selected").style(Style::default().fg(theme::SUBTEXT0)),
+            Paragraph::new("  No email selected")
+                .style(Style::default().fg(theme::active().text_muted)),
             inner,
         );
         return;
@@ -265,8 +276,8 @@ fn render_search_result_body(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" Body ")
         .borders(Borders::TOP | Borders::LEFT)
-        .border_style(Style::default().fg(theme::OVERLAY0))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().text_faint))
+        .style(Style::default().bg(theme::active().bg));
 
     let result = app.server_search_results.get(app.server_search_index);
     if result.is_none() {
@@ -276,7 +287,7 @@ fn render_search_result_body(app: &App, frame: &mut Frame, area: Rect) {
 
     let entry = &result.unwrap().entry;
     let content = Paragraph::new(entry.body.as_str())
-        .style(Style::default().fg(theme::TEXT))
+        .style(Style::default().fg(theme::active().text))
         .block(block)
         .wrap(Wrap { trim: false })
         .scroll((app.server_search_scroll, 0));

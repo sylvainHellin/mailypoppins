@@ -19,6 +19,13 @@ pub fn cmd_config_show() -> Result<()> {
     println!("{}: {}", "Config file".bold(), config_path().display());
     println!("{}: {}", "Data dir".bold(), mailypoppins_data_dir().display());
 
+    let theme_name = if config.theme.is_empty() {
+        format!("{} (default)", crate::tui::theme::DEFAULT_THEME_NAME)
+    } else {
+        config.theme.clone()
+    };
+    println!("{}: {}", "Theme".bold(), theme_name);
+
     println!("\n{}", "[email]".bold());
     println!("  font_family       = {}", config.email.font_family);
     println!("  font_size         = {}", config.email.font_size);

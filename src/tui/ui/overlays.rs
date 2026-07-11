@@ -34,27 +34,27 @@ pub(super) fn render_confirm_dialog(dialog: &ConfirmDialog, frame: &mut Frame, a
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::YELLOW))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().warning))
+        .style(Style::default().bg(theme::active().bg));
 
     let lines = vec![
         Line::from(Span::styled(
             &dialog.title,
             Style::default()
-                .fg(theme::YELLOW)
+                .fg(theme::active().warning)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             truncate(&dialog.detail, dialog_width.saturating_sub(4) as usize),
-            Style::default().fg(theme::TEXT),
+            Style::default().fg(theme::active().text),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  [y]", Style::default().fg(theme::GREEN)),
-            Span::styled("es  ", Style::default().fg(theme::TEXT)),
-            Span::styled("[n]", Style::default().fg(theme::RED)),
-            Span::styled("o", Style::default().fg(theme::TEXT)),
+            Span::styled("  [y]", Style::default().fg(theme::active().success)),
+            Span::styled("es  ", Style::default().fg(theme::active().text)),
+            Span::styled("[n]", Style::default().fg(theme::active().error)),
+            Span::styled("o", Style::default().fg(theme::active().text)),
         ]),
     ];
 
@@ -87,8 +87,8 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::PEACH))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().border_focused))
+        .style(Style::default().bg(theme::active().bg));
 
     let inner_width = dialog_width.saturating_sub(4) as usize;
     let title = if is_save {
@@ -100,7 +100,7 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         Line::from(Span::styled(
             title,
             Style::default()
-                .fg(theme::PEACH)
+                .fg(theme::active().border_focused)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -124,9 +124,9 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
             name
         };
         let cursor_style = if i == picker.selected {
-            Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
+            Style::default().fg(theme::active().heading).bg(theme::active().surface)
         } else {
-            Style::default().fg(theme::TEXT)
+            Style::default().fg(theme::active().text)
         };
 
         if is_save {
@@ -136,9 +136,9 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
                 "\u{f0131} " // nf-md-checkbox_blank_outline
             };
             let check_style = if picker.selected_set.contains(&i) {
-                Style::default().fg(theme::GREEN)
+                Style::default().fg(theme::active().selection)
             } else {
-                Style::default().fg(theme::OVERLAY0)
+                Style::default().fg(theme::active().text_faint)
             };
             lines.push(Line::from(vec![
                 Span::styled(check, check_style),
@@ -157,7 +157,7 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
     };
     lines.push(Line::from(Span::styled(
         footer,
-        Style::default().fg(theme::SUBTEXT0),
+        Style::default().fg(theme::active().text_muted),
     )));
 
     let content = Paragraph::new(lines).block(block);
@@ -193,8 +193,8 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
         .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::GREEN))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().success))
+        .style(Style::default().bg(theme::active().bg));
 
     let block_inner = block.inner(dialog_area);
     frame.render_widget(block, dialog_area);
@@ -215,9 +215,9 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
 
             // Query input
             let input_spans = vec![
-                Span::styled("> ", Style::default().fg(theme::GREEN)),
-                Span::styled(&picker.query, Style::default().fg(theme::TEXT)),
-                Span::styled("\u{2588}", Style::default().fg(theme::GREEN)),
+                Span::styled("> ", Style::default().fg(theme::active().success)),
+                Span::styled(&picker.query, Style::default().fg(theme::active().text)),
+                Span::styled("\u{2588}", Style::default().fg(theme::active().success)),
             ];
             frame.render_widget(Paragraph::new(Line::from(input_spans)), chunks[0]);
 
@@ -227,17 +227,17 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
                 if !picker.zoxide_available {
                     result_lines.push(Line::from(Span::styled(
                         "zoxide not found -- press Tab to browse",
-                        Style::default().fg(theme::OVERLAY0),
+                        Style::default().fg(theme::active().text_faint),
                     )));
                 } else if picker.query.is_empty() {
                     result_lines.push(Line::from(Span::styled(
                         "Type to search directories...",
-                        Style::default().fg(theme::OVERLAY0),
+                        Style::default().fg(theme::active().text_faint),
                     )));
                 } else {
                     result_lines.push(Line::from(Span::styled(
                         "No matches",
-                        Style::default().fg(theme::OVERLAY0),
+                        Style::default().fg(theme::active().text_faint),
                     )));
                 }
             } else {
@@ -245,9 +245,9 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
                     let display = path.display().to_string();
                     let display = truncate(&display, inner_width);
                     let style = if i == picker.selected {
-                        Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
+                        Style::default().fg(theme::active().heading).bg(theme::active().surface)
                     } else {
-                        Style::default().fg(theme::TEXT)
+                        Style::default().fg(theme::active().text)
                     };
                     result_lines.push(Line::from(Span::styled(display, style)));
                 }
@@ -258,7 +258,7 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "Tab browse  Enter save  Esc cancel",
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme::active().text_muted),
                 ))),
                 chunks[2],
             );
@@ -280,7 +280,7 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
                 Paragraph::new(Line::from(Span::styled(
                     truncate(&path_str, inner_width),
                     Style::default()
-                        .fg(theme::BLUE)
+                        .fg(theme::active().accent)
                         .add_modifier(Modifier::BOLD),
                 ))),
                 chunks[0],
@@ -290,11 +290,11 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
             let mut entry_lines: Vec<Line> = Vec::new();
             let save_here_style = if picker.selected == 0 {
                 Style::default()
-                    .fg(theme::GREEN)
-                    .bg(theme::SURFACE0)
+                    .fg(theme::active().success)
+                    .bg(theme::active().surface)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::GREEN)
+                Style::default().fg(theme::active().success)
             };
             entry_lines.push(Line::from(Span::styled("[ Save here ]", save_here_style)));
 
@@ -305,9 +305,9 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
                     .unwrap_or_else(|| dir.display().to_string());
                 let display = format!("\u{f024b} {}", truncate(&name, inner_width.saturating_sub(2)));
                 let style = if i + 1 == picker.selected {
-                    Style::default().fg(theme::MAUVE).bg(theme::SURFACE0)
+                    Style::default().fg(theme::active().heading).bg(theme::active().surface)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    Style::default().fg(theme::active().text)
                 };
                 entry_lines.push(Line::from(Span::styled(display, style)));
             }
@@ -334,7 +334,7 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     footer_text,
-                    Style::default().fg(theme::SUBTEXT0),
+                    Style::default().fg(theme::active().text_muted),
                 ))),
                 chunks[2],
             );
@@ -366,13 +366,13 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::RED))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().error))
+        .style(Style::default().bg(theme::active().bg));
 
     let mut lines = vec![
         Line::from(Span::styled(
             "Error",
-            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::active().error).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -380,16 +380,16 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
     for msg_line in error.message.lines() {
         lines.push(Line::from(Span::styled(
             truncate(msg_line, inner_width),
-            Style::default().fg(theme::TEXT),
+            Style::default().fg(theme::active().text),
         )));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  [s]", Style::default().fg(theme::GREEN)),
-        Span::styled("ync now  ", Style::default().fg(theme::TEXT)),
-        Span::styled("[d]", Style::default().fg(theme::SUBTEXT0)),
-        Span::styled("ismiss", Style::default().fg(theme::TEXT)),
+        Span::styled("  [s]", Style::default().fg(theme::active().success)),
+        Span::styled("ync now  ", Style::default().fg(theme::active().text)),
+        Span::styled("[d]", Style::default().fg(theme::active().text_muted)),
+        Span::styled("ismiss", Style::default().fg(theme::active().text)),
     ]));
 
     let content = Paragraph::new(lines).block(block);
@@ -513,15 +513,15 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
         Line::from(Span::styled(
             format!("  {title}"),
             Style::default()
-                .fg(theme::MAUVE)
+                .fg(theme::active().heading)
                 .add_modifier(Modifier::BOLD),
         ))
     };
 
     let entry_line = |key: &str, desc: &str| -> Line {
         Line::from(vec![
-            Span::styled(format!("  {key:<12}"), Style::default().fg(theme::BLUE)),
-            Span::styled(desc.to_string(), Style::default().fg(theme::TEXT)),
+            Span::styled(format!("  {key:<12}"), Style::default().fg(theme::active().accent)),
+            Span::styled(desc.to_string(), Style::default().fg(theme::active().text)),
         ])
     };
 
@@ -557,7 +557,7 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No matching bindings",
-            Style::default().fg(theme::OVERLAY0),
+            Style::default().fg(theme::active().text_faint),
         )));
     }
 
@@ -588,8 +588,8 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
         .title_bottom(Line::from(bottom_title).alignment(Alignment::Center))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BLUE))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().accent))
+        .style(Style::default().bg(theme::active().bg));
 
     let block_inner = block.inner(help_area);
     frame.render_widget(block, help_area);
@@ -601,11 +601,11 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
             .split(block_inner);
 
         let mut spans = vec![
-            Span::styled("/", Style::default().fg(theme::BLUE)),
-            Span::styled(app.help_filter.as_str(), Style::default().fg(theme::TEXT)),
+            Span::styled("/", Style::default().fg(theme::active().accent)),
+            Span::styled(app.help_filter.as_str(), Style::default().fg(theme::active().text)),
         ];
         if app.help_filter_active {
-            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::BLUE)));
+            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::active().accent)));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
 

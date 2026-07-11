@@ -3,7 +3,7 @@ id: 0023
 title: enable theme config
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-05-02
 ---
 

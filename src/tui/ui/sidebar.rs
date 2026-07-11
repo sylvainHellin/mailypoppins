@@ -20,7 +20,7 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .style(Style::default().bg(theme::BASE));
+        .style(Style::default().bg(theme::active().bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -38,12 +38,12 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
         let style = if is_highlighted {
             Style::default()
-                .fg(theme::GREEN)
+                .fg(theme::active().selection)
                 .add_modifier(Modifier::BOLD)
         } else if is_selected {
-            Style::default().fg(theme::BLUE)
+            Style::default().fg(theme::active().accent)
         } else {
-            Style::default().fg(theme::TEXT)
+            Style::default().fg(theme::active().text)
         };
 
         lines.push(Line::from(Span::styled(label, style)));
@@ -58,14 +58,15 @@ pub(super) fn render_activity_log(app: &App, frame: &mut Frame, area: Rect) {
         .title(" Activity ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::TEAL))
-        .style(Style::default().bg(theme::BASE));
+        .border_style(Style::default().fg(theme::active().accent_alt))
+        .style(Style::default().bg(theme::active().bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if app.status_log.is_empty() {
-        let empty = Paragraph::new("  No activity yet").style(Style::default().fg(theme::SUBTEXT0));
+        let empty = Paragraph::new("  No activity yet")
+            .style(Style::default().fg(theme::active().text_muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -81,14 +82,17 @@ pub(super) fn render_activity_log(app: &App, frame: &mut Frame, area: Rect) {
         .map(|entry| {
             let time = entry.timestamp.format("%H:%M").to_string();
             let color = match entry.level {
-                StatusLevel::Success => theme::GREEN,
-                StatusLevel::Error => theme::RED,
-                StatusLevel::Warning => theme::YELLOW,
-                StatusLevel::Info => theme::BLUE,
-                StatusLevel::Progress => theme::TEAL,
+                StatusLevel::Success => theme::active().success,
+                StatusLevel::Error => theme::active().error,
+                StatusLevel::Warning => theme::active().warning,
+                StatusLevel::Info => theme::active().info,
+                StatusLevel::Progress => theme::active().accent_alt,
             };
             Line::from(vec![
-                Span::styled(format!(" {time} "), Style::default().fg(theme::OVERLAY0)),
+                Span::styled(
+                    format!(" {time} "),
+                    Style::default().fg(theme::active().text_faint),
+                ),
                 Span::styled(
                     truncate(&entry.message, inner.width.saturating_sub(7) as usize),
                     Style::default().fg(color),

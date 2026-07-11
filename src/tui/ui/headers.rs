@@ -13,10 +13,10 @@ pub(super) fn header_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
         Span::styled(
             format!(" {label}: "),
             Style::default()
-                .fg(theme::MAUVE)
+                .fg(theme::active().heading)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(value, Style::default().fg(theme::TEXT)),
+        Span::styled(value, Style::default().fg(theme::active().text)),
     ])
 }
 
@@ -27,14 +27,15 @@ pub(super) fn render_headers(app: &App, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .style(Style::default().bg(theme::BASE));
+        .style(Style::default().bg(theme::active().bg));
 
     let selected = app.selected_email();
     if selected.is_none() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         frame.render_widget(
-            Paragraph::new("  No email selected").style(Style::default().fg(theme::SUBTEXT0)),
+            Paragraph::new("  No email selected")
+                .style(Style::default().fg(theme::active().text_muted)),
             inner,
         );
         return;

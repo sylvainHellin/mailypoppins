@@ -7,18 +7,18 @@ use super::super::theme;
 pub(super) fn pane_border_style(current_focus: Focus, pane: Focus) -> Style {
     let focused = current_focus == pane || (current_focus == Focus::Search && pane == Focus::List);
     if focused {
-        Style::default().fg(theme::PEACH)
+        Style::default().fg(theme::active().border_focused)
     } else {
-        Style::default().fg(theme::BLUE)
+        Style::default().fg(theme::active().border)
     }
 }
 
 pub(super) fn hint_span(key: &str) -> Span<'_> {
-    Span::styled(key, Style::default().fg(theme::BLUE))
+    Span::styled(key, Style::default().fg(theme::active().accent))
 }
 
 pub(super) fn desc_span(desc: &str) -> Span<'_> {
-    Span::styled(desc, Style::default().fg(theme::SUBTEXT0))
+    Span::styled(desc, Style::default().fg(theme::active().text_muted))
 }
 
 pub(super) fn truncate(s: &str, max_width: usize) -> String {
