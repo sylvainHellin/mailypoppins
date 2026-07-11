@@ -65,6 +65,11 @@ build.
 
 ### One-time manual setup (not automatable from this repo)
 
+> **Already provisioned** (2026-07-11). The tap repo, deploy keypair, and
+> `TAP_DEPLOY_KEY` secret are all in place; the pipeline goes fully live
+> on the next `v*` tag push. The steps below are kept as reference for
+> re-provisioning or **rotating** the deploy key.
+
 The tap push authenticates with an **SSH deploy key** (a keypair scoped to
 a single repo), not a PAT. The private half lives as an Actions secret on
 this repo; the public half is a write-enabled deploy key on the tap repo.
@@ -102,8 +107,9 @@ this repo; the public half is a write-enabled deploy key on the tap repo.
    (`git@github.com:sylvainHellin/homebrew-mailypoppins.git`), and writes
    `Formula/mailypoppins.rb` to it.
 
-Until steps 1-4 are done, the `homebrew-tap` job skips itself with a
-notice and the rest of the release still succeeds.
+If steps 1-4 are ever undone (e.g. a rotation in progress), the
+`homebrew-tap` job skips itself with a notice and the rest of the release
+still succeeds.
 
 To render the formula locally for inspection (needs a published release
 with checksum assets):

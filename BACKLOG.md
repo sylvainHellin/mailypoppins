@@ -28,6 +28,5 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 > Windows is targeted via WSL only. Native Windows (msvc, Credential Manager, Scoop, winget, EV signing) is out of scope.
 
 - [#0012 Apple Developer ID signing for macOS releases](docs/tickets/0012-apple-developer-id-signing.md) -- chore
-- [#0013 Homebrew tap](docs/tickets/0013-homebrew-tap.md) -- chore, **blocked**: needs the `homebrew-mailypoppins` tap repo + `TAP_DEPLOY_KEY` deploy-key secret ([manual steps](docs/release-process.md#homebrew-tap)); repo-side work done (deploy-key SSH flow, binary `mp`)
 - [#0014 Linux packaging (.deb, .rpm, AUR, musl)](docs/tickets/0014-linux-packaging.md) -- chore
 - [#0015 Cross-platform smoke tests](docs/tickets/0015-cross-platform-smoke-tests.md) -- chore

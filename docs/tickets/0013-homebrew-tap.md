@@ -3,18 +3,18 @@ id: 0013
 title: Homebrew tap
 type: chore
 priority: later
-status: blocked
+status: done
 created: 2026-05-01
 ---
 
-> **Blocked on one-time manual setup** (cannot be done from this repo):
-> create the `sylvainHellin/homebrew-mailypoppins` tap repo, generate an
-> ed25519 deploy keypair, add the public half as a **write-enabled**
-> deploy key on the tap repo, and add the private half as the
-> `TAP_DEPLOY_KEY` Actions secret on this repo. Exact steps in
-> [docs/release-process.md](../release-process.md#homebrew-tap). All
-> repo-side work is done; until the key exists the `homebrew-tap` release
-> job skips itself with a notice.
+> **Done** (2026-07-11). The one-time manual setup is complete: the
+> `sylvainHellin/homebrew-mailypoppins` tap repo was created and seeded,
+> an ed25519 deploy keypair was generated, the public half was added as a
+> **write-enabled** deploy key on the tap repo, and the private half was
+> stored as the `TAP_DEPLOY_KEY` Actions secret on this repo. Steps kept
+> in [docs/release-process.md](../release-process.md#homebrew-tap) for
+> reference (e.g. key rotation). First-release verification is pending:
+> the `homebrew-tap` job goes fully live on the next `v*` tag push.
 
 Publish a `homebrew-mailypoppins` tap with a formula that downloads the signed macOS release artifact (rather than building from source, which would lose the signature). Linux users can install the same way via `brew install`. Install: `brew tap sylvainHellin/mailypoppins && brew install mailypoppins` (binary `mp`).
 
