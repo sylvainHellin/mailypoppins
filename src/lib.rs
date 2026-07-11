@@ -6,6 +6,7 @@ pub mod config_cmd;
 pub mod contacts;
 pub mod contacts_cmd;
 pub mod oauth2;
+pub mod notify;
 pub mod graph;
 pub mod parse;
 pub mod imap_client;

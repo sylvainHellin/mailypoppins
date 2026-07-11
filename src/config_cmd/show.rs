@@ -25,6 +25,7 @@ pub fn cmd_config_show() -> Result<()> {
         config.theme.clone()
     };
     println!("{}: {}", "Theme".bold(), theme_name);
+    println!("{}: {}", "Notifications".bold(), config.notifications);
 
     println!("\n{}", "[email]".bold());
     println!("  font_family       = {}", config.email.font_family);

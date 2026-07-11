@@ -267,6 +267,7 @@ pub(super) async fn lib_do_sync(
     let meta = SyncResultMeta {
         mailbox_states: result.mailbox_states,
         touched_dirs: result.touched_dirs,
+        new_inbox_mail: result.new_inbox_mail,
     };
     Ok((msg, meta))
 }
@@ -279,6 +280,9 @@ pub(super) struct SyncResultMeta {
     /// Empty when the sync was a no-op (lets the UI skip cache
     /// invalidation and mailbox reload entirely).
     pub touched_dirs: Vec<std::path::PathBuf>,
+    /// Sender + subject of every genuinely new inbox email this sync
+    /// saved, for the desktop notification (#0009).
+    pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
 }
 
 pub(super) async fn lib_do_multi_search(
@@ -347,7 +351,7 @@ pub(super) async fn lib_do_sync_graph(
     graph_config: &crate::config::GraphConfig,
     limit: usize,
     reconcile: bool,
-) -> anyhow::Result<(String, Vec<std::path::PathBuf>)> {
+) -> anyhow::Result<(String, GraphSyncMeta)> {
     let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
         .iter()
         .map(|(role, mapping)| SyncTarget {
@@ -381,7 +385,19 @@ pub(super) async fn lib_do_sync_graph(
             msg.push_str(" | Already in sync");
         }
     }
-    Ok((msg, result.touched_dirs))
+    let meta = GraphSyncMeta {
+        touched_dirs: result.touched_dirs,
+        new_inbox_mail: result.new_inbox_mail,
+    };
+    Ok((msg, meta))
+}
+
+/// Metadata returned alongside the status message from `lib_do_sync_graph`.
+pub(super) struct GraphSyncMeta {
+    pub touched_dirs: Vec<std::path::PathBuf>,
+    /// Sender + subject of every genuinely new inbox email this sync
+    /// saved, for the desktop notification (#0009).
+    pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
 }
 
 pub(super) async fn lib_do_multi_search_graph(

@@ -20,6 +20,11 @@ pub struct GlobalConfig {
     /// Unknown names warn and fall back to the default.
     #[serde(default)]
     pub theme: String,
+    /// Desktop notifications for new mail while the TUI is running
+    /// (macOS: `osascript`, Linux: `notify-send`; missing tools degrade
+    /// silently). Opt-in: defaults to off. See src/notify.rs (#0009).
+    #[serde(default)]
+    pub notifications: bool,
     #[serde(default)]
     pub email: EmailSettings,
     #[serde(default)]
@@ -942,6 +947,28 @@ name = "test"
 "#;
         let config: GlobalConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.theme, "");
+    }
+
+    #[test]
+    fn test_parse_config_with_notifications() {
+        let toml_str = r#"
+notifications = true
+
+[[accounts]]
+name = "test"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.notifications);
+    }
+
+    #[test]
+    fn test_notifications_default_off() {
+        let toml_str = r#"
+[[accounts]]
+name = "test"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.notifications);
     }
 
     #[test]

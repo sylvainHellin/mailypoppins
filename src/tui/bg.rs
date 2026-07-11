@@ -203,11 +203,30 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Fetch { account_index, result, new_index, new_mailbox_states, touched_dirs } => {
+        BgResult::Fetch {
+            account_index,
+            result,
+            new_index,
+            new_mailbox_states,
+            touched_dirs,
+            new_inbox_mail,
+        } => {
             match result {
                 Ok(msg) => {
                     let text = if msg.is_empty() { "Fetch complete".into() } else { msg };
                     app.set_status_level(text, StatusLevel::Success);
+                    // Desktop notification for genuinely new inbox mail
+                    // (#0009). Opt-in via `notifications = true` in
+                    // config.toml; no-op when the list is empty (read-flag
+                    // updates and reconciliation never populate it).
+                    if app.global_config.notifications && !new_inbox_mail.is_empty() {
+                        let account_name = app
+                            .accounts
+                            .get(account_index)
+                            .map(|a| a.account_config.name.as_str())
+                            .unwrap_or("");
+                        crate::notify::notify_new_mail(account_name, &new_inbox_mail);
+                    }
                     // Merge updated index and mailbox states back into AccountState
                     if let Some(acct) = app.accounts.get_mut(account_index) {
                         if let Some(index) = new_index {

@@ -195,6 +195,11 @@ pub struct SyncResult {
     /// letting the TUI skip cache invalidation entirely. Always empty on
     /// `dry_run`.
     pub touched_dirs: Vec<PathBuf>,
+    /// Sender + subject of every genuinely new email saved to the *inbox*
+    /// by this sync (#0009). Drives the TUI's desktop notification; other
+    /// mailboxes, read-flag updates, dedup, and reconciliation moves are
+    /// deliberately excluded. Always empty on `dry_run`.
+    pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +251,8 @@ pub async fn sync_mailboxes(
     // updates, dedup, reconciliation moves/removals). Lets the TUI
     // invalidate only the affected mailbox caches.
     let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
+    // Sender/subject of new inbox saves, for desktop notifications (#0009).
+    let mut new_inbox_mail: Vec<crate::notify::NewMailMeta> = Vec::new();
 
     // Build the global known_ids set.
     // If we have an in-memory index, derive it from there (zero disk I/O).
@@ -320,6 +327,17 @@ pub async fn sync_mailboxes(
                         total_saved += saved;
                         if saved > 0 {
                             touched_dirs.insert(target.local_dir.clone());
+                        }
+
+                        // Record sender/subject of new *inbox* saves for the
+                        // desktop notification (#0009). Matched against the
+                        // actually-written message IDs so duplicates the save
+                        // skipped don't produce phantom notifications.
+                        if saved > 0 && target.role.eq_ignore_ascii_case("inbox") {
+                            new_inbox_mail.extend(crate::notify::collect_new_mail_meta(
+                                &new_emails,
+                                &saved_paths,
+                            ));
                         }
 
                         // Update in-memory index with newly saved emails using the
@@ -551,6 +569,7 @@ pub async fn sync_mailboxes(
         fresh_observations,
         mailbox_states: new_mailbox_states,
         touched_dirs: touched_dirs.into_iter().collect(),
+        new_inbox_mail,
     })
 }
 

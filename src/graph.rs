@@ -564,6 +564,8 @@ pub async fn sync_mailboxes_graph(
     let mut total_skipped = 0usize;
     let mut total_read_updated = 0usize;
     let mut fresh_observations: Vec<FreshObservation> = Vec::new();
+    // Sender/subject of new inbox saves, for desktop notifications (#0009).
+    let mut new_inbox_mail: Vec<crate::notify::NewMailMeta> = Vec::new();
     // Local dirs actually modified on disk by this sync (saves, read-flag
     // updates, reconciliation moves/removals). Lets the TUI invalidate only
     // the affected mailbox caches. Left empty on dry_run.
@@ -606,11 +608,23 @@ pub async fn sync_mailboxes_graph(
                             &target.status,
                             &mut global_known_ids,
                         ) {
-                            Ok((saved, dup, _saved_paths)) => {
+                            Ok((saved, dup, saved_paths)) => {
                                 total_saved += saved;
                                 total_skipped += dup;
                                 if saved > 0 {
                                     touched_dirs.insert(target.local_dir.clone());
+                                }
+                                // Record sender/subject of new *inbox* saves
+                                // for the desktop notification (#0009);
+                                // matched against the actually-written message
+                                // IDs so skipped duplicates don't notify.
+                                if saved > 0 && target.role.eq_ignore_ascii_case("inbox") {
+                                    new_inbox_mail.extend(
+                                        crate::notify::collect_new_mail_meta(
+                                            &new_emails,
+                                            &saved_paths,
+                                        ),
+                                    );
                                 }
                                 // Collect fresh observations
                                 for email in &new_emails {
@@ -764,6 +778,7 @@ pub async fn sync_mailboxes_graph(
         fresh_observations,
         mailbox_states: std::collections::HashMap::new(),
         touched_dirs: touched_dirs.into_iter().collect(),
+        new_inbox_mail,
     })
 }
 

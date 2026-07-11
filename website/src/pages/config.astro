@@ -30,6 +30,7 @@ import { Code } from 'astro:components';
       <h2>Full Example</h2>
       <p>A complete single-account configuration with comments explaining each section.</p>
       <ConfigExample code={`theme = "catppuccin-mocha"  # TUI color theme (see Theme section)
+notifications = false       # Desktop notifications for new mail (see Notifications section)
 
 [email]
 font_family = "Helvetica, Arial, sans-serif"  # HTML email font
@@ -95,6 +96,26 @@ path = "~/notes/email/signatures/personal.html"`} />
         with the default theme and logs a warning to the activity log.
       </p>
       <ConfigExample code={`theme = "tokyo-night"`} />
+
+      <!-- notifications -->
+      <h3 id="notifications-section">notifications</h3>
+      <p>
+        Opt-in desktop notifications for new mail while the TUI is running
+        (default: <code>false</code>). Like <code>theme</code>, the key is
+        top-level, so it must appear before the first <code>[section]</code>
+        header. When a background sync (including the automatic IDLE-triggered
+        fetches) saves new emails to the inbox, one notification is shown per
+        sync: <code>sender: subject</code> for a single new email, or
+        <code>N new emails</code> when several arrive at once. Read-status
+        updates, duplicate cleanup, and mailboxes other than the inbox never
+        trigger a notification.
+      </p>
+      <p>
+        Notifications use the platform's native tooling &mdash;
+        <code>osascript</code> on macOS and <code>notify-send</code> on Linux
+        &mdash; and degrade silently if the tool is unavailable.
+      </p>
+      <ConfigExample code={`notifications = true`} />
 
       <!-- [email] -->
       <h3 id="email-section">[email]</h3>

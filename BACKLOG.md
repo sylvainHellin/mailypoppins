@@ -13,7 +13,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 - [#0005 Parallel IMAP fetch per mailbox](docs/tickets/0005-parallel-imap-fetch-per-mailbox.md) -- perf
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
-- [#0009 Desktop notifications](docs/tickets/0009-desktop-notifications.md) -- feature
 - [#0026 Send calendar invitations (iMIP REQUEST)](docs/tickets/0026-send-calendar-invitations.md) -- feature
 
 ## Later

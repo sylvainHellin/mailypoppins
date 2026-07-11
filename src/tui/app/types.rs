@@ -357,6 +357,10 @@ pub enum BgResult {
         /// and reload entirely); `None` means unknown (fall back to
         /// invalidating everything, the pre-optimization behavior).
         touched_dirs: Option<Vec<PathBuf>>,
+        /// Sender + subject of every genuinely new inbox email the sync
+        /// saved. Drives the opt-in desktop notification (#0009); empty
+        /// on failure or when nothing new arrived.
+        new_inbox_mail: Vec<crate::notify::NewMailMeta>,
     },
     Sync {
         account_index: usize,

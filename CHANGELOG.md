@@ -67,6 +67,24 @@ All notable changes to this project are documented in this file.
   comment-fake-head, attribute-fake-head, and the `İ` expansion case.
 
 ### Features
+- **Desktop notifications for new mail (#0009).** Opt-in via a new
+  top-level `notifications = true` key in config.toml (default: off).
+  While the TUI runs, a completed background quick-sync that saved
+  genuinely new *inbox* emails fires one desktop notification per sync:
+  "sender: subject" when exactly one email arrived, "N new emails" when
+  several (natural grouping -- one notification per IDLE-triggered
+  fetch, never per email). Read-flag updates, dedup, reconciliation
+  moves, and non-inbox mailboxes never notify; skipped duplicates are
+  filtered out by matching against the message IDs the save actually
+  wrote. Zero new dependencies: shells out to `osascript` on macOS and
+  `notify-send` on Linux, degrading silently when the tool is missing.
+  Injection-safe by construction: subjects/senders are
+  attacker-controlled, so text is passed as separate argv entries (the
+  macOS path hands it to AppleScript via `on run argv`, so it never
+  touches script source), control characters are stripped, length is
+  capped, and a leading `-` is neutralized so text can't be parsed as a
+  CLI option (`src/notify.rs`, unit-tested). `email config show` prints
+  the setting; `config init` templates include the key.
 - **Quick-move emails between mailboxes (`M`, #0018).** Pressing `M` in
   the email list opens a small fuzzy picker of destination mailboxes
   (type-to-filter subsequence match, arrows/Tab to navigate, Enter to

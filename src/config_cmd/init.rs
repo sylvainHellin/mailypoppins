@@ -929,6 +929,8 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     let mut toml_content = String::new();
     toml_content.push_str("# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night\n");
     toml_content.push_str("theme = \"catppuccin-mocha\"\n\n");
+    toml_content.push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
+    toml_content.push_str("notifications = false\n\n");
     toml_content.push_str("[email]\n");
     toml_content.push_str("font_family = \"Helvetica, Arial, sans-serif\"\n");
     toml_content.push_str("font_size = \"12pt\"\n");
@@ -1168,6 +1170,8 @@ pub(crate) fn build_init_toml(
     let mut out = String::new();
     out.push_str("# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night\n");
     out.push_str("theme = \"catppuccin-mocha\"\n\n");
+    out.push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
+    out.push_str("notifications = false\n\n");
     out.push_str("[email]\n");
     out.push_str("font_family = \"Helvetica, Arial, sans-serif\"\n");
     out.push_str("font_size = \"12pt\"\n");
