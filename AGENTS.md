@@ -24,4 +24,4 @@ Website: `cd website && pnpm install && pnpm dev` (preview) or `pnpm build` (pro
 
 See [docs/](docs/) for architecture, project invariants, lessons-learned, auth, secrets, exchange setup, design plans, and ticket workflow. Open work is indexed in [BACKLOG.md](BACKLOG.md); shipped features in [CHANGELOG.md](CHANGELOG.md).
 
-When you discover a non-obvious behaviour or hard-won fix, append it to [docs/lessons-learned.md](docs/lessons-learned.md) in the same turn. For commands and key bindings, the source of truth is `email --help` and the in-TUI help overlay (`?`); the website pages under `website/src/pages/` are hand-derived from those and must be updated alongside CLI changes.
+When you discover a non-obvious behaviour or hard-won fix, append it to [docs/lessons-learned.md](docs/lessons-learned.md) in the same turn. For commands and key bindings, the source of truth is `mp --help` and the in-TUI help overlay (`?`); the website pages under `website/src/pages/` are hand-derived from those and must be updated alongside CLI changes.

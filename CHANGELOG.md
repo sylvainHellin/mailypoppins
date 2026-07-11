@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **CLI binary renamed `email` -> `mp`.** The installed binary is now
+  `mp` (`cargo install --path .`); Homebrew installs it as `mp` too. All
+  `--help` text, docs, README, and website command examples use `mp`
+  (e.g. `mp fetch`, `mp config show`). The user-facing name/version
+  string stays `mailypoppins X.Y.Z`. The Cargo package/library remain
+  named `email` internally (invisible to users). The Homebrew tap moved
+  to `brew tap sylvainHellin/mailypoppins` / `brew install mailypoppins`.
+  Config paths (`~/.config/email/`), the notification app name, and log
+  file names are unchanged. Ticket #0022 / #0013.
+
 ### Security
 - **`accept_invalid_certs` is now restricted to loopback hosts.** The
   per-account cert-validation opt-out exists for Proton Mail Bridge,
@@ -427,9 +438,7 @@ All notable changes to this project are documented in this file.
   helper that detects the existing runtime and spawns a fresh one in a
   dedicated OS thread (mirrors `oauth2::load_or_refresh_token_blocking`).
 
-## [0.8.0] -- previous
-
-### Changed
+### Changed (previous unreleased batch)
 - **Default password store switched from OS keyring to a machine-bound
   encrypted file** at `~/.config/email/secrets.enc`. Built on
   ChaCha20-Poly1305 + HKDF-SHA256 with the key derived from

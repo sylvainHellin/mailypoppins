@@ -18,7 +18,7 @@ use helpers::{
     WatchEvent,
 };
 
-/// Entry point for the TUI. Call this when `email` is invoked with no arguments.
+/// Entry point for the TUI. Call this when `mp` is invoked with no arguments.
 pub fn run() -> Result<()> {
     install_panic_hook();
     let mut terminal = init_terminal()?;

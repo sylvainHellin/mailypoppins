@@ -451,7 +451,7 @@ pub fn cmd_config_add_account() -> Result<()> {
     let path = config_path();
     if !path.exists() {
         return Err(anyhow::anyhow!(
-            "Config file not found at {}. Run `email config init` first.",
+            "Config file not found at {}. Run `mp config init` first.",
             path.display()
         ));
     }
@@ -836,7 +836,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
             Err(e) => {
                 println!("{}", "FAILED".red());
                 eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
-                eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+                eprintln!("  Continuing with setup (you can re-test later with `mp config oauth2-login`).");
             }
         }
     }
@@ -1032,7 +1032,7 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
             Err(e) => {
                 println!("{}", "FAILED".red());
                 eprintln!("  {} Graph API test failed: {}", "\u{26a0}".yellow(), e);
-                eprintln!("  Continuing with setup (you can re-test later with `email config oauth2-login`).");
+                eprintln!("  Continuing with setup (you can re-test later with `mp config oauth2-login`).");
             }
         }
     }

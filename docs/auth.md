@@ -15,7 +15,7 @@ Auth method is set per account; one config can mix all three.
 - Passwords stored in the secrets backend under `smtp-password-<account>` and `imap-password-<account>`.
 - IMAP falls back to the SMTP password if `imap-password-<account>` is missing.
 - Default backend: machine-bound encrypted file at `~/.config/email/secrets.enc`. Opt into the OS keyring with `secrets_backend = "keyring"` in `config.toml`. See [secrets.md](secrets.md).
-- Set or rotate via `email config set-password {smtp|imap} --account <name>`.
+- Set or rotate via `mp config set-password {smtp|imap} --account <name>`.
 
 ## OAuth2 (IMAP/SMTP, XOAUTH2)
 
@@ -37,7 +37,7 @@ Auth method is set per account; one config can mix all three.
 - Scopes: `IMAP_SMTP_SCOPES` constant in `oauth2.rs` (`https://outlook.office365.com/IMAP.AccessAsUser.All`, `SMTP.Send`, `offline_access`).
 - IMAP authenticates via `async_imap::Authenticator` (XOAUTH2 SASL string built in `oauth2.rs`).
 - SMTP authenticates via `lettre::Mechanism::Xoauth2`.
-- Token refresh is automatic on every IMAP/SMTP call. The refresh token expires after roughly 90 days of inactivity; when that happens, re-run `email config oauth2-login --account <name>`.
+- Token refresh is automatic on every IMAP/SMTP call. The refresh token expires after roughly 90 days of inactivity; when that happens, re-run `mp config oauth2-login --account <name>`.
 
 ## Graph (Microsoft Graph REST)
 
@@ -60,11 +60,11 @@ Auth method is set per account; one config can mix all three.
 - All mail operations route through `src/graph.rs`: `list_folders`, `fetch_messages`, `fetch_new_messages`, `sync_mailboxes_graph`, `send_mail`, `archive_email_graph`, `delete_email_graph`, `mark_read_graph`, `search_messages`.
 - TUI actions branch on `app.is_graph()` in `tui/actions.rs::handle_action()` and dispatch to Graph helpers (`graph::archive_email_graph`, etc.) instead of IMAP/SMTP.
 - No IMAP IDLE -- the watcher is a 60-second timer that polls inbox message count and emits `WatchEvent::Changed` on delta.
-- `email config oauth2-login --account <name>` tests Graph accounts via the `/me` endpoint. `email config show` displays "graph (Microsoft Graph API)" and hides SMTP/IMAP details.
+- `mp config oauth2-login --account <name>` tests Graph accounts via the `/me` endpoint. `mp config show` displays "graph (Microsoft Graph API)" and hides SMTP/IMAP details.
 
 ## Setup wizard
 
-`email config init` (and `email config add-account`) presents four provider options:
+`mp config init` (and `mp config add-account`) presents four provider options:
 
 1. Generic IMAP/SMTP (password)
 2. Proton Mail (Bridge, password, self-signed cert)
@@ -75,6 +75,6 @@ For OAuth2 / Graph, the wizard runs the device-code flow, tests the credential, 
 
 ## Recovery
 
-- Forgotten password: `email config set-password {smtp|imap} --account <name>`.
-- Expired OAuth2 / Graph refresh token: `email config oauth2-login --account <name>`.
-- Lost / corrupted secrets file (e.g. Time Machine restore on a new Mac): `email config reset-secrets`. This wipes `secrets.enc` and `tokens/`, then walks each account prompting for re-entry.
+- Forgotten password: `mp config set-password {smtp|imap} --account <name>`.
+- Expired OAuth2 / Graph refresh token: `mp config oauth2-login --account <name>`.
+- Lost / corrupted secrets file (e.g. Time Machine restore on a new Mac): `mp config reset-secrets`. This wipes `secrets.enc` and `tokens/`, then walks each account prompting for re-entry.

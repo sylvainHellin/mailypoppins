@@ -23,7 +23,11 @@ import { Code } from 'astro:components';
         <em>Available once the first tagged release ships.</em> Installs a
         prebuilt binary -- no Rust toolchain needed:
       </p>
-      <CodeBlock lang="bash" code="brew install sylvainhellin/email/mailypoppins" />
+      <CodeBlock
+        lang="bash"
+        code={`brew tap sylvainHellin/mailypoppins
+brew install mailypoppins`}
+      />
 
       <h3>Prebuilt binaries</h3>
       <p>
@@ -32,7 +36,7 @@ import { Code } from 'astro:components';
         static musl) from the
         <a href="https://github.com/sylvainhellin/mailypoppins/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>,
         verify the <code>.sha256</code> checksum, and place the
-        <code>email</code> binary somewhere on your <code>PATH</code>.
+        <code>mp</code> binary somewhere on your <code>PATH</code>.
       </p>
 
       <h3>From source</h3>
@@ -48,7 +52,7 @@ cd mailypoppins
 cargo install --path .`}
       />
       <p>
-        This installs the <code>email</code> binary to <code>~/.cargo/bin/</code>.
+        This installs the <code>mp</code> binary to <code>~/.cargo/bin/</code>.
         Make sure that directory is in your <code>PATH</code>.
       </p>
     </section>
@@ -57,7 +61,7 @@ cargo install --path .`}
     <section>
       <h2>Setup</h2>
       <p>Run the interactive setup wizard:</p>
-      <CodeBlock lang="bash" code="email config init" />
+      <CodeBlock lang="bash" code="mp config init" />
       <p>The wizard walks through these steps:</p>
       <ol class="steps">
         <li>Choose a provider: standard IMAP/SMTP, Microsoft 365 with OAuth2, or Graph API.</li>
@@ -78,7 +82,7 @@ cargo install --path .`}
     <section>
       <h2>First Sync</h2>
       <p>After setup, pull your emails from the server:</p>
-      <CodeBlock lang="bash" code="email sync" />
+      <CodeBlock lang="bash" code="mp sync" />
       <p>
         This syncs all configured mailboxes (inbox, archive, sent, plus any extras).
         Each email is saved as a <code>.md</code> file with YAML frontmatter and an
@@ -96,7 +100,7 @@ cargo install --path .`}
     <section>
       <h2>Launch the TUI</h2>
       <p>Run the binary with no arguments to open the interactive terminal UI:</p>
-      <CodeBlock lang="bash" code="email" />
+      <CodeBlock lang="bash" code="mp" />
       <p>
         The TUI shows a sidebar with your mailboxes, an email list, and a headers/body
         preview pane. Core navigation:
@@ -126,15 +130,15 @@ cargo install --path .`}
       <CodeBlock
         lang="bash"
         code={`# Create a new draft
-email new meeting-followup
+mp new meeting-followup
 
 # Open and edit the file in your editor -- fill in recipients, subject, body
 
 # Mark it as reviewed and ready to send
-email mark-approved ~/notes/email/drafts/meeting-followup.md
+mp mark-approved ~/notes/email/drafts/meeting-followup.md
 
 # Send it
-email send ~/notes/email/drafts/meeting-followup.md`}
+mp send ~/notes/email/drafts/meeting-followup.md`}
       />
       <p>Or from the TUI:</p>
       <ol class="steps">

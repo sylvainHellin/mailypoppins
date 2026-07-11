@@ -22,7 +22,7 @@ pub fn cmd_reset_secrets() -> Result<()> {
     println!("  - Delete {}", secrets_file.display());
     println!("  - Delete {}/*.enc", token_dir.display());
     println!("  - Prompt you to re-enter SMTP/IMAP passwords for each account");
-    println!("  - For OAuth2/Graph accounts, you will need to re-run `email config oauth2-login`");
+    println!("  - For OAuth2/Graph accounts, you will need to re-run `mp config oauth2-login`");
     println!();
     print!("Continue? [y/N] ");
     io::stdout().flush()?;
@@ -59,7 +59,7 @@ pub fn cmd_reset_secrets() -> Result<()> {
     if config.accounts.is_empty() {
         println!();
         println!(
-            "{} No accounts configured. Run `email config init` to create one.",
+            "{} No accounts configured. Run `mp config init` to create one.",
             "\u{26a0}".yellow()
         );
         return Ok(());
@@ -96,7 +96,7 @@ pub fn cmd_reset_secrets() -> Result<()> {
             }
             AuthMethod::OAuth2 | AuthMethod::Graph => {
                 println!(
-                    "{} Account '{}' ({:?} auth) -- run `email config oauth2-login --account {}` to re-acquire token",
+                    "{} Account '{}' ({:?} auth) -- run `mp config oauth2-login --account {}` to re-acquire token",
                     "\u{2139}".blue(),
                     account.name.bold(),
                     account.auth_method,

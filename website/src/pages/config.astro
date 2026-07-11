@@ -19,9 +19,9 @@ import { Code } from 'astro:components';
       <h2>Config File Location</h2>
       <p>
         All configuration lives in a single file: <code>~/.config/email/config.toml</code>.
-        Create it interactively with <code>email config init</code>, or write it by hand.
-        View the resolved config at any time with <code>email config show</code>.
-        Print the file path with <code>email config path</code>.
+        Create it interactively with <code>mp config init</code>, or write it by hand.
+        View the resolved config at any time with <code>mp config show</code>.
+        Print the file path with <code>mp config path</code>.
       </p>
     </section>
 
@@ -322,7 +322,7 @@ server = "Sent Items"`} />
       </p>
       <p>Set or update passwords with:</p>
       <div class="code-inline">
-        <Code code="email config set-password" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config set-password" lang="bash" theme="catppuccin-mocha" />
       </div>
       <ConfigExample title="Password auth config" code={`[[accounts]]
 name = "personal"
@@ -345,7 +345,7 @@ username = "me@example.com"`} />
       </p>
       <p>Run the device code flow to authenticate:</p>
       <div class="code-inline">
-        <Code code="email config oauth2-login --account work" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config oauth2-login --account work" lang="bash" theme="catppuccin-mocha" />
       </div>
       <ConfigExample title="OAuth2 (IMAP/SMTP) config" code={`[[accounts]]
 name = "work"
@@ -379,7 +379,7 @@ username = "name@company.com"`} />
         SMTP and IMAP sections are not needed.
       </p>
       <div class="code-inline">
-        <Code code="email config oauth2-login --account exchange" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config oauth2-login --account exchange" lang="bash" theme="catppuccin-mocha" />
       </div>
       <ConfigExample title="Graph API config" code={`[[accounts]]
 name = "exchange"
@@ -465,7 +465,7 @@ server = "sentitems"          # Not "Sent Items"`} />
       </ul>
       <p>To set or update a password:</p>
       <div class="code-inline">
-        <Code code="email config set-password" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config set-password" lang="bash" theme="catppuccin-mocha" />
       </div>
       <p>
         The command prompts you to select which password to update (SMTP or IMAP) and

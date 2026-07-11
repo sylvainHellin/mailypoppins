@@ -66,10 +66,10 @@ pub enum SecretsBackendKind {
 
 #[derive(Debug)]
 pub enum SecretsError {
-    /// Secrets file does not exist yet. Caller should run `email config init`.
+    /// Secrets file does not exist yet. Caller should run `mp config init`.
     NotInitialized(PathBuf),
     /// File exists but cannot be decrypted (wrong machine, wrong user,
-    /// corrupt, or tampered). Caller should run `email config reset-secrets`.
+    /// corrupt, or tampered). Caller should run `mp config reset-secrets`.
     Undecryptable(PathBuf, String),
     /// Underlying I/O or crypto error.
     Other(anyhow::Error),
@@ -80,12 +80,12 @@ impl std::fmt::Display for SecretsError {
         match self {
             Self::NotInitialized(p) => write!(
                 f,
-                "Secrets store not initialized at {}. Run `email config init` (fresh install) or `email config set-password` to add credentials.",
+                "Secrets store not initialized at {}. Run `mp config init` (fresh install) or `mp config set-password` to add credentials.",
                 p.display()
             ),
             Self::Undecryptable(p, why) => write!(
                 f,
-                "Cannot decrypt secrets store at {} ({}). This usually means the file was created on a different machine or by a different user. Run `email config reset-secrets` to wipe and re-enter passwords.",
+                "Cannot decrypt secrets store at {} ({}). This usually means the file was created on a different machine or by a different user. Run `mp config reset-secrets` to wipe and re-enter passwords.",
                 p.display(),
                 why
             ),
@@ -374,7 +374,7 @@ impl SecretsBackend for EncryptedFileBackend {
             .entries
             .get(key)
             .cloned()
-            .with_context(|| format!("Secret '{}' not found. Run `email config set-password`.", key))
+            .with_context(|| format!("Secret '{}' not found. Run `mp config set-password`.", key))
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
@@ -410,7 +410,7 @@ impl SecretsBackend for KeyringBackend {
             .context("Failed to create keyring entry")?;
         entry.get_password().with_context(|| {
             format!(
-                "Password '{}' not found in keyring. Run `email config set-password`.",
+                "Password '{}' not found in keyring. Run `mp config set-password`.",
                 key
             )
         })

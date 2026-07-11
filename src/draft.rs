@@ -14,7 +14,7 @@ use crate::parse::{
 };
 use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus, InboxFrontmatter};
 
-/// Frontmatter skeleton for a brand-new empty draft (CLI `email new` and TUI `n`).
+/// Frontmatter skeleton for a brand-new empty draft (CLI `mp new` and TUI `n`).
 /// `attachments:` is intentionally a bare key: it deserializes to `None` via the
 /// serde default, unlike `attachments: []` which yields `Some(vec![])`.
 pub fn new_draft_skeleton(from: &str, date: &str) -> String {

@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
     if let Err(e) = email::config::init_secrets_backend(&global_config) {
         match &e {
             email::secrets::SecretsError::NotInitialized(_) => {
-                // Empty store at startup is fine -- `email config init` or
+                // Empty store at startup is fine -- `mp config init` or
                 // `set-password` will populate it. The actual missing-key
                 // error surfaces later when `SmtpConfig::load` is called.
             }
@@ -1164,7 +1164,7 @@ async fn main() -> Result<()> {
         Some(Commands::Watch { mailbox, timeout }) => {
             if account_config.auth_method == AuthMethod::Graph {
                 return Err(anyhow!(
-                    "IMAP IDLE watch is not supported for Graph accounts. Use 'email sync' instead."
+                    "IMAP IDLE watch is not supported for Graph accounts. Use 'mp sync' instead."
                 ));
             }
             let imap_config = ImapConfig::load(&account_config)?;

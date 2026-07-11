@@ -10,7 +10,7 @@ name = "email"
 path = "src/lib.rs"
 
 [[bin]]
-name = "email"
+name = "mp"
 path = "src/main.rs"
 
 [dependencies]

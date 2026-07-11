@@ -59,7 +59,7 @@ pub fn cmd_config_show() -> Result<()> {
                         match crate::oauth2::load_token_cache(&account.name) {
                             Some(cache) => {
                                 if cache.is_expired() {
-                                    println!("    token      = {} (run `email config oauth2-login`)", "expired".red());
+                                    println!("    token      = {} (run `mp config oauth2-login`)", "expired".red());
                                 } else {
                                     println!("    token      = {}", "valid".green());
                                 }
@@ -69,7 +69,7 @@ pub fn cmd_config_show() -> Result<()> {
                             }
                         }
                     } else {
-                        println!("    token      = {} (run `email config oauth2-login`)", "not cached".red());
+                        println!("    token      = {} (run `mp config oauth2-login`)", "not cached".red());
                     }
                 }
             }

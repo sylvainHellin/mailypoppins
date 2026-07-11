@@ -18,7 +18,7 @@ import AccordionItem from '../components/AccordionItem.astro';
       <div class="accordion-group">
         <AccordionItem question="Config file not found">
           <p>
-            Run <code>email config init</code> to create the config file at
+            Run <code>mp config init</code> to create the config file at
             <code>~/.config/email/config.toml</code>. The interactive wizard will walk you through
             SMTP/IMAP credentials, test connections, discover server mailboxes, and assign roles.
           </p>
@@ -26,7 +26,7 @@ import AccordionItem from '../components/AccordionItem.astro';
 
         <AccordionItem question="Password not found in keyring">
           <p>
-            Run <code>email config set-password</code> to store your SMTP or IMAP password in the
+            Run <code>mp config set-password</code> to store your SMTP or IMAP password in the
             OS keyring (macOS Keychain, Windows Credential Manager, or Linux Secret Service).
             Passwords are never stored in the config file.
           </p>
@@ -44,9 +44,9 @@ import AccordionItem from '../components/AccordionItem.astro';
 
         <AccordionItem question="SMTP authentication failed">
           <p>
-            Check your credentials with <code>email config show</code> and re-run
-            <code>email config set-password smtp</code> if needed. For OAuth2 accounts, try
-            <code>email config oauth2-login</code> to refresh the token.
+            Check your credentials with <code>mp config show</code> and re-run
+            <code>mp config set-password smtp</code> if needed. For OAuth2 accounts, try
+            <code>mp config oauth2-login</code> to refresh the token.
           </p>
         </AccordionItem>
 
@@ -54,7 +54,7 @@ import AccordionItem from '../components/AccordionItem.astro';
           <p>
             Check the path in your config under <code>[signatures]</code>. Paths support
             <code>~</code> expansion. Verify the file exists at the specified location with
-            <code>ls</code> or <code>email config show</code>.
+            <code>ls</code> or <code>mp config show</code>.
           </p>
         </AccordionItem>
       </div>
@@ -81,7 +81,7 @@ import AccordionItem from '../components/AccordionItem.astro';
 
         <AccordionItem question="OAuth2 token expired">
           <p>
-            Run <code>email config oauth2-login --account &lt;name&gt;</code> to re-authenticate.
+            Run <code>mp config oauth2-login --account &lt;name&gt;</code> to re-authenticate.
             Access tokens expire after roughly one hour and are auto-refreshed, but refresh tokens
             expire after approximately 90 days of inactivity.
           </p>
@@ -102,7 +102,7 @@ import AccordionItem from '../components/AccordionItem.astro';
       <div class="accordion-group">
         <AccordionItem question="How does sync work?">
           <p>
-            <code>email sync</code> is additive by default -- it only downloads new emails,
+            <code>mp sync</code> is additive by default -- it only downloads new emails,
             deduplicating by Message-ID. It uses a two-pass approach: first fetches headers (~50
             bytes per message) to check what is new, then downloads full messages only for emails
             not already stored locally. Add <code>--reconcile</code> to also detect server-side

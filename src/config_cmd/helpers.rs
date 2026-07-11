@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 /// Block on a future from sync context.
 ///
-/// `email config init` and friends are sync but reachable from `#[tokio::main]`,
+/// `mp config init` and friends are sync but reachable from `#[tokio::main]`,
 /// so calling `Runtime::new()` directly panics with "Cannot start a runtime
 /// from within a runtime". Detect that case and run the future on a fresh
 /// runtime in a dedicated OS thread.

@@ -1,7 +1,7 @@
 //! Best-effort hooks that keep the contacts index fresh after send/sync.
 //!
 //! Both hooks are no-ops when the account has no `.contacts-cache.json` yet —
-//! the user must run `email contacts rebuild` once to create the baseline.
+//! the user must run `mp contacts rebuild` once to create the baseline.
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 

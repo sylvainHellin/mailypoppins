@@ -319,7 +319,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     let path = config_path();
     if !path.exists() {
         return Err(anyhow::anyhow!(
-            "Config file not found at {}. Run `email config init` to create it.",
+            "Config file not found at {}. Run `mp config init` to create it.",
             path.display()
         ));
     }
@@ -334,7 +334,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
 
 /// Refuse to parse legacy configs containing `[accounts.directories]` or
 /// per-mailbox `local = "..."` keys. Per the v1.0 "no migrations" invariant,
-/// fail loud and instruct the user to re-run `email config init`.
+/// fail loud and instruct the user to re-run `mp config init`.
 fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
     let mut hits: Vec<&'static str> = Vec::new();
     if content.contains("[accounts.directories]")
@@ -354,7 +354,7 @@ fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
         return Err(anyhow::anyhow!(
             "Config at {} uses removed keys: {}.\n\
              Mail data now lives under `mailypoppins_data_dir()` (e.g. ~/Library/Application Support/mailypoppins on macOS).\n\
-             Per the v1.0 \"no migrations\" policy, please re-run `email config init` to regenerate the config.",
+             Per the v1.0 \"no migrations\" policy, please re-run `mp config init` to regenerate the config.",
             path.display(),
             hits.join(", "),
         ));

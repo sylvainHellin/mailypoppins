@@ -12,6 +12,8 @@ How mailypoppins is put together. Read this before non-trivial changes.
 
 Single crate, library + binary. All logic lives in `src/lib.rs` modules so the TUI can call them directly without subprocess spawning. Config types derive `Clone` so they can be moved into background threads.
 
+The installed binary is `mp` (`cargo install --path .`). The Cargo package and library are still named `email` internally for historical reasons -- that name is invisible to users (it only shows up in `use email::...` imports), so it was left untouched during the `email` -> `mp` binary rename. The user-facing name/version string is `mailypoppins X.Y.Z`, set via clap `#[command(name = "mailypoppins")]` + `#[command(version)]` in `src/main.rs`; the Homebrew formula test asserts against that string.
+
 ## Big-picture design
 
 - **Multi-account.** Config uses a `[[accounts]]` array. Each account has independent IMAP/SMTP/directories/signatures. The TUI shows one account at a time, switching via backtick or Ctrl+1-9. All accounts are watched for new mail simultaneously. CLI commands target an account via `--account` (defaults to first). Secret keys are namespaced: `smtp-password-{name}`, `imap-password-{name}`.
@@ -31,7 +33,7 @@ Single crate, library + binary. All logic lives in `src/lib.rs` modules so the T
 | `src/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in). `encrypt_blob` / `decrypt_blob` reused by `oauth2.rs`. See [secrets.md](secrets.md). |
 | `src/oauth2.rs` | OAuth2 device-code flow, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, XOAUTH2 SASL string builder. Scope-parameterised (`IMAP_SMTP_SCOPES` vs `GRAPH_SCOPES`). |
 | `src/graph.rs` | Microsoft Graph REST client: list folders, fetch / sync / send / archive / delete / mark-read / search. Used when `auth_method = "graph"`. |
-| `src/contacts/` + `src/contacts_cmd.rs` | Contact mining from local mail, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `email contacts {rebuild,stats,list}`. |
+| `src/contacts/` + `src/contacts_cmd.rs` | Contact mining from local mail, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. |
 | `src/config_cmd/` | Config subcommands: init wizard, add-account, show, set-password, oauth2-login, reset-secrets, path |
 | `src/parse.rs` | RFC822 parsing, saving emails to disk, attachment extraction, `open_file_with_system()`, `attachments_dir_for()`, `stable_attachments_dir()`, `link_or_copy()`, `account_dir_for_email()`, `ensure_utf8_charset()` |
 | `src/draft.rs` | Draft parsing/validation, reply/forward creation, status transitions |

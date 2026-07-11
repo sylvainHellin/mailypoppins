@@ -78,17 +78,17 @@ a new machine, the kernel handed out a new machine-id, or the file got
 corrupted), every command that needs a password will fail with:
 
 ```
-Cannot decrypt secrets store on this machine. Run `email config reset-secrets` to wipe and re-enter passwords.
+Cannot decrypt secrets store on this machine. Run `mp config reset-secrets` to wipe and re-enter passwords.
 ```
 
-`email config reset-secrets`:
+`mp config reset-secrets`:
 
 1. Confirms the destructive operation interactively.
 2. Removes `~/.config/email/secrets.enc`.
 3. Removes all `*.enc` files under `<mailypoppins_data_dir>/tokens/`.
 4. Walks each configured `[[accounts]]` and re-prompts for SMTP / IMAP
    passwords. For OAuth2 / Graph accounts, prints a hint to re-run
-   `email config oauth2-login --account <name>`.
+   `mp config oauth2-login --account <name>`.
 
 ## Opting into the OS keyring
 
@@ -101,7 +101,7 @@ secrets_backend = "keyring"
 ```
 
 This swaps the storage at startup. There is no automatic migration: you
-will need to re-set passwords via `email config set-password <which>
+will need to re-set passwords via `mp config set-password <which>
 --account <name>` after flipping the switch.
 
 On macOS, the keyring backend will re-prompt for every keychain item every

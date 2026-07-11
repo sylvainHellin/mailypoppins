@@ -1282,7 +1282,7 @@ pub(super) fn handle_action(
             } else {
                 app.set_status_level(
                     format!(
-                        "Config file not found at {}. Run `email config init` to create it.",
+                        "Config file not found at {}. Run `mp config init` to create it.",
                         path.display()
                     ),
                     StatusLevel::Warning,

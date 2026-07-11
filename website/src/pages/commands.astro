@@ -7,36 +7,36 @@ import KeyBindingTable from '../components/KeyBindingTable.astro';
 import { Code } from 'astro:components';
 
 const draftCommands = [
-  { command: 'email <file>', description: 'Preview a draft (dry-run)' },
-  { command: 'email new <name>', description: 'Create a new draft from template' },
-  { command: 'email list [dir]', description: 'List drafts grouped by status' },
-  { command: 'email validate <file|dir>', description: 'Validate frontmatter' },
-  { command: 'email mark-approved <file>', description: 'Mark draft as approved' },
-  { command: 'email mark-draft <file>', description: 'Demote approved draft back to draft' },
-  { command: 'email send <file> [-y]', description: 'Send a single approved email' },
-  { command: 'email send-approved [dir] [-y]', description: 'Send all approved emails' },
-  { command: 'email reply [file] [--all]', description: 'Create a reply draft' },
-  { command: 'email forward [file]', description: 'Create a forward draft' },
+  { command: 'mp <file>', description: 'Preview a draft (dry-run)' },
+  { command: 'mp new <name>', description: 'Create a new draft from template' },
+  { command: 'mp list [dir]', description: 'List drafts grouped by status' },
+  { command: 'mp validate <file|dir>', description: 'Validate frontmatter' },
+  { command: 'mp mark-approved <file>', description: 'Mark draft as approved' },
+  { command: 'mp mark-draft <file>', description: 'Demote approved draft back to draft' },
+  { command: 'mp send <file> [-y]', description: 'Send a single approved email' },
+  { command: 'mp send-approved [dir] [-y]', description: 'Send all approved emails' },
+  { command: 'mp reply [file] [--all]', description: 'Create a reply draft' },
+  { command: 'mp forward [file]', description: 'Create a forward draft' },
 ];
 
 const imapCommands = [
-  { command: 'email fetch [filters]', description: 'Fetch emails from server' },
-  { command: 'email sync [options]', description: 'Sync local folders with server' },
-  { command: 'email watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
-  { command: 'email list-mailboxes', description: 'List available server mailboxes' },
-  { command: 'email archive <file>', description: 'Archive an email (server + local)' },
-  { command: 'email delete <file>', description: 'Delete an email (server + local)' },
-  { command: 'email search <query>', description: 'Search emails on server' },
-  { command: 'email open <file>', description: 'Open attachment in default app' },
-  { command: 'email save <file> [--output]', description: 'Save attachment(s) to directory' },
+  { command: 'mp fetch [filters]', description: 'Fetch emails from server' },
+  { command: 'mp sync [options]', description: 'Sync local folders with server' },
+  { command: 'mp watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
+  { command: 'mp list-mailboxes', description: 'List available server mailboxes' },
+  { command: 'mp archive <file>', description: 'Archive an email (server + local)' },
+  { command: 'mp delete <file>', description: 'Delete an email (server + local)' },
+  { command: 'mp search <query>', description: 'Search emails on server' },
+  { command: 'mp open <file>', description: 'Open attachment in default app' },
+  { command: 'mp save <file> [--output]', description: 'Save attachment(s) to directory' },
 ];
 
 const configCommands = [
-  { command: 'email config init', description: 'Interactive setup wizard' },
-  { command: 'email config show', description: 'Display config (passwords masked)' },
-  { command: 'email config set-password', description: 'Store password in OS keyring' },
-  { command: 'email config oauth2-login', description: 'Run OAuth2 device code flow' },
-  { command: 'email config path', description: 'Print config file path' },
+  { command: 'mp config init', description: 'Interactive setup wizard' },
+  { command: 'mp config show', description: 'Display config (passwords masked)' },
+  { command: 'mp config set-password', description: 'Store password in OS keyring' },
+  { command: 'mp config oauth2-login', description: 'Run OAuth2 device code flow' },
+  { command: 'mp config path', description: 'Print config file path' },
 ];
 
 const fetchOptions = [
@@ -130,7 +130,7 @@ const listKeys = [
     <section>
       <h2 id="tui">TUI</h2>
       <p>
-        Running <code>email</code> with no arguments launches a full-screen terminal interface
+        Running <code>mp</code> with no arguments launches a full-screen terminal interface
         built on <code>ratatui</code>. The layout has four panes: a sidebar with the mailbox list,
         an email list, a headers pane, and a body preview. Panes adapt to terminal width -- the
         sidebar hides below 40 columns, and the right panes hide below 80 columns.
@@ -186,7 +186,7 @@ const listKeys = [
     <section>
       <h2 id="search-syntax">Search Query Syntax</h2>
       <p>
-        The <code>email search</code> command and the TUI server search overlay (<code>f</code>)
+        The <code>mp search</code> command and the TUI server search overlay (<code>f</code>)
         accept structured queries with prefix operators. Quoted values are supported
         (e.g., <code>from:"John Doe"</code>). Without an <code>in:</code> prefix, all configured
         mailboxes are searched in sequence.

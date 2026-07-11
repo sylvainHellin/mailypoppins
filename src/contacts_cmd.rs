@@ -1,4 +1,4 @@
-//! CLI handlers for `email contacts …`.
+//! CLI handlers for `mp contacts …`.
 
 use crate::config::{account_dir, AccountConfig, GlobalConfig};
 use crate::contacts::{

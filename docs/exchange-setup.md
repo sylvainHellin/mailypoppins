@@ -57,7 +57,7 @@ From the app registration "Overview" page, copy:
 
 Run:
 ```
-email config init
+mp config init
 ```
 Select "3. Microsoft 365 / Exchange Online (OAuth2)" and follow the prompts. You will be asked for the client_id and tenant_id, then the device code flow will start.
 
@@ -104,12 +104,12 @@ local = "sent-items"
 
 Then run the device code flow to acquire a token:
 ```
-email config oauth2-login --account work
+mp config oauth2-login --account work
 ```
 
 ## Step 6: Authenticate
 
-When you run `email config oauth2-login`, the CLI will:
+When you run `mp config oauth2-login`, the CLI will:
 1. Display a URL and a code
 2. Open the URL in your browser (or display it for you to open manually)
 3. Enter the code and sign in with your Microsoft account
@@ -128,7 +128,7 @@ The `IMAP.AccessAsUser.All` permission often requires admin consent. Request you
 ### Token expired
 If you see "OAuth2 token expired" errors, run:
 ```
-email config oauth2-login --account work
+mp config oauth2-login --account work
 ```
 to re-authenticate. Refresh tokens expire after ~90 days of inactivity.
 

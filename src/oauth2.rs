@@ -277,7 +277,7 @@ async fn refresh_token(
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!(
-            "Token refresh failed (the refresh token may have expired -- run `email config oauth2-login`): {}",
+            "Token refresh failed (the refresh token may have expired -- run `mp config oauth2-login`): {}",
             body
         ));
     }
@@ -316,7 +316,7 @@ pub async fn load_or_refresh_token(
 ) -> Result<String> {
     let cache = load_token_cache(account_name).ok_or_else(|| {
         anyhow!(
-            "No OAuth2 token cached for account '{}'. Run `email config oauth2-login {}` first.",
+            "No OAuth2 token cached for account '{}'. Run `mp config oauth2-login {}` first.",
             account_name,
             account_name
         )
@@ -329,7 +329,7 @@ pub async fn load_or_refresh_token(
 
     if cache.refresh_token.is_empty() {
         return Err(anyhow!(
-            "OAuth2 token expired and no refresh token available. Run `email config oauth2-login {}`.",
+            "OAuth2 token expired and no refresh token available. Run `mp config oauth2-login {}`.",
             account_name
         ));
     }

@@ -15,7 +15,7 @@ By default, mailypoppins stores SMTP/IMAP passwords and OAuth2 tokens in a
 machine-bound encrypted file at `~/.config/email/secrets.enc`. There is no
 Keychain prompt during `cargo install` and no codesign setup required. See
 [docs/secrets.md](docs/secrets.md) for the threat model, key derivation, and
-recovery procedure (`email config reset-secrets`).
+recovery procedure (`mp config reset-secrets`).
 
 The OS keyring backend (macOS Keychain, Linux Secret Service) is supported
 as an opt-in via `secrets_backend = "keyring"` in `~/.config/email/config.toml`.
@@ -37,8 +37,8 @@ conventions.
 
 - **`Cannot decrypt secrets store on this machine`** -- the encrypted
   secrets file was created on a different host (machine ID changed) or by
-  a different user. Run `email config reset-secrets` to wipe the file and
+  a different user. Run `mp config reset-secrets` to wipe the file and
   re-enter passwords.
 - **`Secrets store not initialized`** -- you have not configured any
-  passwords yet. Run `email config init` (fresh install) or
-  `email config set-password <smtp|imap> --account <name>` to populate.
+  passwords yet. Run `mp config init` (fresh install) or
+  `mp config set-password <smtp|imap> --account <name>` to populate.

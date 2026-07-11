@@ -4,6 +4,10 @@ Non-obvious gotchas, regressions, and hard-won fixes that are easy to forget. Ap
 
 Format: short imperative title, one-paragraph description, and (when useful) a code reference.
 
+## `cargo install --path .` leaves a stale `email` binary after the `mp` rename
+
+The CLI binary was renamed `email` -> `mp` (ticket #0022). `cargo install --path .` installs `~/.cargo/bin/mp` but does **not** remove the previously installed `~/.cargo/bin/email`, so a stale old binary lingers and shadows nothing but confuses `which email`. On this dev machine the fix is a symlink so old muscle memory / scripts keep working: `rm -f ~/.cargo/bin/email && ln -s mp ~/.cargo/bin/email` (relative target, resolves within `~/.cargo/bin`). This is a local convenience only -- it is not created by any install step and does not ship anywhere. The Cargo package/library are still named `email` internally; only the `[[bin]]` target changed, so `use email::...` imports are unaffected.
+
 ## HTML charset must be injected before saving
 
 Incoming HTML bodies are saved as raw bytes from the server. Browsers default to latin-1 when no charset is declared, breaking umlauts and other non-ASCII characters. Always inject `<meta charset="UTF-8">` before writing to disk -- see `ensure_utf8_charset()` in `parse.rs`.
@@ -73,7 +77,7 @@ Main is `#[tokio::main]`, so a tokio runtime is always live by the time any sync
 
 ## Attachment paths in drafts must reference the per-account stable mirror
 
-The per-mailbox `<mailbox>/<stem>_attachments/<file>` path follows the email when reconcile detects an inbox -> archive move on the server, so any draft created before the move ends up with stale frontmatter and `email send` fails with `Failed to read attachment`. Each fetched attachment is therefore also hardlinked into `<account>/attachments/<sanitized-message-id>/` (copy fallback on filesystems that disallow hardlinks). `create_forward_draft` writes those stable paths and lazy-hydrates the mirror for emails fetched before the scheme existed. Cleanup happens in `reconcile_local_files` only when the email vanishes from every synced mailbox -- never on dedup or move (the surviving copy still references the same Message-ID). Helpers live in `src/parse.rs`: `sanitize_message_id_for_path`, `stable_attachments_dir`, `link_or_copy`, `account_dir_for_email`. See ticket #0006.
+The per-mailbox `<mailbox>/<stem>_attachments/<file>` path follows the email when reconcile detects an inbox -> archive move on the server, so any draft created before the move ends up with stale frontmatter and `mp send` fails with `Failed to read attachment`. Each fetched attachment is therefore also hardlinked into `<account>/attachments/<sanitized-message-id>/` (copy fallback on filesystems that disallow hardlinks). `create_forward_draft` writes those stable paths and lazy-hydrates the mirror for emails fetched before the scheme existed. Cleanup happens in `reconcile_local_files` only when the email vanishes from every synced mailbox -- never on dedup or move (the surviving copy still references the same Message-ID). Helpers live in `src/parse.rs`: `sanitize_message_id_for_path`, `stable_attachments_dir`, `link_or_copy`, `account_dir_for_email`. See ticket #0006.
 
 ## Display names with non-atext characters break lettre's `Mailbox` parser
 

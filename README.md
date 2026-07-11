@@ -1,6 +1,6 @@
-# email
+# mailypoppins
 
-A CLI tool and TUI for managing emails from Markdown drafts with YAML frontmatter. Supports IMAP fetch/sync/archive and an auditable draft workflow (`draft -> approved -> sent`). Running `email` with no arguments launches an interactive terminal UI.
+A CLI tool and TUI for managing emails from Markdown drafts with YAML frontmatter. Supports IMAP fetch/sync/archive and an auditable draft workflow (`draft -> approved -> sent`). Running `mp` with no arguments launches an interactive terminal UI.
 
 ## Installation
 
@@ -14,7 +14,7 @@ cargo install --path .
 Run the interactive setup wizard:
 
 ```bash
-email config init
+mp config init
 ```
 
 This will:
@@ -102,7 +102,7 @@ For Microsoft 365 accounts using OAuth2 (IMAP/SMTP) or Graph API:
 3. Run the device code flow:
 
 ```bash
-email config oauth2-login --account <name>
+mp config oauth2-login --account <name>
 ```
 
 Graph accounts require an `[accounts.oauth2]` section with `client_id` and `tenant_id`, and use Graph well-known folder names (`inbox`, `archive`, `sentitems`) instead of IMAP folder names.
@@ -110,11 +110,11 @@ Graph accounts require an `[accounts.oauth2]` section with `client_id` and `tena
 ### Config commands
 
 ```bash
-email config init           # Interactive setup wizard
-email config show           # Display config (passwords masked)
-email config set-password   # Store SMTP or IMAP password in keyring
-email config oauth2-login   # Run OAuth2 device code flow
-email config path           # Print config file path
+mp config init           # Interactive setup wizard
+mp config show           # Display config (passwords masked)
+mp config set-password   # Store SMTP or IMAP password in keyring
+mp config oauth2-login   # Run OAuth2 device code flow
+mp config path           # Print config file path
 ```
 
 ## Email Draft Format
@@ -156,7 +156,7 @@ The file is updated in-place with `status: sent`, `sent_at` timestamp, `sent_via
 ### TUI
 
 ```bash
-email                           # Launch the interactive TUI
+mp                              # Launch the interactive TUI
 ```
 
 ### Global options
@@ -169,29 +169,29 @@ email                           # Launch the interactive TUI
 ### Drafts
 
 ```bash
-email <file>                    # Preview a draft (dry-run)
-email new <name>                # Create a new draft from template
-email list [dir]                # List drafts grouped by status
-email validate <file|dir>       # Validate frontmatter
-email mark-approved <file>      # Mark draft as approved
-email send <file> [-y]          # Send a single approved email
-email send-approved [dir] [-y]  # Send all approved emails in directory
-email reply [file] [--all]      # Create a reply draft from a received email
-email forward [file]            # Create a forward draft from a received email
+mp <file>                       # Preview a draft (dry-run)
+mp new <name>                   # Create a new draft from template
+mp list [dir]                   # List drafts grouped by status
+mp validate <file|dir>          # Validate frontmatter
+mp mark-approved <file>         # Mark draft as approved
+mp send <file> [-y]             # Send a single approved email
+mp send-approved [dir] [-y]     # Send all approved emails in directory
+mp reply [file] [--all]         # Create a reply draft from a received email
+mp forward [file]               # Create a forward draft from a received email
 ```
 
 ### IMAP
 
 ```bash
-email fetch [filters]           # Fetch emails from server
-email sync [options]            # Sync local folders with server
-email watch [options]           # Watch mailbox for changes (IMAP IDLE)
-email list-mailboxes            # List available server mailboxes
-email archive <file>            # Archive an inbox email (server + local)
-email delete <file>             # Delete an inbox email (server + local)
-email search <query>            # Search emails on the server
-email open <file>               # Open an attachment in the default app
-email save <file> [--output]    # Save attachment(s) to a directory
+mp fetch [filters]              # Fetch emails from server
+mp sync [options]               # Sync local folders with server
+mp watch [options]              # Watch mailbox for changes (IMAP IDLE)
+mp list-mailboxes               # List available server mailboxes
+mp archive <file>               # Archive an inbox email (server + local)
+mp delete <file>                # Delete an inbox email (server + local)
+mp search <query>               # Search emails on the server
+mp open <file>                  # Open an attachment in the default app
+mp save <file> [--output]       # Save attachment(s) to a directory
 ```
 
 ### Fetch options
@@ -245,7 +245,7 @@ Reply drafts include a `{{SIGNATURE}}` placeholder between the reply area and qu
 
 ## TUI
 
-Running `email` with no arguments opens a full-screen terminal interface (built on `ratatui`).
+Running `mp` with no arguments opens a full-screen terminal interface (built on `ratatui`).
 
 **Layout:** sidebar (mailbox list) | email list | headers + body preview. Adapts to terminal width.
 
@@ -272,42 +272,42 @@ The TUI calls library functions directly (no subprocess spawning). Background IM
 
 ```bash
 # 1. Set up (once)
-email config init
+mp config init
 
 # 2. Launch the TUI for interactive management
-email
+mp
 
 # Or use CLI commands directly:
 
 # 3. Sync inbox
-email sync
+mp sync
 
 # 4. Create and review drafts
-email new meeting-followup
-email list ~/notes/email/drafts/
-email ~/notes/email/drafts/2026-03-01_meeting-followup.md   # preview
+mp new meeting-followup
+mp list ~/notes/email/drafts/
+mp ~/notes/email/drafts/2026-03-01_meeting-followup.md   # preview
 
 # 5. Approve and send
-email mark-approved ~/notes/email/drafts/2026-03-01_meeting-followup.md
-email send ~/notes/email/drafts/2026-03-01_meeting-followup.md
+mp mark-approved ~/notes/email/drafts/2026-03-01_meeting-followup.md
+mp send ~/notes/email/drafts/2026-03-01_meeting-followup.md
 
 # 6. Or batch send all approved
-email send-approved ~/notes/email/drafts/
+mp send-approved ~/notes/email/drafts/
 ```
 
 ## Troubleshooting
 
 ### "Config file not found"
-Run `email config init` to create the config file.
+Run `mp config init` to create the config file.
 
 ### "Password not found in keyring"
-Run `email config set-password` to store your password.
+Run `mp config set-password` to store your password.
 
 ### "Email not approved for sending"
-Run `email mark-approved <file>` first.
+Run `mp mark-approved <file>` first.
 
 ### "SMTP authentication failed"
-Check your credentials with `email config show` and re-run `email config set-password smtp` if needed.
+Check your credentials with `mp config show` and re-run `mp config set-password smtp` if needed.
 
 ### "Signature file not found"
 Check the path in your config. Paths support `~` expansion.
