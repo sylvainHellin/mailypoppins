@@ -16,7 +16,12 @@ use ratatui::style::Color;
 pub const DEFAULT_THEME_NAME: &str = "catppuccin-mocha";
 
 /// Canonical names of all built-in themes, for error messages and docs.
-pub const THEME_NAMES: &[&str] = &["catppuccin-mocha", "catppuccin-latte", "tokyo-night"];
+pub const THEME_NAMES: &[&str] = &[
+    "catppuccin-mocha",
+    "catppuccin-latte",
+    "tokyo-night",
+    "terminal",
+];
 
 /// Semantic color slots used by the TUI renderers.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,6 +157,41 @@ impl Theme {
         }
     }
 
+    /// Terminal-adaptive theme: surfaces use `Color::Reset` so the terminal's
+    /// own background shows through, and the rest of the palette uses the 16
+    /// ANSI named colors so the whole TUI follows the user's terminal theme
+    /// (light or dark).
+    ///
+    /// Two deliberate exceptions to "Reset everywhere":
+    /// - `surface` is `DarkGray` (not `Reset`): the cursor row, status bar and
+    ///   code blocks paint text over `surface` and rely on it contrasting with
+    ///   `bg`. With `surface == Reset` the cursor row would be invisible.
+    /// - `selection` is `White` so the cursor-row foreground stays legible on
+    ///   the `DarkGray` surface on both light and dark terminals.
+    pub const fn terminal() -> Self {
+        Self {
+            bg: Color::Reset,             // terminal default background
+            surface: Color::DarkGray,     // must contrast with bg (cursor row)
+            text: Color::Reset,           // terminal default foreground
+            text_muted: Color::Gray,
+            text_faint: Color::Gray, // stays legible on the DarkGray status bar
+            border: Color::Blue,
+            border_focused: Color::Cyan,
+            selection: Color::White, // cursor-row fg over DarkGray surface
+            unread: Color::Blue,
+            unread_count: Color::Yellow,
+            accent: Color::Blue,
+            accent_alt: Color::Cyan,
+            heading: Color::Magenta,
+            emphasis: Color::Yellow,
+            code: Color::Yellow,
+            success: Color::Green,
+            warning: Color::Yellow,
+            error: Color::Red,
+            info: Color::Blue,
+        }
+    }
+
     /// Look up a built-in theme by name (case-insensitive, with a few
     /// aliases). Returns `None` for unknown names.
     pub fn by_name(name: &str) -> Option<Self> {
@@ -160,6 +200,7 @@ impl Theme {
             "" | "default" | "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin_mocha()),
             "latte" | "catppuccin-latte" => Some(Self::catppuccin_latte()),
             "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
+            "terminal" | "transparent" | "ansi" => Some(Self::terminal()),
             _ => None,
         }
     }
@@ -232,6 +273,42 @@ mod tests {
         );
         assert_eq!(Theme::by_name("default"), Some(Theme::catppuccin_mocha()));
         assert_eq!(Theme::by_name(""), Some(Theme::catppuccin_mocha()));
+    }
+
+    #[test]
+    fn terminal_theme_resolves_and_aliases() {
+        assert_eq!(Theme::by_name("terminal"), Some(Theme::terminal()));
+        assert_eq!(Theme::by_name("transparent"), Some(Theme::terminal()));
+        assert_eq!(Theme::by_name("ansi"), Some(Theme::terminal()));
+        assert_eq!(Theme::by_name("TERMINAL"), Some(Theme::terminal()));
+    }
+
+    #[test]
+    fn terminal_theme_uses_reset_and_ansi_slots() {
+        let t = Theme::terminal();
+        // Surfaces let the terminal background show through...
+        assert_eq!(t.bg, Color::Reset);
+        assert_eq!(t.text, Color::Reset);
+        // ...except `surface`, which must contrast with `bg` so the cursor
+        // row / status bar stay visible on both light and dark terminals.
+        assert_ne!(t.surface, Color::Reset);
+        assert_eq!(t.surface, Color::DarkGray);
+        // Status levels map to the expected ANSI named colors.
+        assert_eq!(t.error, Color::Red);
+        assert_eq!(t.warning, Color::Yellow);
+        assert_eq!(t.success, Color::Green);
+        // No RGB anywhere: the whole palette follows the terminal.
+        for slot in [
+            t.bg, t.surface, t.text, t.text_muted, t.text_faint, t.border,
+            t.border_focused, t.selection, t.unread, t.unread_count, t.accent,
+            t.accent_alt, t.heading, t.emphasis, t.code, t.success, t.warning,
+            t.error, t.info,
+        ] {
+            assert!(
+                !matches!(slot, Color::Rgb(..) | Color::Indexed(_)),
+                "terminal theme slot {slot:?} is not an ANSI named color"
+            );
+        }
     }
 
     #[test]

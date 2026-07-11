@@ -144,6 +144,19 @@ All notable changes to this project are documented in this file.
   templates include the key. Website config page documents the option.
   Closes [#0023](docs/tickets/0023-enable-theme-config.md).
 
+- **Terminal-adaptive `terminal` theme.** A new built-in theme (aliases
+  `transparent` / `ansi`) that follows the terminal's own palette: the
+  background/foreground slots use `Color::Reset` so the terminal's
+  default colors show through, and the accent/status slots use the 16
+  ANSI named colors (`error` → red, `warning`/`code` → yellow,
+  `success` → green, `accent` → blue, ...) so the whole TUI tracks a
+  light or dark terminal theme. One deliberate exception: `surface` is
+  `DarkGray` (not `Reset`) because the cursor row, status bar and code
+  blocks paint over `surface` and rely on it contrasting with `bg`;
+  `selection` is `White` so the cursor-row text stays legible on that
+  surface. Registered in `THEME_NAMES`, the unknown-name warning list,
+  the `config init` template comment and the website config page.
+
 - **Open the log file from the TUI.** New global hotkey `Ctrl+l`
   suspends the TUI and opens the newest daily log file
   (`<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`) in `$EDITOR`, using

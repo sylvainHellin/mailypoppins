@@ -16,7 +16,8 @@ use chrono::Utc;
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct GlobalConfig {
     /// TUI color theme name. Built-ins: "catppuccin-mocha" (the default,
-    /// today's exact appearance), "catppuccin-latte", "tokyo-night".
+    /// today's exact appearance), "catppuccin-latte", "tokyo-night",
+    /// "terminal" (adapts to the terminal's own ANSI palette).
     /// Unknown names warn and fall back to the default.
     #[serde(default)]
     pub theme: String,
