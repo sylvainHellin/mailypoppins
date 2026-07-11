@@ -2,7 +2,7 @@
 #
 # Rendered by scripts/update-homebrew-formula.sh, which fills the version
 # and sha256 placeholders from a tagged GitHub release; the result is
-# pushed to the tap repository (sylvainHellin/homebrew-email) by the
+# pushed to the tap repository (sylvainHellin/homebrew-mailypoppins) by the
 # `homebrew-tap` job in .github/workflows/release.yml.
 #
 # The formula installs prebuilt release binaries instead of building from
@@ -33,10 +33,10 @@ class Mailypoppins < Formula
   end
 
   def install
-    bin.install "email"
+    bin.install "mp"
   end
 
   test do
-    assert_match "mailypoppins", shell_output("#{bin}/email --version")
+    assert_match "mailypoppins", shell_output("#{bin}/mp --version")
   end
 end

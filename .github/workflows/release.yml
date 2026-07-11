@@ -77,38 +77,45 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: email
+          bin: mp
           target: ${{ matrix.target }}
           archive: mailypoppins-$target
           features: ${{ matrix.features }}
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Update the Homebrew tap (ticket #0013). Requires the
-  # HOMEBREW_TAP_TOKEN repository secret: a fine-grained PAT with
-  # `contents: read/write` on sylvainHellin/homebrew-email. Skipped with a
-  # notice (not a failure) until the tap repo + secret exist -- see
-  # docs/release-process.md for the one-time setup.
+  # Update the Homebrew tap (ticket #0013). Requires the TAP_DEPLOY_KEY
+  # repository secret: the PRIVATE half of an ed25519 deploy key whose
+  # PUBLIC half is registered (with write access) on
+  # sylvainHellin/homebrew-mailypoppins. Auth is over SSH via ssh-agent;
+  # no PAT is involved. Skipped with a notice (not a failure) until the
+  # tap repo + key exist -- see docs/release-process.md for the one-time
+  # setup.
   homebrew-tap:
     needs: upload-assets
     runs-on: ubuntu-latest
     env:
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
     steps:
-      - name: Skip when HOMEBREW_TAP_TOKEN is not configured
-        if: env.TAP_TOKEN == ''
-        run: echo "::notice::HOMEBREW_TAP_TOKEN not set; skipping Homebrew tap update."
+      - name: Skip when TAP_DEPLOY_KEY is not configured
+        if: env.TAP_DEPLOY_KEY == ''
+        run: echo "::notice::TAP_DEPLOY_KEY not set; skipping Homebrew tap update."
       - uses: actions/checkout@v4
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_DEPLOY_KEY != ''
+      - name: Load tap deploy key into ssh-agent
+        if: env.TAP_DEPLOY_KEY != ''
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.TAP_DEPLOY_KEY }}
       - name: Render formula from release checksums
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_DEPLOY_KEY != ''
         run: |
           scripts/update-homebrew-formula.sh "${GITHUB_REF_NAME#v}" > /tmp/mailypoppins.rb
           cat /tmp/mailypoppins.rb
       - name: Push formula to tap repository
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_DEPLOY_KEY != ''
         run: |
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/sylvainHellin/homebrew-email.git" tap
+          git clone "git@github.com:sylvainHellin/homebrew-mailypoppins.git" tap
           mkdir -p tap/Formula
           cp /tmp/mailypoppins.rb tap/Formula/mailypoppins.rb
           cd tap
