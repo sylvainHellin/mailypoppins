@@ -519,6 +519,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("Enter / e", "Open in editor"),
                 ("r / R", "Reply / Reply-all"),
                 ("w", "Forward"),
+                ("c", "Edit recipients (Drafts only)"),
                 ("a", "Archive"),
                 ("d", "Delete"),
                 ("m", "Toggle read/unread"),

@@ -339,6 +339,22 @@ impl App {
                     }));
                 }
             }
+            KeyCode::Char('c') => {
+                // Edit recipients/subject of a draft via the compose wizard
+                // (fuzzy-finder), rewriting the frontmatter in place.
+                // Only meaningful in the Drafts mailbox -- received/sent
+                // emails have no editable draft frontmatter here.
+                self.g_pending = false;
+                if self.active_kind() == MailboxKind::Drafts {
+                    if let Some(path) = self.selected_email_path() {
+                        self.push_action(Action::OpenComposeWizard(ComposeMode::EditDraft {
+                            source_path: path,
+                        }));
+                    }
+                } else {
+                    self.set_status("Edit recipients (c) is only available in Drafts".to_string());
+                }
+            }
             KeyCode::Char('a') => {
                 self.g_pending = false;
                 if key.modifiers.contains(KeyModifiers::CONTROL) {

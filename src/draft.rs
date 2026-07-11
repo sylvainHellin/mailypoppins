@@ -433,6 +433,250 @@ pub fn create_forward_draft(
     Ok(dest)
 }
 
+/// New recipient/subject values for an in-place draft frontmatter rewrite.
+/// Empty strings clear the corresponding optional field (to/cc/bcc).
+pub struct DraftRecipientEdit {
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+}
+
+/// Rewrite ONLY the `to`/`cc`/`bcc`/`subject` frontmatter fields of an
+/// existing draft file in place, preserving the body and every other
+/// frontmatter field byte-for-byte.
+///
+/// The file must begin with a `---` fence and contain a closing `---`.
+/// Files with missing/malformed frontmatter are rejected with an error so
+/// the caller can surface a status message without any data loss (the file
+/// is only written on the success path).
+///
+/// Existing `to:`/`cc:`/`bcc:`/`subject:` lines are replaced where present;
+/// missing recipient/subject keys are appended just before the closing
+/// fence. Empty recipient values are written as a bare key (e.g. `cc:`),
+/// matching the new-draft skeleton convention.
+pub fn rewrite_draft_recipients(path: &Path, edit: &DraftRecipientEdit) -> Result<()> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+
+    // Detect the dominant line ending so we can re-emit the frontmatter with
+    // the same style the file already uses (avoids mixed CRLF/LF endings).
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+
+    // Split off the opening fence without touching the body bytes.
+    let after_open = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
+        .ok_or_else(|| anyhow!("No frontmatter found (file does not start with '---')"))?;
+
+    // Collect frontmatter lines up to the closing fence (a line that is
+    // exactly `---`). Everything after that newline is the untouched body.
+    let mut fm_lines: Vec<String> = Vec::new();
+    let mut body = String::new();
+    let mut closed = false;
+    let mut cursor = 0usize;
+    while cursor < after_open.len() {
+        let rest = &after_open[cursor..];
+        let (line, advance) = match rest.find('\n') {
+            Some(nl) => (&rest[..nl], nl + 1),
+            None => (rest, rest.len()),
+        };
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed == "---" {
+            closed = true;
+            body = after_open[cursor + advance..].to_string();
+            break;
+        }
+        fm_lines.push(trimmed.to_string());
+        cursor += advance;
+    }
+    if !closed {
+        return Err(anyhow!("Malformed frontmatter: no closing '---' fence"));
+    }
+
+    let to_line = if edit.to.trim().is_empty() {
+        "to:".to_string()
+    } else {
+        format!("to: {}", yaml_dq_escape(&edit.to))
+    };
+    let cc_line = if edit.cc.trim().is_empty() {
+        "cc:".to_string()
+    } else {
+        format!("cc: {}", yaml_dq_escape(&edit.cc))
+    };
+    let bcc_line = if edit.bcc.trim().is_empty() {
+        "bcc:".to_string()
+    } else {
+        format!("bcc: {}", yaml_dq_escape(&edit.bcc))
+    };
+    let subject_line = format!("subject: {}", yaml_dq_escape(&edit.subject));
+
+    // Rebuild the frontmatter line list, replacing the four managed keys in
+    // place (only when they appear at top level, i.e. zero indentation) and
+    // dropping any continuation lines belonging to a replaced multiline
+    // scalar. Every other top-level entry — including its own continuation
+    // block — is copied verbatim.
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut wrote_to = false;
+    let mut wrote_cc = false;
+    let mut wrote_bcc = false;
+    let mut wrote_subject = false;
+    let mut i = 0usize;
+    while i < fm_lines.len() {
+        let line = &fm_lines[i];
+        // A top-level key line has no leading whitespace. Indented lines are
+        // continuation lines of the previous entry (block scalars, nested
+        // mappings, flow continuations) and are never matched as managed
+        // keys — they are copied verbatim below.
+        let is_top_level = !line.starts_with(' ') && !line.starts_with('\t');
+        let managed: Option<&str> = if is_top_level {
+            if line == "to:" || line.starts_with("to: ") {
+                Some("to")
+            } else if line == "cc:" || line.starts_with("cc: ") {
+                Some("cc")
+            } else if line == "bcc:" || line.starts_with("bcc: ") {
+                Some("bcc")
+            } else if line == "subject:" || line.starts_with("subject: ") {
+                Some("subject")
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match managed {
+            Some(key) => {
+                match key {
+                    "to" => {
+                        out_lines.push(to_line.clone());
+                        wrote_to = true;
+                    }
+                    "cc" => {
+                        out_lines.push(cc_line.clone());
+                        wrote_cc = true;
+                    }
+                    "bcc" => {
+                        out_lines.push(bcc_line.clone());
+                        wrote_bcc = true;
+                    }
+                    _ => {
+                        out_lines.push(subject_line.clone());
+                        wrote_subject = true;
+                    }
+                }
+                // Skip the replaced key line and every continuation line that
+                // follows it (any more-indented line): folded `>`, literal
+                // `|`, indent-continued plain scalars, and block
+                // sequences/mappings nested under the key.
+                //
+                // Blank or whitespace-only lines are legal *inside* a block
+                // scalar (they separate paragraphs), so they must be consumed
+                // too — but only when a further indented line follows them.
+                // A trailing blank line that precedes the next top-level key
+                // belongs to the document, not the scalar, and must survive.
+                i += 1;
+                while i < fm_lines.len() {
+                    let cont = &fm_lines[i];
+                    if cont.starts_with(' ') || cont.starts_with('\t') {
+                        i += 1;
+                    } else if cont.trim().is_empty() {
+                        // Blank line: only consumable if a later indented line
+                        // continues the scalar block. Look ahead past any run
+                        // of blank lines to find the first non-blank line.
+                        let mut j = i + 1;
+                        while j < fm_lines.len() && fm_lines[j].trim().is_empty() {
+                            j += 1;
+                        }
+                        let continues = j < fm_lines.len()
+                            && (fm_lines[j].starts_with(' ') || fm_lines[j].starts_with('\t'));
+                        if continues {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            None => {
+                out_lines.push(line.clone());
+                i += 1;
+            }
+        }
+    }
+
+    if !wrote_to {
+        out_lines.push(to_line);
+    }
+    if !wrote_cc {
+        out_lines.push(cc_line);
+    }
+    if !wrote_bcc {
+        out_lines.push(bcc_line);
+    }
+    if !wrote_subject {
+        out_lines.push(subject_line);
+    }
+
+    let mut rebuilt = String::new();
+    rebuilt.push_str("---");
+    rebuilt.push_str(newline);
+    for line in out_lines {
+        rebuilt.push_str(&line);
+        rebuilt.push_str(newline);
+    }
+    rebuilt.push_str("---");
+    rebuilt.push_str(newline);
+    rebuilt.push_str(&body);
+
+    write_atomic(path, rebuilt.as_bytes())
+        .with_context(|| format!("Failed to write file: {}", path.display()))?;
+    Ok(())
+}
+
+/// Atomically overwrite `path` by writing to a `.tmp` sibling then renaming
+/// over the destination. Mirrors `secrets::write_secret_file_atomic` minus the
+/// 0600 mode — drafts are plain files, so this preserves the permission
+/// semantics of an ordinary overwrite.
+fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    // Use a PID-qualified extension so we never collide with (and clobber) a
+    // real user file that happens to be named `<draft>.tmp`.
+    let tmp = path.with_extension(format!("mp-tmp.{}", std::process::id()));
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow!(e))
+                .with_context(|| format!("Failed to remove stale temp file: {}", tmp.display()))
+        }
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("Failed to create temp file: {}", tmp.display()))?;
+    file.write_all(data)
+        .with_context(|| format!("Failed to write temp file: {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to flush temp file: {}", tmp.display()))?;
+    drop(file);
+
+    fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// YAML double-quote escape for a scalar string value.
+fn yaml_dq_escape(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 pub fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
@@ -712,6 +956,477 @@ mod tests {
             },
             body_markdown: body.to_string(),
         }
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_preserves_body_and_unknown_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("draft.md");
+        let original = concat!(
+            "---\n",
+            "to: old@example.com\n",
+            "cc:\n",
+            "bcc:\n",
+            "subject: Old subject\n",
+            "status: draft\n",
+            "from: \"me@example.com\"\n",
+            "date: Thu, 10 Jul 2026 08:00:00 +0000\n",
+            "reply_to:\n",
+            "attachments:\n",
+            "custom_field: keep-me\n",
+            "---\n",
+            "\n",
+            "Hello body line 1.\n",
+            "Line 2 with --- dashes inside.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "alice@example.com, bob@example.com".to_string(),
+            cc: "carol@example.com".to_string(),
+            bcc: String::new(),
+            subject: "New subject".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+
+        // Recipient/subject fields rewritten.
+        assert!(result.contains("to: \"alice@example.com, bob@example.com\""));
+        assert!(result.contains("cc: \"carol@example.com\""));
+        assert!(
+            result.contains("\nbcc:\n"),
+            "empty bcc should be a bare key: {result}"
+        );
+        assert!(result.contains("subject: \"New subject\""));
+        assert!(!result.contains("Old subject"));
+        assert!(!result.contains("old@example.com"));
+
+        // Unknown / unrelated frontmatter fields preserved verbatim.
+        assert!(result.contains("status: draft"));
+        assert!(result.contains("from: \"me@example.com\""));
+        assert!(result.contains("date: Thu, 10 Jul 2026 08:00:00 +0000"));
+        assert!(result.contains("reply_to:"));
+        assert!(result.contains("custom_field: keep-me"));
+
+        // Body preserved byte-for-byte (including the interior `---`).
+        assert!(
+            result.ends_with("\nHello body line 1.\nLine 2 with --- dashes inside.\n"),
+            "body not preserved: {result:?}"
+        );
+
+        // The rewritten file still parses and reflects the new values.
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(
+            draft.frontmatter.to.as_deref(),
+            Some("alice@example.com, bob@example.com")
+        );
+        assert_eq!(draft.frontmatter.cc.as_deref(), Some("carol@example.com"));
+        assert_eq!(draft.frontmatter.bcc, None);
+        assert_eq!(draft.frontmatter.subject, "New subject");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_appends_missing_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("draft.md");
+        // No cc/bcc keys present at all.
+        let original = "---\nto: old@example.com\nsubject: S\nstatus: draft\n---\n\nBody.\n";
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: "cc@example.com".to_string(),
+            bcc: "bcc@example.com".to_string(),
+            subject: "S2".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
+        assert_eq!(draft.frontmatter.cc.as_deref(), Some("cc@example.com"));
+        assert_eq!(draft.frontmatter.bcc.as_deref(), Some("bcc@example.com"));
+        assert_eq!(draft.frontmatter.subject, "S2");
+        assert_eq!(draft.body_markdown, "Body.");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_folded_subject_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("folded.md");
+        // A folded `subject: >` block spanning two indented continuation lines.
+        let original = concat!(
+            "---\n",
+            "to: old@example.com\n",
+            "subject: >\n",
+            "  This is a long folded\n",
+            "  subject line.\n",
+            "status: draft\n",
+            "custom_field: keep-me\n",
+            "---\n",
+            "\n",
+            "Body stays.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New subject".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        // Orphaned continuation lines of the old folded scalar must be gone.
+        assert!(
+            !result.contains("This is a long folded"),
+            "folded continuation not consumed: {result}"
+        );
+        assert!(!result.contains("subject line."));
+        assert!(result.contains("custom_field: keep-me"));
+
+        // Must still parse and yield the new values with body preserved.
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
+        assert_eq!(draft.frontmatter.subject, "New subject");
+        assert_eq!(draft.body_markdown, "Body stays.");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_literal_block_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("literal.md");
+        // A literal `subject: |` block.
+        let original = concat!(
+            "---\n",
+            "to: old@example.com\n",
+            "subject: |\n",
+            "  line one\n",
+            "  line two\n",
+            "status: draft\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "S2".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(!result.contains("line one"), "literal block not consumed: {result}");
+        assert!(!result.contains("line two"));
+
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.subject, "S2");
+        assert_eq!(draft.body_markdown, "Body.");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_folded_subject_interior_blank_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("folded_blank.md");
+        // A folded `subject: >` block with a blank line separating two
+        // paragraphs. The blank line is legal YAML and is NOT indented, so a
+        // naive "stop at first non-indented line" consumer would orphan the
+        // second paragraph and make the frontmatter unparseable.
+        let original = concat!(
+            "---\n",
+            "to: old@example.com\n",
+            "subject: >\n",
+            "  first paragraph\n",
+            "\n",
+            "  second paragraph\n",
+            "status: draft\n",
+            "---\n",
+            "\n",
+            "Body stays.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New subject".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        // Neither paragraph of the old folded scalar may survive.
+        assert!(
+            !result.contains("first paragraph"),
+            "first paragraph not consumed: {result}"
+        );
+        assert!(
+            !result.contains("second paragraph"),
+            "orphaned second paragraph after interior blank line: {result}"
+        );
+        assert!(result.contains("status: draft"));
+
+        // Must still parse cleanly with body preserved.
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
+        assert_eq!(draft.frontmatter.subject, "New subject");
+        assert_eq!(draft.body_markdown, "Body stays.");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_literal_to_interior_blank_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("literal_blank.md");
+        // A literal `to: |` block with an interior blank line between entries.
+        let original = concat!(
+            "---\n",
+            "to: |\n",
+            "  first@example.com\n",
+            "\n",
+            "  second@example.com\n",
+            "subject: Old\n",
+            "status: draft\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(
+            !result.contains("first@example.com"),
+            "first literal line not consumed: {result}"
+        );
+        assert!(
+            !result.contains("second@example.com"),
+            "orphaned literal line after interior blank line: {result}"
+        );
+
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
+        assert_eq!(draft.frontmatter.subject, "New");
+        assert_eq!(draft.body_markdown, "Body.");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_block_scalar_trailing_blank_before_next_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("trailing_blank.md");
+        // A managed block scalar followed by a blank line and then a NEXT
+        // top-level key. The trailing blank belongs to the document, not the
+        // scalar, and the next key must survive verbatim.
+        let original = concat!(
+            "---\n",
+            "subject: >\n",
+            "  folded line one\n",
+            "  folded line two\n",
+            "\n",
+            "custom_field: keep-me\n",
+            "status: draft\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(!result.contains("folded line one"), "scalar not consumed: {result}");
+        assert!(!result.contains("folded line two"));
+        // The next top-level key survives verbatim.
+        assert!(
+            result.contains("custom_field: keep-me"),
+            "next top-level key was swallowed: {result}"
+        );
+
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.subject, "New");
+        assert_eq!(draft.body_markdown, "Body.");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_nested_key_not_matched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested.md");
+        // A nested `to:` under `meta:` must NOT be treated as the top-level
+        // recipient key, and must not produce duplicate top-level keys.
+        let original = concat!(
+            "---\n",
+            "to: old@example.com\n",
+            "subject: Old\n",
+            "meta:\n",
+            "  to: nested@example.com\n",
+            "status: draft\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        // The nested key is preserved verbatim under `meta:`.
+        assert!(
+            result.contains("meta:\n  to: nested@example.com"),
+            "nested key mangled: {result}"
+        );
+        // Exactly one top-level `to:` line (the rewritten one).
+        let top_level_to = result
+            .lines()
+            .filter(|l| l.starts_with("to: ") || *l == "to:")
+            .count();
+        assert_eq!(top_level_to, 1, "duplicate top-level to keys: {result}");
+
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
+        assert_eq!(draft.frontmatter.subject, "New");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_preserves_crlf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("crlf.md");
+        let original = concat!(
+            "---\r\n",
+            "to: old@example.com\r\n",
+            "subject: Old\r\n",
+            "status: draft\r\n",
+            "---\r\n",
+            "\r\n",
+            "Body with CRLF.\r\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        // Frontmatter lines must use CRLF, not bare LF (no mixed endings).
+        assert!(result.contains("to: \"new@example.com\"\r\n"), "frontmatter not CRLF: {result:?}");
+        assert!(
+            !result.lines().any(|l| l.starts_with("to:") && !result.contains(&format!("{l}\r"))),
+            "mixed endings: {result:?}"
+        );
+        // No lone LF that isn't part of a CRLF pair.
+        assert!(!result.replace("\r\n", "").contains('\n'), "stray LF found: {result:?}");
+
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
+        assert_eq!(draft.frontmatter.subject, "New");
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_duplicate_key_does_not_multiply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dup.md");
+        // Two top-level `to:` lines (malformed input). Both are managed keys
+        // and get replaced; the result must not multiply the count.
+        let original = concat!(
+            "---\n",
+            "to: a@example.com\n",
+            "to: b@example.com\n",
+            "subject: Old\n",
+            "status: draft\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "new@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "New".to_string(),
+        };
+        rewrite_draft_recipients(&path, &edit).unwrap();
+
+        let result = fs::read_to_string(&path).unwrap();
+        let to_count = result
+            .lines()
+            .filter(|l| l.starts_with("to: ") || *l == "to:")
+            .count();
+        // Both duplicate keys are replaced in place; the count is unchanged
+        // (2), never multiplied. (Duplicate top-level keys are malformed YAML
+        // to begin with, so this only guards against the rewriter making the
+        // situation worse by appending extra copies.)
+        assert_eq!(to_count, 2, "to keys multiplied: {result}");
+        // Both were rewritten to the new value.
+        assert!(!result.contains("a@example.com"), "stale value: {result}");
+        assert!(!result.contains("b@example.com"), "stale value: {result}");
+        assert_eq!(
+            result.matches("to: \"new@example.com\"").count(),
+            2,
+            "both duplicates should hold the new value: {result}"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_errors_on_missing_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nofm.md");
+        let original = "Just a body, no frontmatter fence.\n";
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "x@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "S".to_string(),
+        };
+        let result = rewrite_draft_recipients(&path, &edit);
+        assert!(result.is_err());
+        // File must be left untouched on error (no data loss).
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_rewrite_draft_recipients_errors_on_unclosed_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("unclosed.md");
+        let original = "---\nto: a@x.com\nsubject: S\nno closing fence here\n";
+        fs::write(&path, original).unwrap();
+
+        let edit = DraftRecipientEdit {
+            to: "x@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "S".to_string(),
+        };
+        let result = rewrite_draft_recipients(&path, &edit);
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]

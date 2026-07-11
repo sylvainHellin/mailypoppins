@@ -550,11 +550,13 @@ impl ComposeField {
     }
 }
 
-/// Wizard mode: blank new draft vs. forward from an existing email.
+/// Wizard mode: blank new draft, forward from an existing email, or
+/// edit the recipient/subject fields of an existing draft in place.
 #[derive(Debug, Clone)]
 pub enum ComposeMode {
     New,
     Forward { source_path: PathBuf },
+    EditDraft { source_path: PathBuf },
 }
 
 /// A fuzzy-matched contact suggestion under the focused address field.

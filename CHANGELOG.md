@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **TUI: edit a draft's recipients/subject with the fuzzy compose wizard
+  (`c`).** In the Drafts mailbox, press `c` on a draft to reopen the
+  compose wizard pre-seeded from the draft's existing `to`/`cc`/`bcc`/
+  `subject` frontmatter, with the same contact fuzzy-finder used for new
+  drafts. Submitting rewrites *only* those four frontmatter fields in
+  place, preserving the body and every other frontmatter field, and does
+  not open `$EDITOR`. Previously, changing recipients on an existing
+  draft meant hand-editing the YAML frontmatter. `c` is a no-op with a
+  status hint outside the Drafts mailbox, and drafts with missing/
+  malformed frontmatter fail with an error status and no data loss.
+
 ### Changed
 - **CLI binary renamed `email` -> `mp`.** The installed binary is now
   `mp` (`cargo install --path .`); Homebrew installs it as `mp` too. All

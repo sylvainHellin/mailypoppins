@@ -1718,6 +1718,21 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
                 .unwrap_or_else(|_| String::from("Fwd: "));
             (String::new(), String::new(), String::new(), subject)
         }
+        ComposeMode::EditDraft { source_path } => {
+            match crate::draft::parse_email_draft(source_path) {
+                Ok(draft) => (
+                    draft.frontmatter.to.unwrap_or_default(),
+                    draft.frontmatter.cc.unwrap_or_default(),
+                    draft.frontmatter.bcc.unwrap_or_default(),
+                    draft.frontmatter.subject,
+                ),
+                Err(e) => {
+                    app.set_status_level(format!("Cannot edit draft: {e}"), StatusLevel::Error);
+                    app.focus = Focus::List;
+                    return;
+                }
+            }
+        }
     };
 
     app.compose_wizard = Some(ComposeWizard {
@@ -1765,11 +1780,37 @@ fn submit_compose_wizard(
         return Ok(());
     }
 
+    // Editing an existing draft's recipients/subject rewrites the file in
+    // place and does NOT open $EDITOR -- the whole point is a quick,
+    // fuzzy-finder edit of the header fields.
+    if let ComposeMode::EditDraft { source_path } = &wizard.mode {
+        let edit = crate::draft::DraftRecipientEdit {
+            to: wizard.to.clone(),
+            cc: wizard.cc.clone(),
+            bcc: wizard.bcc.clone(),
+            subject: wizard.subject.clone(),
+        };
+        match crate::draft::rewrite_draft_recipients(source_path, &edit) {
+            Ok(()) => {
+                if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                    app.invalidate_cache_idx(idx);
+                }
+                app.reload_current_mailbox();
+                app.set_status("Recipients updated".to_string());
+            }
+            Err(e) => {
+                app.set_status_level(format!("Recipient update failed: {e}"), StatusLevel::Error);
+            }
+        }
+        return Ok(());
+    }
+
     let draft_result = match &wizard.mode {
         ComposeMode::New => write_new_draft_from_wizard(app, &wizard),
         ComposeMode::Forward { source_path } => {
             write_forward_draft_from_wizard(app, source_path, &wizard)
         }
+        ComposeMode::EditDraft { .. } => unreachable!("handled above"),
     };
 
     let path = match draft_result {
