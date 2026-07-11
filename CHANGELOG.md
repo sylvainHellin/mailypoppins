@@ -67,6 +67,23 @@ All notable changes to this project are documented in this file.
   comment-fake-head, attribute-fake-head, and the `İ` expansion case.
 
 ### Features
+- **Quick-move emails between mailboxes (`M`, #0018).** Pressing `M` in
+  the email list opens a small fuzzy picker of destination mailboxes
+  (type-to-filter subsequence match, arrows/Tab to navigate, Enter to
+  confirm, Esc to cancel). Works on the current selection if any,
+  otherwise the cursor email. The move runs server-side (IMAP
+  `UID COPY` + `\Deleted` + `EXPUNGE` -- the same machinery as archive,
+  so servers without the MOVE extension work and read/unread flags are
+  preserved; Graph accounts use the `/move` endpoint), then the local
+  `.md`/`.html`/`_attachments` files follow with the frontmatter
+  `status:` updated to match the destination. On IMAP failure the local
+  move is rolled back, mirroring archive semantics. The picker excludes
+  the active mailbox (moving to the same mailbox is impossible by
+  construction) and local-only mailboxes like Drafts; the in-memory
+  message-ID index is updated for both source and destination.
+  Internally `archive_email_locally` / `archive_email_graph` are now
+  thin wrappers over the generalized `move_email_locally` /
+  `move_email_graph`.
 - **Configurable TUI color themes.** New top-level `theme = "..."` key
   in config.toml selects a named built-in theme, helix-style. Built-ins:
   `catppuccin-mocha` (the default -- reproduces the previous hardcoded

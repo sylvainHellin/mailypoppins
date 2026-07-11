@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     Action, App, AttachmentPicker, AttachmentPickerMode, ComposeField, ComposeMode,
     ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
-    EmailEntry, Focus, MailboxKind, Message, SearchOverlayFocus,
+    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, SearchOverlayFocus,
 };
 
 impl App {
@@ -21,6 +21,10 @@ impl App {
 
         if self.dir_picker.is_some() {
             return self.handle_dir_picker_key(key);
+        }
+
+        if self.mailbox_picker.is_some() {
+            return self.handle_mailbox_picker_key(key);
         }
 
         if self.attachment_picker.is_some() {
@@ -471,6 +475,10 @@ impl App {
                 } else {
                     self.push_action(Action::ToggleRead);
                 }
+            }
+            KeyCode::Char('M') => {
+                self.g_pending = false;
+                self.open_mailbox_picker();
             }
             KeyCode::Char(' ') => {
                 self.g_pending = false;
@@ -1155,6 +1163,97 @@ impl App {
         None
     }
 
+    // -----------------------------------------------------------------
+    // Quick-move mailbox picker (#0018)
+    // -----------------------------------------------------------------
+
+    /// Open the quick-move picker for the current selection (or the
+    /// cursor email). Candidates are all server-backed mailboxes other
+    /// than the active one, so "move to the same mailbox" cannot happen.
+    fn open_mailbox_picker(&mut self) {
+        // The source mailbox must have a server-side folder; Drafts
+        // (local-only) can't be quick-moved -- drafts leave via send.
+        if self
+            .mailboxes
+            .get(self.active_mailbox)
+            .and_then(|m| m.server_name.as_ref())
+            .is_none()
+        {
+            self.set_status("Quick-move is not available in this mailbox".to_string());
+            return;
+        }
+
+        let paths: Vec<PathBuf> = if !self.selection.is_empty() {
+            self.selection.iter().cloned().collect()
+        } else if let Some(p) = self.selected_email_path() {
+            vec![p]
+        } else {
+            return;
+        };
+
+        let candidates: Vec<(usize, String)> = self
+            .mailboxes
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| *i != self.active_mailbox && m.server_name.is_some())
+            .map(|(i, m)| (i, m.label.clone()))
+            .collect();
+        if candidates.is_empty() {
+            self.set_status("No other mailboxes to move to".to_string());
+            return;
+        }
+
+        let filtered = (0..candidates.len()).collect();
+        self.mailbox_picker = Some(MailboxPicker {
+            query: String::new(),
+            candidates,
+            filtered,
+            selected: 0,
+            paths,
+        });
+    }
+
+    fn handle_mailbox_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let picker = self.mailbox_picker.as_mut()?;
+
+        match key.code {
+            KeyCode::Down | KeyCode::Tab => {
+                if !picker.filtered.is_empty()
+                    && picker.selected < picker.filtered.len() - 1
+                {
+                    picker.selected += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(&cand_idx) = picker.filtered.get(picker.selected) {
+                    let dest_idx = picker.candidates[cand_idx].0;
+                    let picker = self.mailbox_picker.take().expect("picker checked above");
+                    self.selection.clear();
+                    self.push_action(Action::MoveToMailbox {
+                        paths: picker.paths,
+                        dest_idx,
+                    });
+                }
+            }
+            KeyCode::Esc => {
+                self.mailbox_picker = None;
+            }
+            KeyCode::Backspace => {
+                picker.query.pop();
+                refresh_mailbox_picker_filter(picker);
+            }
+            KeyCode::Char(c) => {
+                picker.query.push(c);
+                refresh_mailbox_picker_filter(picker);
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// Helper to open the attachment picker in the given mode.
     fn open_attachment_picker(&mut self, mode: AttachmentPickerMode) {
         if let Some(email) = self.selected_email() {
@@ -1531,6 +1630,33 @@ fn accept_suggestion(field: &mut String, suggestion: &ComposeSuggestion) {
 }
 
 // ---------------------------------------------------------------------------
+// Quick-move mailbox picker helpers (#0018)
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive subsequence ("fuzzy") match: every char of `needle`
+/// must appear in `haystack` in order. Empty needle matches everything.
+pub(super) fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    let hay = haystack.to_lowercase();
+    let mut hay_chars = hay.chars();
+    needle
+        .to_lowercase()
+        .chars()
+        .all(|nc| hay_chars.any(|hc| hc == nc))
+}
+
+/// Recompute `picker.filtered` from `picker.query` and reset the cursor.
+pub(super) fn refresh_mailbox_picker_filter(picker: &mut MailboxPicker) {
+    picker.filtered = picker
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, label))| fuzzy_match(&picker.query, label))
+        .map(|(i, _)| i)
+        .collect();
+    picker.selected = 0;
+}
+
+// ---------------------------------------------------------------------------
 // Directory picker helpers
 // ---------------------------------------------------------------------------
 
@@ -1813,6 +1939,169 @@ mod tests {
         app.set_email_read(&path, true);
         assert!(app.emails[0].read);
         assert!(app.email_cache[0].is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Quick-move mailbox picker (#0018)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fuzzy_match_empty_needle_matches_everything() {
+        assert!(fuzzy_match("", "Inbox"));
+        assert!(fuzzy_match("", ""));
+    }
+
+    #[test]
+    fn fuzzy_match_is_case_insensitive_subsequence() {
+        assert!(fuzzy_match("arc", "Archive"));
+        assert!(fuzzy_match("ACV", "archive")); // a..c..v in order
+        assert!(fuzzy_match("inbx", "Inbox"));
+        assert!(!fuzzy_match("xz", "Inbox"));
+        assert!(!fuzzy_match("xobni", "Inbox")); // order matters
+    }
+
+    fn picker_with_labels(labels: &[&str]) -> super::super::MailboxPicker {
+        super::super::MailboxPicker {
+            query: String::new(),
+            candidates: labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i, l.to_string()))
+                .collect(),
+            filtered: (0..labels.len()).collect(),
+            selected: 0,
+            paths: vec![PathBuf::from("/mail/inbox/a.md")],
+        }
+    }
+
+    #[test]
+    fn picker_filter_narrows_and_resets_cursor() {
+        let mut picker = picker_with_labels(&["Inbox", "Sent", "Archive", "Newsletters"]);
+        picker.selected = 3;
+        picker.query = "ne".to_string();
+        refresh_mailbox_picker_filter(&mut picker);
+        // "ne" (subsequence): Se~n~t? no 'e' after 'n'... Sent = s,e,n,t:
+        // n then e fails (e precedes n). Archive has no 'n'. Newsletters
+        // and Inbox? i-n-b-o-x: n then no e. Only Newsletters matches.
+        assert_eq!(picker.filtered, vec![3]);
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn picker_filter_empty_query_restores_all() {
+        let mut picker = picker_with_labels(&["Inbox", "Archive"]);
+        picker.query = "arch".to_string();
+        refresh_mailbox_picker_filter(&mut picker);
+        assert_eq!(picker.filtered, vec![1]);
+        picker.query.clear();
+        refresh_mailbox_picker_filter(&mut picker);
+        assert_eq!(picker.filtered, vec![0, 1]);
+    }
+
+    #[test]
+    fn picker_filter_no_match_yields_empty() {
+        let mut picker = picker_with_labels(&["Inbox", "Archive"]);
+        picker.query = "zzz".to_string();
+        refresh_mailbox_picker_filter(&mut picker);
+        assert!(picker.filtered.is_empty());
+    }
+
+    fn mb_info(label: &str, dir: &str, kind: MailboxKind, server: Option<&str>) -> super::super::MailboxInfo {
+        super::super::MailboxInfo {
+            label: label.to_string(),
+            icon: "",
+            dir: PathBuf::from(dir),
+            kind,
+            server_name: server.map(|s| s.to_string()),
+        }
+    }
+
+    fn app_with_mailboxes() -> App {
+        let mut app = app_with_emails(sample());
+        app.mailboxes = vec![
+            mb_info("Inbox", "/mail/inbox", MailboxKind::Inbox, Some("INBOX")),
+            mb_info("Drafts", "/mail/drafts", MailboxKind::Drafts, None),
+            mb_info("Sent", "/mail/sent", MailboxKind::Sent, Some("Sent")),
+            mb_info("Archive", "/mail/archive", MailboxKind::Archive, Some("Archive")),
+        ];
+        app.active_mailbox = 0;
+        app
+    }
+
+    #[test]
+    fn open_picker_excludes_active_mailbox_and_local_only() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        let picker = app.mailbox_picker.as_ref().expect("picker should open");
+        // Active mailbox (Inbox) and local-only Drafts are excluded.
+        let labels: Vec<&str> = picker
+            .candidates
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(labels, vec!["Sent", "Archive"]);
+        // Cursor email is carried as the move target.
+        assert_eq!(picker.paths.len(), 1);
+    }
+
+    #[test]
+    fn open_picker_uses_selection_when_present() {
+        let mut app = app_with_mailboxes();
+        app.selection.insert(app.emails[0].path.clone());
+        app.selection.insert(app.emails[2].path.clone());
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        let picker = app.mailbox_picker.as_ref().expect("picker should open");
+        assert_eq!(picker.paths.len(), 2);
+    }
+
+    #[test]
+    fn open_picker_refused_in_local_only_mailbox() {
+        let mut app = app_with_mailboxes();
+        app.active_mailbox = 1; // Drafts: no server folder
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert!(app.mailbox_picker.is_none());
+    }
+
+    #[test]
+    fn picker_enter_pushes_move_action_with_dest() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        // Filter to "Archive", then confirm.
+        for c in "arch".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.mailbox_picker.is_none());
+        match app.pending_actions.pop_front() {
+            Some(Action::MoveToMailbox { paths, dest_idx }) => {
+                assert_eq!(dest_idx, 3); // Archive
+                assert_eq!(paths.len(), 1);
+            }
+            other => panic!("expected MoveToMailbox, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn picker_esc_closes_without_action() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert!(app.mailbox_picker.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.mailbox_picker.is_none());
+        assert!(app.pending_actions.is_empty());
+    }
+
+    #[test]
+    fn picker_enter_on_no_match_is_noop() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        for c in "zzz".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        // No match highlighted: picker stays open, nothing queued.
+        assert!(app.mailbox_picker.is_some());
+        assert!(app.pending_actions.is_empty());
     }
 
     #[test]

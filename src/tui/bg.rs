@@ -100,6 +100,45 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
+        BgResult::Move { account_index, dest_mailbox_idx, dest_label, result } => {
+            decrement_mutations(app, account_index);
+            match result {
+                Ok(msg) => {
+                    let text = if msg.is_empty() {
+                        format!("Moved to {dest_label}")
+                    } else {
+                        msg
+                    };
+                    app.set_status_level(text, StatusLevel::Success);
+                    if account_index == app.active_account {
+                        // The source list was already updated optimistically;
+                        // only the destination cache went stale.
+                        app.invalidate_cache_idx(dest_mailbox_idx);
+                        if let Some(count) = app.mailbox_counts.get_mut(dest_mailbox_idx) {
+                            *count += 1;
+                        }
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
+                }
+                Err(e) => {
+                    app.push_status(format!("Move failed: {e}"), StatusLevel::Error);
+                    if account_index == app.active_account {
+                        // Source and destination may both be inconsistent
+                        // after a rollback -- invalidate both and reload.
+                        app.invalidate_cache_idx(app.active_mailbox);
+                        app.invalidate_cache_idx(dest_mailbox_idx);
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
+                    app.set_persistent_error(format!(
+                        "Move failed: {e}\nEmail restored. Sync (F) to fix?"
+                    ));
+                }
+            }
+        }
+
         BgResult::Delete { account_index, result } => {
             decrement_mutations(app, account_index);
             match result {

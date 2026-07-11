@@ -1078,6 +1078,21 @@ pub async fn archive_email_graph(
     file_path: &std::path::Path,
     archive_folder: &str,
 ) -> Result<()> {
+    move_email_graph(config, archive_dir, file_path, archive_folder, "inbox", "archived").await
+}
+
+/// Move an email to another folder via Graph API: find by message-id,
+/// move on server, move locally with a `status:` frontmatter update
+/// (#0018). Generalizes the archive flow -- archiving is
+/// `move_email_graph(.., archive_folder, "inbox", "archived")`.
+pub async fn move_email_graph(
+    config: &GraphConfig,
+    dest_dir: &std::path::Path,
+    file_path: &std::path::Path,
+    dest_folder: &str,
+    old_status: &str,
+    new_status: &str,
+) -> Result<()> {
     let message_id = crate::imap_client::get_message_id_from_file(file_path)
         .ok_or_else(|| anyhow!("No message_id found in {}", file_path.display()))?;
 
@@ -1085,25 +1100,28 @@ pub async fn archive_email_graph(
 
     // Find the message on the server
     if let Some(graph_id) = client.find_message_by_internet_id(&message_id).await? {
-        client.move_message(&graph_id, archive_folder).await?;
-        info!("Graph: moved message {} to {}", message_id, archive_folder);
+        client.move_message(&graph_id, dest_folder).await?;
+        info!("Graph: moved message {} to {}", message_id, dest_folder);
     } else {
         warn!(
-            "Graph: message {} not found on server, archiving locally only",
+            "Graph: message {} not found on server, moving locally only",
             message_id
         );
     }
 
     // Move local files
-    std::fs::create_dir_all(archive_dir)?;
+    std::fs::create_dir_all(dest_dir)?;
     let filename = file_path
         .file_name()
         .ok_or_else(|| anyhow!("Invalid file path"))?;
-    let dest = archive_dir.join(filename);
+    let dest = dest_dir.join(filename);
 
-    // Update frontmatter status to archived
+    // Update frontmatter status to match the destination mailbox
     if let Ok(content) = std::fs::read_to_string(file_path) {
-        let updated = content.replace("status: inbox", "status: archived");
+        let updated = content.replace(
+            &format!("status: {}", old_status),
+            &format!("status: {}", new_status),
+        );
         std::fs::write(file_path, updated)?;
     }
 

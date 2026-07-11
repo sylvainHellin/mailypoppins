@@ -25,13 +25,32 @@ pub async fn append_to_sent_folder(imap_config: &ImapConfig, raw_message: &[u8],
 }
 
 pub async fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str, archive_mailbox: &str) -> Result<()> {
-    info!("Archiving email on server: Message-ID={} -> {}", message_id, archive_mailbox);
+    move_email_on_server(imap_config, message_id, "INBOX", archive_mailbox).await
+}
+
+/// Move an email to a different mailbox on the IMAP server (#0018).
+///
+/// SELECTs `source_mailbox`, finds the message by Message-ID, then
+/// UID COPY + \Deleted + EXPUNGE -- the same machinery as archiving
+/// (which is a move with a fixed destination). COPY+EXPUNGE is used
+/// instead of MOVE so servers without the MOVE extension work too;
+/// COPY preserves flags, so read/unread state survives the move.
+pub async fn move_email_on_server(
+    imap_config: &ImapConfig,
+    message_id: &str,
+    source_mailbox: &str,
+    dest_mailbox: &str,
+) -> Result<()> {
+    info!(
+        "Moving email on server: Message-ID={} {} -> {}",
+        message_id, source_mailbox, dest_mailbox
+    );
     let mut session = open_imap_session(imap_config).await?;
 
     session
-        .select("INBOX")
+        .select(source_mailbox)
         .await
-        .map_err(|e| anyhow!("Failed to select INBOX: {}", e))?;
+        .map_err(|e| anyhow!("Failed to select {}: {}", source_mailbox, e))?;
 
     let query = format!("HEADER Message-ID \"{}\"", message_id);
     let uids = session
@@ -42,8 +61,9 @@ pub async fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str,
     if uids.is_empty() {
         session.logout().await.ok();
         return Err(anyhow!(
-            "Email with Message-ID {} not found in INBOX on server",
-            message_id
+            "Email with Message-ID {} not found in {} on server",
+            message_id,
+            source_mailbox
         ));
     }
 
@@ -51,9 +71,9 @@ pub async fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str,
     let uid_str = uid.to_string();
 
     session
-        .uid_copy(&uid_str, archive_mailbox)
+        .uid_copy(&uid_str, dest_mailbox)
         .await
-        .map_err(|e| anyhow!("Failed to copy email to {}: {}", archive_mailbox, e))?;
+        .map_err(|e| anyhow!("Failed to copy email to {}: {}", dest_mailbox, e))?;
 
     session
         .uid_store(&uid_str, "+FLAGS (\\Deleted)")
@@ -76,7 +96,37 @@ pub async fn archive_email_on_server(imap_config: &ImapConfig, message_id: &str,
 }
 
 pub async fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path, file_path: &Path, archive_mailbox: &str) -> Result<()> {
-    info!("Archiving email locally: {}", file_path.display());
+    move_email_locally(
+        imap_config,
+        archive_dir,
+        file_path,
+        "INBOX",
+        archive_mailbox,
+        "inbox",
+        "archived",
+    )
+    .await
+}
+
+/// Move an email to another mailbox: local file move (with `status:`
+/// frontmatter update) plus server-side move, rolling back the local
+/// changes if the server move fails (#0018). Generalizes the archive
+/// flow -- archiving is `move_email_locally(.., "INBOX", archive,
+/// "inbox", "archived")`.
+pub async fn move_email_locally(
+    imap_config: &ImapConfig,
+    dest_dir: &Path,
+    file_path: &Path,
+    source_mailbox: &str,
+    dest_mailbox: &str,
+    old_status: &str,
+    new_status: &str,
+) -> Result<()> {
+    info!(
+        "Moving email locally: {} -> {}",
+        file_path.display(),
+        dest_dir.display()
+    );
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
@@ -89,17 +139,21 @@ pub async fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path,
         .context("Failed to parse frontmatter")?;
 
     let message_id = inbox_fm.message_id.as_ref().ok_or_else(|| {
-        anyhow!("No message_id in frontmatter -- cannot archive on server")
+        anyhow!("No message_id in frontmatter -- cannot move on server")
     })?;
 
-    fs::create_dir_all(archive_dir)?;
+    fs::create_dir_all(dest_dir)?;
 
-    let new_content = content.replacen("status: inbox", "status: archived", 1);
+    let new_content = content.replacen(
+        &format!("status: {}", old_status),
+        &format!("status: {}", new_status),
+        1,
+    );
 
     let file_name = file_path
         .file_name()
         .ok_or_else(|| anyhow!("Invalid file path"))?;
-    let dest = archive_dir.join(file_name);
+    let dest = dest_dir.join(file_name);
 
     fs::write(&dest, &new_content)?;
     fs::remove_file(file_path)?;
@@ -119,8 +173,10 @@ pub async fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path,
         fs::rename(&att_source, &att_dest)?;
     }
 
-    if let Err(e) = archive_email_on_server(imap_config, message_id, archive_mailbox).await {
-        info!("IMAP archive failed, rolling back local changes: {}", e);
+    if let Err(e) =
+        move_email_on_server(imap_config, message_id, source_mailbox, dest_mailbox).await
+    {
+        info!("IMAP move failed, rolling back local changes: {}", e);
         fs::write(file_path, &content)?;
         fs::remove_file(&dest)?;
         if had_html {
@@ -130,7 +186,7 @@ pub async fn archive_email_locally(imap_config: &ImapConfig, archive_dir: &Path,
         if had_att_dir {
             fs::rename(&att_dest, &att_source).ok();
         }
-        return Err(e.context("IMAP archive failed; local changes have been rolled back"));
+        return Err(e.context("IMAP move failed; local changes have been rolled back"));
     }
 
     Ok(())

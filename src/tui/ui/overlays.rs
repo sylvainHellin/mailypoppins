@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::super::app::{
     App, AttachmentPicker, AttachmentPickerMode, ConfirmDialog, DirPicker, DirPickerMode,
-    PersistentError,
+    MailboxPicker, PersistentError,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -342,6 +342,91 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
     }
 }
 
+pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, area: Rect) {
+    let dialog_width = 40u16.min(area.width.saturating_sub(4));
+    let list_len = picker.filtered.len().max(1) as u16;
+    let dialog_height = (list_len + 5).min(area.height.saturating_sub(2));
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(dialog_width)])
+        .flex(Flex::Center)
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(dialog_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+
+    let dialog_area = vertical[0];
+    frame.render_widget(Clear, dialog_area);
+
+    let count = picker.paths.len();
+    let title = if count == 1 {
+        " Move to ".to_string()
+    } else {
+        format!(" Move {count} emails to ")
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::active().border_focused))
+        .style(Style::default().bg(theme::active().bg));
+
+    let block_inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // query input
+            Constraint::Min(0),    // mailbox list
+            Constraint::Length(1), // footer
+        ])
+        .split(block_inner);
+
+    // Query input
+    let input_spans = vec![
+        Span::styled("> ", Style::default().fg(theme::active().border_focused)),
+        Span::styled(&picker.query, Style::default().fg(theme::active().text)),
+        Span::styled("\u{2588}", Style::default().fg(theme::active().border_focused)),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(input_spans)), chunks[0]);
+
+    // Mailbox list
+    let inner_width = block_inner.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    if picker.filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matching mailbox",
+            Style::default().fg(theme::active().text_faint),
+        )));
+    } else {
+        for (pos, &cand_idx) in picker.filtered.iter().enumerate() {
+            let label = &picker.candidates[cand_idx].1;
+            let style = if pos == picker.selected {
+                Style::default().fg(theme::active().heading).bg(theme::active().surface)
+            } else {
+                Style::default().fg(theme::active().text)
+            };
+            lines.push(Line::from(Span::styled(truncate(label, inner_width), style)));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), chunks[1]);
+
+    // Footer
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "type filter  \u{2191}/\u{2193} nav  Enter move  Esc cancel",
+            Style::default().fg(theme::active().text_muted),
+        ))),
+        chunks[2],
+    );
+}
+
 pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame, area: Rect) {
     let dialog_width = 50u16.min(area.width.saturating_sub(4));
     let msg_lines = error.message.lines().count() as u16;
@@ -436,6 +521,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("a", "Archive"),
                 ("d", "Delete"),
                 ("m", "Toggle read/unread"),
+                ("M", "Move to mailbox (fuzzy picker)"),
                 ("A", "Approve draft"),
                 ("D", "Mark approved as draft (reverse A)"),
                 ("x / X", "Send / Send all approved"),

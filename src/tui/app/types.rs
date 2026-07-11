@@ -378,6 +378,15 @@ pub enum BgResult {
         account_index: usize,
         result: Result<String, String>,
     },
+    /// A quick-move to an arbitrary mailbox finished (#0018). Carries
+    /// the destination mailbox index + label so the handler can
+    /// invalidate the right cache and report where the email went.
+    Move {
+        account_index: usize,
+        dest_mailbox_idx: usize,
+        dest_label: String,
+        result: Result<String, String>,
+    },
     Delete {
         account_index: usize,
         result: Result<String, String>,
@@ -630,6 +639,13 @@ pub enum Action {
     Delete,
     BatchArchive(Vec<PathBuf>),
     BatchDelete(Vec<PathBuf>),
+    /// Quick-move emails to another mailbox (#0018). `paths` is the
+    /// selection (or the cursor email); `dest_idx` indexes
+    /// `App::mailboxes`.
+    MoveToMailbox {
+        paths: Vec<PathBuf>,
+        dest_idx: usize,
+    },
     ToggleRead,
     MarkAsRead,
     BatchToggleRead(Vec<PathBuf>),
@@ -712,6 +728,24 @@ pub struct AttachmentPicker {
     pub mode: AttachmentPickerMode,
     /// Set of selected indices (used in Save mode for multi-select).
     pub selected_set: HashSet<usize>,
+}
+
+/// Overlay state for the quick-move mailbox picker (#0018): a fuzzy
+/// type-to-filter list of destination mailboxes, opened with `M` from
+/// the email list.
+pub struct MailboxPicker {
+    /// Type-to-filter query.
+    pub query: String,
+    /// Candidate destinations: `(mailbox index into App::mailboxes,
+    /// label)`. Excludes the active mailbox and any mailbox without a
+    /// server-side folder.
+    pub candidates: Vec<(usize, String)>,
+    /// Indices into `candidates` matching the current query.
+    pub filtered: Vec<usize>,
+    /// Cursor position in `filtered`.
+    pub selected: usize,
+    /// Emails to move (current selection, or the cursor email).
+    pub paths: Vec<PathBuf>,
 }
 
 /// Whether the directory picker is in zoxide or browser mode.

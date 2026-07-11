@@ -76,6 +76,7 @@ pub struct App {
     pub persistent_error: Option<PersistentError>,
     pub attachment_picker: Option<AttachmentPicker>,
     pub dir_picker: Option<DirPicker>,
+    pub mailbox_picker: Option<MailboxPicker>,
     pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
@@ -175,6 +176,7 @@ impl App {
             persistent_error: None,
             attachment_picker: None,
             dir_picker: None,
+            mailbox_picker: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
@@ -264,6 +266,7 @@ impl App {
             persistent_error: None,
             attachment_picker: None,
             dir_picker: None,
+            mailbox_picker: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,

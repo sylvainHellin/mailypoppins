@@ -21,7 +21,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 - [#0010 Inline image rendering](docs/tickets/0010-inline-image-rendering.md) -- feature
 - [#0016 Open attachments for drafts (`o`)](docs/tickets/0016-attachment-open-for-drafts.md) -- feature
 - [#0017 Jump-to-date in mailbox list](docs/tickets/0017-jump-to-date.md) -- feature
-- [#0018 Quick-move between mailboxes](docs/tickets/0018-quick-move-between-mailboxes.md) -- feature
 - [#0019 Configurable keybindings](docs/tickets/0019-configurable-keybindings.md) -- feature
 - [#0020 Accept / tentative / decline calendar invitations](docs/tickets/0020-accept-calendar-invitations.md) -- feature
 

@@ -125,6 +125,10 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         overlays::render_dir_picker(picker, frame, area);
     }
 
+    if let Some(picker) = &app.mailbox_picker {
+        overlays::render_mailbox_picker(picker, frame, area);
+    }
+
     if let Some(error) = &app.persistent_error {
         overlays::render_persistent_error(error, frame, area);
     }

@@ -25,7 +25,8 @@ use crate::draft::{
 use crate::imap_client::{
     append_to_sent_folder, archive_email_locally, batch_archive_emails_locally,
     batch_delete_emails_locally, delete_email_locally, get_message_id_from_file,
-    mark_read_on_server, mark_unread_on_server, update_read_status_locally,
+    mark_read_on_server, mark_unread_on_server, move_email_locally,
+    update_read_status_locally,
 };
 use crate::send::send_email;
 use crate::types::EmailStatus;
@@ -885,6 +886,139 @@ pub(super) fn handle_action(
                         let _ = tx.send(BgResult::Delete {
                             account_index: acct_idx,
                             result: result.map(|()| String::new()).map_err(|e| e.to_string()),
+                        });
+                    }
+                });
+            }
+        }
+
+        Action::MoveToMailbox { paths, dest_idx } => {
+            // Quick-move to an arbitrary mailbox (#0018): generalized
+            // archive. Optimistic list removal + async server/local move,
+            // rollback handled by move_email_locally (IMAP) and reported
+            // via BgResult::Move.
+            let (dest_dir, dest_label, dest_kind) = match app.mailboxes.get(dest_idx) {
+                Some(mb) => (mb.dir.clone(), mb.label.clone(), mb.kind),
+                None => return Ok(()),
+            };
+            let dest_server = match app
+                .mailboxes
+                .get(dest_idx)
+                .and_then(|mb| mb.server_name.clone())
+            {
+                Some(s) => s,
+                None => {
+                    app.set_status_level(
+                        format!("{dest_label} has no server-side folder"),
+                        StatusLevel::Error,
+                    );
+                    return Ok(());
+                }
+            };
+            let source_server = app.active_server_mailbox();
+            let old_status = super::app::kind_to_status(app.active_kind());
+            let new_status = super::app::kind_to_status(dest_kind);
+
+            // Resolve the backend config BEFORE any optimistic mutation
+            // (same order as Archive) so a missing config leaves the
+            // list and index untouched.
+            let imap_config = if app.is_graph() {
+                None
+            } else {
+                match app.imap_config.clone() {
+                    Some(c) => Some(c),
+                    None => {
+                        app.set_status_level(
+                            "IMAP not configured".to_string(),
+                            StatusLevel::Error,
+                        );
+                        return Ok(());
+                    }
+                }
+            };
+
+            // Optimistically update the in-memory index: the file moves
+            // to dest_dir keeping its name.
+            for path in &paths {
+                if let Some(mid) = get_message_id_from_file(path) {
+                    app.remove_from_message_index(path, &mid);
+                    if let Some(name) = path.file_name() {
+                        app.insert_into_message_index(
+                            &dest_dir,
+                            mid,
+                            dest_dir.join(name),
+                        );
+                    }
+                }
+            }
+
+            let path_set: HashSet<PathBuf> = paths.iter().cloned().collect();
+            app.remove_selected_from_list_batch(&path_set);
+
+            let count = paths.len();
+            app.bg_count += count;
+            app.bg_mutations += count;
+            app.set_status_level(
+                if count == 1 {
+                    format!("Moving to {dest_label}...")
+                } else {
+                    format!("Moving {count} emails to {dest_label}...")
+                },
+                StatusLevel::Progress,
+            );
+            terminal.draw(|frame| ui::view(app, frame))?;
+
+            let acct_idx = app.active_account;
+            let tx = bg_tx.clone();
+
+            if app.is_graph() {
+                let graph_config = app.graph_config.clone().unwrap();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .expect("failed to create tokio runtime");
+                    for path in &paths {
+                        let result = rt
+                            .block_on(crate::graph::move_email_graph(
+                                &graph_config,
+                                &dest_dir,
+                                path,
+                                &dest_server,
+                                &old_status,
+                                &new_status,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Move {
+                            account_index: acct_idx,
+                            dest_mailbox_idx: dest_idx,
+                            dest_label: dest_label.clone(),
+                            result,
+                        });
+                    }
+                });
+            } else {
+                let imap_config = imap_config.expect("checked before optimistic mutation");
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new()
+                        .expect("failed to create tokio runtime");
+                    for path in &paths {
+                        let result = rt
+                            .block_on(move_email_locally(
+                                &imap_config,
+                                &dest_dir,
+                                path,
+                                &source_server,
+                                &dest_server,
+                                &old_status,
+                                &new_status,
+                            ))
+                            .map(|()| String::new())
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(BgResult::Move {
+                            account_index: acct_idx,
+                            dest_mailbox_idx: dest_idx,
+                            dest_label: dest_label.clone(),
+                            result,
                         });
                     }
                 });
