@@ -84,3 +84,40 @@ jobs:
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Update the Homebrew tap (ticket #0013). Requires the
+  # HOMEBREW_TAP_TOKEN repository secret: a fine-grained PAT with
+  # `contents: read/write` on sylvainHellin/homebrew-email. Skipped with a
+  # notice (not a failure) until the tap repo + secret exist -- see
+  # docs/release-process.md for the one-time setup.
+  homebrew-tap:
+    needs: upload-assets
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Skip when HOMEBREW_TAP_TOKEN is not configured
+        if: env.TAP_TOKEN == ''
+        run: echo "::notice::HOMEBREW_TAP_TOKEN not set; skipping Homebrew tap update."
+      - uses: actions/checkout@v4
+        if: env.TAP_TOKEN != ''
+      - name: Render formula from release checksums
+        if: env.TAP_TOKEN != ''
+        run: |
+          scripts/update-homebrew-formula.sh "${GITHUB_REF_NAME#v}" > /tmp/mailypoppins.rb
+          cat /tmp/mailypoppins.rb
+      - name: Push formula to tap repository
+        if: env.TAP_TOKEN != ''
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/sylvainHellin/homebrew-email.git" tap
+          mkdir -p tap/Formula
+          cp /tmp/mailypoppins.rb tap/Formula/mailypoppins.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mailypoppins.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged; nothing to push."
+          else
+            git commit -m "mailypoppins ${GITHUB_REF_NAME}"
+            git push
+          fi

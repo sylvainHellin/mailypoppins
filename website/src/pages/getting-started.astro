@@ -14,19 +14,33 @@ import { Code } from 'astro:components';
       <p class="subtitle">Install mailypoppins and send your first email in under 5 minutes.</p>
     </header>
 
-    <!-- Prerequisites -->
-    <section>
-      <h2>Prerequisites</h2>
-      <p>
-        You need the Rust toolchain installed. If you don't have it yet, install it from
-        <a href="https://rustup.rs" target="_blank" rel="noopener noreferrer">rustup.rs</a>.
-      </p>
-    </section>
-
     <!-- Installation -->
     <section>
       <h2>Installation</h2>
-      <p>Clone the repository and build from source:</p>
+
+      <h3>Homebrew (macOS and Linux)</h3>
+      <p>
+        <em>Available once the first tagged release ships.</em> Installs a
+        prebuilt binary -- no Rust toolchain needed:
+      </p>
+      <CodeBlock lang="bash" code="brew install sylvainhellin/email/mailypoppins" />
+
+      <h3>Prebuilt binaries</h3>
+      <p>
+        <em>Available once the first tagged release ships.</em> Download the
+        archive for your platform (macOS arm64/x86_64, Linux x86_64 gnu or
+        static musl) from the
+        <a href="https://github.com/sylvainhellin/mailypoppins/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>,
+        verify the <code>.sha256</code> checksum, and place the
+        <code>email</code> binary somewhere on your <code>PATH</code>.
+      </p>
+
+      <h3>From source</h3>
+      <p>
+        You need the Rust toolchain installed. If you don't have it yet, install it from
+        <a href="https://rustup.rs" target="_blank" rel="noopener noreferrer">rustup.rs</a>.
+        Then clone the repository and build:
+      </p>
       <CodeBlock
         lang="bash"
         code={`git clone https://github.com/sylvainhellin/mailypoppins

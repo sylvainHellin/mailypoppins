@@ -78,6 +78,17 @@ All notable changes to this project are documented in this file.
   `vendored-openssl` cargo feature that statically links OpenSSL; not
   compiled in default builds). Release procedure documented in
   [docs/release-process.md](docs/release-process.md).
+- **Homebrew tap, repo side (#0013).** Formula template
+  (`packaging/homebrew/mailypoppins.rb.tmpl`) installing prebuilt
+  release binaries (native macOS arm64/x86_64, static musl on Linux),
+  a renderer (`scripts/update-homebrew-formula.sh`) that fills version
+  and SHA-256 placeholders from published release checksums, and a
+  `homebrew-tap` release job that pushes the rendered formula to
+  `sylvainHellin/homebrew-email` on every tag. The job skips itself
+  with a notice until the tap repo and `HOMEBREW_TAP_TOKEN` secret
+  exist (one-time manual setup, see
+  [docs/release-process.md](docs/release-process.md#homebrew-tap)).
+
 ### Features
 - **Desktop notifications for new mail (#0009).** Opt-in via a new
   top-level `notifications = true` key in config.toml (default: off).
