@@ -118,7 +118,10 @@ All notable changes to this project are documented in this file.
   preserved; Graph accounts use the `/move` endpoint), then the local
   `.md`/`.html`/`_attachments` files follow with the frontmatter
   `status:` updated to match the destination. On IMAP failure the local
-  move is rolled back, mirroring archive semantics. The picker excludes
+  move is rolled back, mirroring archive semantics, and both the source
+  and destination mailbox caches are invalidated by index so the
+  restored email reappears even if the user switched mailboxes while
+  the move was in flight. The picker excludes
   the active mailbox (moving to the same mailbox is impossible by
   construction) and local-only mailboxes like Drafts; the in-memory
   message-ID index is updated for both source and destination.

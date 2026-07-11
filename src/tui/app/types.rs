@@ -383,10 +383,13 @@ pub enum BgResult {
         result: Result<String, String>,
     },
     /// A quick-move to an arbitrary mailbox finished (#0018). Carries
-    /// the destination mailbox index + label so the handler can
-    /// invalidate the right cache and report where the email went.
+    /// the source + destination mailbox indices and the destination
+    /// label so the handler can invalidate the right caches (the user
+    /// may have switched mailboxes while the move was in flight) and
+    /// report where the email went.
     Move {
         account_index: usize,
+        source_mailbox_idx: usize,
         dest_mailbox_idx: usize,
         dest_label: String,
         result: Result<String, String>,

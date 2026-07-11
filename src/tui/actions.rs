@@ -969,6 +969,7 @@ pub(super) fn handle_action(
             terminal.draw(|frame| ui::view(app, frame))?;
 
             let acct_idx = app.active_account;
+            let source_idx = app.active_mailbox;
             let tx = bg_tx.clone();
 
             if app.is_graph() {
@@ -990,6 +991,7 @@ pub(super) fn handle_action(
                             .map_err(|e| e.to_string());
                         let _ = tx.send(BgResult::Move {
                             account_index: acct_idx,
+                            source_mailbox_idx: source_idx,
                             dest_mailbox_idx: dest_idx,
                             dest_label: dest_label.clone(),
                             result,
@@ -1016,6 +1018,7 @@ pub(super) fn handle_action(
                             .map_err(|e| e.to_string());
                         let _ = tx.send(BgResult::Move {
                             account_index: acct_idx,
+                            source_mailbox_idx: source_idx,
                             dest_mailbox_idx: dest_idx,
                             dest_label: dest_label.clone(),
                             result,

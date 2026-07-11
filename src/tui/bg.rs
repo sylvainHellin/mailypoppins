@@ -38,6 +38,26 @@ fn mailbox_indices_for_dirs(
         .collect()
 }
 
+/// After a failed move the on-disk rollback may leave both the SOURCE
+/// mailbox (the email was optimistically removed from its list/cache)
+/// and the destination cache inconsistent. Returns the cache indices to
+/// invalidate (deduped) and whether the currently open mailbox is one of
+/// them and therefore needs a reload. The user may have switched
+/// mailboxes while the move was in flight, so the source is NOT
+/// necessarily the active mailbox.
+fn move_failure_invalidation(
+    source_mailbox_idx: usize,
+    dest_mailbox_idx: usize,
+    active_mailbox: usize,
+) -> (Vec<usize>, bool) {
+    let mut indices = vec![source_mailbox_idx];
+    if dest_mailbox_idx != source_mailbox_idx {
+        indices.push(dest_mailbox_idx);
+    }
+    let reload_current = indices.contains(&active_mailbox);
+    (indices, reload_current)
+}
+
 /// Persist the account's `mailbox_states` cache to disk. Best-effort: logs
 /// and continues on failure (the cache only buys us a faster first quick
 /// sync; sync correctness does not depend on it).
@@ -100,7 +120,13 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Move { account_index, dest_mailbox_idx, dest_label, result } => {
+        BgResult::Move {
+            account_index,
+            source_mailbox_idx,
+            dest_mailbox_idx,
+            dest_label,
+            result,
+        } => {
             decrement_mutations(app, account_index);
             match result {
                 Ok(msg) => {
@@ -125,10 +151,21 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                     app.push_status(format!("Move failed: {e}"), StatusLevel::Error);
                     if account_index == app.active_account {
                         // Source and destination may both be inconsistent
-                        // after a rollback -- invalidate both and reload.
-                        app.invalidate_cache_idx(app.active_mailbox);
-                        app.invalidate_cache_idx(dest_mailbox_idx);
-                        app.reload_current_mailbox();
+                        // after a rollback -- invalidate both by index
+                        // (the user may have switched mailboxes while the
+                        // move was in flight) and reload the open mailbox
+                        // only if it is one of them.
+                        let (indices, reload_current) = move_failure_invalidation(
+                            source_mailbox_idx,
+                            dest_mailbox_idx,
+                            app.active_mailbox,
+                        );
+                        for idx in indices {
+                            app.invalidate_cache_idx(idx);
+                        }
+                        if reload_current {
+                            app.reload_current_mailbox();
+                        }
                     } else {
                         app.invalidate_all_caches_on(account_index);
                     }
@@ -547,5 +584,39 @@ mod tests {
     #[test]
     fn mailbox_loaded_dropped_on_future_generation() {
         assert!(!mailbox_loaded_is_current(0, 2, 7, 0, 2, 8));
+    }
+
+    // -----------------------------------------------------------------------
+    // move_failure_invalidation (#0018 follow-up: invalidate the actual
+    // SOURCE mailbox, not whatever mailbox happens to be open)
+    // -----------------------------------------------------------------------
+
+    /// User stayed on the source mailbox: both caches invalidated,
+    /// open mailbox reloaded.
+    #[test]
+    fn move_failure_source_active_invalidates_both_and_reloads() {
+        assert_eq!(move_failure_invalidation(0, 3, 0), (vec![0, 3], true));
+    }
+
+    /// User switched to the destination while the move was in flight:
+    /// both caches invalidated, open mailbox (dest) reloaded.
+    #[test]
+    fn move_failure_dest_active_invalidates_both_and_reloads() {
+        assert_eq!(move_failure_invalidation(0, 3, 3), (vec![0, 3], true));
+    }
+
+    /// User switched to an unrelated mailbox: the SOURCE cache (where the
+    /// email was optimistically removed) must still be invalidated so the
+    /// rolled-back email reappears on the next visit -- but the open
+    /// mailbox is untouched by the rollback, so no reload.
+    #[test]
+    fn move_failure_unrelated_active_invalidates_source_without_reload() {
+        assert_eq!(move_failure_invalidation(0, 3, 2), (vec![0, 3], false));
+    }
+
+    /// Degenerate same-mailbox move: no duplicate invalidation.
+    #[test]
+    fn move_failure_same_source_and_dest_dedupes() {
+        assert_eq!(move_failure_invalidation(3, 3, 3), (vec![3], true));
     }
 }
