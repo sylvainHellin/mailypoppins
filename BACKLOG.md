@@ -10,18 +10,29 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Next
 
+> Calendar invitations (iMIP) design: [docs/plans/calendar-invites.md](docs/plans/calendar-invites.md). v1 is iMIP over SMTP/IMAP for all accounts; no Graph. Supersedes #0020 / #0026.
+
+- [#0027 iMIP receive - detect/save/parse invite](docs/tickets/0027-imip-receive-parse.md) -- feature
+- [#0028 iMIP send - REQUEST invite + CLI](docs/tickets/0028-imip-send-invite.md) -- feature
+- [#0029 iMIP RSVP - accept/tentative/decline + TUI](docs/tickets/0029-imip-rsvp-reply.md) -- feature
+- [#0030 iMIP REPLY reconciliation (organizer-side)](docs/tickets/0030-imip-reply-reconciliation.md) -- feature
+- [#0032 TUI foundation package (overlay enum, keymap-as-data, leaders)](docs/tickets/0032-tui-foundation-package.md) -- refactor
 - [#0005 Parallel IMAP fetch per mailbox](docs/tickets/0005-parallel-imap-fetch-per-mailbox.md) -- perf
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
-- [#0026 Send calendar invitations (iMIP REQUEST)](docs/tickets/0026-send-calendar-invitations.md) -- feature
 
 ## Later
 
+> TUI multi-view roadmap: [docs/plans/tui-restructure-views.md](docs/plans/tui-restructure-views.md). Foundation (#0032) first, then views.
+
+- [#0033 View switcher + Contacts view (vCard send)](docs/tickets/0033-view-switcher-contacts-view.md) -- feature
+- [#0034 Local calendar view (iMIP-derived)](docs/tickets/0034-local-calendar-view.md) -- feature
+- [#0031 iMIP cancellations/updates (CANCEL / SEQUENCE)](docs/tickets/0031-imip-cancel-update.md) -- feature
+- [#0035 Graph API admin approval + Azure app verification](docs/tickets/0035-graph-admin-approval.md) -- chore _(blocked)_
+- [#0036 Graph sync backend (calendar + server-side RSVP)](docs/tickets/0036-graph-sync-backend.md) -- feature _(blocked by #0035)_
 - [#0010 Inline image rendering](docs/tickets/0010-inline-image-rendering.md) -- feature
 - [#0016 Open attachments for drafts (`o`)](docs/tickets/0016-attachment-open-for-drafts.md) -- feature
 - [#0017 Jump-to-date in mailbox list](docs/tickets/0017-jump-to-date.md) -- feature
-- [#0019 Configurable keybindings](docs/tickets/0019-configurable-keybindings.md) -- feature
-- [#0020 Accept / tentative / decline calendar invitations](docs/tickets/0020-accept-calendar-invitations.md) -- feature
 
 ### Distribution / cross-platform (adoption track)
 

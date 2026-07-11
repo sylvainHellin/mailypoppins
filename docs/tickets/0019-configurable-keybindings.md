@@ -3,9 +3,13 @@ id: 0019
 title: Configurable keybindings
 type: feature
 priority: later
-status: open
+status: dropped
 created: 2026-05-01
 ---
+
+> **Subsumed 2026-07-11 by [#0032 TUI foundation package](0032-tui-foundation-package.md).**
+> The `Action` enum + single `KEYMAP` data table delivered there is the groundwork this ticket
+> needs; configurable keybindings fall out of keymap-as-data. Original notes retained for record.
 
 Allow remapping keys via `~/.config/email/config.toml`. The current bindings are vim-flavoured and hardcoded.
 

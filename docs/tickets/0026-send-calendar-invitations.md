@@ -3,9 +3,15 @@ id: 0026
 title: Send calendar invitations (iMIP REQUEST)
 type: feature
 priority: next
-status: open
+status: dropped
 created: 2026-06-24
 ---
+
+> **Refined 2026-07-11 → superseded by [#0028 iMIP send](0028-imip-send-invite.md)** against
+> [docs/plans/calendar-invites.md](../plans/calendar-invites.md). The Graph note below is **not**
+> v1: Graph is a future backend ([#0035](0035-graph-admin-approval.md)/[#0036](0036-graph-sync-backend.md)).
+> Exchange organizer-matching risk moves to the Graph-future section of the design doc.
+> Original notes retained below for record.
 
 Sending an `.ics` file as a normal attachment does **not** produce a real calendar invitation: the recipient sees a file to open, with no Accept / Tentative / Decline buttons and no RSVP tracking. A proper invitation is an iMIP message (RFC 6047 / RFC 5546): the email body carries an inline `text/calendar; method=REQUEST` MIME part, which is what Outlook / Apple Mail / Gmail render as an actionable invite. Today the only workaround is to compose the invite from a real calendar client (Outlook), so mailypoppins cannot be used to send invitations.
 
