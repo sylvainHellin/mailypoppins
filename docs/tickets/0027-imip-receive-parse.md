@@ -3,9 +3,11 @@ id: 0027
 title: iMIP receive - detect, save .ics, parse VEVENT into frontmatter
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-07-11
 ---
+
+Shipped in 7958c80.
 
 Receiving side of iMIP calendar invitations. Design: [calendar-invites](../plans/calendar-invites.md) (D2, D5, D6). Splits the receiving half out of [#0020](0020-accept-calendar-invitations.md).
 

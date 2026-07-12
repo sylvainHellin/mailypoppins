@@ -3,9 +3,11 @@ id: 0028
 title: iMIP send - REQUEST invite MIME + CLI
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-07-11
 ---
+
+Shipped in daf9629.
 
 Sending side of iMIP calendar invitations. Design: [calendar-invites](../plans/calendar-invites.md) (D1, D7). Refines [#0026](0026-send-calendar-invitations.md) (send half).
 

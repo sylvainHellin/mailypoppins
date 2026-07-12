@@ -3,9 +3,11 @@ id: 0029
 title: iMIP RSVP - accept/tentative/decline (REPLY) + TUI card/overlay
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-07-11
 ---
+
+Shipped in e058e46.
 
 Attendee-side RSVP to a received invite. Design: [calendar-invites](../plans/calendar-invites.md) (D3, D6, D7). Splits the accept/decline half out of [#0020](0020-accept-calendar-invitations.md). Depends on [#0027](0027-imip-receive-parse.md).
 

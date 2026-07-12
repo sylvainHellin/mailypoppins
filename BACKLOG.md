@@ -10,12 +10,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Next
 
-> Calendar invitations (iMIP) design: [docs/plans/calendar-invites.md](docs/plans/calendar-invites.md). v1 is iMIP over SMTP/IMAP for all accounts; no Graph. Supersedes #0020 / #0026.
-
-- [#0027 iMIP receive - detect/save/parse invite](docs/tickets/0027-imip-receive-parse.md) -- feature
-- [#0028 iMIP send - REQUEST invite + CLI](docs/tickets/0028-imip-send-invite.md) -- feature
-- [#0029 iMIP RSVP - accept/tentative/decline + TUI](docs/tickets/0029-imip-rsvp-reply.md) -- feature
-- [#0030 iMIP REPLY reconciliation (organizer-side)](docs/tickets/0030-imip-reply-reconciliation.md) -- feature
 - [#0032 TUI foundation package (overlay enum, keymap-as-data, leaders)](docs/tickets/0032-tui-foundation-package.md) -- refactor
 - [#0005 Parallel IMAP fetch per mailbox](docs/tickets/0005-parallel-imap-fetch-per-mailbox.md) -- perf
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature

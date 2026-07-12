@@ -3,9 +3,11 @@ id: 0030
 title: iMIP REPLY reconciliation - organizer-side attendee tracking
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-07-11
 ---
+
+Shipped in 10d38f8.
 
 Organizer-side RSVP tracking. Design: [calendar-invites](../plans/calendar-invites.md) (D4). Depends on [#0027](0027-imip-receive-parse.md) (parse) and [#0028](0028-imip-send-invite.md) (sent invites to match against).
 
