@@ -528,3 +528,114 @@ fn sent_invite_roundtrips_through_receive_parser() {
     assert!(content.contains(&format!("uid: {}", uid)));
     assert!(content.contains("method: REQUEST"));
 }
+
+/// Full-rescan reconciliation (#0030) through the real save path.
+///
+/// Builds a sent REQUEST invite and an incoming REPLY with the same UID via the
+/// live iMIP builders, saves both to disk through `save_fetched_emails` (the
+/// production writer that emits the sidecar + `event:` block), then runs
+/// `reconcile_account` over the account root and asserts the sent invite's
+/// attendee status flips. A second run must be byte-identical (idempotent).
+#[test]
+fn rescan_reconciles_reply_into_sent_invite_and_is_idempotent() {
+    use chrono::{TimeZone, Utc};
+    use email::invite::{
+        build_invite_ics, build_reply_ics, generate_uid, reply_context_from_ics, InviteSpec, Rsvp,
+    };
+    use email::reconcile::reconcile_account;
+    use email::send::build_invite_mime_body;
+    use lettre::message::Message;
+
+    let organizer = "chair@tum.de";
+    let uid = generate_uid(organizer);
+    let spec = InviteSpec {
+        uid: uid.clone(),
+        organizer: organizer.to_string(),
+        attendees: vec!["a@example.com".to_string(), "b@example.com".to_string()],
+        summary: "LOC Day planning".to_string(),
+        start: Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
+        end: Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap(),
+        location: Some("Room 4.12".to_string()),
+        description: None,
+    };
+    let request_ics = build_invite_ics(&spec).unwrap();
+
+    // --- Sent REQUEST invite (organizer's Sent copy) ---
+    let req_body = build_invite_mime_body("You are invited.", String::new(), &request_ics);
+    let req_msg: Message = Message::builder()
+        .from("Chair <chair@tum.de>".parse().unwrap())
+        .to("a@example.com".parse().unwrap())
+        .cc("b@example.com".parse().unwrap())
+        .subject(&spec.summary)
+        .message_id(Some("<sent-invite-30@tum.de>".to_string()))
+        .multipart(req_body)
+        .unwrap();
+    let req_raw = req_msg.formatted();
+    let req_email = parse_rfc822_to_fetched_email(&req_raw).unwrap();
+
+    // --- Incoming REPLY from attendee A (ACCEPTED) ---
+    let ctx = reply_context_from_ics(request_ics.as_bytes()).unwrap();
+    let reply_ics = build_reply_ics(&ctx, "a@example.com", Rsvp::Accepted).unwrap();
+    let reply_body = build_invite_mime_body("A accepts.", String::new(), &reply_ics);
+    let reply_msg: Message = Message::builder()
+        .from("A <a@example.com>".parse().unwrap())
+        .to("chair@tum.de".parse().unwrap())
+        .subject("Accepted: LOC Day planning")
+        .message_id(Some("<reply-a-30@example.com>".to_string()))
+        .multipart(reply_body)
+        .unwrap();
+    let reply_raw = reply_msg.formatted();
+    let reply_email = parse_rfc822_to_fetched_email(&reply_raw).unwrap();
+    assert_eq!(
+        reply_email.event.as_ref().and_then(|e| e.method.as_deref()),
+        Some("REPLY"),
+        "reply parsed as METHOD:REPLY"
+    );
+
+    // --- Save both through the production writer ---
+    let tmp = tempdir().unwrap();
+    let account_root = tmp.path().join("acct");
+    let sent = account_root.join("sent");
+    let inbox = account_root.join("inbox");
+    save_fetched_emails(&[req_email], &sent, "sent").unwrap();
+    save_fetched_emails(&[reply_email], &inbox, "inbox").unwrap();
+
+    let (sent_md, before) = read_only_md(&sent);
+    // Attendee A starts unresolved on the sent invite.
+    let fm_before = parse_frontmatter(&before).event.unwrap();
+    let a_before = fm_before
+        .attendees
+        .iter()
+        .find(|x| x.address.eq_ignore_ascii_case("a@example.com"))
+        .unwrap();
+    assert_eq!(a_before.status, "needs-action");
+
+    // --- Full-mailstore reconciliation ---
+    let stats = reconcile_account(&account_root).unwrap();
+    assert_eq!(stats.updated, 1, "exactly one attendee status rewritten");
+
+    let after_first = fs::read(&sent_md).unwrap();
+    let fm_after = parse_frontmatter(&String::from_utf8_lossy(&after_first))
+        .event
+        .unwrap();
+    let a_after = fm_after
+        .attendees
+        .iter()
+        .find(|x| x.address.eq_ignore_ascii_case("a@example.com"))
+        .unwrap();
+    assert_eq!(a_after.status, "accepted", "A's RSVP reconciled onto the invite");
+    // B never replied, so stays needs-action.
+    let b_after = fm_after
+        .attendees
+        .iter()
+        .find(|x| x.address.eq_ignore_ascii_case("b@example.com"))
+        .unwrap();
+    assert_eq!(b_after.status, "needs-action");
+
+    // --- Idempotency: second rescan changes nothing, bytes identical ---
+    let stats2 = reconcile_account(&account_root).unwrap();
+    assert_eq!(stats2.updated, 0);
+    assert_eq!(stats2.unchanged, 1);
+    let after_second = fs::read(&sent_md).unwrap();
+    assert_eq!(after_first, after_second, "rescan must be byte-idempotent");
+}

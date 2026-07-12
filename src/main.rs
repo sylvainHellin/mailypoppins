@@ -242,6 +242,24 @@ enum Commands {
         #[command(subcommand)]
         action: ContactsAction,
     },
+    /// Calendar / iMIP invite operations
+    Calendar {
+        #[command(subcommand)]
+        action: CalendarAction,
+    },
+}
+
+/// Organizer-side calendar operations (#0030).
+#[derive(Subcommand)]
+enum CalendarAction {
+    /// Reconcile locally-stored invites against attendee REPLY emails,
+    /// recomputing `event.attendees[].status` from the whole mailstore.
+    /// Idempotent and safe to re-run; rebuilds derived state from IMAP alone.
+    Rebuild {
+        /// Account name (default: all configured accounts)
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 /// RSVP actions for `mp invite <accept|tentative|decline> <email-path>`.
@@ -1509,6 +1527,10 @@ async fn main() -> Result<()> {
                     &account_config,
                     &result.fresh_observations,
                 );
+                // Organizer-side REPLY reconciliation (#0030): only walks the
+                // mailstore when this sync saved a METHOD:REPLY invite.
+                let account_root = email::config::account_dir(&account_config.name);
+                email::reconcile::bump_after_sync(&account_root, result.saw_reply_invite);
             }
 
             let prefix = if dry_run { "[dry-run] " } else { "" };
@@ -1811,6 +1833,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Some(Commands::Calendar { action }) => match action {
+            CalendarAction::Rebuild { account } => {
+                let acct = account.or_else(|| cli.account.clone());
+                email::calendar_cmd::handle_rebuild(&global_config, acct)?;
+            }
+        },
 
         Some(Commands::Config { action }) => {
             match action {

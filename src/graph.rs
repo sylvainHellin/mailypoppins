@@ -594,6 +594,8 @@ pub async fn sync_mailboxes_graph(
     let mut fresh_observations: Vec<FreshObservation> = Vec::new();
     // Sender/subject of new inbox saves, for desktop notifications (#0009).
     let mut new_inbox_mail: Vec<crate::notify::NewMailMeta> = Vec::new();
+    // Whether any saved email is a METHOD:REPLY invite (#0030 reconciliation).
+    let mut saw_reply_invite = false;
     // Local dirs actually modified on disk by this sync (saves, read-flag
     // updates, reconciliation moves/removals). Lets the TUI invalidate only
     // the affected mailbox caches. Left empty on dry_run.
@@ -641,6 +643,14 @@ pub async fn sync_mailboxes_graph(
                                 total_skipped += dup;
                                 if saved > 0 {
                                     touched_dirs.insert(target.local_dir.clone());
+                                    if new_emails.iter().any(|e| {
+                                        e.event
+                                            .as_ref()
+                                            .and_then(|ev| ev.method.as_deref())
+                                            .is_some_and(|m| m.eq_ignore_ascii_case("REPLY"))
+                                    }) {
+                                        saw_reply_invite = true;
+                                    }
                                 }
                                 // Record sender/subject of new *inbox* saves
                                 // for the desktop notification (#0009);
@@ -807,6 +817,7 @@ pub async fn sync_mailboxes_graph(
         mailbox_states: std::collections::HashMap::new(),
         touched_dirs: touched_dirs.into_iter().collect(),
         new_inbox_mail,
+        saw_reply_invite,
     })
 }
 

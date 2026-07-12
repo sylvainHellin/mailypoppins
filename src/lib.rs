@@ -11,6 +11,8 @@ pub mod graph;
 pub mod parse;
 pub mod calendar;
 pub mod invite;
+pub mod reconcile;
+pub mod calendar_cmd;
 pub mod imap_client;
 pub mod draft;
 pub mod send;

@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Organizer-side RSVP reconciliation (iMIP REPLY): `mp calendar rebuild`.**
+  When an attendee accepts/declines a `mp send --invite` invitation, their
+  mail client sends a `METHOD:REPLY` email that arrives via normal sync
+  (parsed + saved with an `event:` block since #0027). Reconciliation
+  matches each REPLY by event `UID` to your locally-stored sent invite and
+  updates that invite's `event.attendees[].status` for the replying
+  address (matched case-insensitively), so you can see who responded.
+  `SEQUENCE` is respected — replies for a sequence older than the stored
+  invite's are ignored — and when several replies exist for the same
+  attendee+UID the one with the highest `(SEQUENCE, DTSTAMP)` wins. Runs
+  automatically after each sync (IMAP and Graph), but only when the sync
+  actually saved a REPLY, so the common no-calendar path stays free of a
+  mailstore walk. The frontmatter update is a line-surgical rewrite of the
+  matching attendee's `status:` line only (never a serde re-serialize of
+  the whole file), so block scalars, interior blank lines, CRLF endings,
+  and quoted/unicode attendee addresses round-trip byte-for-byte.
+  Reconciliation is **idempotent and re-runnable over the whole
+  mailstore**: `event.attendees[]` is local derived state reconstructible
+  from IMAP-visible messages alone (the sent invite + the REPLY emails),
+  so two machines syncing the same account converge on identical state
+  with no machine-to-machine sync. `mp calendar rebuild [--account NAME]`
+  recomputes every invite's attendee statuses from scratch (defaults to
+  all accounts), mirroring `mp contacts rebuild`. A reply from an address
+  that was never invited is ignored (the organizer's attendee list is the
+  invite's). **Honest caveat:** this updates only the *local* mirror —
+  without Graph the user's server-side Exchange calendar is never touched.
+  `METHOD:CANCEL` and `SEQUENCE`-bump event updates remain out of scope
+  (#0031). Ticket #0030.
 - **RSVP to calendar invitations (iMIP REPLY): `mp invite accept|tentative|decline <email-path>` + TUI `V`.**
   Respond to a received invite (an email with an `event:` block and a
   sidecar `invite.ics`). Builds a `METHOD:REPLY` `VCALENDAR` whose `UID`

@@ -200,6 +200,11 @@ pub struct SyncResult {
     /// mailboxes, read-flag updates, dedup, and reconciliation moves are
     /// deliberately excluded. Always empty on `dry_run`.
     pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
+    /// `true` when this sync saved at least one `METHOD:REPLY` iMIP invite.
+    /// The caller uses it to trigger organizer-side REPLY reconciliation
+    /// (#0030) only when a calendar reply actually arrived — keeping the
+    /// common no-calendar sync path free of a mailstore walk.
+    pub saw_reply_invite: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +258,8 @@ pub async fn sync_mailboxes(
     let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
     // Sender/subject of new inbox saves, for desktop notifications (#0009).
     let mut new_inbox_mail: Vec<crate::notify::NewMailMeta> = Vec::new();
+    // Whether any saved email is a METHOD:REPLY invite (#0030 reconciliation).
+    let mut saw_reply_invite = false;
 
     // Build the global known_ids set.
     // If we have an in-memory index, derive it from there (zero disk I/O).
@@ -327,6 +334,14 @@ pub async fn sync_mailboxes(
                         total_saved += saved;
                         if saved > 0 {
                             touched_dirs.insert(target.local_dir.clone());
+                            if new_emails.iter().any(|e| {
+                                e.event
+                                    .as_ref()
+                                    .and_then(|ev| ev.method.as_deref())
+                                    .is_some_and(|m| m.eq_ignore_ascii_case("REPLY"))
+                            }) {
+                                saw_reply_invite = true;
+                            }
                         }
 
                         // Record sender/subject of new *inbox* saves for the
@@ -570,6 +585,7 @@ pub async fn sync_mailboxes(
         mailbox_states: new_mailbox_states,
         touched_dirs: touched_dirs.into_iter().collect(),
         new_inbox_mail,
+        saw_reply_invite,
     })
 }
 

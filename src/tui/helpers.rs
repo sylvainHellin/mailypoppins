@@ -247,6 +247,23 @@ pub(super) async fn lib_do_sync(
     // Incremental contacts-index update (best-effort, no-op if no cache).
     crate::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
 
+    // Organizer-side REPLY reconciliation (#0030): only walks the mailstore
+    // when this sync actually saved a METHOD:REPLY invite. Fold the invites it
+    // rewrote into touched_dirs so the affected mailbox cache is invalidated
+    // and the event card reloads with the updated attendee statuses.
+    let mut touched_dirs = result.touched_dirs;
+    let account_root = crate::config::account_dir(&account_config.name);
+    for invite_path in
+        crate::reconcile::bump_after_sync(&account_root, result.saw_reply_invite)
+    {
+        if let Some(dir) = invite_path.parent() {
+            let dir = dir.to_path_buf();
+            if !touched_dirs.contains(&dir) {
+                touched_dirs.push(dir);
+            }
+        }
+    }
+
     let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
     if result.read_updated > 0 {
         msg.push_str(&format!(", {} read status updated", result.read_updated));
@@ -266,7 +283,7 @@ pub(super) async fn lib_do_sync(
     }
     let meta = SyncResultMeta {
         mailbox_states: result.mailbox_states,
-        touched_dirs: result.touched_dirs,
+        touched_dirs,
         new_inbox_mail: result.new_inbox_mail,
     };
     Ok((msg, meta))
@@ -368,6 +385,20 @@ pub(super) async fn lib_do_sync_graph(
 
     crate::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
 
+    // Organizer-side REPLY reconciliation (#0030); see the IMAP path above.
+    let mut touched_dirs = result.touched_dirs;
+    let account_root = crate::config::account_dir(&account_config.name);
+    for invite_path in
+        crate::reconcile::bump_after_sync(&account_root, result.saw_reply_invite)
+    {
+        if let Some(dir) = invite_path.parent() {
+            let dir = dir.to_path_buf();
+            if !touched_dirs.contains(&dir) {
+                touched_dirs.push(dir);
+            }
+        }
+    }
+
     let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
     if result.read_updated > 0 {
         msg.push_str(&format!(", {} read status updated", result.read_updated));
@@ -386,7 +417,7 @@ pub(super) async fn lib_do_sync_graph(
         }
     }
     let meta = GraphSyncMeta {
-        touched_dirs: result.touched_dirs,
+        touched_dirs,
         new_inbox_mail: result.new_inbox_mail,
     };
     Ok((msg, meta))

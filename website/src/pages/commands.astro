@@ -16,6 +16,7 @@ const draftCommands = [
   { command: 'mp send <file> [-y]', description: 'Send a single approved email' },
   { command: 'mp send --invite ...', description: 'Send a calendar invitation (iMIP REQUEST)' },
   { command: 'mp invite accept|tentative|decline <file>', description: 'RSVP to a received invitation (iMIP REPLY)' },
+  { command: 'mp calendar rebuild [--account NAME]', description: 'Reconcile attendee RSVPs into your sent invites' },
   { command: 'mp send-approved [dir] [-y]', description: 'Send all approved emails' },
   { command: 'mp reply [file] [--all]', description: 'Create a reply draft' },
   { command: 'mp forward [file]', description: 'Create a forward draft' },
@@ -232,6 +233,31 @@ const listKeys = [
         an Accept / Tentative / Decline overlay. <strong>The RSVP is emailed to
         the organizer only — it is not synced to your Exchange server calendar
         (no Graph in v1).</strong> Graph accounts are not yet supported for RSVP.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="calendar-rebuild">Organizer RSVP Tracking (<code>mp calendar rebuild</code>)</h2>
+      <p>
+        When someone accepts or declines an invitation you sent with
+        <code>mp send --invite</code>, their reply arrives as a
+        <code>METHOD:REPLY</code> email during normal sync. mailypoppins matches
+        it by event <code>UID</code> to your locally-stored sent invite and
+        updates that invite's per-attendee <code>status</code> so you can see who
+        responded. This runs automatically after each sync (only when a reply
+        actually arrived), and the preview card reflects the live statuses.
+      </p>
+      <p>
+        <code>mp calendar rebuild [--account NAME]</code> recomputes every
+        invite's attendee statuses from scratch by re-scanning the whole
+        mailstore (defaults to all accounts). It is idempotent and safe to
+        re-run: the attendee statuses are derived state reconstructible from the
+        messages on the server alone, so two machines syncing the same account
+        converge on identical state with no direct machine-to-machine sync.
+        Replies for a <code>SEQUENCE</code> older than the stored invite's are
+        ignored, and the most recent reply per attendee wins.
+        <strong>This updates only your local mirror — without Graph, your
+        server-side Exchange calendar is never touched.</strong>
       </p>
     </section>
 

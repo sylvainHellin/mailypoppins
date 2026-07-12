@@ -28,6 +28,10 @@ pub struct ParsedEvent {
     pub uid: Option<String>,
     pub method: Option<String>,
     pub sequence: u32,
+    /// `DTSTAMP` as an RFC3339 UTC string, when present. Used by REPLY
+    /// reconciliation (#0030) as the latest-wins tiebreaker between multiple
+    /// replies from the same attendee within one sequence.
+    pub dtstamp: Option<String>,
     pub summary: Option<String>,
     pub start: Option<String>,
     pub end: Option<String>,
@@ -91,6 +95,9 @@ pub fn parse_ics(bytes: &[u8]) -> Option<ParsedEvent> {
 
     let uid = event.get_uid().map(|s| s.to_string());
     let sequence = event.get_sequence().unwrap_or(0);
+    let dtstamp = event
+        .get_timestamp()
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     let summary = event.get_summary().map(|s| s.to_string());
     let location = event.get_location().map(|s| s.to_string());
     let organizer = event
@@ -120,6 +127,7 @@ pub fn parse_ics(bytes: &[u8]) -> Option<ParsedEvent> {
         uid,
         method,
         sequence,
+        dtstamp,
         summary,
         start,
         end,
@@ -435,6 +443,19 @@ END:VCALENDAR\r
         assert_eq!(ev.method.as_deref(), Some("REPLY"));
         assert_eq!(ev.uid.as_deref(), Some("abc123@google.com"));
         assert_eq!(ev.attendees[0].status, "accepted");
+    }
+
+    #[test]
+    fn parse_dtstamp_for_reply_tiebreak() {
+        // DTSTAMP is surfaced as an RFC3339 UTC string for #0030's
+        // latest-wins reconciliation; absence degrades to None.
+        let with = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:u@x\r\nSEQUENCE:0\r\nDTSTAMP:20260710T120000Z\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:a@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let ev = parse_ics(with.as_bytes()).unwrap();
+        assert_eq!(ev.dtstamp.as_deref(), Some("2026-07-10T12:00:00Z"));
+
+        let without = REPLY; // the REPLY fixture carries no DTSTAMP
+        let ev2 = parse_ics(without.as_bytes()).unwrap();
+        assert_eq!(ev2.dtstamp, None);
     }
 
     #[test]
