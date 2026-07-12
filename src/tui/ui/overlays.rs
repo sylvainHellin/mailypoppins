@@ -6,10 +6,70 @@ use ratatui::Frame;
 
 use super::super::app::{
     App, AttachmentPicker, AttachmentPickerMode, ConfirmDialog, DirPicker, DirPickerMode,
-    MailboxPicker, PersistentError,
+    MailboxPicker, PersistentError, RsvpOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
+
+/// Render the three-choice RSVP overlay (#0029): Accept / Tentative / Decline
+/// for a received invite, opened with `V`. Esc cancels.
+pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area: Rect) {
+    let dialog_width = 46u16.min(area.width.saturating_sub(4));
+    let dialog_height = 8u16;
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(dialog_width)])
+        .flex(Flex::Center)
+        .split(area);
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(dialog_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+    let dialog_area = vertical[0];
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" RSVP ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::active().accent))
+        .style(Style::default().bg(theme::active().bg));
+
+    let inner_width = dialog_width.saturating_sub(4) as usize;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate(&overlay.summary, inner_width),
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    let choices = ["Accept", "Tentative", "Decline"];
+    for (i, label) in choices.iter().enumerate() {
+        let selected = i == overlay.selected;
+        let marker = if selected { "\u{25b6} " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(theme::active().selection)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::active().text)
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Enter confirm  ·  Esc cancel",
+        Style::default().fg(theme::active().text_muted),
+    )));
+
+    let content = Paragraph::new(lines).block(block);
+    frame.render_widget(content, dialog_area);
+}
 
 pub(super) fn render_confirm_dialog(dialog: &ConfirmDialog, frame: &mut Frame, area: Rect) {
     let dialog_width = 40u16.min(area.width.saturating_sub(4));
@@ -524,6 +584,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
                 ("d", "Delete"),
                 ("m", "Toggle read/unread"),
                 ("M", "Move to mailbox (fuzzy picker)"),
+                ("V", "RSVP to invitation (Accept/Tentative/Decline)"),
                 ("A", "Approve draft"),
                 ("D", "Mark approved as draft (reverse A)"),
                 ("x / X", "Send / Send all approved"),
@@ -562,6 +623,7 @@ pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static 
             vec![
                 ("j/k", "Scroll line by line"),
                 ("d/u", "Half-page down / up"),
+                ("V", "RSVP to invitation (Accept/Tentative/Decline)"),
                 ("Esc", "Return to list"),
             ],
         ),

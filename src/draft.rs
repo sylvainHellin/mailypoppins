@@ -636,6 +636,120 @@ pub fn rewrite_draft_recipients(path: &Path, edit: &DraftRecipientEdit) -> Resul
     Ok(())
 }
 
+/// Rewrite ONLY the `rsvp:` line nested under the top-level `event:` block of
+/// an invite email's frontmatter, in place, preserving the body and every
+/// other frontmatter field byte-for-byte.
+///
+/// This is the local-state update after a successful RSVP send (#0029): the
+/// sidecar `.ics` stays the source of truth for `UID`/`SEQUENCE`; the
+/// frontmatter `event.rsvp` is a render/query cache. `new_status` is one of
+/// `accepted` / `tentative` / `declined` (lowercase, no quoting needed).
+///
+/// Only a `rsvp:` line indented under `event:` is touched. If the `event:`
+/// block has no `rsvp:` line (older invites parsed before the field existed),
+/// one is inserted immediately after the `event:` key at the same indentation
+/// as the block's other children. Errors (leaving the file untouched) when the
+/// frontmatter is missing/malformed or has no `event:` block, so the caller can
+/// surface a status message with no data loss.
+pub fn set_event_rsvp(path: &Path, new_status: &str) -> Result<()> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+
+    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+
+    let after_open = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
+        .ok_or_else(|| anyhow!("No frontmatter found (file does not start with '---')"))?;
+
+    // Split frontmatter lines from the untouched body at the closing fence.
+    let mut fm_lines: Vec<String> = Vec::new();
+    let mut body = String::new();
+    let mut closed = false;
+    let mut cursor = 0usize;
+    while cursor < after_open.len() {
+        let rest = &after_open[cursor..];
+        let (line, advance) = match rest.find('\n') {
+            Some(nl) => (&rest[..nl], nl + 1),
+            None => (rest, rest.len()),
+        };
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed == "---" {
+            closed = true;
+            body = after_open[cursor + advance..].to_string();
+            break;
+        }
+        fm_lines.push(trimmed.to_string());
+        cursor += advance;
+    }
+    if !closed {
+        return Err(anyhow!("Malformed frontmatter: no closing '---' fence"));
+    }
+
+    // Find the top-level `event:` key (zero indentation).
+    let event_idx = fm_lines
+        .iter()
+        .position(|l| *l == "event:" || l.starts_with("event:"))
+        .filter(|&i| {
+            let l = &fm_lines[i];
+            !l.starts_with(' ') && !l.starts_with('\t')
+        })
+        .ok_or_else(|| anyhow!("Email has no event: block (not an invite)"))?;
+
+    // Scan the block's children (indented lines) for an `rsvp:` entry, tracking
+    // the child indentation so an inserted line matches the block's style.
+    let mut rsvp_line_idx: Option<usize> = None;
+    let mut child_indent: Option<String> = None;
+    let mut i = event_idx + 1;
+    while i < fm_lines.len() {
+        let line = &fm_lines[i];
+        let indent_len = line.len() - line.trim_start().len();
+        let is_indented = line.starts_with(' ') || line.starts_with('\t');
+        if !is_indented && !line.trim().is_empty() {
+            break; // next top-level key ends the block
+        }
+        if is_indented && !line.trim().is_empty() {
+            if child_indent.is_none() {
+                child_indent = Some(line[..indent_len].to_string());
+            }
+            // Match `rsvp:` only at the block's direct-child indentation, never
+            // a deeper `- status:`/`address:` under `attendees:`.
+            let trimmed = line.trim_start();
+            let at_child_indent = child_indent
+                .as_deref()
+                .map(|ci| line[..indent_len] == *ci)
+                .unwrap_or(false);
+            if at_child_indent && (trimmed == "rsvp:" || trimmed.starts_with("rsvp:")) {
+                rsvp_line_idx = Some(i);
+                break;
+            }
+        }
+        i += 1;
+    }
+
+    let indent = child_indent.unwrap_or_else(|| "  ".to_string());
+    let new_line = format!("{}rsvp: {}", indent, new_status);
+    match rsvp_line_idx {
+        Some(idx) => fm_lines[idx] = new_line,
+        None => fm_lines.insert(event_idx + 1, new_line),
+    }
+
+    let mut rebuilt = String::new();
+    rebuilt.push_str("---");
+    rebuilt.push_str(newline);
+    for line in fm_lines {
+        rebuilt.push_str(&line);
+        rebuilt.push_str(newline);
+    }
+    rebuilt.push_str("---");
+    rebuilt.push_str(newline);
+    rebuilt.push_str(&body);
+
+    write_atomic(path, rebuilt.as_bytes())
+        .with_context(|| format!("Failed to write file: {}", path.display()))?;
+    Ok(())
+}
+
 /// Atomically overwrite `path` by writing to a `.tmp` sibling then renaming
 /// over the destination. Mirrors `secrets::write_secret_file_atomic` minus the
 /// 0600 mode — drafts are plain files, so this preserves the permission
@@ -1025,6 +1139,102 @@ mod tests {
         assert_eq!(draft.frontmatter.cc.as_deref(), Some("carol@example.com"));
         assert_eq!(draft.frontmatter.bcc, None);
         assert_eq!(draft.frontmatter.subject, "New subject");
+    }
+
+    #[test]
+    fn test_set_event_rsvp_updates_in_place_and_preserves_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("invite.md");
+        let original = concat!(
+            "---\n",
+            "from: \"chair@tum.de\"\n",
+            "to: \"me@example.com\"\n",
+            "subject: LOC Day planning\n",
+            "status: inbox\n",
+            "event:\n",
+            "  uid: abc123@outlook.com\n",
+            "  method: REQUEST\n",
+            "  sequence: 3\n",
+            "  summary: LOC Day planning\n",
+            "  rsvp: needs-action\n",
+            "  attendees:\n",
+            "  - address: me@example.com\n",
+            "    status: needs-action\n",
+            "---\n",
+            "\n",
+            "You are invited.\nLine with --- dashes.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        set_event_rsvp(&path, "accepted").unwrap();
+        let result = fs::read_to_string(&path).unwrap();
+
+        // Only the block's own rsvp: flipped; attendee status untouched.
+        assert!(result.contains("  rsvp: accepted"), "{result}");
+        assert!(!result.contains("rsvp: needs-action"), "{result}");
+        assert!(
+            result.contains("    status: needs-action"),
+            "attendee status must not change: {result}"
+        );
+        // Body preserved byte-for-byte, including interior dashes.
+        assert!(
+            result.ends_with("\nYou are invited.\nLine with --- dashes.\n"),
+            "body not preserved: {result:?}"
+        );
+
+        // Round-trips: parses back with the new own-RSVP status.
+        let matter = Matter::<YAML>::new();
+        let parsed = matter.parse(&fs::read_to_string(&path).unwrap());
+        let fm: crate::types::InboxFrontmatter =
+            parsed.data.unwrap().deserialize().unwrap();
+        let event = fm.event.unwrap();
+        assert_eq!(event.rsvp, "accepted");
+        assert_eq!(event.attendees.len(), 1);
+        assert_eq!(event.attendees[0].status, "needs-action");
+    }
+
+    #[test]
+    fn test_set_event_rsvp_inserts_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("invite2.md");
+        // An older invite without an rsvp: line under event:.
+        let original = concat!(
+            "---\n",
+            "from: chair@tum.de\n",
+            "to: me@example.com\n",
+            "subject: S\n",
+            "status: inbox\n",
+            "event:\n",
+            "  uid: u@x\n",
+            "  method: REQUEST\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        );
+        fs::write(&path, original).unwrap();
+
+        set_event_rsvp(&path, "declined").unwrap();
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(result.contains("  rsvp: declined"), "{result}");
+        // Inserted at child indentation, right after event:.
+        assert!(result.contains("event:\n  rsvp: declined\n  uid: u@x"), "{result}");
+
+        let matter = Matter::<YAML>::new();
+        let parsed = matter.parse(&result);
+        let fm: crate::types::InboxFrontmatter =
+            parsed.data.unwrap().deserialize().unwrap();
+        assert_eq!(fm.event.unwrap().rsvp, "declined");
+    }
+
+    #[test]
+    fn test_set_event_rsvp_errors_without_event_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.md");
+        let original = "---\nsubject: S\nstatus: inbox\n---\n\nBody.\n";
+        fs::write(&path, original).unwrap();
+        assert!(set_event_rsvp(&path, "accepted").is_err());
+        // File untouched on error.
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]

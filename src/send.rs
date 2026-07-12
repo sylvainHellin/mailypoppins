@@ -601,6 +601,235 @@ pub fn build_invite_mime_body(plain: &str, html: String, ics: &str) -> MultiPart
         .singlepart(build_ics_attachment(ics))
 }
 
+/// Build the SMTP transport (implicit TLS on :465, STARTTLS otherwise),
+/// honouring the account's OAuth2/password auth and `accept_invalid_certs`
+/// opt-in. Shared by `send_email` and `send_reply` so both apply identical
+/// transport policy.
+fn build_smtp_transport(
+    smtp_config: &SmtpConfig,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+    if smtp_config.accept_invalid_certs {
+        crate::config::ensure_invalid_certs_allowed(&smtp_config.host)?;
+    }
+    let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
+
+    let mailer: AsyncSmtpTransport<Tokio1Executor> = if smtp_config.port == 465 {
+        // Implicit TLS (SMTPS)
+        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_config.host)?;
+        if smtp_config.accept_invalid_certs {
+            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(true)
+                .build()?;
+            transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
+        }
+        let transport = transport.port(smtp_config.port).credentials(creds);
+        if smtp_config.auth_method == AuthMethod::OAuth2 {
+            transport
+                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
+                .build()
+        } else {
+            transport.build()
+        }
+    } else {
+        // STARTTLS
+        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?;
+        if smtp_config.accept_invalid_certs {
+            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(true)
+                .build()?;
+            transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
+        }
+        let transport = transport.port(smtp_config.port).credentials(creds);
+        if smtp_config.auth_method == AuthMethod::OAuth2 {
+            transport
+                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
+                .build()
+        } else {
+            transport.build()
+        }
+    };
+    Ok(mailer)
+}
+
+/// Build the `multipart/alternative` body of an iMIP RSVP `REPLY` (#0029):
+/// a minimal `text/plain` human note plus the inline
+/// `text/calendar; method=REPLY; charset=UTF-8` part carrying the responding
+/// `ATTENDEE`'s `PARTSTAT`. No `text/html` and no `.ics` attachment: a REPLY
+/// is machine-consumed by the organizer's client, so the alternative stays
+/// lean (mirrors what Gmail/Outlook emit).
+pub fn build_reply_mime_body(plain: &str, ics: &str) -> MultiPart {
+    let calendar_ct: ContentType = "text/calendar; method=REPLY; charset=UTF-8"
+        .parse()
+        .expect("static calendar content-type");
+    MultiPart::alternative()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(plain.to_string()),
+        )
+        .singlepart(
+            SinglePart::builder()
+                .header(calendar_ct)
+                .body(ics.to_string()),
+        )
+}
+
+/// Send an iMIP RSVP `REPLY` to a received invitation's `ORGANIZER`.
+///
+/// `from` is the responding account's primary address (also the REPLY
+/// `ATTENDEE`); `organizer` is the single recipient. `reply_ics` is the
+/// `METHOD:REPLY` payload from [`crate::invite::build_reply_ics`]. `subject`
+/// follows the Outlook convention (`Accepted:`/`Tentative:`/`Declined: <summary>`).
+/// Returns the send outcome plus the raw message bytes (for an optional IMAP
+/// APPEND to Sent) and the generated Message-ID.
+pub async fn send_reply(
+    from: &str,
+    organizer: &str,
+    subject: &str,
+    plain_body: &str,
+    reply_ics: &str,
+    smtp_config: &SmtpConfig,
+) -> Result<(SendResult, Vec<u8>, Option<String>)> {
+    let from_mailbox: Mailbox = normalize_address_for_smtp(from)
+        .parse()
+        .context("Invalid 'from' address for RSVP reply")?;
+    let organizer_mailbox: Mailbox = normalize_address_for_smtp(organizer)
+        .parse()
+        .context("Invalid ORGANIZER address for RSVP reply")?;
+
+    info!("Sending RSVP reply: subject=\"{}\", from={}, to={}", subject, from, organizer);
+
+    let message = Message::builder()
+        .from(from_mailbox.clone())
+        .to(organizer_mailbox.clone())
+        .subject(subject)
+        .message_id(None)
+        .multipart(build_reply_mime_body(plain_body, reply_ics))
+        .context("Failed to build RSVP reply message")?;
+
+    let raw_message = message.formatted();
+    let message_id = mailparse::parse_headers(&raw_message)
+        .ok()
+        .and_then(|(headers, _)| {
+            headers
+                .iter()
+                .find(|h| h.get_key().eq_ignore_ascii_case("Message-ID"))
+                .map(|h| h.get_value().trim().to_string())
+        });
+
+    let mailer = build_smtp_transport(smtp_config)?;
+    let envelope = Envelope::new(Some(from_mailbox.email), vec![organizer_mailbox.email])
+        .context("Failed to build RSVP reply envelope")?;
+
+    let results = match mailer.send_raw(&envelope, &raw_message).await {
+        Ok(_) => {
+            info!("RSVP reply sent to organizer {}", organizer);
+            vec![RecipientResult {
+                address: organizer.to_string(),
+                role: RecipientRole::To,
+                success: true,
+                error: None,
+            }]
+        }
+        Err(e) => {
+            let err_msg = format!("{}", e);
+            error!("Failed to send RSVP reply to {}: {}", organizer, err_msg);
+            vec![RecipientResult {
+                address: organizer.to_string(),
+                role: RecipientRole::To,
+                success: false,
+                error: Some(err_msg),
+            }]
+        }
+    };
+
+    Ok((SendResult { results }, raw_message, message_id))
+}
+
+/// Outcome of an RSVP send, carried back to the caller so it can do the
+/// optional IMAP APPEND to Sent and surface a status line.
+pub struct RsvpOutcome {
+    pub send_result: SendResult,
+    pub raw_message: Vec<u8>,
+    pub message_id: Option<String>,
+    /// The `ORGANIZER` the reply was sent to.
+    pub organizer: String,
+    /// The Outlook-convention subject used (`Accepted: <summary>` etc.).
+    pub subject: String,
+}
+
+/// End-to-end attendee RSVP to a received invite (#0029), shared by the CLI
+/// and the TUI so both run identical logic (no subprocess).
+///
+/// Steps: read the invite email's sidecar `invite.ics` (source of truth for
+/// `UID`/`SEQUENCE`), build a `METHOD:REPLY` with the account's `PARTSTAT`,
+/// email it to the `ORGANIZER`, and — only on a successful send — flip the
+/// local `event.rsvp` frontmatter. The sidecar is never rewritten.
+///
+/// `email_path` is the received invite `.md`; `account_address` is the
+/// responding account's primary address (the REPLY `ATTENDEE`).
+pub async fn send_rsvp(
+    email_path: &Path,
+    account_address: &str,
+    rsvp: crate::invite::Rsvp,
+    smtp_config: &SmtpConfig,
+) -> Result<RsvpOutcome> {
+    let account_address = crate::parse::extract_email_address(account_address);
+    if account_address.is_empty() {
+        return Err(anyhow!("Account has no usable address to RSVP as"));
+    }
+
+    // Locate and read the sidecar .ics colocated with the email's attachments.
+    let sidecar = crate::parse::attachments_dir_for(email_path)
+        .join(crate::parse::CALENDAR_SIDECAR_NAME);
+    let ics_bytes = fs::read(&sidecar).with_context(|| {
+        format!(
+            "No calendar sidecar found at {} (is this a received invite?)",
+            sidecar.display()
+        )
+    })?;
+
+    let ctx = crate::invite::reply_context_from_ics(&ics_bytes)?;
+    let reply_ics = crate::invite::build_reply_ics(&ctx, &account_address, rsvp)?;
+
+    let summary = ctx.summary.as_deref().unwrap_or("(no subject)");
+    let subject = format!("{}: {}", rsvp.subject_verb(), summary);
+    let plain_body = format!(
+        "{} the invitation: {}",
+        rsvp.subject_verb(),
+        summary
+    );
+
+    let (send_result, raw_message, message_id) = send_reply(
+        &account_address,
+        &ctx.organizer,
+        &subject,
+        &plain_body,
+        &reply_ics,
+        smtp_config,
+    )
+    .await?;
+
+    // Update local state only after the reply actually left the machine.
+    if send_result.any_succeeded() {
+        if let Err(e) = crate::draft::set_event_rsvp(email_path, rsvp.frontmatter_status()) {
+            log::warn!(
+                "RSVP sent but failed to update event.rsvp in {}: {}",
+                email_path.display(),
+                e
+            );
+        }
+    }
+
+    Ok(RsvpOutcome {
+        send_result,
+        raw_message,
+        message_id,
+        organizer: ctx.organizer,
+        subject,
+    })
+}
+
 pub async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
@@ -815,47 +1044,8 @@ pub async fn send_email(
         .context("Invalid 'from' address")?
         .email;
 
-    // Create SMTP transport (branching on auth method)
-    if smtp_config.accept_invalid_certs {
-        crate::config::ensure_invalid_certs_allowed(&smtp_config.host)?;
-    }
-    let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
-
-    let mailer: AsyncSmtpTransport<Tokio1Executor> = if smtp_config.port == 465 {
-        // Implicit TLS (SMTPS)
-        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_config.host)?;
-        if smtp_config.accept_invalid_certs {
-            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
-                .dangerous_accept_invalid_certs(true)
-                .build()?;
-            transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
-        }
-        let transport = transport.port(smtp_config.port).credentials(creds);
-        if smtp_config.auth_method == AuthMethod::OAuth2 {
-            transport
-                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
-                .build()
-        } else {
-            transport.build()
-        }
-    } else {
-        // STARTTLS
-        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?;
-        if smtp_config.accept_invalid_certs {
-            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
-                .dangerous_accept_invalid_certs(true)
-                .build()?;
-            transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
-        }
-        let transport = transport.port(smtp_config.port).credentials(creds);
-        if smtp_config.auth_method == AuthMethod::OAuth2 {
-            transport
-                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
-                .build()
-        } else {
-            transport.build()
-        }
-    };
+    // Create SMTP transport (branching on auth method / TLS mode).
+    let mailer = build_smtp_transport(smtp_config)?;
 
     // Send to each recipient individually
     let mut results = Vec::with_capacity(recipients.len());

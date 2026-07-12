@@ -280,6 +280,70 @@ pub(super) fn handle_action(
             }
         }
 
+        Action::Rsvp { path, choice } => {
+            let (acct_idx, smtp_config, imap_config, graph_config, account_config, _sig, _sent) =
+                resolve_send_account(app, &path);
+
+            if graph_config.is_some()
+                && account_config.auth_method == crate::config::AuthMethod::Graph
+            {
+                app.set_status_level(
+                    "RSVP is not supported for Graph accounts yet (#0036)".to_string(),
+                    StatusLevel::Error,
+                );
+                return Ok(());
+            }
+            let smtp_config = match smtp_config {
+                Some(c) => c,
+                None => {
+                    app.set_status_level(
+                        "SMTP not configured".to_string(),
+                        StatusLevel::Error,
+                    );
+                    return Ok(());
+                }
+            };
+            let account_address =
+                crate::parse::extract_email_address(&account_config.default_from);
+            let rsvp = choice.to_rsvp();
+
+            app.bg_count += 1;
+            app.set_status_level(
+                format!("Sending {} reply...", choice.label().to_lowercase()),
+                StatusLevel::Progress,
+            );
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new()
+                    .expect("failed to create tokio runtime");
+                let result = (|| -> anyhow::Result<String> {
+                    let outcome = rt.block_on(crate::send::send_rsvp(
+                        &path,
+                        &account_address,
+                        rsvp,
+                        &smtp_config,
+                    ))?;
+                    if !outcome.send_result.any_succeeded() {
+                        anyhow::bail!("Failed to send RSVP to {}", outcome.organizer);
+                    }
+                    // Best-effort IMAP APPEND to Sent, matching the send path.
+                    if let Some(ref imap_cfg) = imap_config {
+                        let sent_mailbox = resolve_sent_mailbox(&account_config);
+                        let _ = rt.block_on(append_to_sent_folder(
+                            imap_cfg,
+                            &outcome.raw_message,
+                            &sent_mailbox,
+                        ));
+                    }
+                    Ok(format!("{} — replied to {}", outcome.subject, outcome.organizer))
+                })();
+                let _ = tx.send(BgResult::Rsvp {
+                    account_index: acct_idx,
+                    result: result.map_err(|e| e.to_string()),
+                });
+            });
+        }
+
         Action::SendApproved => {
             if let Some(dir) = app.active_dir().cloned() {
                 if app.is_graph() {

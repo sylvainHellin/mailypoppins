@@ -130,8 +130,14 @@ enum Commands {
         /// Path to the email to forward (interactive selection if omitted)
         file: Option<PathBuf>,
     },
+    /// RSVP to a received calendar invitation (iMIP REPLY over SMTP)
+    Invite {
+        #[command(subcommand)]
+        action: InviteAction,
+    },
     /// List available IMAP mailboxes/folders
     ListMailboxes,
+
     /// Fetch emails from IMAP server
     Fetch {
         /// Filter by sender address
@@ -235,6 +241,28 @@ enum Commands {
     Contacts {
         #[command(subcommand)]
         action: ContactsAction,
+    },
+}
+
+/// RSVP actions for `mp invite <accept|tentative|decline> <email-path>`.
+/// Whole-series only (v1); the target is a received invite `.md` with an
+/// `event:` block and a sidecar `invite.ics`.
+#[derive(Subcommand)]
+enum InviteAction {
+    /// Accept the invitation (PARTSTAT=ACCEPTED)
+    Accept {
+        /// Path to the received invite email `.md`
+        file: PathBuf,
+    },
+    /// Tentatively accept the invitation (PARTSTAT=TENTATIVE)
+    Tentative {
+        /// Path to the received invite email `.md`
+        file: PathBuf,
+    },
+    /// Decline the invitation (PARTSTAT=DECLINED)
+    Decline {
+        /// Path to the received invite email `.md`
+        file: PathBuf,
     },
 }
 
@@ -566,6 +594,62 @@ async fn run_send_invite(
             send_result.failed().len()
         );
     }
+
+    Ok(())
+}
+
+/// RSVP to a received calendar invitation (`mp invite accept|tentative|decline`).
+///
+/// Reads the invite email's sidecar `invite.ics`, builds a `METHOD:REPLY`
+/// with the account's `PARTSTAT`, emails it to the `ORGANIZER`, and flips the
+/// local `event.rsvp` on success. Appends the reply to the server Sent folder
+/// best-effort. Graph accounts are rejected (Graph RSVP is #0036).
+async fn run_invite_rsvp(
+    account_config: &email::config::AccountConfig,
+    smtp_config: &SmtpConfig,
+    file: &Path,
+    rsvp: email::invite::Rsvp,
+) -> Result<()> {
+    if account_config.auth_method == AuthMethod::Graph {
+        return Err(anyhow!(
+            "`mp invite` RSVP is not supported for Graph accounts yet (Graph calendar RSVP \
+             is tracked by #0036, blocked on #0035). Use an SMTP-configured account."
+        ));
+    }
+
+    let account_address = email::parse::extract_email_address(&account_config.default_from);
+
+    println!("Sending {} reply...", rsvp.subject_verb().to_lowercase());
+    let outcome =
+        email::send::send_rsvp(file, &account_address, rsvp, smtp_config).await?;
+
+    if !outcome.send_result.any_succeeded() {
+        return Err(anyhow!(
+            "Failed to send RSVP to organizer {}",
+            outcome.organizer
+        ));
+    }
+
+    // Best-effort IMAP APPEND to Sent, matching the normal send path.
+    if let Ok(imap_config) = ImapConfig::load(account_config) {
+        let sent_mailbox = resolve_sent_mailbox(account_config);
+        if let Err(e) =
+            append_to_sent_folder(&imap_config, &outcome.raw_message, &sent_mailbox).await
+        {
+            warn!("Failed to append RSVP reply to Sent folder: {}", e);
+        }
+    }
+
+    println!(
+        "{} {} — replied to {}",
+        "✓".green().bold(),
+        outcome.subject,
+        outcome.organizer
+    );
+    println!(
+        "  {} Local RSVP updated. Note: not synced to the Exchange server calendar (no Graph in v1).",
+        "ℹ".blue()
+    );
 
     Ok(())
 }
@@ -1265,6 +1349,15 @@ async fn main() -> Result<()> {
                 "✓".green(),
                 draft_path.display()
             );
+        }
+
+        Some(Commands::Invite { action }) => {
+            let (file, rsvp) = match action {
+                InviteAction::Accept { file } => (file, email::invite::Rsvp::Accepted),
+                InviteAction::Tentative { file } => (file, email::invite::Rsvp::Tentative),
+                InviteAction::Decline { file } => (file, email::invite::Rsvp::Declined),
+            };
+            run_invite_rsvp(&account_config, &smtp_config, &file, rsvp).await?;
         }
 
         Some(Commands::ListMailboxes) => {

@@ -4,9 +4,28 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
-use super::super::app::{App, Focus};
+use super::super::app::{App, EmailEntry, Focus};
 use super::super::theme;
 use super::util::{pane_border_style, truncate};
+
+/// Nerd Font calendar glyph shown before a subject when the email carries an
+/// iMIP invite (`event:` frontmatter). Distinct from the attachment paperclip
+/// (`\u{f0c6}`); an invite may show both.
+const INVITE_GLYPH: &str = "\u{f00eb}";
+
+/// Build the subject-cell prefix: invite calendar badge (if any) followed by
+/// the attachment paperclip (if any). Both, one, or neither may apply.
+fn invite_and_attachment_prefix(email: &EmailEntry) -> String {
+    let mut prefix = String::new();
+    if email.is_invite() {
+        prefix.push_str(INVITE_GLYPH);
+        prefix.push(' ');
+    }
+    if email.has_attachments {
+        prefix.push_str("\u{f0c6} ");
+    }
+    prefix
+}
 
 pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     let border_style = pane_border_style(app.focus, Focus::List);
@@ -108,11 +127,9 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.selection.contains(&email.path);
                 let contact = truncate(email.display_contact(app.active_kind()), contact_width);
-                let subject_prefix = if email.has_attachments {
-                    "\u{f0c6} "
-                } else {
-                    ""
-                };
+                // Invite badge (calendar glyph) is distinct from the
+                // attachment paperclip; an invite may also have attachments.
+                let subject_prefix = invite_and_attachment_prefix(email);
                 let subject = truncate(
                     &format!("{}{}", subject_prefix, email.subject),
                     subject_width,
@@ -203,11 +220,7 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
             .map(|(i, email)| {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.selection.contains(&email.path);
-                let subject_prefix = if email.has_attachments {
-                    "\u{f0c6} "
-                } else {
-                    ""
-                };
+                let subject_prefix = invite_and_attachment_prefix(email);
                 let subject = truncate(
                     &format!("{}{}", subject_prefix, email.subject),
                     subject_width,
@@ -273,5 +286,47 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
         let mut state = TableState::default();
         state.select(Some(app.list_index));
         frame.render_stateful_widget(table, list_area, &mut state);
+    }
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::*;
+    use crate::types::EventFrontmatter;
+    use std::path::PathBuf;
+
+    fn entry(is_invite: bool, has_att: bool) -> EmailEntry {
+        EmailEntry {
+            path: PathBuf::from("/x.md"),
+            from: "a".into(), to: "b".into(), cc: None,
+            subject: "S".into(), status: "inbox".into(),
+            date_display: "2026-07-01".into(), date_sort: "2026-07-01T00:00:00".into(),
+            body: String::new(), has_attachments: has_att, read: false,
+            event: is_invite.then(|| EventFrontmatter {
+                uid: None, method: Some("REQUEST".into()), sequence: 0,
+                summary: None, start: None, end: None, location: None,
+                organizer: None, rsvp: "needs-action".into(),
+                recurrence: String::new(), attendees: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn invite_badge_precedes_attachment_paperclip() {
+        let p = invite_and_attachment_prefix(&entry(true, true));
+        assert!(p.starts_with(INVITE_GLYPH), "prefix={p:?}");
+        assert!(p.contains('\u{f0c6}'), "paperclip missing: {p:?}");
+    }
+
+    #[test]
+    fn no_badge_for_plain_email() {
+        assert_eq!(invite_and_attachment_prefix(&entry(false, false)), "");
+    }
+
+    #[test]
+    fn invite_only_has_calendar_no_paperclip() {
+        let p = invite_and_attachment_prefix(&entry(true, false));
+        assert!(p.starts_with(INVITE_GLYPH));
+        assert!(!p.contains('\u{f0c6}'));
     }
 }

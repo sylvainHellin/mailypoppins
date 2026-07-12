@@ -6,7 +6,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     Action, App, AttachmentPicker, AttachmentPickerMode, ComposeField, ComposeMode,
     ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
-    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, SearchOverlayFocus,
+    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, RsvpChoice, RsvpOverlay,
+    SearchOverlayFocus,
 };
 
 impl App {
@@ -25,6 +26,10 @@ impl App {
 
         if self.mailbox_picker.is_some() {
             return self.handle_mailbox_picker_key(key);
+        }
+
+        if self.rsvp_overlay.is_some() {
+            return self.handle_rsvp_overlay_key(key);
         }
 
         if self.attachment_picker.is_some() {
@@ -501,6 +506,10 @@ impl App {
                 self.g_pending = false;
                 self.open_mailbox_picker();
             }
+            KeyCode::Char('V') => {
+                self.g_pending = false;
+                self.open_rsvp_overlay();
+            }
             KeyCode::Char(' ') => {
                 self.g_pending = false;
                 if let Some(path) = self.selected_email_path() {
@@ -971,12 +980,86 @@ impl App {
                 }
                 None
             }
+            KeyCode::Char('V') => {
+                self.open_rsvp_overlay();
+                None
+            }
             KeyCode::Esc => {
                 self.focus = Focus::List;
                 None
             }
             _ => None,
         }
+    }
+
+    /// Open the RSVP overlay for the cursor email, guarding against
+    /// non-invites and self-authored (organizer-side) invites. RSVP is only
+    /// for received REQUEST invites (D3): our own Sent invites make us the
+    /// organizer, so we hint instead of opening.
+    fn open_rsvp_overlay(&mut self) {
+        let Some(email) = self.selected_email() else {
+            return;
+        };
+        if !email.is_invite() {
+            self.set_status("Not a calendar invite".to_string());
+            return;
+        }
+        if self.active_kind() == MailboxKind::Sent {
+            self.set_status(
+                "You are the organizer of this invite — nothing to RSVP".to_string(),
+            );
+            return;
+        }
+        if !email.is_request_invite() {
+            self.set_status(
+                "Only received invitations (REQUEST) can be RSVP'd".to_string(),
+            );
+            return;
+        }
+        let summary = email
+            .event
+            .as_ref()
+            .and_then(|e| e.summary.clone())
+            .unwrap_or_else(|| email.subject.clone());
+        self.rsvp_overlay = Some(RsvpOverlay {
+            path: email.path.clone(),
+            summary,
+            selected: 0,
+        });
+    }
+
+    fn handle_rsvp_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let overlay = self.rsvp_overlay.as_mut()?;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                if overlay.selected < 2 {
+                    overlay.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Char('a') => overlay.selected = 0,
+            KeyCode::Char('t') => overlay.selected = 1,
+            KeyCode::Char('d') => overlay.selected = 2,
+            KeyCode::Enter => {
+                let choice = match overlay.selected {
+                    0 => RsvpChoice::Accept,
+                    1 => RsvpChoice::Tentative,
+                    _ => RsvpChoice::Decline,
+                };
+                let overlay = self.rsvp_overlay.take().expect("overlay checked above");
+                self.push_action(Action::Rsvp {
+                    path: overlay.path,
+                    choice,
+                });
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.rsvp_overlay = None;
+            }
+            _ => {}
+        }
+        None
     }
 
     fn handle_attachment_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
@@ -1769,6 +1852,7 @@ mod tests {
             body: body.to_string(),
             has_attachments: false,
             read: false,
+            event: None,
         }
     }
 

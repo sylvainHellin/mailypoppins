@@ -30,6 +30,29 @@ pub struct EmailEntry {
     pub body: String,
     pub has_attachments: bool,
     pub read: bool,
+    /// Parsed `event:` frontmatter block when the email carries an iMIP
+    /// invite (#0029). `None` for the vast majority of emails. Drives the
+    /// list invite badge and the preview event card.
+    pub event: Option<crate::types::EventFrontmatter>,
+}
+
+impl EmailEntry {
+    /// Whether this email is a received invitation the user can RSVP to
+    /// (`method: REQUEST`). Our own sent invites are `REQUEST` too but the
+    /// caller (TUI) gates RSVP by mailbox kind / organizer, not just this.
+    pub fn is_invite(&self) -> bool {
+        self.event.is_some()
+    }
+
+    /// True when the invite is a received REQUEST (not a REPLY/CANCEL) and so
+    /// is a candidate for RSVP.
+    pub fn is_request_invite(&self) -> bool {
+        self.event
+            .as_ref()
+            .and_then(|e| e.method.as_deref())
+            .map(|m| m.eq_ignore_ascii_case("REQUEST"))
+            .unwrap_or(false)
+    }
 }
 
 impl EmailEntry {
@@ -57,6 +80,8 @@ struct Frontmatter {
     #[allow(dead_code)]
     attachments: Option<Vec<String>>,
     read: Option<bool>,
+    #[serde(default)]
+    event: Option<crate::types::EventFrontmatter>,
 }
 
 /// Load all emails from a directory.
@@ -113,6 +138,7 @@ fn parse_email(path: &Path) -> Result<EmailEntry> {
         body,
         has_attachments: fm.has_attachments.unwrap_or(false),
         read: fm.read.unwrap_or(false),
+        event: fm.event,
     })
 }
 
@@ -371,6 +397,11 @@ pub enum BgResult {
         new_mailbox_states: Option<std::collections::HashMap<String, MailboxState>>,
     },
     Send {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    /// An attendee RSVP (#0029) finished sending its METHOD:REPLY.
+    Rsvp {
         account_index: usize,
         result: Result<String, String>,
     },
@@ -700,6 +731,12 @@ pub enum Action {
     ComposeWizardSubmit,
     /// Close the wizard without writing anything.
     ComposeWizardCancel,
+    /// RSVP to a received invite (#0029): send a METHOD:REPLY to the
+    /// organizer on a background thread and flip local `event.rsvp`.
+    Rsvp {
+        path: PathBuf,
+        choice: RsvpChoice,
+    },
 }
 
 /// Which destructive action a confirmation dialog is guarding.
@@ -711,6 +748,51 @@ pub enum ConfirmAction {
     Delete,
     Send,
     SendApproved,
+}
+
+/// Background RSVP send result (#0029).
+#[derive(Debug)]
+pub struct RsvpDone {
+    pub account_index: usize,
+    pub result: Result<String, String>,
+}
+
+/// A choice in the three-option RSVP overlay (#0029).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RsvpChoice {
+    Accept,
+    Tentative,
+    Decline,
+}
+
+impl RsvpChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            RsvpChoice::Accept => "Accept",
+            RsvpChoice::Tentative => "Tentative",
+            RsvpChoice::Decline => "Decline",
+        }
+    }
+
+    /// Map to the library RSVP status enum.
+    pub fn to_rsvp(self) -> crate::invite::Rsvp {
+        match self {
+            RsvpChoice::Accept => crate::invite::Rsvp::Accepted,
+            RsvpChoice::Tentative => crate::invite::Rsvp::Tentative,
+            RsvpChoice::Decline => crate::invite::Rsvp::Declined,
+        }
+    }
+}
+
+/// State for the small RSVP overlay opened with `V` on a received invite.
+/// Three choices (Accept / Tentative / Decline) plus Esc to cancel.
+pub struct RsvpOverlay {
+    /// The invite email being answered.
+    pub path: PathBuf,
+    /// Event summary, shown in the overlay title.
+    pub summary: String,
+    /// Cursor over the three choices.
+    pub selected: usize,
 }
 
 /// Data for rendering the confirmation dialog overlay.

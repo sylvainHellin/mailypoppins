@@ -219,6 +219,25 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
+        BgResult::Rsvp { account_index, result } => {
+            match result {
+                Ok(msg) => {
+                    let text = if msg.is_empty() { "RSVP sent".into() } else { msg };
+                    app.set_status_level(text, StatusLevel::Success);
+                    // The invite's local event.rsvp frontmatter changed on
+                    // disk; refresh the open mailbox so the preview card and
+                    // list badge reflect the new own-RSVP state.
+                    if account_index == app.active_account {
+                        app.invalidate_cache_idx(app.active_mailbox);
+                        app.reload_current_mailbox();
+                    } else {
+                        app.invalidate_all_caches_on(account_index);
+                    }
+                }
+                Err(e) => app.set_status_level(format!("RSVP failed: {e}"), StatusLevel::Error),
+            }
+        }
+
         BgResult::SendApproved { account_index, result } => {
             match result {
                 Ok(msg) => {

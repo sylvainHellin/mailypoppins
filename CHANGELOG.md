@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **RSVP to calendar invitations (iMIP REPLY): `mp invite accept|tentative|decline <email-path>` + TUI `V`.**
+  Respond to a received invite (an email with an `event:` block and a
+  sidecar `invite.ics`). Builds a `METHOD:REPLY` `VCALENDAR` whose `UID`
+  and `SEQUENCE` are copied verbatim from the sidecar `.ics` (the source
+  of truth, never the frontmatter cache), with a single `ATTENDEE` = your
+  account address carrying the chosen `PARTSTAT`
+  (`ACCEPTED`/`TENTATIVE`/`DECLINED`), a fresh `DTSTAMP`, and the echoed
+  `ORGANIZER`. `RECURRENCE-ID` is intentionally absent — v1 answers the
+  whole series only. The reply is emailed to the `ORGANIZER` as
+  `multipart/alternative [ text/plain, text/calendar; method=REPLY ]`
+  with an Outlook-convention subject (`Accepted: <summary>` /
+  `Tentative: <summary>` / `Declined: <summary>`), and appended to the
+  server Sent folder best-effort. On a successful send the local
+  `event.rsvp` frontmatter is flipped in place (the sidecar is untouched)
+  via the same safe in-place YAML rewrite machinery as draft edits. The
+  TUI gains an invite badge (calendar glyph) in the email-list row, an
+  event summary card at the top of the preview pane (title, time,
+  location, organizer, your RSVP state, per-attendee statuses,
+  recurrence, and the honest "not synced to Exchange" caveat), and a
+  single `V` key that opens a small Accept / Tentative / Decline overlay
+  (Esc cancels); the reply is sent on a background thread. RSVP is only
+  offered for received `REQUEST` invites — your own sent invites make you
+  the organizer and are guarded with a hint. Graph accounts error clearly
+  (Graph RSVP is #0036). No RSVP note text and no per-occurrence
+  responses in v1. Ticket #0029.
 - **Send calendar invitations (iMIP): `mp send --invite`.** Send a
   `METHOD:REQUEST` invitation over SMTP that renders as an actionable
   Accept / Tentative / Decline event in Outlook, Gmail, and Apple Mail.

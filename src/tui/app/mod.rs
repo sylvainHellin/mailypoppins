@@ -77,6 +77,8 @@ pub struct App {
     pub attachment_picker: Option<AttachmentPicker>,
     pub dir_picker: Option<DirPicker>,
     pub mailbox_picker: Option<MailboxPicker>,
+    /// The RSVP overlay (#0029), opened with `V` on a received invite.
+    pub rsvp_overlay: Option<RsvpOverlay>,
     pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
@@ -177,6 +179,7 @@ impl App {
             attachment_picker: None,
             dir_picker: None,
             mailbox_picker: None,
+            rsvp_overlay: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
@@ -267,6 +270,7 @@ impl App {
             attachment_picker: None,
             dir_picker: None,
             mailbox_picker: None,
+            rsvp_overlay: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,

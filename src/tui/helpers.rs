@@ -472,6 +472,7 @@ fn fetched_to_email_entry(fetched: &FetchedEmail) -> EmailEntry {
         body: fetched.body_text.clone(),
         has_attachments: fetched.has_attachments,
         read: fetched.is_read,
+        event: fetched.event.clone(),
     }
 }
 

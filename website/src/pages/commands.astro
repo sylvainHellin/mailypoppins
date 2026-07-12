@@ -15,6 +15,7 @@ const draftCommands = [
   { command: 'mp mark-draft <file>', description: 'Demote approved draft back to draft' },
   { command: 'mp send <file> [-y]', description: 'Send a single approved email' },
   { command: 'mp send --invite ...', description: 'Send a calendar invitation (iMIP REQUEST)' },
+  { command: 'mp invite accept|tentative|decline <file>', description: 'RSVP to a received invitation (iMIP REPLY)' },
   { command: 'mp send-approved [dir] [-y]', description: 'Send all approved emails' },
   { command: 'mp reply [file] [--all]', description: 'Create a reply draft' },
   { command: 'mp forward [file]', description: 'Create a forward draft' },
@@ -118,6 +119,7 @@ const listKeys = [
   { key: 'd', action: 'Delete selected (with confirmation)' },
   { key: 'm', action: 'Toggle read / unread' },
   { key: 'M', action: 'Move to mailbox (fuzzy picker)' },
+  { key: 'V', action: 'RSVP to invitation (Accept / Tentative / Decline overlay)' },
   { key: 'A', action: 'Mark as approved' },
   { key: 'D', action: 'Mark approved as draft (reverse of A)' },
   { key: 'x', action: 'Send (with confirmation)' },
@@ -208,6 +210,29 @@ const listKeys = [
         are not yet supported for invites.
       </p>
       <CommandTable commands={inviteOptions} />
+    </section>
+
+    <section>
+      <h2 id="rsvp">RSVP to Invitations (<code>mp invite</code>)</h2>
+      <p>
+        <code>mp invite accept|tentative|decline &lt;email-path&gt;</code> replies
+        to a received calendar invitation. It reads the invite email's sidecar
+        <code>invite.ics</code> (the source of truth for <code>UID</code>/<code>SEQUENCE</code>),
+        builds a <code>METHOD:REPLY</code> with your account as the single
+        <code>ATTENDEE</code> carrying the chosen <code>PARTSTAT</code>
+        (<code>ACCEPTED</code>/<code>TENTATIVE</code>/<code>DECLINED</code>), and
+        emails it to the <code>ORGANIZER</code> with an Outlook-convention
+        subject (<code>Accepted: &lt;summary&gt;</code>, etc.). On a successful
+        send the local <code>event.rsvp</code> is updated. v1 answers the whole
+        series only (no per-occurrence responses) and adds no note text.
+      </p>
+      <p>
+        In the TUI, invites show a calendar badge in the list and an event
+        summary card at the top of the preview pane; press <code>V</code> to open
+        an Accept / Tentative / Decline overlay. <strong>The RSVP is emailed to
+        the organizer only — it is not synced to your Exchange server calendar
+        (no Graph in v1).</strong> Graph accounts are not yet supported for RSVP.
+      </p>
     </section>
 
     <section>

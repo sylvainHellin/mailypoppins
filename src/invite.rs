@@ -11,9 +11,11 @@
 //! sidecar) and a single `VEVENT` that [`crate::calendar::parse_ics`] can read
 //! back into an `event:` frontmatter block.
 
+use std::str::FromStr;
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
-use icalendar::{Calendar, Component, Event, EventLike, Property};
+use icalendar::{Calendar, CalendarComponent, Component, Event, EventLike, Property};
 
 /// The inputs needed to build a `REQUEST` invite. Times are already resolved to
 /// absolute instants (UTC); recipients are bare email addresses.
@@ -299,6 +301,169 @@ pub fn build_invite_ics(spec: &InviteSpec) -> Result<String> {
     Ok(calendar.to_string())
 }
 
+/// The three RSVP participation statuses an attendee can reply with (D3/D6).
+/// Whole-series only in v1 (no per-occurrence responses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rsvp {
+    Accepted,
+    Tentative,
+    Declined,
+}
+
+impl Rsvp {
+    /// RFC 5545 `PARTSTAT` value for the REPLY `ATTENDEE`.
+    pub fn partstat(self) -> &'static str {
+        match self {
+            Rsvp::Accepted => "ACCEPTED",
+            Rsvp::Tentative => "TENTATIVE",
+            Rsvp::Declined => "DECLINED",
+        }
+    }
+
+    /// Lowercase status stored in `event.rsvp` frontmatter.
+    pub fn frontmatter_status(self) -> &'static str {
+        match self {
+            Rsvp::Accepted => "accepted",
+            Rsvp::Tentative => "tentative",
+            Rsvp::Declined => "declined",
+        }
+    }
+
+    /// Outlook-style subject verb prefix (`Accepted:` / `Tentative:` /
+    /// `Declined:`).
+    pub fn subject_verb(self) -> &'static str {
+        match self {
+            Rsvp::Accepted => "Accepted",
+            Rsvp::Tentative => "Tentative",
+            Rsvp::Declined => "Declined",
+        }
+    }
+}
+
+/// What we extracted from a received invite's sidecar `.ics` in order to build
+/// a REPLY. The sidecar is the source of truth for `UID`/`SEQUENCE`
+/// (`docs/plans/calendar-invites.md`, D2) — never the frontmatter cache.
+#[derive(Debug, Clone)]
+pub struct ReplyContext {
+    pub uid: String,
+    pub sequence: u32,
+    pub summary: Option<String>,
+    /// `ORGANIZER` address (bare, no `mailto:`) — the REPLY recipient.
+    pub organizer: String,
+}
+
+/// Strip a leading `mailto:` (case-insensitive) from a CAL-ADDRESS.
+fn strip_mailto(addr: &str) -> &str {
+    let trimmed = addr.trim();
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("mailto:") {
+        trimmed[7..].trim()
+    } else {
+        trimmed
+    }
+}
+
+/// Read a received invite's sidecar `.ics` bytes and pull out the fields needed
+/// to build (and route) a REPLY: `UID`, `SEQUENCE`, `SUMMARY`, `ORGANIZER`.
+///
+/// This deliberately reads the raw `.ics` rather than the `event:` frontmatter
+/// so the reply echoes the exact `UID`/`SEQUENCE` the organizer sent (the
+/// frontmatter is a lossy render cache). Errors when the payload is not a
+/// received `METHOD:REQUEST` invite, or is missing a `UID`/`ORGANIZER`.
+pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
+    let text = std::str::from_utf8(bytes).context("Sidecar .ics is not valid UTF-8")?;
+    let calendar =
+        Calendar::from_str(text).map_err(|e| anyhow!("Failed to parse sidecar .ics: {}", e))?;
+
+    let method = calendar
+        .property_value("METHOD")
+        .map(|m| m.trim().to_uppercase());
+    match method.as_deref() {
+        Some("REQUEST") => {}
+        Some("REPLY") => {
+            return Err(anyhow!(
+                "This is a REPLY (an incoming RSVP), not an invitation you can respond to"
+            ))
+        }
+        Some(other) => {
+            return Err(anyhow!(
+                "Cannot RSVP to a METHOD:{} calendar item (only received REQUEST invites)",
+                other
+            ))
+        }
+        None => return Err(anyhow!("Sidecar .ics has no METHOD (not an iMIP invite)")),
+    }
+
+    let event = calendar
+        .components
+        .iter()
+        .find_map(|c| match c {
+            CalendarComponent::Event(e) => Some(e),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("Sidecar .ics has no VEVENT"))?;
+
+    let uid = event
+        .get_uid()
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow!("Invite has no UID; cannot build a matching REPLY"))?;
+    let sequence = event.get_sequence().unwrap_or(0);
+    let summary = event.get_summary().map(|s| s.to_string());
+    let organizer = event
+        .property_value("ORGANIZER")
+        .map(strip_mailto)
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow!("Invite has no ORGANIZER; cannot address the REPLY"))?;
+
+    Ok(ReplyContext {
+        uid,
+        sequence,
+        summary,
+        organizer,
+    })
+}
+
+/// Build a `METHOD:REPLY` `VCALENDAR` for an RSVP.
+///
+/// Copies `UID` + `SEQUENCE` verbatim from the source invite (`ctx`), sets a
+/// single `ATTENDEE` = the responding account's address with the chosen
+/// `PARTSTAT`, and a fresh `DTSTAMP`. `RECURRENCE-ID` is intentionally absent
+/// (v1 answers the whole series only, D6). No `RSVP` parameter on a REPLY
+/// attendee (that lives on the REQUEST). Renders to `.ics` bytes routed to the
+/// `ORGANIZER`.
+pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result<String> {
+    if attendee.trim().is_empty() {
+        return Err(anyhow!("REPLY attendee address is empty"));
+    }
+
+    let mut event = Event::new();
+    event
+        .uid(&ctx.uid)
+        .sequence(ctx.sequence)
+        .timestamp(Utc::now()); // DTSTAMP
+    if let Some(summary) = ctx.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+        event.summary(summary);
+    }
+
+    // ORGANIZER echoed back so the reply matches the request thread.
+    event.append_property(Property::new(
+        "ORGANIZER",
+        format!("mailto:{}", ctx.organizer),
+    ));
+
+    // The single ATTENDEE line is the RSVP payload: our address + PARTSTAT.
+    let mut prop = Property::new("ATTENDEE", format!("mailto:{}", attendee.trim()));
+    prop.add_parameter("PARTSTAT", rsvp.partstat());
+    event.append_property(prop);
+
+    let mut calendar = Calendar::new();
+    calendar.push(event.done());
+    calendar.append_property(Property::new("METHOD", "REPLY"));
+
+    Ok(calendar.to_string())
+}
+
 /// Convenience: resolve `--start` + (`--end` | `--duration`) into an absolute
 /// `(start, end)` UTC pair with validation.
 pub fn resolve_times(
@@ -479,6 +644,93 @@ mod tests {
         assert!(!ics.contains("SUMMARY:Plan A, B; C"));
     }
 
+    // A received Outlook-style REQUEST used as the RSVP source of truth.
+    const RECEIVED_REQUEST: &str = "\
+BEGIN:VCALENDAR\r
+PRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN\r
+VERSION:2.0\r
+METHOD:REQUEST\r
+BEGIN:VEVENT\r
+UID:040000008200E00074C5B7101A82E00800000000@outlook.com\r
+SEQUENCE:3\r
+SUMMARY:LOC Day planning\r
+DTSTART:20260720T120000Z\r
+DTEND:20260720T130000Z\r
+ORGANIZER;CN=Chair:mailto:chair@tum.de\r
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.com\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+
+    #[test]
+    fn reply_context_extracts_uid_sequence_organizer_from_sidecar() {
+        let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
+        assert_eq!(ctx.uid, "040000008200E00074C5B7101A82E00800000000@outlook.com");
+        assert_eq!(ctx.sequence, 3);
+        assert_eq!(ctx.summary.as_deref(), Some("LOC Day planning"));
+        assert_eq!(ctx.organizer, "chair@tum.de");
+    }
+
+    #[test]
+    fn reply_context_rejects_non_request_methods() {
+        let reply = RECEIVED_REQUEST.replace("METHOD:REQUEST", "METHOD:REPLY");
+        assert!(reply_context_from_ics(reply.as_bytes()).is_err());
+        let cancel = RECEIVED_REQUEST.replace("METHOD:REQUEST", "METHOD:CANCEL");
+        assert!(reply_context_from_ics(cancel.as_bytes()).is_err());
+        assert!(reply_context_from_ics(b"not a calendar").is_err());
+    }
+
+    #[test]
+    fn build_reply_ics_copies_uid_sequence_and_sets_partstat() {
+        let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
+        for (rsvp, partstat) in [
+            (Rsvp::Accepted, "ACCEPTED"),
+            (Rsvp::Tentative, "TENTATIVE"),
+            (Rsvp::Declined, "DECLINED"),
+        ] {
+            let ics = unfold(&build_reply_ics(&ctx, "me@example.com", rsvp).unwrap());
+            // METHOD:REPLY at VCALENDAR level.
+            assert!(ics.contains("METHOD:REPLY"), "ics=\n{}", ics);
+            // UID + SEQUENCE copied verbatim from the sidecar (not regenerated).
+            assert!(ics.contains("UID:040000008200E00074C5B7101A82E00800000000@outlook.com"));
+            assert!(ics.contains("SEQUENCE:3"));
+            // Fresh DTSTAMP present.
+            assert!(ics.contains("DTSTAMP:"));
+            // Exactly one ATTENDEE = our address, with the chosen PARTSTAT.
+            assert_eq!(ics.matches("ATTENDEE").count(), 1, "ics=\n{}", ics);
+            assert!(ics.contains("mailto:me@example.com"));
+            assert!(
+                ics.contains(&format!("PARTSTAT={}", partstat)),
+                "missing PARTSTAT={} in\n{}",
+                partstat,
+                ics
+            );
+            // ORGANIZER echoed so the organizer's client threads it correctly.
+            assert!(ics.contains("ORGANIZER:mailto:chair@tum.de"), "ics=\n{}", ics);
+            // Whole-series only: no per-occurrence RECURRENCE-ID (D6).
+            assert!(!ics.contains("RECURRENCE-ID"), "ics=\n{}", ics);
+            // A REPLY attendee carries no RSVP parameter (that lives on REQUEST).
+            assert!(!ics.contains("RSVP=TRUE"), "ics=\n{}", ics);
+        }
+    }
+
+    #[test]
+    fn build_reply_ics_roundtrips_through_receive_parser() {
+        let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
+        let ics = build_reply_ics(&ctx, "me@example.com", Rsvp::Accepted).unwrap();
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).expect("parses");
+        assert_eq!(parsed.method.as_deref(), Some("REPLY"));
+        assert_eq!(
+            parsed.uid.as_deref(),
+            Some("040000008200E00074C5B7101A82E00800000000@outlook.com")
+        );
+        assert_eq!(parsed.sequence, 3);
+        assert_eq!(parsed.organizer.as_deref(), Some("chair@tum.de"));
+        assert_eq!(parsed.attendees.len(), 1);
+        assert_eq!(parsed.attendees[0].address, "me@example.com");
+        assert_eq!(parsed.attendees[0].status, "accepted");
+    }
+
     #[test]
     fn build_invite_ics_roundtrips_through_receive_parser() {
         // The sent invite must parse back through the #0027 receive path.
@@ -497,3 +749,4 @@ mod tests {
         assert_eq!(parsed.attendees[0].address, "a@example.com");
     }
 }
+
