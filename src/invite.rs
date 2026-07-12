@@ -350,6 +350,18 @@ pub struct ReplyContext {
     pub summary: Option<String>,
     /// `ORGANIZER` address (bare, no `mailto:`) — the REPLY recipient.
     pub organizer: String,
+    /// The invite's `DTSTART` property, cloned verbatim (value + params such as
+    /// `TZID`/`VALUE=DATE`) so the REPLY echoes it exactly. RFC 5546 marks
+    /// `DTSTART` optional in a REPLY, but Exchange/Outlook reject a REPLY that
+    /// omits it ("Invalid ICAL element: DTSTART"), so we always re-emit it when
+    /// the source invite carried one.
+    pub dtstart: Option<Property>,
+    /// The invite's `DTEND` property, cloned verbatim (mutually exclusive with
+    /// `DURATION` in a well-formed invite).
+    pub dtend: Option<Property>,
+    /// The invite's `DURATION` property, cloned verbatim (used by invites that
+    /// express the span as `DTSTART` + `DURATION` instead of `DTEND`).
+    pub duration: Option<Property>,
 }
 
 /// Strip a leading `mailto:` (case-insensitive) from a CAL-ADDRESS.
@@ -416,22 +428,36 @@ pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow!("Invite has no ORGANIZER; cannot address the REPLY"))?;
 
+    // Echo the invite's DTSTART/DTEND (or DURATION) into the REPLY. We clone the
+    // parsed `Property` verbatim so its value AND parameters (`TZID`,
+    // `VALUE=DATE`, ...) survive unchanged — the highest-fidelity form
+    // preservation the crate allows without re-serializing datetimes ourselves.
+    let dtstart = event.properties().get("DTSTART").cloned();
+    let dtend = event.properties().get("DTEND").cloned();
+    let duration = event.properties().get("DURATION").cloned();
+
     Ok(ReplyContext {
         uid,
         sequence,
         summary,
         organizer,
+        dtstart,
+        dtend,
+        duration,
     })
 }
 
 /// Build a `METHOD:REPLY` `VCALENDAR` for an RSVP.
 ///
-/// Copies `UID` + `SEQUENCE` verbatim from the source invite (`ctx`), sets a
-/// single `ATTENDEE` = the responding account's address with the chosen
-/// `PARTSTAT`, and a fresh `DTSTAMP`. `RECURRENCE-ID` is intentionally absent
-/// (v1 answers the whole series only, D6). No `RSVP` parameter on a REPLY
-/// attendee (that lives on the REQUEST). Renders to `.ics` bytes routed to the
-/// `ORGANIZER`.
+/// Copies `UID` + `SEQUENCE` verbatim from the source invite (`ctx`), echoes
+/// the invite's `DTSTART` (+`DTEND`|`DURATION`) verbatim, sets a single
+/// `ATTENDEE` = the responding account's address with the chosen `PARTSTAT`,
+/// and a fresh `DTSTAMP`. RFC 5546 marks `DTSTART` optional in a REPLY, but
+/// Exchange/Outlook reject a REPLY without it ("Invalid ICAL element:
+/// DTSTART"); echoing the invite's value mirrors what Outlook itself sends.
+/// `RECURRENCE-ID` is intentionally absent (v1 answers the whole series only,
+/// D6). No `RSVP` parameter on a REPLY attendee (that lives on the REQUEST).
+/// Renders to `.ics` bytes routed to the `ORGANIZER`.
 pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result<String> {
     if attendee.trim().is_empty() {
         return Err(anyhow!("REPLY attendee address is empty"));
@@ -451,6 +477,29 @@ pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result
         "ORGANIZER",
         format!("mailto:{}", ctx.organizer),
     ));
+
+    // DTSTART (+DTEND | DURATION) echoed verbatim from the invite. RFC 5546
+    // permits omitting DTSTART in a REPLY, but Exchange/Outlook reject such a
+    // REPLY ("Invalid ICAL element: DTSTART"); Outlook itself echoes the
+    // invite's values back, so we mirror that. When the invite genuinely had no
+    // DTSTART we build the REPLY without it (defensive) and warn.
+    match ctx.dtstart.clone() {
+        Some(dtstart) => {
+            event.append_property(dtstart);
+            if let Some(dtend) = ctx.dtend.clone() {
+                event.append_property(dtend);
+            } else if let Some(duration) = ctx.duration.clone() {
+                event.append_property(duration);
+            }
+        }
+        None => {
+            log::warn!(
+                "Building REPLY for UID {} without DTSTART (source invite had none); \
+                 Exchange/Outlook may reject it",
+                ctx.uid
+            );
+        }
+    }
 
     // The single ATTENDEE line is the RSVP payload: our address + PARTSTAT.
     let mut prop = Property::new("ATTENDEE", format!("mailto:{}", attendee.trim()));
@@ -662,6 +711,41 @@ END:VEVENT\r
 END:VCALENDAR\r
 ";
 
+    // A TZID-based invite (Outlook wall-clock + named zone).
+    const RECEIVED_REQUEST_TZID: &str = "\
+BEGIN:VCALENDAR\r
+PRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN\r
+VERSION:2.0\r
+METHOD:REQUEST\r
+BEGIN:VEVENT\r
+UID:tzid-uid@outlook.com\r
+SEQUENCE:1\r
+SUMMARY:Zoned meeting\r
+DTSTART;TZID=Europe/Berlin:20260720T140000\r
+DTEND;TZID=Europe/Berlin:20260720T150000\r
+ORGANIZER;CN=Chair:mailto:chair@tum.de\r
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.com\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+
+    // A date-only (all-day) invite: DTSTART/DTEND carry VALUE=DATE.
+    const RECEIVED_REQUEST_DATE_ONLY: &str = "\
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+METHOD:REQUEST\r
+BEGIN:VEVENT\r
+UID:allday-uid@example.com\r
+SEQUENCE:0\r
+SUMMARY:All day\r
+DTSTART;VALUE=DATE:20260720\r
+DTEND;VALUE=DATE:20260721\r
+ORGANIZER:mailto:chair@tum.de\r
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.com\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+
     #[test]
     fn reply_context_extracts_uid_sequence_organizer_from_sidecar() {
         let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
@@ -669,6 +753,10 @@ END:VCALENDAR\r
         assert_eq!(ctx.sequence, 3);
         assert_eq!(ctx.summary.as_deref(), Some("LOC Day planning"));
         assert_eq!(ctx.organizer, "chair@tum.de");
+        // DTSTART/DTEND carried through verbatim (UTC `Z` form).
+        assert_eq!(ctx.dtstart.as_ref().map(|p| p.value()), Some("20260720T120000Z"));
+        assert_eq!(ctx.dtend.as_ref().map(|p| p.value()), Some("20260720T130000Z"));
+        assert!(ctx.duration.is_none());
     }
 
     #[test]
@@ -711,7 +799,49 @@ END:VCALENDAR\r
             assert!(!ics.contains("RECURRENCE-ID"), "ics=\n{}", ics);
             // A REPLY attendee carries no RSVP parameter (that lives on REQUEST).
             assert!(!ics.contains("RSVP=TRUE"), "ics=\n{}", ics);
+            // DTSTART/DTEND echoed verbatim so Exchange/Outlook accept the REPLY
+            // ("Invalid ICAL element: DTSTART" otherwise). UTC `Z` form here.
+            assert!(ics.contains("DTSTART:20260720T120000Z"), "ics=\n{}", ics);
+            assert!(ics.contains("DTEND:20260720T130000Z"), "ics=\n{}", ics);
         }
+    }
+
+    #[test]
+    fn build_reply_ics_echoes_tzid_dtstart_dtend_verbatim() {
+        let ctx = reply_context_from_ics(RECEIVED_REQUEST_TZID.as_bytes()).unwrap();
+        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", Rsvp::Accepted).unwrap());
+        // TZID param and wall-clock value preserved exactly (no UTC rewrite).
+        assert!(
+            ics.contains("DTSTART;TZID=Europe/Berlin:20260720T140000"),
+            "ics=\n{}",
+            ics
+        );
+        assert!(
+            ics.contains("DTEND;TZID=Europe/Berlin:20260720T150000"),
+            "ics=\n{}",
+            ics
+        );
+    }
+
+    #[test]
+    fn build_reply_ics_echoes_date_only_dtstart_dtend_verbatim() {
+        let ctx = reply_context_from_ics(RECEIVED_REQUEST_DATE_ONLY.as_bytes()).unwrap();
+        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", Rsvp::Declined).unwrap());
+        // VALUE=DATE param + date-only value preserved verbatim.
+        assert!(ics.contains("DTSTART;VALUE=DATE:20260720"), "ics=\n{}", ics);
+        assert!(ics.contains("DTEND;VALUE=DATE:20260721"), "ics=\n{}", ics);
+    }
+
+    #[test]
+    fn build_reply_ics_omits_dtstart_when_invite_had_none() {
+        // Defensive: an invite with no DTSTART yields a REPLY without one
+        // (rather than failing). DTEND alone is dropped too (needs a start).
+        let no_start = RECEIVED_REQUEST.replace("DTSTART:20260720T120000Z\r\n", "");
+        let ctx = reply_context_from_ics(no_start.as_bytes()).unwrap();
+        assert!(ctx.dtstart.is_none());
+        let ics = unfold(&build_reply_ics(&ctx, "me@example.com", Rsvp::Accepted).unwrap());
+        assert!(!ics.contains("DTSTART"), "ics=\n{}", ics);
+        assert!(!ics.contains("DTEND"), "ics=\n{}", ics);
     }
 
     #[test]
@@ -729,6 +859,9 @@ END:VCALENDAR\r
         assert_eq!(parsed.attendees.len(), 1);
         assert_eq!(parsed.attendees[0].address, "me@example.com");
         assert_eq!(parsed.attendees[0].status, "accepted");
+        // DTSTART/DTEND survive the round-trip (needed for Exchange interop).
+        assert_eq!(parsed.start.as_deref(), Some("2026-07-20T12:00:00Z"));
+        assert_eq!(parsed.end.as_deref(), Some("2026-07-20T13:00:00Z"));
     }
 
     #[test]
@@ -749,4 +882,3 @@ END:VCALENDAR\r
         assert_eq!(parsed.attendees[0].address, "a@example.com");
     }
 }
-

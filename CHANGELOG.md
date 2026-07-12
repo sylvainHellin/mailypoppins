@@ -109,6 +109,18 @@ All notable changes to this project are documented in this file.
   status hint outside the Drafts mailbox, and drafts with missing/
   malformed frontmatter fail with an error status and no data loss.
 
+### Fixed
+- **iMIP RSVP replies now include `DTSTART`/`DTEND`, fixing Exchange/Outlook
+  rejection.** A `METHOD:REPLY` built by `mp invite accept|tentative|decline`
+  previously omitted the event's start/end times. RFC 5546 marks `DTSTART`
+  optional in a REPLY, but Exchange/Outlook reject one that lacks it (the
+  reply is delivered as an unusable `not supported calendar message.ics` with
+  "Invalid ICAL element: DTSTART"). The REPLY now echoes the source invite's
+  `DTSTART` and `DTEND` (or `DURATION`) verbatim — value and parameters such
+  as `TZID` or `VALUE=DATE` preserved exactly, matching what Outlook itself
+  sends. If the invite genuinely carried no `DTSTART`, the reply is still
+  built without one (and a warning logged) rather than failing. Ticket #0029.
+
 ### Changed
 - **CLI binary renamed `email` -> `mp`.** The installed binary is now
   `mp` (`cargo install --path .`); Homebrew installs it as `mp` too. All
