@@ -34,6 +34,8 @@ fn make_fetched_email(subject: &str, message_id: Option<&str>) -> FetchedEmail {
         message_id: message_id.map(|s| s.to_string()),
         attachments: Vec::new(),
         is_read: false,
+        calendar_ics: None,
+        event: None,
     }
 }
 

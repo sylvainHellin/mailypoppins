@@ -167,6 +167,12 @@ pub(crate) fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     idx
 }
 
+/// Filename of the iMIP calendar sidecar saved in each invite's attachments
+/// directory. A fixed name (rather than the sender's, which is often just
+/// `invite.ics`/`meeting.ics` anyway) keeps lookup deterministic for later
+/// RSVP/reconciliation tickets and avoids collisions with real attachments.
+pub const CALENDAR_SIDECAR_NAME: &str = "invite.ics";
+
 #[derive(Debug, Clone)]
 pub struct FetchedEmail {
     pub from: String,
@@ -180,6 +186,13 @@ pub struct FetchedEmail {
     pub message_id: Option<String>,
     pub attachments: Vec<AttachmentData>,
     pub is_read: bool,
+    /// Raw `text/calendar` payload (an iMIP invite), saved as a sidecar `.ics`
+    /// next to the email. `None` when the email carries no calendar part.
+    pub calendar_ics: Option<Vec<u8>>,
+    /// Parsed `event:` frontmatter block, populated best-effort from
+    /// `calendar_ics`. `None` when there is no calendar part or it was
+    /// unparseable (the sidecar is still saved in the latter case).
+    pub event: Option<crate::types::EventFrontmatter>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,8 +263,19 @@ pub fn extract_body_text(parsed: &mailparse::ParsedMail) -> (String, Option<Stri
 
 /// Check whether a MIME part should be treated as an attachment.
 /// Matches: explicit `Content-Disposition: attachment`, inline images,
-/// and inline non-text parts that carry a filename (e.g. inline PDFs).
+/// inline non-text parts that carry a filename (e.g. inline PDFs), and any
+/// `.ics`/`text/calendar` part (so a non-invite calendar export is preserved as
+/// a regular attachment; the single iMIP invite part is excluded separately by
+/// the caller, which parses payloads to find it).
 fn is_attachment_part(part: &mailparse::ParsedMail) -> bool {
+    // A calendar part is only special when it is the actual iMIP invite lifted
+    // to the sidecar; that exclusion happens in `collect_attachments` (it needs
+    // the decoded payload). Every other `.ics`/`text/calendar` part is preserved
+    // as a regular attachment (keeping its original filename, or a synthesized
+    // `inline-N.ics` when it has none) so no calendar bytes are ever dropped.
+    if is_calendar_part(part) {
+        return true;
+    }
     let disposition = part.get_content_disposition();
     if disposition.disposition == mailparse::DispositionType::Attachment {
         return true;
@@ -277,11 +301,17 @@ fn is_attachment_part(part: &mailparse::ParsedMail) -> bool {
 }
 
 pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
+    let invite = extract_calendar_ics(parsed);
+    let mut skip = SkipInvite::new(invite.as_deref());
+    has_attachments_inner(parsed, &mut skip)
+}
+
+fn has_attachments_inner(parsed: &mailparse::ParsedMail, skip: &mut SkipInvite) -> bool {
     for sub in &parsed.subparts {
-        if is_attachment_part(sub) {
+        if is_attachment_part(sub) && !skip.is_invite(sub) {
             return true;
         }
-        if has_attachments(sub) {
+        if has_attachments_inner(sub, skip) {
             return true;
         }
     }
@@ -289,19 +319,58 @@ pub fn has_attachments(parsed: &mailparse::ParsedMail) -> bool {
 }
 
 /// Extract all attachments from a parsed email, recursing through MIME subparts.
+/// The single iMIP invite part (lifted to the `.ics` sidecar) is excluded so it
+/// is not also stored as a regular attachment; every other `.ics`/calendar part
+/// is preserved.
 pub fn extract_attachments(parsed: &mailparse::ParsedMail) -> Vec<AttachmentData> {
     let mut attachments = Vec::new();
     let mut counter = 0usize;
-    collect_attachments(parsed, &mut attachments, &mut counter);
+    let invite = extract_calendar_ics(parsed);
+    let mut skip = SkipInvite::new(invite.as_deref());
+    collect_attachments(parsed, &mut attachments, &mut counter, &mut skip);
     attachments
+}
+
+/// Tracks the single iMIP invite part to exclude from the attachment list. The
+/// invite is identified by its decoded payload bytes; only the FIRST calendar
+/// part matching those bytes is skipped (matching `extract_calendar_ics`, which
+/// returns the first invite in the same traversal order).
+struct SkipInvite<'a> {
+    invite_bytes: Option<&'a [u8]>,
+    skipped: bool,
+}
+
+impl<'a> SkipInvite<'a> {
+    fn new(invite_bytes: Option<&'a [u8]>) -> Self {
+        SkipInvite {
+            invite_bytes,
+            skipped: false,
+        }
+    }
+
+    /// Returns true (once) for the part whose decoded body is the iMIP invite.
+    fn is_invite(&mut self, part: &mailparse::ParsedMail) -> bool {
+        if self.skipped {
+            return false;
+        }
+        let Some(bytes) = self.invite_bytes else {
+            return false;
+        };
+        if is_calendar_part(part) && part.get_body_raw().ok().as_deref() == Some(bytes) {
+            self.skipped = true;
+            return true;
+        }
+        false
+    }
 }
 
 fn collect_attachments(
     parsed: &mailparse::ParsedMail,
     attachments: &mut Vec<AttachmentData>,
     counter: &mut usize,
+    skip: &mut SkipInvite,
 ) {
-    if is_attachment_part(parsed) {
+    if is_attachment_part(parsed) && !skip.is_invite(parsed) {
         let disposition = parsed.get_content_disposition();
         let filename = disposition
             .params
@@ -332,8 +401,48 @@ fn collect_attachments(
         }
     }
     for sub in &parsed.subparts {
-        collect_attachments(sub, attachments, counter);
+        collect_attachments(sub, attachments, counter, skip);
     }
+}
+
+/// Recursively find the first calendar part that is an actual iMIP invite --
+/// i.e. its decoded payload parses as a `VCALENDAR` carrying a `METHOD` property
+/// (REQUEST/REPLY/CANCEL/...) -- and return its raw decoded bytes. Matches both
+/// inline `text/calendar` parts and `.ics` attachments. A calendar part without
+/// a `METHOD` (e.g. a plain `.ics` export) is NOT an invite and is left to the
+/// regular attachment path with its original filename.
+pub fn extract_calendar_ics(parsed: &mailparse::ParsedMail) -> Option<Vec<u8>> {
+    if is_calendar_part(parsed) {
+        if let Ok(raw) = parsed.get_body_raw() {
+            if !raw.is_empty() && crate::calendar::is_imip_invite(&raw) {
+                return Some(raw);
+            }
+        }
+    }
+    for sub in &parsed.subparts {
+        if let Some(ics) = extract_calendar_ics(sub) {
+            return Some(ics);
+        }
+    }
+    None
+}
+
+/// Whether a MIME part is an iMIP calendar payload (inline or `.ics` attachment).
+fn is_calendar_part(part: &mailparse::ParsedMail) -> bool {
+    if crate::calendar::is_calendar_mimetype(&part.ctype.mimetype) {
+        return true;
+    }
+    // Some senders attach the invite as application/octet-stream named *.ics.
+    let filename = part
+        .get_content_disposition()
+        .params
+        .get("filename")
+        .or_else(|| part.ctype.params.get("name"))
+        .cloned();
+    filename
+        .as_deref()
+        .map(crate::calendar::is_ics_filename)
+        .unwrap_or(false)
 }
 
 /// Map a MIME type to a reasonable file extension.
@@ -345,6 +454,7 @@ fn mime_ext_for(mime: &str) -> &str {
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
         "image/bmp" => "bmp",
+        "text/calendar" | "application/ics" => "ics",
         _ => "bin",
     }
 }
@@ -518,6 +628,12 @@ pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail>
     let (body_text, html_body) = extract_body_text(&parsed);
     let has_att = has_attachments(&parsed);
     let att_data = extract_attachments(&parsed);
+    let calendar_ics = extract_calendar_ics(&parsed);
+    // Best-effort: a malformed invite still saves the sidecar, just no event block.
+    let event = calendar_ics
+        .as_deref()
+        .and_then(crate::calendar::parse_ics)
+        .map(|ev| crate::calendar::event_frontmatter(&ev));
 
     Some(FetchedEmail {
         from,
@@ -531,6 +647,8 @@ pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail>
         message_id,
         attachments: att_data,
         is_read: false,
+        calendar_ics,
+        event,
     })
 }
 
@@ -754,7 +872,25 @@ pub fn save_fetched_emails_with_known_ids(
             attachments: None, // filled below after saving attachment files
             read: email.is_read,
             fetched_at: fetched_at.clone(),
+            event: email.event.clone(),
         };
+
+        // Save the iMIP calendar sidecar `.ics` (source of truth for
+        // UID/SEQUENCE), colocated with attachments so archive/move keeps it
+        // next to the email (ticket #0006). Best-effort: a write error must not
+        // fail the email save.
+        if let Some(ref ics) = email.calendar_ics {
+            let att_dir = attachments_dir_for(&dest);
+            if let Err(e) = fs::create_dir_all(&att_dir)
+                .and_then(|_| fs::write(att_dir.join(CALENDAR_SIDECAR_NAME), ics))
+            {
+                log::warn!(
+                    "failed to save calendar sidecar for {}: {}",
+                    dest.display(),
+                    e
+                );
+            }
+        }
 
         // Save attachment files and record filenames
         let mut saved_filenames: Vec<String> = Vec::new();
@@ -1777,6 +1913,8 @@ mod tests {
             message_id: Some("<test1@example.com>".to_string()),
             attachments: vec![],
             is_read: false,
+            calendar_ics: None,
+            event: None,
         }];
 
         let (saved, skipped) = save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
@@ -1811,6 +1949,8 @@ mod tests {
             message_id: Some("<dup@example.com>".to_string()),
             attachments: vec![],
             is_read: false,
+            calendar_ics: None,
+            event: None,
         };
 
         // Save once
@@ -1838,6 +1978,8 @@ mod tests {
             message_id: Some("<html@example.com>".to_string()),
             attachments: vec![],
             is_read: false,
+            calendar_ics: None,
+            event: None,
         }];
 
         save_fetched_emails(&emails, dir.path(), "inbox").unwrap();
@@ -1886,6 +2028,8 @@ mod tests {
                 },
             ],
             is_read: false,
+            calendar_ics: None,
+            event: None,
         }];
 
         save_fetched_emails(&emails, &inbox_dir, "inbox").unwrap();

@@ -953,6 +953,7 @@ mod tests {
                 sent_at: None,
                 sent_via: None,
                 message_id: None,
+                event: None,
             },
             body_markdown: body.to_string(),
         }

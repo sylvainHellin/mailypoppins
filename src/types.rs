@@ -42,6 +42,50 @@ impl std::fmt::Display for EmailStatus {
     }
 }
 
+/// A single attendee within an `event:` frontmatter block.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct EventAttendee {
+    pub address: String,
+    /// needs-action | accepted | tentative | declined
+    pub status: String,
+}
+
+/// The nested `event:` frontmatter block populated when an email carries an
+/// iMIP calendar invitation. The sidecar `.ics` is the source of truth; this
+/// block is a render/query cache (see `docs/plans/calendar-invites.md`, D2).
+///
+/// Every field is optional or defaulted so that emails without an `event:`
+/// block (the vast majority) round-trip unchanged.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct EventFrontmatter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// REQUEST | REPLY | CANCEL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub sequence: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// RFC3339 with offset where the source carried a resolvable timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organizer: Option<String>,
+    /// Own RSVP status: needs-action | accepted | tentative | declined.
+    #[serde(default)]
+    pub rsvp: String,
+    /// Human-readable RRULE summary, empty when the event does not recur (D6).
+    #[serde(default)]
+    pub recurrence: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attendees: Vec<EventAttendee>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EmailFrontmatter {
     #[serde(default)]
@@ -64,6 +108,8 @@ pub struct EmailFrontmatter {
     pub sent_via: Option<String>,
     #[serde(default)]
     pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<EventFrontmatter>,
 }
 
 #[derive(Debug)]
@@ -88,6 +134,8 @@ pub struct InboxFrontmatter {
     pub attachments: Option<Vec<String>>,
     #[serde(default)]
     pub read: Option<bool>,
+    #[serde(default)]
+    pub event: Option<EventFrontmatter>,
 }
 
 /// Frontmatter used when saving fetched emails to disk.
@@ -108,6 +156,8 @@ pub struct SaveFrontmatter {
     pub attachments: Option<Vec<String>>,
     pub read: bool,
     pub fetched_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<EventFrontmatter>,
 }
 
 #[cfg(test)]
@@ -152,6 +202,7 @@ mod tests {
             sent_at: None,
             sent_via: None,
             message_id: Some("<test@example.com>".to_string()),
+            event: None,
         };
         let yaml = serde_yaml::to_string(&fm).unwrap();
         let back: EmailFrontmatter = serde_yaml::from_str(&yaml).unwrap();
@@ -250,6 +301,7 @@ subject: "Hi"
             attachments: None,
             read: false,
             fetched_at: "2024-01-01T12:00:00Z".to_string(),
+            event: None,
         };
         let yaml = serde_yaml::to_string(&fm).unwrap();
         assert!(yaml.contains("read: false"));

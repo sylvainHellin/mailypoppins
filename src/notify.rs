@@ -306,6 +306,8 @@ mod tests {
             message_id: mid.map(|s| s.to_string()),
             attachments: Vec::new(),
             is_read: false,
+            calendar_ics: None,
+            event: None,
         }
     }
 

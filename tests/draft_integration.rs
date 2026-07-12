@@ -573,6 +573,7 @@ fn test_validate_draft_missing_attachment_warning() {
             sent_at: None,
             sent_via: None,
             message_id: None,
+            event: None,
         },
         body_markdown: "Body".to_string(),
     };
@@ -602,6 +603,7 @@ fn test_validate_draft_existing_attachment_no_warning() {
             sent_at: None,
             sent_via: None,
             message_id: None,
+            event: None,
         },
         body_markdown: "Body".to_string(),
     };

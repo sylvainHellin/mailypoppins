@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Receive calendar invitations (iMIP): detect, save, and parse
+  `text/calendar` parts.** Incoming iMIP invites (Outlook, Google, Apple)
+  were previously silently dropped by the MIME part traversal. Fetching
+  now detects any `text/calendar` part (inline or `.ics` attachment, on
+  both the IMAP and Graph paths), saves the raw payload as a sidecar
+  `invite.ics` in the email's `_attachments/` directory (source of truth
+  for `UID`/`SEQUENCE`), and parses the first `VEVENT` into a nested
+  `event:` frontmatter block (`uid`, `method`, `sequence`, `summary`,
+  timezone-aware `start`/`end` as RFC3339, `location`, `organizer`,
+  `attendees` with per-attendee `status`, own `rsvp` status initialized
+  to `needs-action`, and a human-readable `recurrence` summary for
+  `RRULE`). `REQUEST`/`REPLY`/`CANCEL` methods are all detected and
+  stored (semantic handling of REPLY/CANCEL is deferred). Parsing is
+  best-effort: a malformed `.ics` still saves the sidecar and the email,
+  just without an `event:` block. Emails without a calendar part are
+  stored exactly as before. Ticket #0027.
 - **TUI: edit a draft's recipients/subject with the fuzzy compose wizard
   (`c`).** In the Drafts mailbox, press `c` on a draft to reopen the
   compose wizard pre-seeded from the draft's existing `to`/`cc`/`bcc`/

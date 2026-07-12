@@ -314,6 +314,7 @@ impl GraphClient {
                     Ok(attachments) => email.attachments = attachments,
                     Err(e) => warn!("Failed to fetch attachments for {}: {}", msg.id, e),
                 }
+                populate_calendar_from_attachments(&mut email);
             }
 
             emails.push(email);
@@ -435,6 +436,33 @@ fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
         message_id,
         attachments: Vec::new(), // filled by caller if has_attachments
         is_read: msg.is_read,
+        calendar_ics: None, // filled by caller once attachments are fetched
+        event: None,
+    }
+}
+
+/// Detect an iMIP calendar payload among fetched Graph attachments and populate
+/// `calendar_ics` + `event` on the email. The Graph API delivers `text/calendar`
+/// invites as a named `.ics` attachment, so both fetch paths converge on the
+/// same `parse.rs`/`calendar.rs` machinery. Best-effort: parse failures still
+/// leave the raw sidecar bytes so the email save writes the `.ics`.
+fn populate_calendar_from_attachments(email: &mut FetchedEmail) {
+    // Lift only the FIRST `.ics` attachment that is an actual iMIP invite (its
+    // payload parses as a VCALENDAR carrying a METHOD property). Every other
+    // `.ics` (e.g. a plain calendar export the user shared) stays a regular
+    // attachment with its original filename -- matching the IMAP path.
+    let invite_idx = email
+        .attachments
+        .iter()
+        .position(|att| {
+            crate::calendar::is_ics_filename(&att.filename)
+                && crate::calendar::is_imip_invite(&att.content)
+        });
+    if let Some(idx) = invite_idx {
+        let ics = email.attachments.remove(idx).content;
+        email.event = crate::calendar::parse_ics(&ics)
+            .map(|ev| crate::calendar::event_frontmatter(&ev));
+        email.calendar_ics = Some(ics);
     }
 }
 
@@ -1281,6 +1309,7 @@ impl GraphClient {
                     email.attachments = att;
                 }
             }
+            populate_calendar_from_attachments(&mut email);
             emails.push(email);
         }
 
@@ -1341,6 +1370,7 @@ impl GraphClient {
                     email.attachments = att;
                 }
             }
+            populate_calendar_from_attachments(&mut email);
             emails.push(email);
         }
 
@@ -1416,6 +1446,61 @@ fn parse_search_to_graph_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn att(filename: &str, content: &str) -> crate::parse::AttachmentData {
+        crate::parse::AttachmentData {
+            filename: filename.to_string(),
+            content: content.as_bytes().to_vec(),
+            content_id: None,
+        }
+    }
+
+    fn email_with(attachments: Vec<crate::parse::AttachmentData>) -> FetchedEmail {
+        FetchedEmail {
+            from: "a@b.com".into(),
+            to: "me@x.com".into(),
+            cc: None,
+            subject: "s".into(),
+            date: "d".into(),
+            body_text: String::new(),
+            html_body: None,
+            has_attachments: true,
+            message_id: None,
+            attachments,
+            is_read: false,
+            calendar_ics: None,
+            event: None,
+        }
+    }
+
+    const INVITE_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:graph-invite-1\r\nSUMMARY:Sync\r\nDTSTART:20260720T120000Z\r\nDTEND:20260720T130000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const EXPORT_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:graph-export-1\r\nSUMMARY:Dentist\r\nDTSTART:20260801T090000Z\r\nDTEND:20260801T093000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn graph_lifts_invite_and_keeps_shared_ics() {
+        let mut email = email_with(vec![
+            att("invite.ics", INVITE_ICS),
+            att("my-calendar.ics", EXPORT_ICS),
+        ]);
+        populate_calendar_from_attachments(&mut email);
+        // Invite lifted to sidecar + event block.
+        assert_eq!(email.calendar_ics.as_deref(), Some(INVITE_ICS.as_bytes()));
+        assert!(email.event.is_some());
+        // The non-invite export survives as a regular attachment, filename kept.
+        assert_eq!(email.attachments.len(), 1);
+        assert_eq!(email.attachments[0].filename, "my-calendar.ics");
+        assert_eq!(email.attachments[0].content, EXPORT_ICS.as_bytes());
+    }
+
+    #[test]
+    fn graph_non_imip_ics_export_stays_a_plain_attachment() {
+        let mut email = email_with(vec![att("schedule.ics", EXPORT_ICS)]);
+        populate_calendar_from_attachments(&mut email);
+        assert!(email.calendar_ics.is_none(), "no sidecar for a plain export");
+        assert!(email.event.is_none());
+        assert_eq!(email.attachments.len(), 1);
+        assert_eq!(email.attachments[0].filename, "schedule.ics");
+    }
 
     #[test]
     fn test_iso_to_rfc2822() {
