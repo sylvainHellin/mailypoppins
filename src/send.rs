@@ -544,11 +544,69 @@ pub fn split_addresses(s: &str) -> Vec<String> {
     parts
 }
 
+/// Build the `multipart/alternative` for an iMIP invite: `text/plain`,
+/// `text/html`, and the inline `text/calendar; method=REQUEST; charset=UTF-8`
+/// part carrying the `VEVENT`. This inline calendar part is the contract
+/// (`docs/plans/calendar-invites.md`, §2) — Outlook and Gmail render it as an
+/// actionable Accept / Tentative / Decline invite.
+fn build_invite_alternative(plain: &str, html: String, ics: &str) -> MultiPart {
+    let calendar_ct: ContentType = "text/calendar; method=REQUEST; charset=UTF-8"
+        .parse()
+        .expect("static calendar content-type");
+    MultiPart::alternative()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(plain.to_string()),
+        )
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(html),
+        )
+        .singlepart(
+            SinglePart::builder()
+                .header(calendar_ct)
+                .body(ics.to_string()),
+        )
+}
+
+/// Build the optional `application/ics; name="invite.ics"` attachment carrying
+/// the same `.ics` bytes as the inline part. Optional hardening (design §2):
+/// ship it in v1, drop it if live testing shows duplicate rendering.
+fn build_ics_attachment(ics: &str) -> SinglePart {
+    let ct: ContentType = "application/ics; name=\"invite.ics\""
+        .parse()
+        .expect("static ics attachment content-type");
+    Attachment::new("invite.ics".to_string()).body(ics.to_string(), ct)
+}
+
+/// Assemble the full iMIP invite body:
+///
+/// ```text
+/// multipart/mixed
+/// ├── multipart/alternative
+/// │   ├── text/plain
+/// │   ├── text/html
+/// │   └── text/calendar; method=REQUEST; charset=UTF-8   (the contract)
+/// └── application/ics; name="invite.ics"                 (optional hardening)
+/// ```
+///
+/// Shared by the live send path and the round-trip integration test so both
+/// exercise the identical MIME shape. File attachments (if any) are appended by
+/// the caller after this base.
+pub fn build_invite_mime_body(plain: &str, html: String, ics: &str) -> MultiPart {
+    MultiPart::mixed()
+        .multipart(build_invite_alternative(plain, html, ics))
+        .singlepart(build_ics_attachment(ics))
+}
+
 pub async fn send_email(
     draft: &EmailDraft,
     smtp_config: &SmtpConfig,
     email_config: &EmailSettings,
     signature: Option<&str>,
+    invite_ics: Option<&str>,
 ) -> Result<(SendResult, Vec<u8>, Option<String>)> {
     // Check status
     if draft.frontmatter.status != EmailStatus::Approved {
@@ -667,7 +725,7 @@ pub async fn send_email(
         quoted_html.as_deref(),
     );
 
-    // Build the text/html alternative part
+    // Build the plain/html alternative part (non-invite path).
     let body_multipart = MultiPart::alternative()
         .singlepart(
             SinglePart::builder()
@@ -677,11 +735,35 @@ pub async fn send_email(
         .singlepart(
             SinglePart::builder()
                 .header(ContentType::TEXT_HTML)
-                .body(body_html),
+                .body(body_html.clone()),
         );
 
     // Build message with or without attachments
-    let message = if let Some(attachments) = &draft.frontmatter.attachments {
+    let message = if let Some(ics) = invite_ics {
+        // Invite path: multipart/mixed [ alternative(plain, html, calendar),
+        // application/ics ]; regular file attachments (if any) follow.
+        let mut mixed = build_invite_mime_body(&draft.body_markdown, body_html, ics);
+        if let Some(attachments) = &draft.frontmatter.attachments {
+            for attachment_path in attachments {
+                let expanded = shellexpand::tilde(attachment_path);
+                let path = Path::new(expanded.as_ref());
+                let file_content = fs::read(path)
+                    .with_context(|| format!("Failed to read attachment: {}", attachment_path))?;
+                let filename = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "attachment".to_string());
+                let content_type = mime_guess::from_path(path)
+                    .first_or_octet_stream()
+                    .to_string();
+                let content_type_parsed = content_type.parse().unwrap_or_else(|_| {
+                    "application/octet-stream".parse().expect("static MIME type")
+                });
+                mixed = mixed.singlepart(Attachment::new(filename).body(file_content, content_type_parsed));
+            }
+        }
+        builder.multipart(mixed).context("Failed to build invite message")?
+    } else if let Some(attachments) = &draft.frontmatter.attachments {
         if !attachments.is_empty() {
             let mut mixed = MultiPart::mixed().multipart(body_multipart);
 

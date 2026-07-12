@@ -434,3 +434,97 @@ fn plain_multipart_email_is_unchanged() {
     assert!(fm.event.is_none());
     assert!(fm.attachments.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Send-side round-trip (ticket #0028)
+//
+// Build a METHOD:REQUEST invite the way `mp send --invite` does, assemble the
+// exact iMIP MIME tree via the shared `build_invite_mime_body`, then feed the
+// formatted bytes back through the #0027 receive path. This proves the sent
+// invite is picked up as an event (frontmatter + sidecar) -- the anchor #0030
+// reconciliation relies on.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sent_invite_roundtrips_through_receive_parser() {
+    use chrono::{TimeZone, Utc};
+    use email::invite::{build_invite_ics, generate_uid, InviteSpec};
+    use email::send::build_invite_mime_body;
+    use lettre::message::Message;
+
+    let organizer = "chair@tum.de";
+    let uid = generate_uid(organizer);
+    let spec = InviteSpec {
+        uid: uid.clone(),
+        organizer: organizer.to_string(),
+        attendees: vec!["a@example.com".to_string(), "b@example.com".to_string()],
+        // Text that exercises RFC 5545 escaping + folding across the wire.
+        summary: "LOC Day planning, part 2; final".to_string(),
+        start: Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
+        end: Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap(),
+        location: Some("Room 4.12; TUM".to_string()),
+        description: Some("Agenda:\n- item one\n- item two".to_string()),
+    };
+    let ics = build_invite_ics(&spec).unwrap();
+
+    // Assemble the iMIP MIME message (same builder as the live send path).
+    let body = build_invite_mime_body(
+        "You are invited.",
+        "<p>You are invited.</p>".to_string(),
+        &ics,
+    );
+    let message: Message = Message::builder()
+        .from("Chair <chair@tum.de>".parse().unwrap())
+        .to("a@example.com".parse().unwrap())
+        .cc("b@example.com".parse().unwrap())
+        .subject(&spec.summary)
+        .message_id(Some("<sent-invite-1@tum.de>".to_string()))
+        .multipart(body)
+        .unwrap();
+    let raw = message.formatted();
+
+    // Header tree sanity: the inline calendar part with method=REQUEST is the
+    // contract; the application/ics attachment is the optional hardening.
+    let raw_str = String::from_utf8_lossy(&raw);
+    assert!(raw_str.contains("multipart/mixed"), "top-level mixed");
+    assert!(raw_str.contains("multipart/alternative"), "alternative present");
+    assert!(
+        raw_str.contains("text/calendar")
+            && raw_str.to_lowercase().contains("method=request"),
+        "inline text/calendar; method=REQUEST is the contract"
+    );
+    assert!(
+        raw_str.contains("application/ics"),
+        "optional application/ics hardening part present"
+    );
+
+    // Round-trip through the #0027 receive path.
+    let email = parse_rfc822_to_fetched_email(&raw).unwrap();
+    let ev = email.event.clone().expect("sent invite parsed back as an event");
+    assert_eq!(ev.method.as_deref(), Some("REQUEST"));
+    assert_eq!(ev.uid.as_deref(), Some(uid.as_str()));
+    assert_eq!(ev.sequence, 0);
+    assert_eq!(ev.summary.as_deref(), Some("LOC Day planning, part 2; final"));
+    assert_eq!(ev.location.as_deref(), Some("Room 4.12; TUM"));
+    assert_eq!(ev.organizer.as_deref(), Some("chair@tum.de"));
+    assert_eq!(ev.start.as_deref(), Some("2026-07-20T12:00:00Z"));
+    assert_eq!(ev.end.as_deref(), Some("2026-07-20T13:00:00Z"));
+    assert_eq!(ev.attendees.len(), 2);
+    assert_eq!(ev.attendees[0].address, "a@example.com");
+    assert_eq!(ev.attendees[1].address, "b@example.com");
+    assert!(email.calendar_ics.is_some(), "sidecar bytes carried");
+
+    // Save to a mailbox and confirm the sidecar + event block land on disk.
+    let tmp = tempdir().unwrap();
+    let sent = tmp.path().join("acct").join("sent");
+    save_fetched_emails(&[email], &sent, "sent").unwrap();
+    let (md, content) = read_only_md(&sent);
+    let att_dir = md.with_file_name(format!(
+        "{}_attachments",
+        md.file_stem().unwrap().to_string_lossy()
+    ));
+    assert!(att_dir.join(CALENDAR_SIDECAR_NAME).exists(), "sidecar written");
+    assert!(content.contains("event:"));
+    assert!(content.contains(&format!("uid: {}", uid)));
+    assert!(content.contains("method: REQUEST"));
+}

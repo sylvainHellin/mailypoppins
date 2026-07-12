@@ -44,13 +44,43 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Send a single approved email
+    /// Send a single approved email, or (with --invite) a calendar invitation
     Send {
-        /// Path to the email draft file
-        file: PathBuf,
+        /// Path to the email draft file (omit when using --invite)
+        file: Option<PathBuf>,
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Send an iMIP calendar invitation (METHOD:REQUEST) instead of a draft.
+        /// Attendees come from --to/--cc; the subject is used as the event
+        /// summary. Requires --to, --start, --subject, and one of --end/--duration.
+        #[arg(long)]
+        invite: bool,
+        /// Invite recipient(s), comma-separated (invite mode; ATTENDEE + To).
+        #[arg(long)]
+        to: Option<String>,
+        /// Invite CC recipient(s), comma-separated (invite mode; ATTENDEE + Cc).
+        #[arg(long)]
+        cc: Option<String>,
+        /// Event subject / summary (invite mode).
+        #[arg(long)]
+        subject: Option<String>,
+        /// Event start. Local time (2026-07-20T14:00 or "2026-07-20 14:00") or
+        /// RFC3339 with offset (2026-07-20T14:00:00+02:00, ...Z). Invite mode.
+        #[arg(long)]
+        start: Option<String>,
+        /// Event end (same formats as --start). Provide this or --duration.
+        #[arg(long)]
+        end: Option<String>,
+        /// Event duration instead of --end: ISO8601 (PT1H30M) or short (1h30m).
+        #[arg(long)]
+        duration: Option<String>,
+        /// Optional event location (invite mode).
+        #[arg(long)]
+        location: Option<String>,
+        /// Optional event description / body (invite mode).
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Send all approved emails in a directory
     SendApproved {
@@ -316,6 +346,230 @@ fn parse_recipients(field: Option<&str>) -> Vec<(String, String)> {
     }
 }
 
+/// CLI arguments for `mp send --invite`.
+struct InviteArgs {
+    to: Option<String>,
+    cc: Option<String>,
+    subject: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    duration: Option<String>,
+    location: Option<String>,
+    description: Option<String>,
+    yes: bool,
+}
+
+/// Send an iMIP calendar invitation (`METHOD:REQUEST`) over SMTP.
+///
+/// Builds the `VEVENT` (via `email::invite`), assembles the iMIP MIME tree
+/// (via `send_email(..., Some(ics))`), sends it, and persists the sent invite
+/// locally as an email `.md` with an `event:` block plus a sidecar `invite.ics`
+/// so the #0027 receive path (and #0030 reconciliation) can pick it up.
+async fn run_send_invite(
+    account_config: &email::config::AccountConfig,
+    smtp_config: &SmtpConfig,
+    global_config: &GlobalConfig,
+    signature: Option<&str>,
+    sent_dir: Option<&Path>,
+    args: InviteArgs,
+) -> Result<()> {
+    // Graph accounts cannot send iMIP invites yet (Graph send is #0036, blocked
+    // on tenant admin approval #0035). Fail clearly rather than silently.
+    if account_config.auth_method == AuthMethod::Graph {
+        return Err(anyhow!(
+            "`mp send --invite` is not supported for Graph accounts yet (Graph calendar send \
+             is tracked by #0036, blocked on #0035). Use an SMTP-configured account."
+        ));
+    }
+
+    let subject = args
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("--invite requires --subject (used as the event summary)"))?;
+    let start = args
+        .start
+        .as_deref()
+        .ok_or_else(|| anyhow!("--invite requires --start"))?;
+
+    // Resolve times with validation (end after start, exactly one of end/duration).
+    let (start_dt, end_dt) =
+        email::invite::resolve_times(start, args.end.as_deref(), args.duration.as_deref())?;
+
+    // Attendees from --to/--cc (dedup, bare addresses). To/Cc headers keep the
+    // full form; ATTENDEE lines use the extracted address.
+    let to_field = args.to.as_deref().filter(|s| !s.trim().is_empty());
+    let cc_field = args.cc.as_deref().filter(|s| !s.trim().is_empty());
+
+    let mut attendees: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for field in [to_field, cc_field].into_iter().flatten() {
+        for raw in split_addresses(field) {
+            let addr = extract_email_address(&raw);
+            if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
+                attendees.push(addr);
+            }
+        }
+    }
+    if attendees.is_empty() {
+        return Err(anyhow!("--invite requires at least one recipient via --to/--cc"));
+    }
+
+    // ORGANIZER = the sending account's primary address (must match, or Exchange
+    // silently drops the invite). Use the bare email part of default_from.
+    let organizer = extract_email_address(&account_config.default_from);
+    if organizer.is_empty() {
+        return Err(anyhow!(
+            "Account has no usable primary address (default_from); cannot set ORGANIZER"
+        ));
+    }
+
+    let uid = email::invite::generate_uid(&organizer);
+    let spec = email::invite::InviteSpec {
+        uid: uid.clone(),
+        organizer: organizer.clone(),
+        attendees: attendees.clone(),
+        summary: subject.to_string(),
+        start: start_dt,
+        end: end_dt,
+        location: args.location.clone().filter(|s| !s.trim().is_empty()),
+        description: args.description.clone().filter(|s| !s.trim().is_empty()),
+    };
+    let ics = email::invite::build_invite_ics(&spec)?;
+
+    // Human-readable body: reuse the description, else a short summary line.
+    let body = args
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("You are invited to: {}", subject));
+
+    // Build the event: frontmatter block from the same ICS (round-trips via #0027).
+    let event = email::calendar::parse_ics(ics.as_bytes())
+        .map(|p| email::calendar::event_frontmatter(&p));
+
+    // Synthetic draft used for the send + local Sent persistence.
+    let sent_at = chrono::Utc::now();
+    let filename = format!(
+        "{}-invite-{}.md",
+        sent_at.format("%Y%m%d-%H%M%S"),
+        email::parse::slugify_subject(subject)
+    );
+    let draft_path = sent_dir
+        .map(|d| d.join(&filename))
+        .unwrap_or_else(|| PathBuf::from(&filename));
+
+    let draft = EmailDraft {
+        path: draft_path.clone(),
+        frontmatter: EmailFrontmatter {
+            to: to_field.map(str::to_string),
+            cc: cc_field.map(str::to_string),
+            bcc: None,
+            subject: subject.to_string(),
+            status: EmailStatus::Approved,
+            from: Some(account_config.default_from.clone()),
+            reply_to: None,
+            attachments: None,
+            sent_at: None,
+            sent_via: None,
+            message_id: None,
+            event,
+        },
+        body_markdown: body,
+    };
+
+    // Preview.
+    println!("{}", "--- Invite Preview ---".bold());
+    println!("  {} {}", "Summary:".yellow(), subject);
+    println!("  {} {}", "Organizer:".green(), organizer);
+    println!("  {} {}", "Attendees:".green(), attendees.join(", "));
+    println!(
+        "  {} {}  →  {}",
+        "When:".blue(),
+        start_dt.to_rfc3339(),
+        end_dt.to_rfc3339()
+    );
+    if let Some(loc) = spec.location.as_deref() {
+        println!("  {} {}", "Location:".blue(), loc);
+    }
+    println!("  {} {}", "UID:".dimmed(), uid);
+    println!("{}", "---".dimmed());
+
+    if !args.yes && !prompt_confirmation("Send this invitation?") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    println!("Sending invitation...");
+    let (send_result, raw_message, message_id) =
+        send_email(&draft, smtp_config, &global_config.email, signature, Some(&ics)).await?;
+
+    for r in send_result.succeeded() {
+        println!("  {} {} ({})", "✓".green(), r.address, r.role);
+    }
+    for r in send_result.failed() {
+        println!(
+            "  {} {} ({}): {}",
+            "✗".red(),
+            r.address,
+            r.role,
+            r.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+
+    if !send_result.any_succeeded() {
+        return Err(anyhow!(
+            "Failed to send invitation to all {} recipient(s)",
+            send_result.results.len()
+        ));
+    }
+
+    // Persist the sent invite locally: the `.md` (with event: block) plus the
+    // sidecar invite.ics, so the #0027 parser recognises our own Sent copy.
+    update_status_to_sent(&draft, sent_dir, message_id.as_deref())?;
+    let sidecar_dir = email::parse::attachments_dir_for(&draft_path);
+    if let Err(e) = fs::create_dir_all(&sidecar_dir)
+        .and_then(|_| fs::write(sidecar_dir.join(email::parse::CALENDAR_SIDECAR_NAME), &ics))
+    {
+        warn!("Failed to write invite sidecar .ics: {}", e);
+    }
+
+    // IMAP APPEND to Sent (best-effort), matching the normal send path.
+    if let Ok(imap_config) = ImapConfig::load(account_config) {
+        let sent_mailbox = resolve_sent_mailbox(account_config);
+        if let Err(e) = append_to_sent_folder(&imap_config, &raw_message, &sent_mailbox).await {
+            warn!("Failed to append invite to Sent folder: {}", e);
+            println!(
+                "  {} Could not copy invite to server Sent folder: {}",
+                "⚠".yellow(),
+                e
+            );
+        }
+    }
+
+    email::contacts::hooks::bump_after_send(account_config, &draft);
+
+    if send_result.all_succeeded() {
+        println!(
+            "{} Invitation sent to all {} recipient(s)",
+            "✓".green().bold(),
+            send_result.results.len()
+        );
+    } else {
+        println!(
+            "{} Partial send: {} succeeded, {} failed",
+            "⚠".yellow().bold(),
+            send_result.succeeded().len(),
+            send_result.failed().len()
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -408,7 +662,45 @@ async fn main() -> Result<()> {
         .map(|_| email::config::mailbox_dir(&account_config.name, "archive"));
 
     match cli.command {
-        Some(Commands::Send { file, yes }) => {
+        Some(Commands::Send {
+            file,
+            yes,
+            invite,
+            to,
+            cc,
+            subject,
+            start,
+            end,
+            duration,
+            location,
+            description,
+        }) => {
+            if invite {
+                run_send_invite(
+                    &account_config,
+                    &smtp_config,
+                    &global_config,
+                    signature_content.as_deref(),
+                    sent_dir.as_deref(),
+                    InviteArgs {
+                        to,
+                        cc,
+                        subject,
+                        start,
+                        end,
+                        duration,
+                        location,
+                        description,
+                        yes,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+
+            let file = file.ok_or_else(|| {
+                anyhow!("`mp send` needs a draft file, or use `--invite` to send a calendar invitation")
+            })?;
             let draft = parse_email_draft(&file)?;
             validate_draft(&draft)?;
 
@@ -499,6 +791,7 @@ async fn main() -> Result<()> {
                     &smtp_config,
                     &global_config.email,
                     signature_content.as_deref(),
+                    None,
                 )
                 .await?;
 
@@ -681,6 +974,7 @@ async fn main() -> Result<()> {
                         &smtp_config,
                         &global_config.email,
                         signature_content.as_deref(),
+                        None,
                     )
                     .await
                     {

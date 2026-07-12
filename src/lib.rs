@@ -10,6 +10,7 @@ pub mod notify;
 pub mod graph;
 pub mod parse;
 pub mod calendar;
+pub mod invite;
 pub mod imap_client;
 pub mod draft;
 pub mod send;

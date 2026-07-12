@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Send calendar invitations (iMIP): `mp send --invite`.** Send a
+  `METHOD:REQUEST` invitation over SMTP that renders as an actionable
+  Accept / Tentative / Decline event in Outlook, Gmail, and Apple Mail.
+  New flags: `--invite --to <addr> [--cc <addr>] --subject <text>
+  --start <when> (--end <when> | --duration <dur>) [--location <text>]
+  [--description <text>]`. The subject is reused as the event `SUMMARY`
+  and attendees come from `--to`/`--cc` (each an `ATTENDEE` with
+  `RSVP=TRUE`). `--start`/`--end` accept local wall-clock time
+  (`2026-07-20T14:00`, `2026-07-20 14:00`) or RFC3339 with an offset
+  (`2026-07-20T14:00:00+02:00`, `...Z`); `--duration` accepts ISO8601
+  (`PT1H30M`) or short form (`1h30m`). The message is built as
+  `multipart/mixed [ multipart/alternative(text/plain, text/html,
+  text/calendar; method=REQUEST), application/ics ]` — the inline
+  `text/calendar` part is the contract and the `application/ics`
+  attachment is optional hardening. `ORGANIZER` is set to (and validated
+  against) the sending account's primary address, since Exchange drops
+  mismatched invites. The event `UID` is a collision-resistant
+  `sha256(now + randomness + organizer)` hex prefix scoped to the
+  sender's domain (no new dependency). The sent invite is persisted
+  locally as an email `.md` with an `event:` block plus a sidecar
+  `invite.ics`, so it round-trips through the receive path (#0027) and
+  anchors reply reconciliation (#0030). Graph-auth accounts error clearly
+  (Graph calendar send is #0036). RSVP replies, cancellations, recurring
+  creation, and TUI compose integration are out of scope. Ticket #0028.
 - **Receive calendar invitations (iMIP): detect, save, and parse
   `text/calendar` parts.** Incoming iMIP invites (Outlook, Google, Apple)
   were previously silently dropped by the MIME part traversal. Fetching

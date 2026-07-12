@@ -14,6 +14,7 @@ const draftCommands = [
   { command: 'mp mark-approved <file>', description: 'Mark draft as approved' },
   { command: 'mp mark-draft <file>', description: 'Demote approved draft back to draft' },
   { command: 'mp send <file> [-y]', description: 'Send a single approved email' },
+  { command: 'mp send --invite ...', description: 'Send a calendar invitation (iMIP REQUEST)' },
   { command: 'mp send-approved [dir] [-y]', description: 'Send all approved emails' },
   { command: 'mp reply [file] [--all]', description: 'Create a reply draft' },
   { command: 'mp forward [file]', description: 'Create a forward draft' },
@@ -62,6 +63,18 @@ const syncOptions = [
 const globalOptions = [
   { command: '-s, --signature <name>', description: 'Use a specific signature' },
   { command: '--no-signature', description: 'Skip signature entirely' },
+];
+
+const inviteOptions = [
+  { command: '--invite', description: 'Send an iMIP calendar invitation (METHOD:REQUEST)' },
+  { command: '--to <addr>', description: 'Attendee(s), comma-separated (also the To header)' },
+  { command: '--cc <addr>', description: 'CC attendee(s), comma-separated' },
+  { command: '--subject <text>', description: 'Event summary (reused as the email subject)' },
+  { command: '--start <when>', description: 'Start: local time or RFC3339 with offset' },
+  { command: '--end <when>', description: 'End (same formats as --start); or use --duration' },
+  { command: '--duration <dur>', description: 'Duration instead of --end: PT1H30M or 1h30m' },
+  { command: '--location <text>', description: 'Optional event location' },
+  { command: '--description <text>', description: 'Optional event description / body' },
 ];
 
 const searchSyntax = [
@@ -177,6 +190,24 @@ const listKeys = [
         local files to match. The Sent directory is never reconciled -- locally-authored
         files are the source of truth.
       </p>
+    </section>
+
+    <section>
+      <h2 id="invite-options">Invite Options (<code>mp send --invite</code>)</h2>
+      <p>
+        <code>mp send --invite</code> sends an iMIP calendar invitation
+        (<code>METHOD:REQUEST</code>) over SMTP that renders as an actionable
+        Accept / Tentative / Decline event in Outlook, Gmail, and Apple Mail.
+        Attendees come from <code>--to</code>/<code>--cc</code> and the subject
+        is reused as the event summary. Times accept local wall-clock
+        (<code>2026-07-20T14:00</code>, <code>"2026-07-20 14:00"</code>) or
+        RFC3339 with an offset (<code>2026-07-20T14:00:00+02:00</code>,
+        <code>...Z</code>); provide either <code>--end</code> or
+        <code>--duration</code>. The <code>ORGANIZER</code> is the sending
+        account's primary address (Exchange drops mismatches). Graph accounts
+        are not yet supported for invites.
+      </p>
+      <CommandTable commands={inviteOptions} />
     </section>
 
     <section>

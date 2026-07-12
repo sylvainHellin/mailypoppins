@@ -228,6 +228,7 @@ pub(super) fn handle_action(
                                 &smtp_config,
                                 &email_settings,
                                 signature.as_deref(),
+                                None,
                             ))?;
 
                             if send_result.all_succeeded() || send_result.any_succeeded() {
@@ -441,6 +442,7 @@ pub(super) fn handle_action(
                                     &smtp_config,
                                     &email_settings,
                                     signature.as_deref(),
+                                    None,
                                 )) {
                                     Ok((send_result, raw_message, message_id)) => {
                                         if send_result.all_succeeded()
