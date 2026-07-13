@@ -11,7 +11,7 @@ use super::util::{pane_border_style, truncate};
 /// Nerd Font calendar glyph shown before a subject when the email carries an
 /// iMIP invite (`event:` frontmatter). Distinct from the attachment paperclip
 /// (`\u{f0c6}`); an invite may show both.
-const INVITE_GLYPH: &str = "\u{f00eb}";
+const INVITE_GLYPH: &str = "\u{f00ed}";
 
 /// Build the subject-cell prefix: invite calendar badge (if any) followed by
 /// the attachment paperclip (if any). Both, one, or neither may apply.

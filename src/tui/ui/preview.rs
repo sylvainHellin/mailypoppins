@@ -57,7 +57,7 @@ pub(super) fn render_body(app: &App, frame: &mut Frame, area: Rect) {
 /// Render the bordered event summary card into `area`.
 fn render_event_card(lines: Vec<Line<'static>>, frame: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title(" \u{f00eb} Invitation ")
+        .title(" \u{f00ed} Invitation ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::active().accent))
