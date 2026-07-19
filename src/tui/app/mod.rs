@@ -1,6 +1,11 @@
+mod keymap;
 mod keys;
 mod types;
 
+pub use keymap::{
+    dump_json, dump_markdown, help_sections, hint_bindings, prefix_continuations, resolve, Guard,
+    KeyAction, KeyBinding, KeyCtx, KEYMAP,
+};
 pub use types::*;
 
 use std::collections::{HashSet, VecDeque};
@@ -335,6 +340,44 @@ impl App {
             .get(self.active_mailbox)
             .map(|m| m.label.as_str())
             .unwrap_or("Mail")
+    }
+
+    /// The keymap context the next keystroke will be dispatched in, used by the
+    /// mode/hint bar to show the live continuations from `KEYMAP`. Overlays
+    /// take precedence over pane focus (mirroring `handle_key`'s dispatcher).
+    pub fn key_context(&self) -> Option<KeyCtx> {
+        match &self.overlay {
+            Overlay::Search => Some(KeyCtx::ServerSearch),
+            Overlay::Activity => Some(KeyCtx::Activity),
+            Overlay::Help => Some(KeyCtx::Help),
+            // Modal overlays (confirm / pickers / rsvp / error / compose) have
+            // their own inline chips; the hint bar defers to them.
+            Overlay::Confirm(_)
+            | Overlay::Compose(_)
+            | Overlay::Attachment(_)
+            | Overlay::Dir(_)
+            | Overlay::Mailbox(_)
+            | Overlay::Rsvp(_)
+            | Overlay::Error(_) => None,
+            Overlay::None => match self.focus {
+                Focus::Sidebar => Some(KeyCtx::Sidebar),
+                Focus::List => Some(KeyCtx::List),
+                Focus::Headers => Some(KeyCtx::Headers),
+                Focus::Preview => Some(KeyCtx::Preview),
+                // Metadata search input / compose field editing: no hint row.
+                Focus::Search | Focus::ComposeWizard => None,
+            },
+        }
+    }
+
+    /// The pending leader prefix, if any (today only `g`). Drives the hint
+    /// bar's continuation view.
+    pub fn pending_prefix(&self) -> Option<char> {
+        if self.g_pending {
+            Some('g')
+        } else {
+            None
+        }
     }
 
     pub fn active_dir(&self) -> Option<&PathBuf> {

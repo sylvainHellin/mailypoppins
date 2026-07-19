@@ -5,6 +5,10 @@ import Footer from '../components/Footer.astro';
 import CommandTable from '../components/CommandTable.astro';
 import KeyBindingTable from '../components/KeyBindingTable.astro';
 import { Code } from 'astro:components';
+// TUI key bindings are GENERATED from the single KEYMAP source of truth in
+// src/tui/app/keymap.rs. Do not hand-edit; run scripts/regen-website-keys.sh
+// after changing KEYMAP so the site cannot drift from the TUI/help overlay.
+import tuiKeys from '../data/tui-keys.json';
 
 const draftCommands = [
   { command: 'mp <file>', description: 'Preview a draft (dry-run)' },
@@ -91,49 +95,8 @@ const searchSyntax = [
   { command: 'bare text', description: 'Matches any field (IMAP TEXT)' },
 ];
 
-const globalKeys = [
-  { key: '1-9', action: 'Jump to mailbox by index' },
-  { key: 'Tab / Shift-Tab', action: 'Cycle pane focus forward / backward' },
-  { key: '/', action: 'Filter by metadata (subject, contact, date)' },
-  { key: '\\', action: 'Search (includes body)' },
-  { key: '!', action: 'Toggle activity log panel' },
-  { key: 'L', action: 'Open activity log overlay' },
-  { key: 'Ctrl+l', action: 'Open the current log file in $EDITOR' },
-  { key: 'Ctrl+e', action: 'Open config.toml in $EDITOR (changes apply on restart)' },
-  { key: '`', action: 'Switch account' },
-  { key: 'Ctrl+1-9', action: 'Jump to account by index' },
-  { key: '?', action: 'Help overlay' },
-  { key: 'q', action: 'Quit' },
-];
-
-const listKeys = [
-  { key: 'j / k', action: 'Navigate up / down' },
-  { key: 'g g / G', action: 'Jump to top / bottom' },
-  { key: 'Space', action: 'Toggle selection' },
-  { key: 'Ctrl+a', action: 'Select all visible' },
-  { key: 'Esc', action: 'Clear selection' },
-  { key: 'Enter / e', action: 'Open in $EDITOR' },
-  { key: 'r / R', action: 'Reply / Reply all' },
-  { key: 'w', action: 'Forward' },
-  { key: 'c', action: 'Edit recipients / subject (Drafts only)' },
-  { key: 'a', action: 'Archive selected (with confirmation)' },
-  { key: 'd', action: 'Delete selected (with confirmation)' },
-  { key: 'm', action: 'Toggle read / unread' },
-  { key: 'M', action: 'Move to mailbox (fuzzy picker)' },
-  { key: 'V', action: 'RSVP to invitation (Accept / Tentative / Decline overlay)' },
-  { key: 'A', action: 'Mark as approved' },
-  { key: 'D', action: 'Mark approved as draft (reverse of A)' },
-  { key: 'x', action: 'Send (with confirmation)' },
-  { key: 'X', action: 'Send all approved (with confirmation)' },
-  { key: 'n', action: 'New draft' },
-  { key: 'y', action: 'Copy file path to clipboard' },
-  { key: 's', action: 'Quick sync (fetch + reconcile, limit 100)' },
-  { key: 'S', action: 'Full sync (fetch + reconcile, no limit)' },
-  { key: 'f', action: 'Server search (IMAP)' },
-  { key: 'o', action: 'Open attachment in default app' },
-  { key: 'O', action: 'Save attachment(s) to directory' },
-  { key: 'b', action: 'Open HTML version in browser' },
-];
+// Slugify a section title for the heading anchor id.
+const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 ---
 
 <Layout title="Commands -- mailypoppins" description="Complete reference for mailypoppins CLI commands and TUI key bindings.">
@@ -279,12 +242,19 @@ const listKeys = [
 
     <section>
       <h2 id="tui-keys">TUI Key Bindings</h2>
+      <p>
+        Generated from the single <code>KEYMAP</code> source of truth
+        (<code>src/tui/app/keymap.rs</code>) via <code>mp dump-keys --json</code>;
+        see <code>scripts/regen-website-keys.sh</code>. These match the in-TUI
+        help overlay (<kbd>?</kbd>) exactly.
+      </p>
 
-      <h3 id="global-keys">Global</h3>
-      <KeyBindingTable bindings={globalKeys} />
-
-      <h3 id="list-keys">List Focus</h3>
-      <KeyBindingTable bindings={listKeys} />
+      {tuiKeys.map((section) => (
+        <>
+          <h3 id={`${slug(section.title)}-keys`}>{section.title}</h3>
+          <KeyBindingTable bindings={section.bindings} />
+        </>
+      ))}
     </section>
   </main>
   <Footer />

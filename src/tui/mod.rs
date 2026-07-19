@@ -18,6 +18,18 @@ use helpers::{
     WatchEvent,
 };
 
+/// Machine-readable dump of the TUI keymap (`mp dump-keys`), used to
+/// regenerate the website key table from the single `KEYMAP` source.
+pub fn dump_keys() -> String {
+    app::dump_markdown()
+}
+
+/// JSON dump of the TUI keymap grouped by section (`mp dump-keys --json`), for
+/// regenerating the website data file.
+pub fn dump_keys_json() -> String {
+    app::dump_json()
+}
+
 /// Entry point for the TUI. Call this when `mp` is invoked with no arguments.
 pub fn run() -> Result<()> {
     install_panic_hook();

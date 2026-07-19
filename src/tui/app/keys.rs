@@ -36,87 +36,140 @@ impl App {
             return self.handle_search_key(key);
         }
 
-        // Account switching (only when >1 account)
-        if self.accounts.len() > 1 {
-            if key.code == KeyCode::Char('`') {
-                self.g_pending = false;
-                let next = (self.active_account + 1) % self.accounts.len();
-                self.switch_account(next);
-                return None;
-            }
-            // Ctrl+1 through Ctrl+9 for direct account jump
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                if let KeyCode::Char(c @ '1'..='9') = key.code {
-                    let idx = (c as usize) - ('1' as usize);
-                    if idx < self.accounts.len() {
-                        self.g_pending = false;
-                        self.switch_account(idx);
-                        return None;
-                    }
-                }
+        // Normal-mode surface (#0032, (B)-lite): resolve the pressed key through
+        // the KEYMAP table into a `KeyAction`, then run one executor. Global
+        // bindings are always tried first, then the focused pane's context
+        // (mirroring the old "global keys before pane dispatch" precedence).
+        // Guards are evaluated against live state so context-sensitive rules
+        // (`c` only in Drafts, most list keys only when non-empty, multi-account
+        // account jumps) stay in the data model.
+        self.dispatch_normal_mode(key)
+    }
+
+    /// Table-driven dispatch for the no-overlay surface. Returns the `Message`
+    /// (only `Quit` today) or `None`.
+    fn dispatch_normal_mode(&mut self, key: KeyEvent) -> Option<Message> {
+        let pending = if self.g_pending { Some('g') } else { None };
+        let guard_ok = |g: super::Guard| self.guard_satisfied(g);
+
+        // Global context first.
+        if let Some(action) = super::resolve(super::KeyCtx::Global, key, pending, &guard_ok) {
+            return self.execute(action, key);
+        }
+        // Then the focused pane's context.
+        if let Some(ctx) = self.pane_ctx() {
+            if let Some(action) = super::resolve(ctx, key, pending, &guard_ok) {
+                return self.execute(action, key);
             }
         }
+        // No live binding matched: clear any pending leader (an unrecognised
+        // key aborts the chord), matching the old `_ => { g_pending = false }`.
+        self.g_pending = false;
+        None
+    }
 
-        match key.code {
-            KeyCode::Char('q') => return Some(Message::Quit),
-            KeyCode::Char('?') => {
+    /// The KEYMAP context for the currently focused pane (no overlay active).
+    fn pane_ctx(&self) -> Option<super::KeyCtx> {
+        match self.focus {
+            Focus::Sidebar => Some(super::KeyCtx::Sidebar),
+            Focus::List => Some(super::KeyCtx::List),
+            Focus::Headers => Some(super::KeyCtx::Headers),
+            Focus::Preview => Some(super::KeyCtx::Preview),
+            Focus::Search | Focus::ComposeWizard => None,
+        }
+    }
+
+    /// Evaluate a keymap `Guard` against live app state.
+    fn guard_satisfied(&self, guard: super::Guard) -> bool {
+        match guard {
+            super::Guard::None => true,
+            super::Guard::MultiAccount => self.accounts.len() > 1,
+            // `c` (edit recipients) is catalogued Drafts-only, but the old code
+            // still *matched* the key outside Drafts to show a status hint. We
+            // resolve it in any mailbox and branch inside the executor so that
+            // UX is preserved; the guard is advisory here.
+            super::Guard::DraftsOnly => true,
+            super::Guard::NonEmptyList => !self.visible.is_empty(),
+        }
+    }
+
+    /// Run a resolved Normal-mode [`KeyAction`]. This is the single executor the
+    /// table dispatches into; it replaces the former per-pane match arms.
+    fn execute(&mut self, action: super::KeyAction, key: KeyEvent) -> Option<Message> {
+        use super::KeyAction as A;
+
+        // Every executed action clears the pending leader except the leader key
+        // itself (handled explicitly below) and the `gg` continuation.
+        match action {
+            // -- Global -------------------------------------------------------
+            A::Quit => return Some(Message::Quit),
+            A::ToggleHelp => {
                 self.g_pending = false;
                 self.help_scroll = 0;
                 self.help_filter.clear();
                 self.help_filter_active = false;
                 self.overlay = Overlay::Help;
-                return None;
             }
-            KeyCode::Char('!') => {
+            A::ToggleActivityLog => {
                 self.g_pending = false;
                 self.show_activity_log = !self.show_activity_log;
-                return None;
             }
-            KeyCode::Char('L') => {
+            A::OpenActivityOverlay => {
                 self.g_pending = false;
                 self.activity_filter.clear();
                 self.activity_filter_active = false;
                 self.activity_scroll = 0;
                 self.overlay = Overlay::Activity;
-                return None;
             }
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            A::OpenLogFile => {
                 self.g_pending = false;
                 self.push_action(Action::OpenLogFile);
-                return None;
             }
-            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            A::OpenConfigFile => {
                 self.g_pending = false;
                 self.push_action(Action::OpenConfigFile);
-                return None;
             }
-            KeyCode::Char('/') => {
+            A::FilterMetadata => {
                 self.g_pending = false;
                 self.focus = Focus::Search;
                 self.search_query.clear();
                 self.search_includes_body = false;
                 self.reload_from_cache();
-                return None;
             }
-            KeyCode::Char('\\') => {
+            A::SearchContent => {
                 self.g_pending = false;
                 self.focus = Focus::Search;
                 self.search_query.clear();
                 self.search_includes_body = true;
                 self.reload_from_cache();
-                return None;
             }
-            KeyCode::Char(c @ '1'..='9') => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < self.mailboxes.len() {
-                    self.g_pending = false;
-                    self.sidebar_index = idx;
-                    self.switch_mailbox(idx);
-                    self.focus = Focus::List;
-                    return None;
+            A::SwitchAccount => {
+                self.g_pending = false;
+                let next = (self.active_account + 1) % self.accounts.len();
+                self.switch_account(next);
+            }
+            A::JumpAccount => {
+                // Ctrl+1..9 -> direct account jump (guarded to multi-account).
+                self.g_pending = false;
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.accounts.len() {
+                        self.switch_account(idx);
+                    }
                 }
             }
-            KeyCode::Tab => {
+            A::JumpMailbox => {
+                self.g_pending = false;
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.mailboxes.len() {
+                        self.sidebar_index = idx;
+                        self.switch_mailbox(idx);
+                        self.focus = Focus::List;
+                    }
+                }
+            }
+            A::FocusForward => {
                 self.g_pending = false;
                 if self.focus == Focus::Sidebar {
                     self.switch_mailbox(self.sidebar_index);
@@ -129,9 +182,8 @@ impl App {
                     Focus::Search => Focus::List,
                     Focus::ComposeWizard => Focus::ComposeWizard,
                 };
-                return None;
             }
-            KeyCode::BackTab => {
+            A::FocusBackward => {
                 self.g_pending = false;
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Headers,
@@ -141,19 +193,305 @@ impl App {
                     Focus::Search => Focus::List,
                     Focus::ComposeWizard => Focus::ComposeWizard,
                 };
-                return None;
             }
-            _ => {}
+            // -- Sidebar ------------------------------------------------------
+            A::SidebarDown => {
+                self.g_pending = false;
+                if self.sidebar_index < self.mailboxes.len().saturating_sub(1) {
+                    self.sidebar_index += 1;
+                }
+            }
+            A::SidebarUp => {
+                self.g_pending = false;
+                self.sidebar_index = self.sidebar_index.saturating_sub(1);
+            }
+            A::SidebarSelect => {
+                self.g_pending = false;
+                self.switch_mailbox(self.sidebar_index);
+                self.focus = Focus::List;
+            }
+            // -- Headers ------------------------------------------------------
+            A::HeadersDown => {
+                self.g_pending = false;
+                self.headers_scroll = self.headers_scroll.saturating_add(1);
+            }
+            A::HeadersUp => {
+                self.g_pending = false;
+                self.headers_scroll = self.headers_scroll.saturating_sub(1);
+            }
+            // -- Preview / body ----------------------------------------------
+            A::PreviewDown => {
+                self.g_pending = false;
+                self.preview_scroll = self.preview_scroll.saturating_add(1);
+            }
+            A::PreviewUp => {
+                self.g_pending = false;
+                self.preview_scroll = self.preview_scroll.saturating_sub(1);
+            }
+            A::PreviewHalfDown => {
+                self.g_pending = false;
+                self.preview_scroll = self.preview_scroll.saturating_add(10);
+            }
+            A::PreviewHalfUp => {
+                self.g_pending = false;
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+            }
+            A::PreviewToList => {
+                self.g_pending = false;
+                self.focus = Focus::List;
+            }
+            // -- List / shared -----------------------------------------------
+            _ => return self.execute_list(action, key),
+        }
+        None
+    }
+
+    /// List-context actions (and the shared attachment/browser/RSVP actions the
+    /// list, headers, and preview panes all use). Split out to keep `execute`
+    /// readable; it also owns the list-cursor scroll-reset bookkeeping.
+    fn execute_list(&mut self, action: super::KeyAction, _key: KeyEvent) -> Option<Message> {
+        use super::KeyAction as A;
+        let old_index = self.list_index;
+
+        match action {
+            A::ListDown => {
+                self.g_pending = false;
+                if self.list_index < self.visible.len() - 1 {
+                    self.list_index += 1;
+                }
+            }
+            A::ListUp => {
+                self.g_pending = false;
+                self.list_index = self.list_index.saturating_sub(1);
+            }
+            A::ListTop => {
+                // Reached only with `g` pending (the leader continuation).
+                self.list_index = 0;
+                self.g_pending = false;
+            }
+            A::ListBottom => {
+                self.g_pending = false;
+                self.list_index = self.visible.len().saturating_sub(1);
+            }
+            A::OpenEditor => {
+                self.g_pending = false;
+                self.push_action(Action::EditCurrent);
+            }
+            A::Reply => {
+                self.g_pending = false;
+                self.push_action(Action::Reply(false));
+            }
+            A::ReplyAll => {
+                self.g_pending = false;
+                self.push_action(Action::Reply(true));
+            }
+            A::Forward => {
+                self.g_pending = false;
+                if let Some(path) = self.selected_email_path() {
+                    self.push_action(Action::OpenComposeWizard(ComposeMode::Forward {
+                        source_path: path,
+                    }));
+                }
+            }
+            A::EditRecipients => {
+                // Only meaningful in Drafts; outside Drafts keep the old status
+                // hint (the guard is advisory, resolved everywhere).
+                self.g_pending = false;
+                if self.active_kind() == MailboxKind::Drafts {
+                    if let Some(path) = self.selected_email_path() {
+                        self.push_action(Action::OpenComposeWizard(ComposeMode::EditDraft {
+                            source_path: path,
+                        }));
+                    }
+                } else {
+                    self.set_status(
+                        "Edit recipients (c) is only available in Drafts".to_string(),
+                    );
+                }
+            }
+            A::SelectAllVisible => {
+                self.g_pending = false;
+                self.selection = self.visible_emails().map(|e| e.path.clone()).collect();
+            }
+            A::Archive => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: format!("Archive {} emails?", count),
+                        detail: format!("{} selected emails", count),
+                        action: ConfirmAction::Archive,
+                    });
+                } else if let Some(email) = self.selected_email() {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: "Archive this email?".to_string(),
+                        detail: format!("{} - {}", email.from, email.subject),
+                        action: ConfirmAction::Archive,
+                    });
+                }
+            }
+            A::Delete => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: format!("Delete {} emails?", count),
+                        detail: format!("{} selected emails", count),
+                        action: ConfirmAction::Delete,
+                    });
+                } else if let Some(email) = self.selected_email() {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: "Delete this email?".to_string(),
+                        detail: format!("{} - {}", email.from, email.subject),
+                        action: ConfirmAction::Delete,
+                    });
+                }
+            }
+            A::Approve => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: format!("Approve {} drafts?", count),
+                        detail: format!("{} selected drafts", count),
+                        action: ConfirmAction::Approve,
+                    });
+                } else {
+                    self.push_action(Action::Approve);
+                }
+            }
+            A::MarkDraft => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: format!("Mark {} drafts as draft?", count),
+                        detail: format!("{} selected drafts", count),
+                        action: ConfirmAction::MarkDraft,
+                    });
+                } else {
+                    self.push_action(Action::MarkDraft);
+                }
+            }
+            A::Send => {
+                self.g_pending = false;
+                if let Some(email) = self.selected_email() {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: "Send this email?".to_string(),
+                        detail: format!("To: {} - {}", email.to, email.subject),
+                        action: ConfirmAction::Send,
+                    });
+                }
+            }
+            A::SendAll => {
+                self.g_pending = false;
+                self.overlay = Overlay::Confirm(ConfirmDialog {
+                    title: "Send all approved emails?".to_string(),
+                    detail: format!("In {}", self.active_label()),
+                    action: ConfirmAction::SendApproved,
+                });
+            }
+            A::CopyPath => {
+                self.g_pending = false;
+                self.push_action(Action::CopyPath);
+            }
+            A::ToggleRead => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    let paths: Vec<PathBuf> = self.selection.iter().cloned().collect();
+                    self.push_action(Action::BatchToggleRead(paths));
+                } else {
+                    self.push_action(Action::ToggleRead);
+                }
+            }
+            A::MovePicker => {
+                self.g_pending = false;
+                self.open_mailbox_picker();
+            }
+            A::Rsvp => {
+                self.g_pending = false;
+                self.open_rsvp_overlay();
+            }
+            A::NewDraft => {
+                self.g_pending = false;
+                self.push_action(Action::OpenComposeWizard(ComposeMode::New));
+            }
+            A::QuickSync => {
+                self.g_pending = false;
+                self.push_action(Action::Fetch);
+            }
+            A::FullSync => {
+                self.g_pending = false;
+                self.push_action(Action::Sync);
+            }
+            A::ServerSearch => {
+                self.g_pending = false;
+                self.server_search_query.clear();
+                self.server_search_results.clear();
+                self.server_search_index = 0;
+                self.server_search_scroll = 0;
+                self.server_search_headers_scroll = 0;
+                self.server_search_focus = SearchOverlayFocus::Input;
+                self.server_search_loading = false;
+                self.server_search_status = None;
+                self.overlay = Overlay::Search;
+            }
+            A::OpenAttachment => {
+                self.g_pending = false;
+                self.open_attachment_picker(AttachmentPickerMode::Open);
+            }
+            A::SaveAttachment => {
+                self.g_pending = false;
+                self.open_attachment_picker(AttachmentPickerMode::Save);
+            }
+            A::OpenInBrowser => {
+                self.g_pending = false;
+                if let Some(email) = self.selected_email() {
+                    let html_path = email.path.with_extension("html");
+                    if html_path.exists() {
+                        self.push_action(Action::OpenHtmlInBrowser(html_path));
+                    } else {
+                        self.set_status("No HTML version available".to_string());
+                    }
+                }
+            }
+            A::ToggleSelect => {
+                self.g_pending = false;
+                if let Some(path) = self.selected_email_path() {
+                    if self.selection.contains(&path) {
+                        self.selection.remove(&path);
+                    } else {
+                        self.selection.insert(path);
+                    }
+                    if self.list_index < self.visible.len() - 1 {
+                        self.list_index += 1;
+                    }
+                }
+            }
+            A::ClearSelection => {
+                self.g_pending = false;
+                if !self.selection.is_empty() {
+                    self.selection.clear();
+                }
+            }
+            // The leader key itself: begin/toggle the pending `g` chord. This is
+            // the only action that intentionally leaves `g_pending` set.
+            A::Manual => {
+                // A::Manual reaches here only for the `g` PrefixLeader row.
+                self.g_pending = !self.g_pending;
+            }
+            // Any pane-only action mistakenly routed here is a no-op.
+            _ => {
+                self.g_pending = false;
+            }
         }
 
-        match self.focus {
-            Focus::Sidebar => self.handle_sidebar_key(key),
-            Focus::List => self.handle_list_key(key),
-            Focus::Headers => self.handle_headers_key(key),
-            Focus::Preview => self.handle_preview_key(key),
-            Focus::Search => unreachable!(),
-            Focus::ComposeWizard => unreachable!("handled above via Overlay::Compose dispatch"),
+        if self.list_index != old_index {
+            self.headers_scroll = 0;
+            self.preview_scroll = 0;
         }
+
+        None
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<Message> {
@@ -200,331 +538,6 @@ impl App {
             }
             _ => {}
         }
-        None
-    }
-
-    fn handle_sidebar_key(&mut self, key: KeyEvent) -> Option<Message> {
-        self.g_pending = false;
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.sidebar_index < self.mailboxes.len().saturating_sub(1) {
-                    self.sidebar_index += 1;
-                }
-                None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.sidebar_index = self.sidebar_index.saturating_sub(1);
-                None
-            }
-            KeyCode::Enter => {
-                self.switch_mailbox(self.sidebar_index);
-                self.focus = Focus::List;
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_headers_key(&mut self, key: KeyEvent) -> Option<Message> {
-        self.g_pending = false;
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.headers_scroll = self.headers_scroll.saturating_add(1);
-                None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.headers_scroll = self.headers_scroll.saturating_sub(1);
-                None
-            }
-            KeyCode::Char('o') => {
-                self.open_attachment_picker(AttachmentPickerMode::Open);
-                None
-            }
-            KeyCode::Char('O') => {
-                self.open_attachment_picker(AttachmentPickerMode::Save);
-                None
-            }
-            KeyCode::Char('b') => {
-                if let Some(email) = self.selected_email() {
-                    let html_path = email.path.with_extension("html");
-                    if html_path.exists() {
-                        self.push_action(Action::OpenHtmlInBrowser(html_path));
-                    } else {
-                        self.set_status("No HTML version available".to_string());
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_list_key(&mut self, key: KeyEvent) -> Option<Message> {
-        if self.visible.is_empty() {
-            self.g_pending = false;
-            match key.code {
-                KeyCode::Char('s') => self.push_action(Action::Fetch),
-                KeyCode::Char('S') => self.push_action(Action::Sync),
-                KeyCode::Char('f') => {
-                    self.server_search_query.clear();
-                    self.server_search_results.clear();
-                    self.server_search_index = 0;
-                    self.server_search_scroll = 0;
-                    self.server_search_headers_scroll = 0;
-                    self.server_search_focus = SearchOverlayFocus::Input;
-                    self.server_search_loading = false;
-                    self.server_search_status = None;
-                    self.overlay = Overlay::Search;
-                }
-                KeyCode::Char('n') => {
-                    self.push_action(Action::OpenComposeWizard(ComposeMode::New));
-                }
-                _ => {}
-            }
-            return None;
-        }
-
-        let old_index = self.list_index;
-
-        match key.code {
-            KeyCode::Char('g') => {
-                if self.g_pending {
-                    self.list_index = 0;
-                    self.g_pending = false;
-                } else {
-                    self.g_pending = true;
-                }
-            }
-            KeyCode::Char('G') => {
-                self.g_pending = false;
-                self.list_index = self.visible.len().saturating_sub(1);
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.g_pending = false;
-                if self.list_index < self.visible.len() - 1 {
-                    self.list_index += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.g_pending = false;
-                self.list_index = self.list_index.saturating_sub(1);
-            }
-            KeyCode::Enter | KeyCode::Char('e') => {
-                self.g_pending = false;
-                self.push_action(Action::EditCurrent);
-            }
-            KeyCode::Char('r') => {
-                self.g_pending = false;
-                self.push_action(Action::Reply(false));
-            }
-            KeyCode::Char('R') => {
-                self.g_pending = false;
-                self.push_action(Action::Reply(true));
-            }
-            KeyCode::Char('w') => {
-                self.g_pending = false;
-                if let Some(path) = self.selected_email_path() {
-                    self.push_action(Action::OpenComposeWizard(ComposeMode::Forward {
-                        source_path: path,
-                    }));
-                }
-            }
-            KeyCode::Char('c') => {
-                // Edit recipients/subject of a draft via the compose wizard
-                // (fuzzy-finder), rewriting the frontmatter in place.
-                // Only meaningful in the Drafts mailbox -- received/sent
-                // emails have no editable draft frontmatter here.
-                self.g_pending = false;
-                if self.active_kind() == MailboxKind::Drafts {
-                    if let Some(path) = self.selected_email_path() {
-                        self.push_action(Action::OpenComposeWizard(ComposeMode::EditDraft {
-                            source_path: path,
-                        }));
-                    }
-                } else {
-                    self.set_status("Edit recipients (c) is only available in Drafts".to_string());
-                }
-            }
-            KeyCode::Char('a') => {
-                self.g_pending = false;
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    // Select-all applies to the current (filtered) view,
-                    // same as before the visible-indices refactor.
-                    self.selection = self.visible_emails().map(|e| e.path.clone()).collect();
-                } else if !self.selection.is_empty() {
-                    let count = self.selection.len();
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: format!("Archive {} emails?", count),
-                        detail: format!("{} selected emails", count),
-                        action: ConfirmAction::Archive,
-                    });
-                } else if let Some(email) = self.selected_email() {
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: "Archive this email?".to_string(),
-                        detail: format!("{} - {}", email.from, email.subject),
-                        action: ConfirmAction::Archive,
-                    });
-                }
-            }
-            KeyCode::Char('d') => {
-                self.g_pending = false;
-                if !self.selection.is_empty() {
-                    let count = self.selection.len();
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: format!("Delete {} emails?", count),
-                        detail: format!("{} selected emails", count),
-                        action: ConfirmAction::Delete,
-                    });
-                } else if let Some(email) = self.selected_email() {
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: "Delete this email?".to_string(),
-                        detail: format!("{} - {}", email.from, email.subject),
-                        action: ConfirmAction::Delete,
-                    });
-                }
-            }
-            KeyCode::Char('A') => {
-                self.g_pending = false;
-                if !self.selection.is_empty() {
-                    let count = self.selection.len();
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: format!("Approve {} drafts?", count),
-                        detail: format!("{} selected drafts", count),
-                        action: ConfirmAction::Approve,
-                    });
-                } else {
-                    self.push_action(Action::Approve);
-                }
-            }
-            KeyCode::Char('D') => {
-                // Reverse of `A`: demote approved drafts back to `draft`
-                // status (#0021). No confirm for the single-email path --
-                // it is a non-destructive, fully reversible toggle of `A`.
-                self.g_pending = false;
-                if !self.selection.is_empty() {
-                    let count = self.selection.len();
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: format!("Mark {} drafts as draft?", count),
-                        detail: format!("{} selected drafts", count),
-                        action: ConfirmAction::MarkDraft,
-                    });
-                } else {
-                    self.push_action(Action::MarkDraft);
-                }
-            }
-            KeyCode::Char('x') => {
-                self.g_pending = false;
-                if let Some(email) = self.selected_email() {
-                    self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: "Send this email?".to_string(),
-                        detail: format!("To: {} - {}", email.to, email.subject),
-                        action: ConfirmAction::Send,
-                    });
-                }
-            }
-            KeyCode::Char('X') => {
-                self.g_pending = false;
-                self.overlay = Overlay::Confirm(ConfirmDialog {
-                    title: "Send all approved emails?".to_string(),
-                    detail: format!("In {}", self.active_label()),
-                    action: ConfirmAction::SendApproved,
-                });
-            }
-            KeyCode::Char('y') => {
-                self.g_pending = false;
-                self.push_action(Action::CopyPath);
-            }
-            KeyCode::Char('n') => {
-                self.g_pending = false;
-                self.push_action(Action::OpenComposeWizard(ComposeMode::New));
-            }
-            KeyCode::Char('s') => {
-                self.g_pending = false;
-                self.push_action(Action::Fetch);
-            }
-            KeyCode::Char('S') => {
-                self.g_pending = false;
-                self.push_action(Action::Sync);
-            }
-            KeyCode::Char('f') => {
-                self.g_pending = false;
-                self.server_search_query.clear();
-                self.server_search_results.clear();
-                self.server_search_index = 0;
-                self.server_search_scroll = 0;
-                self.server_search_headers_scroll = 0;
-                self.server_search_focus = SearchOverlayFocus::Input;
-                self.server_search_loading = false;
-                self.server_search_status = None;
-                self.overlay = Overlay::Search;
-            }
-
-            KeyCode::Char('o') => {
-                self.g_pending = false;
-                self.open_attachment_picker(AttachmentPickerMode::Open);
-            }
-            KeyCode::Char('O') => {
-                self.g_pending = false;
-                self.open_attachment_picker(AttachmentPickerMode::Save);
-            }
-            KeyCode::Char('b') => {
-                self.g_pending = false;
-                if let Some(email) = self.selected_email() {
-                    let html_path = email.path.with_extension("html");
-                    if html_path.exists() {
-                        self.push_action(Action::OpenHtmlInBrowser(html_path));
-                    } else {
-                        self.set_status("No HTML version available".to_string());
-                    }
-                }
-            }
-            KeyCode::Char('m') => {
-                self.g_pending = false;
-                if !self.selection.is_empty() {
-                    let paths: Vec<PathBuf> = self.selection.iter().cloned().collect();
-                    self.push_action(Action::BatchToggleRead(paths));
-                } else {
-                    self.push_action(Action::ToggleRead);
-                }
-            }
-            KeyCode::Char('M') => {
-                self.g_pending = false;
-                self.open_mailbox_picker();
-            }
-            KeyCode::Char('V') => {
-                self.g_pending = false;
-                self.open_rsvp_overlay();
-            }
-            KeyCode::Char(' ') => {
-                self.g_pending = false;
-                if let Some(path) = self.selected_email_path() {
-                    if self.selection.contains(&path) {
-                        self.selection.remove(&path);
-                    } else {
-                        self.selection.insert(path);
-                    }
-                    if self.list_index < self.visible.len() - 1 {
-                        self.list_index += 1;
-                    }
-                }
-            }
-            KeyCode::Esc => {
-                self.g_pending = false;
-                if !self.selection.is_empty() {
-                    self.selection.clear();
-                }
-            }
-
-            _ => {
-                self.g_pending = false;
-            }
-        }
-
-        if self.list_index != old_index {
-            self.headers_scroll = 0;
-            self.preview_scroll = 0;
-        }
-
         None
     }
 
@@ -925,56 +938,6 @@ impl App {
             })
             .collect();
         wizard.suggestion_idx = 0;
-    }
-
-    fn handle_preview_key(&mut self, key: KeyEvent) -> Option<Message> {
-        self.g_pending = false;
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.preview_scroll = self.preview_scroll.saturating_add(1);
-                None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(1);
-                None
-            }
-            KeyCode::Char('d') => {
-                self.preview_scroll = self.preview_scroll.saturating_add(10);
-                None
-            }
-            KeyCode::Char('u') => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(10);
-                None
-            }
-            KeyCode::Char('o') => {
-                self.open_attachment_picker(AttachmentPickerMode::Open);
-                None
-            }
-            KeyCode::Char('O') => {
-                self.open_attachment_picker(AttachmentPickerMode::Save);
-                None
-            }
-            KeyCode::Char('b') => {
-                if let Some(email) = self.selected_email() {
-                    let html_path = email.path.with_extension("html");
-                    if html_path.exists() {
-                        self.push_action(Action::OpenHtmlInBrowser(html_path));
-                    } else {
-                        self.set_status("No HTML version available".to_string());
-                    }
-                }
-                None
-            }
-            KeyCode::Char('V') => {
-                self.open_rsvp_overlay();
-                None
-            }
-            KeyCode::Esc => {
-                self.focus = Focus::List;
-                None
-            }
-            _ => None,
-        }
     }
 
     /// Open the RSVP overlay for the cursor email, guarding against

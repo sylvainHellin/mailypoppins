@@ -1,12 +1,90 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::super::app::App;
+use super::super::app::{hint_bindings, prefix_continuations, App, KeyCtx};
 use super::super::theme;
 use super::util::{desc_span, hint_span};
+
+/// herdr-style mode/hint bar (#0032): a single line showing an accent-bg mode
+/// badge plus the next valid keystrokes for the current context, all derived
+/// from `KEYMAP`. When a leader prefix (today `g`) is pending it shows that
+/// prefix's continuations instead, making the previously-invisible leader
+/// discoverable. Overlay contexts with their own inline chips (confirm,
+/// pickers, compose, ...) render no hint bar (`key_context()` returns `None`).
+pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
+    let bg = theme::active().surface;
+    // Blank line (still painted with the surface bg) when there is nothing
+    // contextual to show, so the row height stays stable.
+    let Some(ctx) = app.key_context() else {
+        let blank = Paragraph::new(Line::from("")).style(Style::default().bg(bg));
+        frame.render_widget(blank, area);
+        return;
+    };
+
+    let pending = app.pending_prefix();
+    let (badge, hints): (String, Vec<(&'static str, &'static str)>) = if let Some(p) = pending {
+        // Leader pending: show its continuations (e.g. `g` -> `gg`, `G`).
+        let conts: Vec<(&str, &str)> = prefix_continuations(ctx, p)
+            .map(|kb| (kb.keys, kb.desc))
+            .collect();
+        (p.to_uppercase().to_string(), conts)
+    } else {
+        let hs: Vec<(&str, &str)> = hint_bindings(ctx).map(|kb| (kb.keys, kb.desc)).collect();
+        (mode_label(app, ctx).to_string(), hs)
+    };
+
+    let mut spans: Vec<Span> = Vec::with_capacity(hints.len() * 2 + 2);
+    // Mode badge: bold, accent background, contrasting fg.
+    spans.push(Span::styled(
+        format!(" {} ", badge),
+        Style::default()
+            .fg(theme::active().bg)
+            .bg(theme::active().accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled("  ", Style::default().bg(bg)));
+    for (i, (keys, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().bg(bg)));
+        }
+        spans.push(Span::styled(
+            *keys,
+            Style::default()
+                .fg(theme::active().accent)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        spans.push(Span::styled(
+            *desc,
+            Style::default().fg(theme::active().text_muted).bg(bg),
+        ));
+    }
+
+    let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(bg));
+    frame.render_widget(bar, area);
+}
+
+/// The badge label for a non-prefixed context. A live selection takes over the
+/// badge (herdr's `N SELECTED`) since that is the most useful mode cue.
+fn mode_label(app: &App, ctx: KeyCtx) -> String {
+    if !app.selection.is_empty() {
+        return format!("{} SELECTED", app.selection.len());
+    }
+    match ctx {
+        KeyCtx::Global => "MAIL".to_string(),
+        KeyCtx::Sidebar => "MAILBOXES".to_string(),
+        KeyCtx::List => "MAIL".to_string(),
+        KeyCtx::Headers => "HEADERS".to_string(),
+        KeyCtx::Preview => "BODY".to_string(),
+        KeyCtx::ServerSearch => "SEARCH".to_string(),
+        KeyCtx::Activity => "ACTIVITY".to_string(),
+        KeyCtx::Help => "HELP".to_string(),
+    }
+}
 
 pub(super) fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let total = app.mailbox_counts[app.active_mailbox];

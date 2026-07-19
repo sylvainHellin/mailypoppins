@@ -1,0 +1,98 @@
+[
+  {
+    "title": "GLOBAL",
+    "bindings": [
+      { "key": "q", "action": "Quit" },
+      { "key": "`", "action": "Switch account" },
+      { "key": "Ctrl+1-9", "action": "Jump to account" },
+      { "key": "1-9", "action": "Jump to mailbox" },
+      { "key": "Tab", "action": "Cycle focus forward" },
+      { "key": "Shift+Tab", "action": "Cycle focus backward" },
+      { "key": "/", "action": "Filter by metadata" },
+      { "key": "\\", "action": "Search email content" },
+      { "key": "?", "action": "Toggle this help" },
+      { "key": "!", "action": "Toggle activity log" },
+      { "key": "L", "action": "Open activity log overlay" },
+      { "key": "Ctrl+l", "action": "Open log file in $EDITOR" },
+      { "key": "Ctrl+e", "action": "Open config.toml in $EDITOR" }
+    ]
+  },
+  {
+    "title": "SIDEBAR",
+    "bindings": [
+      { "key": "j/k", "action": "Navigate mailboxes" },
+      { "key": "Enter", "action": "Select mailbox" }
+    ]
+  },
+  {
+    "title": "EMAIL LIST",
+    "bindings": [
+      { "key": "j/k", "action": "Navigate emails" },
+      { "key": "gg / G", "action": "Jump to top / bottom" },
+      { "key": "Space", "action": "Toggle selection" },
+      { "key": "Ctrl+a", "action": "Select all visible" },
+      { "key": "Esc", "action": "Clear selection" },
+      { "key": "Enter / e", "action": "Open in editor" },
+      { "key": "r / R", "action": "Reply / Reply-all" },
+      { "key": "w", "action": "Forward" },
+      { "key": "c", "action": "Edit recipients (Drafts only)" },
+      { "key": "a", "action": "Archive" },
+      { "key": "d", "action": "Delete" },
+      { "key": "m", "action": "Toggle read/unread" },
+      { "key": "M", "action": "Move to mailbox (fuzzy picker)" },
+      { "key": "V", "action": "RSVP to invitation (Accept/Tentative/Decline)" },
+      { "key": "A", "action": "Approve draft" },
+      { "key": "D", "action": "Mark approved as draft (reverse A)" },
+      { "key": "x / X", "action": "Send / Send all approved" },
+      { "key": "y", "action": "Copy file path" },
+      { "key": "o", "action": "Open attachment" },
+      { "key": "O", "action": "Save attachment to disk" },
+      { "key": "b", "action": "Open HTML in browser" },
+      { "key": "n", "action": "New draft" },
+      { "key": "s / S", "action": "Quick sync / Full sync" },
+      { "key": "f", "action": "Search (IMAP)" }
+    ]
+  },
+  {
+    "title": "SERVER SEARCH",
+    "bindings": [
+      { "key": "j/k", "action": "Navigate results" },
+      { "key": "gg / G", "action": "Jump to top / bottom" },
+      { "key": "d/u", "action": "Half-page down / up" },
+      { "key": "Enter / e", "action": "Open in editor" },
+      { "key": "r / R", "action": "Reply / Reply-all" },
+      { "key": "w", "action": "Forward" },
+      { "key": "a", "action": "Archive" },
+      { "key": "b", "action": "Open HTML in browser" },
+      { "key": "o", "action": "Open attachment" },
+      { "key": "O", "action": "Save attachment to disk" },
+      { "key": "Tab", "action": "Switch focus" },
+      { "key": "Esc", "action": "Close overlay" }
+    ]
+  },
+  {
+    "title": "HEADERS",
+    "bindings": [
+      { "key": "j/k", "action": "Scroll headers" }
+    ]
+  },
+  {
+    "title": "BODY",
+    "bindings": [
+      { "key": "j/k", "action": "Scroll line by line" },
+      { "key": "d/u", "action": "Half-page down / up" },
+      { "key": "V", "action": "RSVP to invitation (Accept/Tentative/Decline)" },
+      { "key": "Esc", "action": "Return to list" }
+    ]
+  },
+  {
+    "title": "ACTIVITY LOG",
+    "bindings": [
+      { "key": "j/k", "action": "Scroll line by line" },
+      { "key": "d/u", "action": "Half-page down / up" },
+      { "key": "gg / G", "action": "Jump to top / bottom" },
+      { "key": "/", "action": "Filter entries" },
+      { "key": "Esc", "action": "Close overlay" }
+    ]
+  }
+]

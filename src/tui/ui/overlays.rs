@@ -518,103 +518,11 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
     }
 }
 
+/// Help-overlay sections, derived from the single `KEYMAP` source of truth
+/// (#0032). The former hand-kept copy lived here; it now delegates so the help
+/// overlay, the hint bar, and the website table cannot drift apart.
 pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
-    vec![
-        (
-            "GLOBAL",
-            vec![
-                ("q", "Quit"),
-                ("`", "Switch account"),
-                ("Ctrl+1-9", "Jump to account"),
-                ("1-9", "Jump to mailbox"),
-                ("Tab", "Cycle focus forward"),
-                ("Shift+Tab", "Cycle focus backward"),
-                ("/", "Filter by metadata"),
-                ("\\", "Search email content"),
-                ("?", "Toggle this help"),
-                ("!", "Toggle activity log"),
-                ("L", "Open activity log overlay"),
-                ("Ctrl+l", "Open log file in $EDITOR"),
-                ("Ctrl+e", "Open config.toml in $EDITOR"),
-            ],
-        ),
-        (
-            "SIDEBAR",
-            vec![
-                ("j/k", "Navigate mailboxes"),
-                ("Enter", "Select mailbox"),
-            ],
-        ),
-        (
-            "EMAIL LIST",
-            vec![
-                ("j/k", "Navigate emails"),
-                ("gg / G", "Jump to top / bottom"),
-                ("Space", "Toggle selection"),
-                ("Ctrl+a", "Select all visible"),
-                ("Esc", "Clear selection"),
-                ("Enter / e", "Open in editor"),
-                ("r / R", "Reply / Reply-all"),
-                ("w", "Forward"),
-                ("c", "Edit recipients (Drafts only)"),
-                ("a", "Archive"),
-                ("d", "Delete"),
-                ("m", "Toggle read/unread"),
-                ("M", "Move to mailbox (fuzzy picker)"),
-                ("V", "RSVP to invitation (Accept/Tentative/Decline)"),
-                ("A", "Approve draft"),
-                ("D", "Mark approved as draft (reverse A)"),
-                ("x / X", "Send / Send all approved"),
-                ("y", "Copy file path"),
-                ("o", "Open attachment"),
-                ("O", "Save attachment to disk"),
-                ("b", "Open HTML in browser"),
-                ("n", "New draft"),
-                ("s / S", "Quick sync / Full sync"),
-                ("f", "Search (IMAP)"),
-            ],
-        ),
-        (
-            "SERVER SEARCH",
-            vec![
-                ("j/k", "Navigate results"),
-                ("gg / G", "Jump to top / bottom"),
-                ("d/u", "Half-page down / up"),
-                ("Enter / e", "Open in editor"),
-                ("r / R", "Reply / Reply-all"),
-                ("w", "Forward"),
-                ("a", "Archive"),
-                ("b", "Open HTML in browser"),
-                ("o", "Open attachment"),
-                ("O", "Save attachment to disk"),
-                ("Tab", "Switch focus"),
-                ("Esc", "Close overlay"),
-            ],
-        ),
-        (
-            "HEADERS",
-            vec![("j/k", "Scroll headers")],
-        ),
-        (
-            "BODY",
-            vec![
-                ("j/k", "Scroll line by line"),
-                ("d/u", "Half-page down / up"),
-                ("V", "RSVP to invitation (Accept/Tentative/Decline)"),
-                ("Esc", "Return to list"),
-            ],
-        ),
-        (
-            "ACTIVITY LOG",
-            vec![
-                ("j/k", "Scroll line by line"),
-                ("d/u", "Half-page down / up"),
-                ("gg / G", "Jump to top / bottom"),
-                ("/", "Filter entries"),
-                ("Esc", "Close overlay"),
-            ],
-        ),
-    ]
+    crate::tui::app::help_sections()
 }
 
 pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) {

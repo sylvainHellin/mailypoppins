@@ -19,13 +19,19 @@ use super::app::{App, Overlay};
 pub fn view(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
+    // Bottom rows: a herdr-style mode/hint bar (#0032) above the status bar.
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1), // hint bar
+            Constraint::Length(1), // status bar
+        ])
         .split(area);
 
     let main_area = outer[0];
-    let status_area = outer[1];
+    let hint_area = outer[1];
+    let status_area = outer[2];
 
     let show_right = app.terminal_width >= 80;
     let show_sidebar = app.terminal_width >= 40;
@@ -96,6 +102,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         list::render_email_list(app, frame, main_area);
     }
 
+    status::render_hint_bar(app, frame, hint_area);
     status::render_status_bar(app, frame, status_area);
 
     // Exactly one overlay at a time by construction (#0032): a single match

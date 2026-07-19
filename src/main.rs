@@ -247,6 +247,17 @@ enum Commands {
         #[command(subcommand)]
         action: CalendarAction,
     },
+    /// Dump the TUI key bindings from the single KEYMAP source of truth.
+    ///
+    /// Markdown by default; `--json` emits the section-grouped shape the
+    /// website consumes. Regenerate the site data with:
+    /// `mp dump-keys --json > website/src/data/tui-keys.json`
+    /// (see scripts/regen-website-keys.sh).
+    DumpKeys {
+        /// Emit JSON grouped by section instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Organizer-side calendar operations (#0030).
@@ -1840,6 +1851,14 @@ async fn main() -> Result<()> {
                 email::calendar_cmd::handle_rebuild(&global_config, acct)?;
             }
         },
+
+        Some(Commands::DumpKeys { json }) => {
+            if json {
+                print!("{}", email::tui::dump_keys_json());
+            } else {
+                print!("{}", email::tui::dump_keys());
+            }
+        }
 
         Some(Commands::Config { action }) => {
             match action {

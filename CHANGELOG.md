@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **TUI mode/hint bar + `mp dump-keys` (keymap-as-data, #0032).** The TUI now
+  shows a herdr-style hint bar above the status line: an accent-background mode
+  badge (or `N SELECTED` when a selection is active) plus the next valid
+  keystrokes for the focused pane, all derived from a single `KEYMAP` table. The
+  previously-invisible `g` leader is now a first-class prefix chord — pressing
+  `g` shows its continuations (`gg`, `G`) in the hint bar. `mp dump-keys` prints
+  the key bindings as Markdown (or `--json` for tooling); the website key table
+  is regenerated from it (`scripts/regen-website-keys.sh`), so the help overlay
+  (`?`), the hint bar, and mailypoppins.dev all derive from one source and can
+  no longer drift. Subsumes and closes #0019 (configurable keybindings
+  groundwork). No existing key binding changed.
 - **Organizer-side RSVP reconciliation (iMIP REPLY): `mp calendar rebuild`.**
   When an attendee accepts/declines a `mp send --invite` invitation, their
   mail client sends a `METHOD:REPLY` email that arrives via normal sync
