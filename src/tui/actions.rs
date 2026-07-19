@@ -8,7 +8,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{
     Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus, MailboxKind,
-    StatusLevel,
+    Overlay, StatusLevel,
 };
 use super::helpers::{
     edit_file, ensure_search_result_saved, lib_do_multi_search_graph, lib_do_sync_graph,
@@ -1753,13 +1753,18 @@ pub(super) fn handle_action(
         }
 
         Action::ComposeWizardCancel => {
-            app.compose_wizard = None;
+            app.close_overlay();
             app.focus = Focus::List;
             app.set_status("Compose cancelled".to_string());
         }
 
         Action::ComposeWizardSubmit => {
             submit_compose_wizard(app, terminal)?;
+            // Consume-and-close: `submit_compose_wizard` takes the wizard via
+            // `mem::replace` and (unless validation re-opens it) leaves the
+            // overlay at `None`. Promote any error queued behind it. Guarded
+            // on `Overlay::None`, so the validation re-open path is a no-op.
+            app.promote_pending_error();
         }
     }
 
@@ -1801,7 +1806,7 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
         }
     };
 
-    app.compose_wizard = Some(ComposeWizard {
+    app.overlay = Overlay::Compose(ComposeWizard {
         mode,
         to,
         cc,
@@ -1820,7 +1825,9 @@ fn submit_compose_wizard(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    let Some(mut wizard) = app.compose_wizard.take() else {
+    let Overlay::Compose(mut wizard) =
+        std::mem::replace(&mut app.overlay, Overlay::None)
+    else {
         return Ok(());
     };
     app.focus = Focus::List;
@@ -1841,7 +1848,7 @@ fn submit_compose_wizard(
             StatusLevel::Error,
         );
         // Re-open the wizard so the user can fix the field.
-        app.compose_wizard = Some(wizard);
+        app.overlay = Overlay::Compose(wizard);
         app.focus = Focus::ComposeWizard;
         return Ok(());
     }

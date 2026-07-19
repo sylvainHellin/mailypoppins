@@ -803,6 +803,54 @@ pub struct ConfirmDialog {
     pub action: ConfirmAction,
 }
 
+/// The single active modal overlay, if any (#0032).
+///
+/// Replaces the former set of independent `Option`/`bool` overlay fields on
+/// `App` (`confirm_dialog`, `show_help`, `show_activity_overlay`,
+/// `show_search_overlay`, `compose_wizard`, `attachment_picker`, `dir_picker`,
+/// `mailbox_picker`, `rsvp_overlay`, `persistent_error`). Exactly one overlay
+/// is renderable at a time by construction: `view` matches on this and
+/// `handle_key` dispatches on it.
+///
+/// Variants that carry per-overlay data own their struct payload. The three
+/// former bare-`bool` overlays (`Help`, `Activity`, `Search`) are unit
+/// variants — their scratch state (scroll offsets, filter strings, server
+/// search buffers) still lives in sibling `App` fields, since those buffers
+/// outlive a single open/close only as reset-on-open scratch space.
+#[derive(Default)]
+pub enum Overlay {
+    /// No overlay: the normal three-pane mail view has full focus.
+    #[default]
+    None,
+    /// Destructive-action confirmation (`y`/`n`).
+    Confirm(ConfirmDialog),
+    /// Help overlay (`?`). Scroll/filter state in `App::help_*`.
+    Help,
+    /// Activity-log overlay (`L`). Scroll/filter state in `App::activity_*`.
+    Activity,
+    /// Server (IMAP) search overlay (`f`). State in `App::server_search_*`.
+    Search,
+    /// Compose wizard (new / forward / edit-recipients).
+    Compose(ComposeWizard),
+    /// Attachment picker (`o` open / `O` save).
+    Attachment(AttachmentPicker),
+    /// Directory picker for saving attachments.
+    Dir(DirPicker),
+    /// Fuzzy mailbox picker for quick-move (`M`).
+    Mailbox(MailboxPicker),
+    /// RSVP overlay for a received invite (`V`, #0029).
+    Rsvp(RsvpOverlay),
+    /// Persistent error requiring explicit dismissal.
+    Error(PersistentError),
+}
+
+impl Overlay {
+    /// Whether any overlay is currently active.
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Overlay::None)
+    }
+}
+
 /// Persistent error notification (requires user action to dismiss).
 pub struct PersistentError {
     pub message: String,

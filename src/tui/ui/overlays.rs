@@ -10,34 +10,25 @@ use super::super::app::{
 };
 use super::super::theme;
 use super::util::truncate;
+use super::widgets::{modal_stack_areas, render_action_button, render_modal_shell};
 
 /// Render the three-choice RSVP overlay (#0029): Accept / Tentative / Decline
 /// for a received invite, opened with `V`. Esc cancels.
 pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area: Rect) {
-    let dialog_width = 46u16.min(area.width.saturating_sub(4));
-    let dialog_height = 8u16;
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        46,
+        8,
+        theme::active().accent,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
 
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(dialog_width)])
-        .flex(Flex::Center)
-        .split(area);
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(dialog_height)])
-        .flex(Flex::Center)
-        .split(horizontal[0]);
-    let dialog_area = vertical[0];
-    frame.render_widget(Clear, dialog_area);
+    let stack = modal_stack_areas(inner, 0, 1);
+    let inner_width = inner.width as usize;
 
-    let block = Block::default()
-        .title(" RSVP ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::active().accent))
-        .style(Style::default().bg(theme::active().bg));
-
-    let inner_width = dialog_width.saturating_sub(4) as usize;
     let mut lines = vec![
         Line::from(Span::styled(
             truncate(&overlay.summary, inner_width),
@@ -61,41 +52,32 @@ pub(super) fn render_rsvp_overlay(overlay: &RsvpOverlay, frame: &mut Frame, area
         };
         lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  Enter confirm  ·  Esc cancel",
-        Style::default().fg(theme::active().text_muted),
-    )));
 
-    let content = Paragraph::new(lines).block(block);
-    frame.render_widget(content, dialog_area);
+    frame.render_widget(Paragraph::new(lines), stack.content);
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "  Enter confirm  ·  Esc cancel",
+                Style::default().fg(theme::active().text_muted),
+            )),
+            footer,
+        );
+    }
 }
 
 pub(super) fn render_confirm_dialog(dialog: &ConfirmDialog, frame: &mut Frame, area: Rect) {
-    let dialog_width = 40u16.min(area.width.saturating_sub(4));
-    let dialog_height = 7u16;
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        40,
+        7,
+        theme::active().warning,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
 
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(dialog_width)])
-        .flex(Flex::Center)
-        .split(area);
-
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(dialog_height)])
-        .flex(Flex::Center)
-        .split(horizontal[0]);
-
-    let dialog_area = vertical[0];
-
-    frame.render_widget(Clear, dialog_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::active().warning))
-        .style(Style::default().bg(theme::active().bg));
+    let stack = modal_stack_areas(inner, 0, 1);
 
     let lines = vec![
         Line::from(Span::styled(
@@ -106,65 +88,67 @@ pub(super) fn render_confirm_dialog(dialog: &ConfirmDialog, frame: &mut Frame, a
         )),
         Line::from(""),
         Line::from(Span::styled(
-            truncate(&dialog.detail, dialog_width.saturating_sub(4) as usize),
+            truncate(&dialog.detail, inner.width as usize),
             Style::default().fg(theme::active().text),
         )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  [y]", Style::default().fg(theme::active().success)),
-            Span::styled("es  ", Style::default().fg(theme::active().text)),
-            Span::styled("[n]", Style::default().fg(theme::active().error)),
-            Span::styled("o", Style::default().fg(theme::active().text)),
-        ]),
     ];
+    frame.render_widget(Paragraph::new(lines), stack.content);
 
-    let content = Paragraph::new(lines).block(block);
-    frame.render_widget(content, dialog_area);
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  [y]", Style::default().fg(theme::active().success)),
+                Span::styled("es  ", Style::default().fg(theme::active().text)),
+                Span::styled("[n]", Style::default().fg(theme::active().error)),
+                Span::styled("o", Style::default().fg(theme::active().text)),
+            ])),
+            footer,
+        );
+    }
 }
 
 pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Frame, area: Rect) {
     let file_count = picker.files.len() as u16;
-    let dialog_width = 50u16.min(area.width.saturating_sub(4));
-    let dialog_height = (file_count + 4).min(area.height.saturating_sub(2));
-
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(dialog_width)])
-        .flex(Flex::Center)
-        .split(area);
-
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(dialog_height)])
-        .flex(Flex::Center)
-        .split(horizontal[0]);
-
-    let dialog_area = vertical[0];
-    frame.render_widget(Clear, dialog_area);
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        50,
+        file_count + 4,
+        theme::active().border_focused,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
 
     let is_save = picker.mode == AttachmentPickerMode::Save;
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::active().border_focused))
-        .style(Style::default().bg(theme::active().bg));
-
-    let inner_width = dialog_width.saturating_sub(4) as usize;
+    // Header row: title + an ` esc close ` chip pushed to the right edge.
+    let stack = modal_stack_areas(inner, 1, 1);
     let title = if is_save {
         "Save Attachments"
     } else {
         "Select Attachment"
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
+    frame.render_widget(
+        Paragraph::new(Span::styled(
             title,
             Style::default()
                 .fg(theme::active().border_focused)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(""),
-    ];
+        stack.header,
+    );
+    let chip_w = 10u16.min(stack.header.width);
+    let chip = Rect {
+        x: stack.header.x + stack.header.width.saturating_sub(chip_w),
+        y: stack.header.y,
+        width: chip_w,
+        height: 1,
+    };
+    render_action_button(frame, chip, Some("esc"), "close", theme::active().border_focused);
+
+    let inner_width = inner.width as usize;
+    let mut lines: Vec<Line> = Vec::new();
 
     // Reserve space for checkbox prefix in save mode
     let name_width = if is_save {
@@ -209,19 +193,22 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         }
     }
 
-    lines.push(Line::from(""));
-    let footer = if is_save {
-        "j/k nav  Space sel  ^a all  Enter confirm  Esc cancel"
-    } else {
-        "j/k nav  Enter open  Esc cancel"
-    };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(theme::active().text_muted),
-    )));
+    frame.render_widget(Paragraph::new(lines), stack.content);
 
-    let content = Paragraph::new(lines).block(block);
-    frame.render_widget(content, dialog_area);
+    if let Some(footer_area) = stack.footer {
+        let footer = if is_save {
+            "j/k nav  Space sel  ^a all  Enter confirm  Esc cancel"
+        } else {
+            "j/k nav  Enter open  Esc cancel"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                footer,
+                Style::default().fg(theme::active().text_muted),
+            )),
+            footer_area,
+        );
+    }
 }
 
 pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rect) {
@@ -488,31 +475,20 @@ pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, a
 }
 
 pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame, area: Rect) {
-    let dialog_width = 50u16.min(area.width.saturating_sub(4));
     let msg_lines = error.message.lines().count() as u16;
-    let dialog_height = msg_lines + 6;
-    let inner_width = dialog_width.saturating_sub(4) as usize;
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        50,
+        msg_lines + 6,
+        theme::active().error,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+    let inner_width = inner.width as usize;
 
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(dialog_width)])
-        .flex(Flex::Center)
-        .split(area);
-
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(dialog_height)])
-        .flex(Flex::Center)
-        .split(horizontal[0]);
-
-    let dialog_area = vertical[0];
-    frame.render_widget(Clear, dialog_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::active().error))
-        .style(Style::default().bg(theme::active().bg));
+    let stack = modal_stack_areas(inner, 0, 1);
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -521,24 +497,25 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
         )),
         Line::from(""),
     ];
-
     for msg_line in error.message.lines() {
         lines.push(Line::from(Span::styled(
             truncate(msg_line, inner_width),
             Style::default().fg(theme::active().text),
         )));
     }
+    frame.render_widget(Paragraph::new(lines), stack.content);
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  [s]", Style::default().fg(theme::active().success)),
-        Span::styled("ync now  ", Style::default().fg(theme::active().text)),
-        Span::styled("[d]", Style::default().fg(theme::active().text_muted)),
-        Span::styled("ismiss", Style::default().fg(theme::active().text)),
-    ]));
-
-    let content = Paragraph::new(lines).block(block);
-    frame.render_widget(content, dialog_area);
+    if let Some(footer) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  [s]", Style::default().fg(theme::active().success)),
+                Span::styled("ync now  ", Style::default().fg(theme::active().text)),
+                Span::styled("[d]", Style::default().fg(theme::active().text_muted)),
+                Span::styled("ismiss", Style::default().fg(theme::active().text)),
+            ])),
+            footer,
+        );
+    }
 }
 
 pub(super) fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {

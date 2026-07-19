@@ -47,6 +47,10 @@ pub struct Theme {
     pub border: Color,
     /// Focused pane border (and the attachment-picker accent).
     pub border_focused: Color,
+    /// Background of modal/overlay panels, distinct from `bg` so a modal
+    /// reads as raised above the dimmed main view (#0032). Usually equal to
+    /// `bg` for opaque themes; `Reset` for the terminal-adaptive theme.
+    pub panel_bg: Color,
 
     // Selection / activity states
     /// Cursor row foreground, highlighted sidebar item, checked checkboxes.
@@ -92,6 +96,7 @@ impl Theme {
             text_faint: Color::Rgb(108, 112, 134),     // overlay0
             border: Color::Rgb(137, 180, 250),         // blue
             border_focused: Color::Rgb(250, 179, 135), // peach
+            panel_bg: Color::Rgb(24, 24, 37),          // mantle (below base)
             selection: Color::Rgb(166, 227, 161),      // green
             unread: Color::Rgb(137, 180, 250),         // blue
             unread_count: Color::Rgb(250, 179, 135),   // peach
@@ -117,6 +122,7 @@ impl Theme {
             text_faint: Color::Rgb(156, 160, 176),    // overlay0
             border: Color::Rgb(30, 102, 245),         // blue
             border_focused: Color::Rgb(254, 100, 11), // peach
+            panel_bg: Color::Rgb(230, 233, 239),      // mantle (below base)
             selection: Color::Rgb(64, 160, 43),       // green
             unread: Color::Rgb(30, 102, 245),         // blue
             unread_count: Color::Rgb(254, 100, 11),   // peach
@@ -142,6 +148,7 @@ impl Theme {
             text_faint: Color::Rgb(86, 95, 137),       // comment
             border: Color::Rgb(122, 162, 247),         // blue
             border_focused: Color::Rgb(255, 158, 100), // orange
+            panel_bg: Color::Rgb(22, 22, 30),          // darker than bg
             selection: Color::Rgb(158, 206, 106),      // green
             unread: Color::Rgb(122, 162, 247),         // blue
             unread_count: Color::Rgb(255, 158, 100),   // orange
@@ -177,6 +184,9 @@ impl Theme {
             text_faint: Color::Gray, // stays legible on the DarkGray status bar
             border: Color::Blue,
             border_focused: Color::Cyan,
+            // Modals inherit the terminal background; `panel_contrast_fg`
+            // falls back to `surface` so their border/dim still reads.
+            panel_bg: Color::Reset,
             selection: Color::White, // cursor-row fg over DarkGray surface
             unread: Color::Blue,
             unread_count: Color::Yellow,
@@ -189,6 +199,18 @@ impl Theme {
             warning: Color::Yellow,
             error: Color::Red,
             info: Color::Blue,
+        }
+    }
+
+    /// Readable foreground for text painted on an accent-colored background
+    /// (badges, action-button chips). When `panel_bg` is `Color::Reset` (the
+    /// terminal-adaptive theme), fall back to `surface` — which is guaranteed
+    /// to contrast with the terminal background — instead of `bg`, which would
+    /// be invisible on a `Reset` terminal. (#0032, herdr `panel_contrast_fg`.)
+    pub fn panel_contrast_fg(&self) -> Color {
+        match self.panel_bg {
+            Color::Reset => self.surface,
+            color => color,
         }
     }
 
@@ -300,9 +322,9 @@ mod tests {
         // No RGB anywhere: the whole palette follows the terminal.
         for slot in [
             t.bg, t.surface, t.text, t.text_muted, t.text_faint, t.border,
-            t.border_focused, t.selection, t.unread, t.unread_count, t.accent,
-            t.accent_alt, t.heading, t.emphasis, t.code, t.success, t.warning,
-            t.error, t.info,
+            t.border_focused, t.panel_bg, t.selection, t.unread, t.unread_count,
+            t.accent, t.accent_alt, t.heading, t.emphasis, t.code, t.success,
+            t.warning, t.error, t.info,
         ] {
             assert!(
                 !matches!(slot, Color::Rgb(..) | Color::Indexed(_)),

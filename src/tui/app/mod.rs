@@ -56,10 +56,18 @@ pub struct App {
 
     // --- Global state ---
     pub pending_actions: VecDeque<Action>,
-    pub confirm_dialog: Option<ConfirmDialog>,
+    /// The single active modal overlay (#0032). Exactly one overlay is
+    /// renderable at a time by construction; `Overlay::None` is the normal
+    /// mail view.
+    pub overlay: Overlay,
+    /// A persistent error that arrived (from a background result) while
+    /// another overlay was already open (#0032). We do not clobber the
+    /// active overlay; instead we surface a transient status-line notice
+    /// and hold the error here, promoting it to `Overlay::Error` the
+    /// moment the active overlay closes (see `promote_pending_error`).
+    pub pending_error: Option<PersistentError>,
     pub status_message: Option<String>,
     pub status_ticks: u8,
-    pub show_help: bool,
     pub help_scroll: u16,
     pub help_filter: String,
     pub help_filter_active: bool,
@@ -73,25 +81,17 @@ pub struct App {
     /// list optimistically) is dropped in `tui/bg.rs`.
     pub mailbox_load_generation: u64,
     pub queued_action: Option<Action>,
-    pub persistent_error: Option<PersistentError>,
-    pub attachment_picker: Option<AttachmentPicker>,
-    pub dir_picker: Option<DirPicker>,
-    pub mailbox_picker: Option<MailboxPicker>,
-    /// The RSVP overlay (#0029), opened with `V` on a received invite.
-    pub rsvp_overlay: Option<RsvpOverlay>,
     pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
     pub show_activity_log: bool,
 
-    // Activity log overlay
-    pub show_activity_overlay: bool,
+    // Activity log overlay scratch state (overlay presence is Overlay::Activity)
     pub activity_filter: String,
     pub activity_filter_active: bool,
     pub activity_scroll: u16,
 
-    // Server search overlay
-    pub show_search_overlay: bool,
+    // Server search overlay scratch state (overlay presence is Overlay::Search)
     pub server_search_query: String,
     pub server_search_focus: SearchOverlayFocus,
     pub server_search_results: Vec<SearchResultEntry>,
@@ -101,9 +101,6 @@ pub struct App {
     pub server_search_loading: bool,
     pub server_search_status: Option<String>,
     pub server_search_scope_label: String,
-
-    // Compose wizard overlay
-    pub compose_wizard: Option<ComposeWizard>,
 
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
@@ -164,10 +161,10 @@ impl App {
             inbox_dir: None,
             account_config: crate::config::AccountConfig::default(),
             pending_actions: VecDeque::new(),
-            confirm_dialog: None,
+            overlay: Overlay::None,
+            pending_error: None,
             status_message: None,
             status_ticks: 0,
-            show_help: false,
             help_scroll: 0,
             help_filter: String::new(),
             help_filter_active: false,
@@ -175,19 +172,12 @@ impl App {
             bg_spin_tick: 0,
             mailbox_load_generation: 0,
             queued_action: None,
-            persistent_error: None,
-            attachment_picker: None,
-            dir_picker: None,
-            mailbox_picker: None,
-            rsvp_overlay: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
-            show_activity_overlay: false,
             activity_filter: String::new(),
             activity_filter_active: false,
             activity_scroll: 0,
-            show_search_overlay: false,
             server_search_query: String::new(),
             server_search_focus: SearchOverlayFocus::Input,
             server_search_results: Vec::new(),
@@ -197,7 +187,6 @@ impl App {
             server_search_loading: false,
             server_search_status: None,
             server_search_scope_label: "All".to_string(),
-            compose_wizard: None,
             global_config,
         };
 
@@ -255,10 +244,10 @@ impl App {
             inbox_dir: None,
             account_config: crate::config::AccountConfig::default(),
             pending_actions: VecDeque::new(),
-            confirm_dialog: None,
+            overlay: Overlay::None,
+            pending_error: None,
             status_message: None,
             status_ticks: 0,
-            show_help: false,
             help_scroll: 0,
             help_filter: String::new(),
             help_filter_active: false,
@@ -266,19 +255,12 @@ impl App {
             bg_spin_tick: 0,
             mailbox_load_generation: 0,
             queued_action: None,
-            persistent_error: None,
-            attachment_picker: None,
-            dir_picker: None,
-            mailbox_picker: None,
-            rsvp_overlay: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
-            show_activity_overlay: false,
             activity_filter: String::new(),
             activity_filter_active: false,
             activity_scroll: 0,
-            show_search_overlay: false,
             server_search_query: String::new(),
             server_search_focus: SearchOverlayFocus::Input,
             server_search_results: Vec::new(),
@@ -288,7 +270,6 @@ impl App {
             server_search_loading: false,
             server_search_status: None,
             server_search_scope_label: "All".to_string(),
-            compose_wizard: None,
             global_config: crate::config::GlobalConfig::default(),
         }
     }
@@ -674,8 +655,105 @@ impl App {
         }
     }
 
+    /// Surface a persistent error that requires explicit dismissal.
+    ///
+    /// When no overlay is open this sets `Overlay::Error` directly, as
+    /// before. When another overlay is already active (this is reachable
+    /// from background results in `bg.rs`, which run regardless of overlay
+    /// state), clobbering it would destroy the overlay's unsaved state and,
+    /// for the compose wizard, leave `focus == Focus::ComposeWizard` while
+    /// `overlay == None` -- a state that panics on the next keystroke
+    /// (`keys.rs` `unreachable!()`). Instead we keep the overlay, show an
+    /// immediate status-line notice with the error's first line, and stash
+    /// the full error in `pending_error`; it is promoted to `Overlay::Error`
+    /// the moment the active overlay closes (`promote_pending_error`).
     pub fn set_persistent_error(&mut self, msg: String) {
-        self.persistent_error = Some(PersistentError { message: msg });
+        if self.overlay.is_active() {
+            // Short, single-line notice so the failure is not invisible
+            // while the overlay stays open. The full multi-line message is
+            // preserved for the promoted error overlay.
+            let notice = msg.lines().next().unwrap_or(&msg).to_string();
+            self.set_status_level(notice, StatusLevel::Error);
+            self.pending_error = Some(PersistentError { message: msg });
+        } else {
+            self.overlay = Overlay::Error(PersistentError { message: msg });
+        }
+    }
+
+    /// Promote a `pending_error` (queued by `set_persistent_error` while an
+    /// overlay was open) to a real `Overlay::Error`, but only once the
+    /// overlay has actually closed to `Overlay::None`. Callers invoke this
+    /// at every overlay-close site (via `close_overlay`, or directly after a
+    /// consume-and-close `mem::replace`). Guarding on `Overlay::None` keeps
+    /// the error from firing during an overlay->overlay handoff (e.g. the
+    /// attachment picker -> dir picker transition), which momentarily takes
+    /// the source overlay before opening the next one.
+    pub fn promote_pending_error(&mut self) {
+        if matches!(self.overlay, Overlay::None) {
+            if let Some(err) = self.pending_error.take() {
+                self.overlay = Overlay::Error(err);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Overlay accessors (#0032)
+    //
+    // Typed borrows into the single `overlay` field, so handlers and
+    // renderers keep their original shape (`if let Some(picker) = ...`).
+    // Returns `None` when a different overlay (or none) is active.
+    // ---------------------------------------------------------------
+
+    pub fn compose_wizard(&self) -> Option<&ComposeWizard> {
+        match &self.overlay {
+            Overlay::Compose(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    pub fn compose_wizard_mut(&mut self) -> Option<&mut ComposeWizard> {
+        match &mut self.overlay {
+            Overlay::Compose(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    pub fn attachment_picker_mut(&mut self) -> Option<&mut AttachmentPicker> {
+        match &mut self.overlay {
+            Overlay::Attachment(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn dir_picker_mut(&mut self) -> Option<&mut DirPicker> {
+        match &mut self.overlay {
+            Overlay::Dir(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn mailbox_picker_mut(&mut self) -> Option<&mut MailboxPicker> {
+        match &mut self.overlay {
+            Overlay::Mailbox(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn rsvp_overlay_mut(&mut self) -> Option<&mut RsvpOverlay> {
+        match &mut self.overlay {
+            Overlay::Rsvp(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Dismiss the active overlay, returning to the normal mail view.
+    ///
+    /// Single-sources overlay-close promotion: after closing, any error
+    /// that arrived while the overlay was open (`pending_error`) is promoted
+    /// to `Overlay::Error` so background failures are never silently lost.
+    pub fn close_overlay(&mut self) {
+        self.overlay = Overlay::None;
+        self.promote_pending_error();
     }
 
     pub fn invalidate_cache_idx(&mut self, idx: usize) {

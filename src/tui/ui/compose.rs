@@ -13,7 +13,7 @@ use super::super::app::{App, ComposeField, ComposeMode, ComposeWizard};
 use super::super::theme;
 
 pub(super) fn render_compose_wizard(app: &mut App, frame: &mut Frame, area: Rect) {
-    let Some(wizard) = app.compose_wizard.as_ref() else {
+    let Some(wizard) = app.compose_wizard() else {
         return;
     };
 

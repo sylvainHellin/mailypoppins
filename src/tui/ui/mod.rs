@@ -8,11 +8,12 @@ mod search;
 mod sidebar;
 mod status;
 mod util;
+mod widgets;
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
-use super::app::App;
+use super::app::{App, Overlay};
 
 /// Render the entire UI from the current app state.
 pub fn view(app: &mut App, frame: &mut Frame) {
@@ -97,43 +98,36 @@ pub fn view(app: &mut App, frame: &mut Frame) {
 
     status::render_status_bar(app, frame, status_area);
 
-    if let Some(dialog) = &app.confirm_dialog {
-        overlays::render_confirm_dialog(dialog, frame, area);
+    // Exactly one overlay at a time by construction (#0032): a single match
+    // on `app.overlay` replaces the former if-cascade of independent overlay
+    // flags. Dim the whole frame first so the modal visually floats above the
+    // recessed main view.
+    if app.overlay.is_active() {
+        widgets::dim_background(frame, area);
     }
-
-    if app.show_help {
+    // The `Help`/`Activity`/`Search`/`Compose` renderers take `&mut App`
+    // (they clamp scroll offsets against the computed viewport), so they can't
+    // run while holding an immutable borrow of `app.overlay`. Dispatch those
+    // via a discriminant check; the payload-carrying overlays render by ref.
+    match &app.overlay {
+        Overlay::None | Overlay::Help | Overlay::Activity | Overlay::Search
+        | Overlay::Compose(_) => {}
+        Overlay::Confirm(dialog) => overlays::render_confirm_dialog(dialog, frame, area),
+        Overlay::Attachment(picker) => {
+            overlays::render_attachment_picker(picker, frame, area)
+        }
+        Overlay::Dir(picker) => overlays::render_dir_picker(picker, frame, area),
+        Overlay::Mailbox(picker) => overlays::render_mailbox_picker(picker, frame, area),
+        Overlay::Rsvp(overlay) => overlays::render_rsvp_overlay(overlay, frame, area),
+        Overlay::Error(error) => overlays::render_persistent_error(error, frame, area),
+    }
+    if matches!(app.overlay, Overlay::Help) {
         overlays::render_help_overlay(app, frame, area);
-    }
-
-    if app.show_activity_overlay {
+    } else if matches!(app.overlay, Overlay::Activity) {
         activity::render_activity_overlay(app, frame, area);
-    }
-
-    if app.show_search_overlay {
+    } else if matches!(app.overlay, Overlay::Search) {
         search::render_search_overlay(app, frame, area);
-    }
-
-    if app.compose_wizard.is_some() {
+    } else if matches!(app.overlay, Overlay::Compose(_)) {
         compose::render_compose_wizard(app, frame, area);
-    }
-
-    if let Some(picker) = &app.attachment_picker {
-        overlays::render_attachment_picker(picker, frame, area);
-    }
-
-    if let Some(picker) = &app.dir_picker {
-        overlays::render_dir_picker(picker, frame, area);
-    }
-
-    if let Some(picker) = &app.mailbox_picker {
-        overlays::render_mailbox_picker(picker, frame, area);
-    }
-
-    if let Some(overlay) = &app.rsvp_overlay {
-        overlays::render_rsvp_overlay(overlay, frame, area);
-    }
-
-    if let Some(error) = &app.persistent_error {
-        overlays::render_persistent_error(error, frame, area);
     }
 }

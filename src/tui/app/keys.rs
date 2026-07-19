@@ -6,50 +6,30 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     Action, App, AttachmentPicker, AttachmentPickerMode, ComposeField, ComposeMode,
     ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
-    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, RsvpChoice, RsvpOverlay,
+    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, Overlay, RsvpChoice, RsvpOverlay,
     SearchOverlayFocus,
 };
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<Message> {
-        if self.confirm_dialog.is_some() {
-            return self.handle_confirm_key(key);
-        }
-
-        if self.persistent_error.is_some() {
-            return self.handle_persistent_error_key(key);
-        }
-
-        if self.dir_picker.is_some() {
-            return self.handle_dir_picker_key(key);
-        }
-
-        if self.mailbox_picker.is_some() {
-            return self.handle_mailbox_picker_key(key);
-        }
-
-        if self.rsvp_overlay.is_some() {
-            return self.handle_rsvp_overlay_key(key);
-        }
-
-        if self.attachment_picker.is_some() {
-            return self.handle_attachment_picker_key(key);
-        }
-
-        if self.show_help {
-            return self.handle_help_key(key);
-        }
-
-        if self.show_activity_overlay {
-            return self.handle_activity_overlay_key(key);
-        }
-
-        if self.show_search_overlay {
-            return self.handle_search_overlay_key(key);
-        }
-
-        if self.compose_wizard.is_some() {
-            return self.handle_compose_wizard_key(key);
+        // Single overlay dispatcher (#0032): exactly one overlay is active by
+        // construction, so this matches on `self.overlay` instead of the
+        // former cascade of `is_some()` / bool guards. Arm order preserves the
+        // historical guard precedence (it never actually mattered — overlays
+        // were always mutually exclusive — but keeping it avoids any behavior
+        // question).
+        match &self.overlay {
+            Overlay::Confirm(_) => return self.handle_confirm_key(key),
+            Overlay::Error(_) => return self.handle_persistent_error_key(key),
+            Overlay::Dir(_) => return self.handle_dir_picker_key(key),
+            Overlay::Mailbox(_) => return self.handle_mailbox_picker_key(key),
+            Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
+            Overlay::Attachment(_) => return self.handle_attachment_picker_key(key),
+            Overlay::Help => return self.handle_help_key(key),
+            Overlay::Activity => return self.handle_activity_overlay_key(key),
+            Overlay::Search => return self.handle_search_overlay_key(key),
+            Overlay::Compose(_) => return self.handle_compose_wizard_key(key),
+            Overlay::None => {}
         }
 
         if self.focus == Focus::Search {
@@ -81,10 +61,10 @@ impl App {
             KeyCode::Char('q') => return Some(Message::Quit),
             KeyCode::Char('?') => {
                 self.g_pending = false;
-                self.show_help = true;
                 self.help_scroll = 0;
                 self.help_filter.clear();
                 self.help_filter_active = false;
+                self.overlay = Overlay::Help;
                 return None;
             }
             KeyCode::Char('!') => {
@@ -94,10 +74,10 @@ impl App {
             }
             KeyCode::Char('L') => {
                 self.g_pending = false;
-                self.show_activity_overlay = true;
                 self.activity_filter.clear();
                 self.activity_filter_active = false;
                 self.activity_scroll = 0;
+                self.overlay = Overlay::Activity;
                 return None;
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -172,14 +152,16 @@ impl App {
             Focus::Headers => self.handle_headers_key(key),
             Focus::Preview => self.handle_preview_key(key),
             Focus::Search => unreachable!(),
-            Focus::ComposeWizard => unreachable!("handled above via compose_wizard.is_some()"),
+            Focus::ComposeWizard => unreachable!("handled above via Overlay::Compose dispatch"),
         }
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<Message> {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                if let Some(dialog) = self.confirm_dialog.take() {
+                if let Overlay::Confirm(dialog) =
+                    std::mem::replace(&mut self.overlay, Overlay::None)
+                {
                     match dialog.action {
                         ConfirmAction::Approve if !self.selection.is_empty() => {
                             let paths: Vec<PathBuf> = self.selection.drain().collect();
@@ -208,10 +190,13 @@ impl App {
                             });
                         }
                     }
+                    // Consume-and-close: the confirm dialog was taken above.
+                    // Promote any error that had been queued behind it.
+                    self.promote_pending_error();
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.confirm_dialog = None;
+                self.close_overlay();
             }
             _ => {}
         }
@@ -281,7 +266,6 @@ impl App {
                 KeyCode::Char('s') => self.push_action(Action::Fetch),
                 KeyCode::Char('S') => self.push_action(Action::Sync),
                 KeyCode::Char('f') => {
-                    self.show_search_overlay = true;
                     self.server_search_query.clear();
                     self.server_search_results.clear();
                     self.server_search_index = 0;
@@ -290,6 +274,7 @@ impl App {
                     self.server_search_focus = SearchOverlayFocus::Input;
                     self.server_search_loading = false;
                     self.server_search_status = None;
+                    self.overlay = Overlay::Search;
                 }
                 KeyCode::Char('n') => {
                     self.push_action(Action::OpenComposeWizard(ComposeMode::New));
@@ -368,13 +353,13 @@ impl App {
                     self.selection = self.visible_emails().map(|e| e.path.clone()).collect();
                 } else if !self.selection.is_empty() {
                     let count = self.selection.len();
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: format!("Archive {} emails?", count),
                         detail: format!("{} selected emails", count),
                         action: ConfirmAction::Archive,
                     });
                 } else if let Some(email) = self.selected_email() {
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: "Archive this email?".to_string(),
                         detail: format!("{} - {}", email.from, email.subject),
                         action: ConfirmAction::Archive,
@@ -385,13 +370,13 @@ impl App {
                 self.g_pending = false;
                 if !self.selection.is_empty() {
                     let count = self.selection.len();
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: format!("Delete {} emails?", count),
                         detail: format!("{} selected emails", count),
                         action: ConfirmAction::Delete,
                     });
                 } else if let Some(email) = self.selected_email() {
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: "Delete this email?".to_string(),
                         detail: format!("{} - {}", email.from, email.subject),
                         action: ConfirmAction::Delete,
@@ -402,7 +387,7 @@ impl App {
                 self.g_pending = false;
                 if !self.selection.is_empty() {
                     let count = self.selection.len();
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: format!("Approve {} drafts?", count),
                         detail: format!("{} selected drafts", count),
                         action: ConfirmAction::Approve,
@@ -418,7 +403,7 @@ impl App {
                 self.g_pending = false;
                 if !self.selection.is_empty() {
                     let count = self.selection.len();
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: format!("Mark {} drafts as draft?", count),
                         detail: format!("{} selected drafts", count),
                         action: ConfirmAction::MarkDraft,
@@ -430,7 +415,7 @@ impl App {
             KeyCode::Char('x') => {
                 self.g_pending = false;
                 if let Some(email) = self.selected_email() {
-                    self.confirm_dialog = Some(ConfirmDialog {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
                         title: "Send this email?".to_string(),
                         detail: format!("To: {} - {}", email.to, email.subject),
                         action: ConfirmAction::Send,
@@ -439,7 +424,7 @@ impl App {
             }
             KeyCode::Char('X') => {
                 self.g_pending = false;
-                self.confirm_dialog = Some(ConfirmDialog {
+                self.overlay = Overlay::Confirm(ConfirmDialog {
                     title: "Send all approved emails?".to_string(),
                     detail: format!("In {}", self.active_label()),
                     action: ConfirmAction::SendApproved,
@@ -463,7 +448,6 @@ impl App {
             }
             KeyCode::Char('f') => {
                 self.g_pending = false;
-                self.show_search_overlay = true;
                 self.server_search_query.clear();
                 self.server_search_results.clear();
                 self.server_search_index = 0;
@@ -472,6 +456,7 @@ impl App {
                 self.server_search_focus = SearchOverlayFocus::Input;
                 self.server_search_loading = false;
                 self.server_search_status = None;
+                self.overlay = Overlay::Search;
             }
 
             KeyCode::Char('o') => {
@@ -586,7 +571,7 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                self.show_search_overlay = false;
+                self.close_overlay();
             }
             _ => {}
         }
@@ -601,7 +586,7 @@ impl App {
                     self.server_search_focus = SearchOverlayFocus::Input;
                 }
                 KeyCode::Esc => {
-                    self.show_search_overlay = false;
+                    self.close_overlay();
                 }
                 _ => {}
             }
@@ -674,7 +659,7 @@ impl App {
                 self.server_search_focus = SearchOverlayFocus::Input;
             }
             KeyCode::Esc => {
-                self.show_search_overlay = false;
+                self.close_overlay();
             }
             _ => {}
         }
@@ -706,7 +691,7 @@ impl App {
                         self.activity_filter_active = false;
                         self.activity_scroll = 0;
                     } else {
-                        self.show_activity_overlay = false;
+                        self.close_overlay();
                     }
                 }
                 _ => {}
@@ -750,7 +735,7 @@ impl App {
                 }
                 KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => {
                     self.g_pending = false;
-                    self.show_activity_overlay = false;
+                    self.close_overlay();
                     self.activity_scroll = 0;
                     self.activity_filter.clear();
                     self.activity_filter_active = false;
@@ -768,7 +753,7 @@ impl App {
     // -----------------------------------------------------------------
 
     fn handle_compose_wizard_key(&mut self, key: KeyEvent) -> Option<Message> {
-        let wizard = self.compose_wizard.as_mut()?;
+        let wizard = self.compose_wizard_mut()?;
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -887,7 +872,7 @@ impl App {
     }
 
     pub(crate) fn recompute_compose_suggestions(&mut self) {
-        let Some(wizard) = self.compose_wizard.as_mut() else {
+        let Some(wizard) = self.compose_wizard_mut() else {
             return;
         };
         if !wizard.focus.is_address() {
@@ -1021,7 +1006,7 @@ impl App {
             .as_ref()
             .and_then(|e| e.summary.clone())
             .unwrap_or_else(|| email.subject.clone());
-        self.rsvp_overlay = Some(RsvpOverlay {
+        self.overlay = Overlay::Rsvp(RsvpOverlay {
             path: email.path.clone(),
             summary,
             selected: 0,
@@ -1029,7 +1014,7 @@ impl App {
     }
 
     fn handle_rsvp_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
-        let overlay = self.rsvp_overlay.as_mut()?;
+        let overlay = self.rsvp_overlay_mut()?;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
                 if overlay.selected < 2 {
@@ -1048,14 +1033,20 @@ impl App {
                     1 => RsvpChoice::Tentative,
                     _ => RsvpChoice::Decline,
                 };
-                let overlay = self.rsvp_overlay.take().expect("overlay checked above");
+                let Overlay::Rsvp(overlay) =
+                    std::mem::replace(&mut self.overlay, Overlay::None)
+                else {
+                    return None;
+                };
                 self.push_action(Action::Rsvp {
                     path: overlay.path,
                     choice,
                 });
+                // Consume-and-close: promote any error queued behind it.
+                self.promote_pending_error();
             }
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.rsvp_overlay = None;
+                self.close_overlay();
             }
             _ => {}
         }
@@ -1063,7 +1054,7 @@ impl App {
     }
 
     fn handle_attachment_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
-        let picker = self.attachment_picker.as_mut().unwrap();
+        let picker = self.attachment_picker_mut().unwrap();
         match picker.mode {
             AttachmentPickerMode::Open => match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -1075,12 +1066,18 @@ impl App {
                     picker.selected = picker.selected.saturating_sub(1);
                 }
                 KeyCode::Enter => {
-                    let picker = self.attachment_picker.take().unwrap();
+                    let Overlay::Attachment(picker) =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return None;
+                    };
                     let path = picker.files[picker.selected].clone();
                     self.push_action(Action::OpenAttachment(path));
+                    // Consume-and-close: promote any error queued behind it.
+                    self.promote_pending_error();
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    self.attachment_picker = None;
+                    self.close_overlay();
                 }
                 _ => {}
             },
@@ -1113,7 +1110,11 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    let picker = self.attachment_picker.take().unwrap();
+                    let Overlay::Attachment(picker) =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return None;
+                    };
                     // Collect selected files, or cursor item if none selected
                     let sources: Vec<PathBuf> = if picker.selected_set.is_empty() {
                         vec![picker.files[picker.selected].clone()]
@@ -1126,10 +1127,15 @@ impl App {
                             .filter_map(|&i| picker.files.get(i).cloned())
                             .collect()
                     };
+                    // Overlay->overlay handoff: `open_dir_picker` sets
+                    // `Overlay::Dir`, so `promote_pending_error` (guarded on
+                    // `Overlay::None`) correctly does NOT fire between taking
+                    // the attachment picker and opening the dir picker.
                     self.open_dir_picker(sources);
+                    self.promote_pending_error();
                 }
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    self.attachment_picker = None;
+                    self.close_overlay();
                 }
                 _ => {}
             },
@@ -1138,7 +1144,7 @@ impl App {
     }
 
     fn handle_dir_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
-        let picker = match self.dir_picker.as_mut() {
+        let picker = match self.dir_picker_mut() {
             Some(p) => p,
             None => return None,
         };
@@ -1175,7 +1181,7 @@ impl App {
                 KeyCode::Enter => {
                     if let Some(dir) = picker.zoxide_results.get(picker.selected).cloned() {
                         let sources = picker.sources.clone();
-                        self.dir_picker = None;
+                        self.close_overlay();
                         self.push_action(Action::SaveAttachments {
                             sources,
                             dest_dir: dir,
@@ -1183,7 +1189,7 @@ impl App {
                     }
                 }
                 KeyCode::Esc => {
-                    self.dir_picker = None;
+                    self.close_overlay();
                 }
                 KeyCode::Char(c) => {
                     picker.query.push(c);
@@ -1238,7 +1244,7 @@ impl App {
                         // "[ Save here ]" -- confirm
                         let sources = picker.sources.clone();
                         let dest_dir = picker.current_dir.clone();
-                        self.dir_picker = None;
+                        self.close_overlay();
                         self.push_action(Action::SaveAttachments {
                             sources,
                             dest_dir,
@@ -1259,7 +1265,7 @@ impl App {
                     refresh_zoxide_results(picker);
                 }
                 KeyCode::Esc => {
-                    self.dir_picker = None;
+                    self.close_overlay();
                 }
                 _ => {}
             },
@@ -1308,7 +1314,7 @@ impl App {
         }
 
         let filtered = (0..candidates.len()).collect();
-        self.mailbox_picker = Some(MailboxPicker {
+        self.overlay = Overlay::Mailbox(MailboxPicker {
             query: String::new(),
             candidates,
             filtered,
@@ -1318,7 +1324,7 @@ impl App {
     }
 
     fn handle_mailbox_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
-        let picker = self.mailbox_picker.as_mut()?;
+        let picker = self.mailbox_picker_mut()?;
 
         match key.code {
             KeyCode::Down | KeyCode::Tab => {
@@ -1334,16 +1340,22 @@ impl App {
             KeyCode::Enter => {
                 if let Some(&cand_idx) = picker.filtered.get(picker.selected) {
                     let dest_idx = picker.candidates[cand_idx].0;
-                    let picker = self.mailbox_picker.take().expect("picker checked above");
+                    let Overlay::Mailbox(picker) =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return None;
+                    };
                     self.selection.clear();
                     self.push_action(Action::MoveToMailbox {
                         paths: picker.paths,
                         dest_idx,
                     });
+                    // Consume-and-close: promote any error queued behind it.
+                    self.promote_pending_error();
                 }
             }
             KeyCode::Esc => {
-                self.mailbox_picker = None;
+                self.close_overlay();
             }
             KeyCode::Backspace => {
                 picker.query.pop();
@@ -1374,7 +1386,7 @@ impl App {
                     self.open_dir_picker(sources);
                 }
                 Ok(files) => {
-                    self.attachment_picker = Some(AttachmentPicker {
+                    self.overlay = Overlay::Attachment(AttachmentPicker {
                         files,
                         selected: 0,
                         mode,
@@ -1412,7 +1424,7 @@ impl App {
                 self.open_dir_picker(sources);
             }
             Ok(files) => {
-                self.attachment_picker = Some(AttachmentPicker {
+                self.overlay = Overlay::Attachment(AttachmentPicker {
                     files,
                     selected: 0,
                     mode,
@@ -1456,7 +1468,7 @@ impl App {
             refresh_browser_entries(&mut picker);
         }
 
-        self.dir_picker = Some(picker);
+        self.overlay = Overlay::Dir(picker);
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) -> Option<Message> {
@@ -1479,7 +1491,7 @@ impl App {
                         self.help_filter_active = false;
                         self.help_scroll = 0;
                     } else {
-                        self.show_help = false;
+                        self.close_overlay();
                     }
                 }
                 _ => {}
@@ -1522,7 +1534,7 @@ impl App {
                 }
                 KeyCode::Char('?') | KeyCode::Esc => {
                     self.g_pending = false;
-                    self.show_help = false;
+                    self.close_overlay();
                     self.help_scroll = 0;
                     self.help_filter.clear();
                     self.help_filter_active = false;
@@ -1538,11 +1550,11 @@ impl App {
     fn handle_persistent_error_key(&mut self, key: KeyEvent) -> Option<Message> {
         match key.code {
             KeyCode::Char('s') => {
-                self.persistent_error = None;
+                self.close_overlay();
                 self.push_action(Action::Sync);
             }
             KeyCode::Char('d') | KeyCode::Esc => {
-                self.persistent_error = None;
+                self.close_overlay();
             }
             _ => {}
         }
@@ -1837,6 +1849,7 @@ fn refresh_browser_entries(picker: &mut DirPicker) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::PersistentError;
     use std::path::PathBuf;
 
     fn entry(subject: &str, from: &str, body: &str) -> EmailEntry {
@@ -2137,7 +2150,9 @@ mod tests {
     fn open_picker_excludes_active_mailbox_and_local_only() {
         let mut app = app_with_mailboxes();
         app.handle_key(KeyEvent::from(KeyCode::Char('M')));
-        let picker = app.mailbox_picker.as_ref().expect("picker should open");
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("picker should open");
+        };
         // Active mailbox (Inbox) and local-only Drafts are excluded.
         let labels: Vec<&str> = picker
             .candidates
@@ -2155,7 +2170,9 @@ mod tests {
         app.selection.insert(app.emails[0].path.clone());
         app.selection.insert(app.emails[2].path.clone());
         app.handle_key(KeyEvent::from(KeyCode::Char('M')));
-        let picker = app.mailbox_picker.as_ref().expect("picker should open");
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("picker should open");
+        };
         assert_eq!(picker.paths.len(), 2);
     }
 
@@ -2164,7 +2181,7 @@ mod tests {
         let mut app = app_with_mailboxes();
         app.active_mailbox = 1; // Drafts: no server folder
         app.handle_key(KeyEvent::from(KeyCode::Char('M')));
-        assert!(app.mailbox_picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Mailbox(_)));
     }
 
     #[test]
@@ -2176,7 +2193,7 @@ mod tests {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(app.mailbox_picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Mailbox(_)));
         match app.pending_actions.pop_front() {
             Some(Action::MoveToMailbox { paths, dest_idx }) => {
                 assert_eq!(dest_idx, 3); // Archive
@@ -2190,9 +2207,9 @@ mod tests {
     fn picker_esc_closes_without_action() {
         let mut app = app_with_mailboxes();
         app.handle_key(KeyEvent::from(KeyCode::Char('M')));
-        assert!(app.mailbox_picker.is_some());
+        assert!(matches!(app.overlay, Overlay::Mailbox(_)));
         app.handle_key(KeyEvent::from(KeyCode::Esc));
-        assert!(app.mailbox_picker.is_none());
+        assert!(!matches!(app.overlay, Overlay::Mailbox(_)));
         assert!(app.pending_actions.is_empty());
     }
 
@@ -2205,7 +2222,7 @@ mod tests {
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         // No match highlighted: picker stays open, nothing queued.
-        assert!(app.mailbox_picker.is_some());
+        assert!(matches!(app.overlay, Overlay::Mailbox(_)));
         assert!(app.pending_actions.is_empty());
     }
 
@@ -2219,5 +2236,133 @@ mod tests {
         app.reload_from_cache();
         assert_eq!(app.visible, vec![0, 1, 2, 3]);
         assert_eq!(app.list_index, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Background error over an open overlay (#0032 regression)
+    //
+    // `set_persistent_error` is called from bg.rs regardless of overlay
+    // state. It must NOT clobber an active overlay (that both destroys the
+    // overlay's unsaved state and, for the compose wizard, leaves
+    // `focus == Focus::ComposeWizard` while `overlay == None` -- a state
+    // that hits `keys.rs`'s `unreachable!()` on the next keystroke). The
+    // error is queued and promoted to `Overlay::Error` when the overlay
+    // actually closes.
+    // -----------------------------------------------------------------------
+
+    fn open_compose_wizard_for_test(app: &mut App) {
+        app.overlay = Overlay::Compose(ComposeWizard {
+            mode: ComposeMode::New,
+            to: "alice@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "draft in progress".to_string(),
+            focus: ComposeField::To,
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
+            contacts: None,
+        });
+        app.focus = Focus::ComposeWizard;
+    }
+
+    /// A background failure while the compose wizard is open must not
+    /// clobber the wizard (which would strand `focus == ComposeWizard` and
+    /// panic on the next key). The error is queued, surfaced on the status
+    /// line, and promoted only after the wizard closes -- and the wizard
+    /// close resets focus, so the panicking `None`+`ComposeWizard` combo
+    /// never occurs.
+    #[test]
+    fn bg_error_over_compose_wizard_does_not_clobber_or_panic() {
+        let mut app = app_with_emails(sample());
+        open_compose_wizard_for_test(&mut app);
+
+        app.set_persistent_error(
+            "Archive failed: boom\nEmail restored to inbox. Sync (F) to fix?".to_string(),
+        );
+
+        // The wizard is preserved (draft intact), focus stays consistent
+        // with the overlay, and the error is queued + surfaced immediately.
+        assert!(
+            matches!(app.overlay, Overlay::Compose(_)),
+            "wizard must not be clobbered by a background error"
+        );
+        assert_eq!(app.focus, Focus::ComposeWizard);
+        assert!(app.pending_error.is_some());
+        assert_eq!(app.status_message.as_deref(), Some("Archive failed: boom"));
+
+        // Close the wizard the way `Action::ComposeWizardCancel` does.
+        app.close_overlay();
+        app.focus = Focus::List;
+
+        // The queued error is now the active overlay, and focus is a valid
+        // pane -- the `overlay == None && focus == ComposeWizard` state that
+        // would hit `unreachable!()` never exists.
+        assert!(matches!(app.overlay, Overlay::Error(_)));
+        assert_eq!(app.focus, Focus::List);
+        assert!(app.pending_error.is_none());
+
+        // Dismissing the promoted error returns to the normal view and does
+        // not re-open anything.
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// A background failure while the mailbox picker is open preserves the
+    /// picker (and its selection/paths) and shows the error only after the
+    /// picker closes.
+    #[test]
+    fn bg_error_over_mailbox_picker_preserves_picker_until_close() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert!(matches!(app.overlay, Overlay::Mailbox(_)));
+
+        app.set_persistent_error("Move failed: boom\nEmail restored.".to_string());
+
+        // Picker (and its carried paths) survive; the error is queued.
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("picker must not be clobbered by a background error");
+        };
+        assert_eq!(picker.paths.len(), 1);
+        assert!(app.pending_error.is_some());
+        assert_eq!(app.status_message.as_deref(), Some("Move failed: boom"));
+
+        // Closing the picker promotes the queued error.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::Error(_)));
+        assert!(app.pending_error.is_none());
+    }
+
+    /// With no overlay open, `set_persistent_error` behaves exactly as
+    /// before: it opens the error overlay directly and queues nothing.
+    #[test]
+    fn persistent_error_with_no_overlay_opens_directly() {
+        let mut app = app_with_emails(sample());
+        app.set_persistent_error("Delete failed: boom".to_string());
+        assert!(matches!(app.overlay, Overlay::Error(_)));
+        assert!(app.pending_error.is_none());
+    }
+
+    /// The attachment picker -> dir picker handoff (`O` save) must not let a
+    /// queued error fire mid-transition: promotion is guarded on
+    /// `Overlay::None`, so after the handoff the dir picker is active and
+    /// the error stays queued until the dir picker itself closes.
+    #[test]
+    fn pending_error_does_not_fire_during_attachment_to_dir_handoff() {
+        let mut app = app_with_emails(sample());
+        // Simulate the attachment save picker with a queued error behind it.
+        app.overlay = Overlay::Attachment(AttachmentPicker {
+            files: vec![PathBuf::from("/tmp/a.pdf")],
+            selected: 0,
+            mode: AttachmentPickerMode::Save,
+            selected_set: std::collections::HashSet::new(),
+        });
+        app.pending_error = Some(PersistentError { message: "bg boom".to_string() });
+
+        // Enter triggers the attachment -> dir picker handoff.
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        // The dir picker is now active; the error did NOT fire in between.
+        assert!(matches!(app.overlay, Overlay::Dir(_)));
+        assert!(app.pending_error.is_some());
     }
 }
