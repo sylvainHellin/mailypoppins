@@ -3,9 +3,11 @@ id: 0032
 title: TUI foundation package - overlay enum, keymap-as-data, leaders, hint bar
 type: refactor
 priority: next
-status: open
+status: done
 created: 2026-07-11
 ---
+
+Shipped in 5a00d05 + 3c1a057.
 
 Herdr-style foundation refactor that must land **before** any multi-view work. Design: [tui-restructure-views](../plans/tui-restructure-views.md) (Stage 1, D9). Inspiration: [herdr-tui-inspiration](../herdr-tui-inspiration.md) phases B + C + cheap A. Scout: `.agents/research/2026-07-11-tui-restructure-scout.md`.
 
@@ -36,3 +38,7 @@ Non-goals (herdr D/E, separate if wanted): mouse/`compute_view` split, scrollbar
 
 - Invite RSVP overlay ([#0029](0029-imip-rsvp-reply.md)) plugs into `Mode` + `KEYMAP`.
 - View switcher ([#0033](0033-view-switcher-contacts-view.md)) becomes a keymap `Action` + render slot.
+
+## Closing note
+
+Shipped in two units: 5a00d05 (overlay `Mode` enum, shared modal primitives, dim background) and 3c1a057 (KEYMAP-as-data with runtime Normal-mode dispatch, `g`-leader as first-class prefix data, hint bar, `mp dump-keys` + generated website key table). All acceptance criteria met: exactly one overlay at a time is enum-enforced; help overlay, hint bar, and website key table all derive from `KEYMAP`; leader continuations show in the hint bar; modals share one shell and dim the background. [#0019](0019-configurable-keybindings.md) dropped as subsumed.

@@ -10,7 +10,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Next
 
-- [#0032 TUI foundation package (overlay enum, keymap-as-data, leaders)](docs/tickets/0032-tui-foundation-package.md) -- refactor
 - [#0005 Parallel IMAP fetch per mailbox](docs/tickets/0005-parallel-imap-fetch-per-mailbox.md) -- perf
 - [#0007 Flagging / starring](docs/tickets/0007-flagging-starring.md) -- feature
 - [#0008 Threading / conversation view](docs/tickets/0008-threading-conversation-view.md) -- feature
