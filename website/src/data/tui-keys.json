@@ -74,6 +74,17 @@
     ]
   },
   {
+    "title": "CONTACTS",
+    "bindings": [
+      { "key": "j/k", "action": "Navigate contacts" },
+      { "key": "gg / G", "action": "Jump to top / bottom" },
+      { "key": "/", "action": "Fuzzy search" },
+      { "key": "Enter / n", "action": "Compose to contact" },
+      { "key": "v", "action": "Send contact as vCard" },
+      { "key": "r", "action": "Refresh contact index" }
+    ]
+  },
+  {
     "title": "HEADERS",
     "bindings": [
       { "key": "j/k", "action": "Scroll headers" }

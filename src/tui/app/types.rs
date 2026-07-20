@@ -682,6 +682,36 @@ pub struct MailView {
     pub focus: Focus,
 }
 
+/// State for the Contacts view (#0033).
+///
+/// A read-only list + fuzzy search + detail pane over the local contacts index
+/// (`crate::contacts`). Sibling of [`MailView`]: it owns the Contacts view's
+/// transient state and lives on `App` beside `mail_view`. The index is loaded
+/// lazily from the on-disk cache the first time the user switches to the view
+/// (`App::ensure_contacts_loaded`); a manual refresh key rebuilds it.
+///
+/// `matches` is the ordered list of contact addresses currently shown (the
+/// result of fuzzy-matching `query` against `index`), recomputed whenever the
+/// query or index changes via `App::recompute_contact_matches`. `list_index`
+/// indexes into `matches`; the detail pane shows `index.contacts[matches[list_index]]`.
+#[derive(Debug, Clone, Default)]
+pub struct ContactsView {
+    /// True once the on-disk cache load has been attempted (whether or not a
+    /// cache existed). Gates the lazy first-switch load.
+    pub loaded: bool,
+    /// The loaded contact index for the active account. `None` means no cache
+    /// yet (the pane shows a "run rebuild" hint).
+    pub index: Option<crate::contacts::ContactIndex>,
+    /// Incremental fuzzy-filter query (edited while `searching`).
+    pub query: String,
+    /// Whether the search input is focused (type-to-filter mode).
+    pub searching: bool,
+    /// Addresses of the current matches, in rank/score order.
+    pub matches: Vec<String>,
+    /// Cursor into `matches`.
+    pub list_index: usize,
+}
+
 /// Messages that drive state transitions (TEA pattern).
 #[derive(Debug)]
 pub enum Message {
@@ -791,6 +821,16 @@ pub enum Action {
     Rsvp {
         path: PathBuf,
         choice: RsvpChoice,
+    },
+    /// Compose a new draft to a contact (#0033). Opens the compose wizard
+    /// (Overlay) seeded with `to`; the overlay floats above whatever view is
+    /// active, so the user stays in Contacts and returns to it on cancel.
+    ComposeToContact {
+        to: String,
+    },
+    /// Export a contact to a `.vcf` and attach it to a new draft (#0033).
+    SendContactVcard {
+        contact: crate::contacts::Contact,
     },
 }
 

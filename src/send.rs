@@ -402,6 +402,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // format_recipient (Contacts view seed sites, #0033)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_recipient_plain_name_passthrough() {
+        assert_eq!(
+            format_recipient("Alice Smith", "alice@x.com"),
+            "Alice Smith <alice@x.com>"
+        );
+    }
+
+    #[test]
+    fn format_recipient_quotes_comma_name() {
+        assert_eq!(
+            format_recipient("Doe, John", "john@x.com"),
+            "\"Doe, John\" <john@x.com>"
+        );
+    }
+
+    #[test]
+    fn format_recipient_escapes_quote_and_backslash() {
+        assert_eq!(
+            format_recipient("Weird \\ \"name\"", "w@x.com"),
+            "\"Weird \\\\ \\\"name\\\"\" <w@x.com>"
+        );
+    }
+
+    #[test]
+    fn format_recipient_empty_name_is_bare_address() {
+        assert_eq!(format_recipient("", "bob@x.com"), "bob@x.com");
+        // Whitespace-only display name is treated as empty.
+        assert_eq!(format_recipient("   ", "bob@x.com"), "bob@x.com");
+    }
+
+    #[test]
+    fn format_recipient_survives_split_addresses_as_one() {
+        // The whole point: a "Last, First" contact name must not be split into
+        // two broken recipients by split_addresses (which runs before
+        // normalize_address_for_smtp on the send path).
+        let seeded = format_recipient("Doe, John", "john@example.com");
+        let parts = split_addresses(&seeded);
+        assert_eq!(parts, vec!["\"Doe, John\" <john@example.com>"]);
+        // And the single recipient parses as a proper lettre Mailbox.
+        let mbox: lettre::message::Mailbox = normalize_address_for_smtp(&parts[0])
+            .parse()
+            .expect("lettre must parse the seeded recipient");
+        assert_eq!(mbox.email.to_string(), "john@example.com");
+    }
+
+    // -----------------------------------------------------------------------
     // markdown_to_html edge cases
     // -----------------------------------------------------------------------
 
@@ -476,6 +526,14 @@ pub fn normalize_address_for_smtp(addr: &str) -> String {
         return format!("{} <{}>", name_part, email_part);
     }
 
+    format!("{} <{}>", quote_display_name(name_part), email_part)
+}
+
+/// Return an RFC 5322 `display-name` for `name`: the bare name if it is made
+/// entirely of atext + FWS, otherwise wrapped in a quoted-string with `"` and
+/// `\` escaped. Shared by [`normalize_address_for_smtp`] and
+/// [`format_recipient`] so the quoting rule lives in exactly one place.
+fn quote_display_name(name: &str) -> String {
     // RFC 5322 atext, plus FWS (space/tab) and `.` (allowed in dot-atom phrases).
     fn is_atext_or_fws(c: char) -> bool {
         c.is_ascii_alphanumeric()
@@ -505,13 +563,28 @@ pub fn normalize_address_for_smtp(addr: &str) -> String {
             )
     }
 
-    if name_part.chars().all(is_atext_or_fws) {
-        return format!("{} <{}>", name_part, email_part);
+    if name.chars().all(is_atext_or_fws) {
+        return name.to_string();
     }
 
     // Quote it. Escape backslashes and double quotes per RFC 5322 quoted-string.
-    let escaped = name_part.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{}\" <{}>", escaped, email_part)
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+/// Build a single RFC 5322 recipient string from a display name and address.
+///
+/// Emits `Name <addr>` with the display name wrapped in a quoted-string when it
+/// contains characters outside atext + FWS (e.g. the `,` in a `"Last, First"`
+/// contact name), so the result survives [`split_addresses`] as ONE recipient
+/// and parses cleanly. When `display_name` is empty (after trimming) the bare
+/// address is returned.
+pub fn format_recipient(display_name: &str, address: &str) -> String {
+    let name = display_name.trim();
+    if name.is_empty() {
+        return address.to_string();
+    }
+    format!("{} <{}>", quote_display_name(name), address)
 }
 
 /// Split a comma-separated address list respecting quoted display names.

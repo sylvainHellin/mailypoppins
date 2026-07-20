@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::super::app::{hint_bindings, prefix_continuations, App, KeyCtx};
+use super::super::app::{hint_bindings, prefix_continuations, App, KeyCtx, View};
 use super::super::theme;
 use super::util::{desc_span, hint_span};
 
@@ -40,7 +40,16 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         }
         (p.to_uppercase().to_string(), conts)
     } else {
-        let hs: Vec<(&str, &str)> = hint_bindings(ctx).map(|kb| (kb.keys, kb.desc)).collect();
+        // Off-Mail, only the view-agnostic Global bindings actually fire
+        // (mail-specific Global keys are swallowed by the dispatcher, #0033).
+        // Filter the Global hint row to match so we don't advertise swallowed
+        // keys (`1-9 Jump to mailbox`, `/ Filter by metadata`) in Contacts /
+        // Calendar. Pane contexts (Contacts list) are unaffected.
+        let off_mail = app.view != View::Mail;
+        let hs: Vec<(&str, &str)> = hint_bindings(ctx)
+            .filter(|kb| !(off_mail && ctx == KeyCtx::Global && !kb.action.is_view_agnostic()))
+            .map(|kb| (kb.keys, kb.desc))
+            .collect();
         (mode_label(app, ctx).to_string(), hs)
     };
 
@@ -89,6 +98,7 @@ fn mode_label(app: &App, ctx: KeyCtx) -> String {
         KeyCtx::Headers => "HEADERS".to_string(),
         KeyCtx::Preview => "BODY".to_string(),
         KeyCtx::ServerSearch => "SEARCH".to_string(),
+        KeyCtx::Contacts => "CONTACTS".to_string(),
         KeyCtx::Activity => "ACTIVITY".to_string(),
         KeyCtx::Help => "HELP".to_string(),
     }

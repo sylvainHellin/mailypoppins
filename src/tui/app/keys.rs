@@ -36,6 +36,12 @@ impl App {
             return self.handle_search_key(key);
         }
 
+        // Contacts view fuzzy-search input (#0033): free-text, hand-dispatched
+        // like the metadata-search input, once armed by `/`.
+        if self.view == super::View::Contacts && self.contacts_view.searching {
+            return self.handle_contacts_search_key(key);
+        }
+
         // Normal-mode surface (#0032, (B)-lite): resolve the pressed key through
         // the KEYMAP table into a `KeyAction`, then run one executor. Global
         // bindings are always tried first, then the focused pane's context
@@ -52,25 +58,38 @@ impl App {
         let pending = if self.g_pending { Some('g') } else { None };
         let guard_ok = |g: super::Guard| self.guard_satisfied(g);
 
+        // The focused pane's context. Mail consults its focused pane; the
+        // Contacts view (#0033) has a single list context; the Calendar
+        // placeholder has no pane context (Global-only surface).
+        let pane_ctx = match self.view {
+            super::View::Mail => self.pane_ctx(),
+            super::View::Contacts => Some(super::KeyCtx::Contacts),
+            super::View::Calendar => None,
+        };
+
         // Global context first.
         if let Some(action) = super::resolve(super::KeyCtx::Global, key, pending, &guard_ok) {
-            // In non-Mail placeholder views only the view-agnostic Global
-            // surface (view switch / quit / help / activity) is live; a
-            // mail-specific Global key resolves but is swallowed here so it
-            // cannot fire (#0033). It still clears any pending leader.
+            // In non-Mail views only the view-agnostic Global surface (view
+            // switch / quit / help / activity) is live; a mail-specific Global
+            // key resolves but is swallowed so it cannot fire (#0033) -- UNLESS
+            // the active view's pane context rebinds that key (e.g. Contacts
+            // rebinds `/` to fuzzy search), in which case the pane binding wins.
             if self.view != super::View::Mail && !action.is_view_agnostic() {
-                self.g_pending = false;
-                return None;
-            }
-            return self.execute(action, key);
-        }
-        // Then the focused pane's context — Mail view only. The placeholder
-        // views have no mail panes, so their key surface is Global-only.
-        if self.view == super::View::Mail {
-            if let Some(ctx) = self.pane_ctx() {
-                if let Some(action) = super::resolve(ctx, key, pending, &guard_ok) {
-                    return self.execute(action, key);
+                let pane_rebinds = pane_ctx
+                    .and_then(|ctx| super::resolve(ctx, key, pending, &guard_ok))
+                    .is_some();
+                if !pane_rebinds {
+                    self.g_pending = false;
+                    return None;
                 }
+            } else {
+                return self.execute(action, key);
+            }
+        }
+        // Then the pane context.
+        if let Some(ctx) = pane_ctx {
+            if let Some(action) = super::resolve(ctx, key, pending, &guard_ok) {
+                return self.execute(action, key);
             }
         }
         // No live binding matched: clear any pending leader (an unrecognised
@@ -262,6 +281,53 @@ impl App {
             A::PreviewToList => {
                 self.g_pending = false;
                 self.focus = Focus::List;
+            }
+            // -- Contacts view (#0033) ---------------------------------------
+            A::ContactsDown => {
+                self.g_pending = false;
+                let len = self.contacts_view.matches.len();
+                if len > 0 && self.contacts_view.list_index < len - 1 {
+                    self.contacts_view.list_index += 1;
+                }
+            }
+            A::ContactsUp => {
+                self.g_pending = false;
+                self.contacts_view.list_index =
+                    self.contacts_view.list_index.saturating_sub(1);
+            }
+            A::ContactsTop => {
+                // Reached only with `g` pending (the leader continuation).
+                self.contacts_view.list_index = 0;
+                self.g_pending = false;
+            }
+            A::ContactsBottom => {
+                self.g_pending = false;
+                self.contacts_view.list_index =
+                    self.contacts_view.matches.len().saturating_sub(1);
+            }
+            A::ContactsSearch => {
+                self.g_pending = false;
+                self.contacts_view.searching = true;
+            }
+            A::ContactsCompose => {
+                self.g_pending = false;
+                if let Some(contact) = self.selected_contact() {
+                    let to =
+                        crate::send::format_recipient(&contact.display_name, &contact.address);
+                    self.push_action(Action::ComposeToContact { to });
+                }
+            }
+            A::ContactsVcard => {
+                self.g_pending = false;
+                if let Some(contact) = self.selected_contact() {
+                    self.push_action(Action::SendContactVcard {
+                        contact: contact.clone(),
+                    });
+                }
+            }
+            A::ContactsRefresh => {
+                self.g_pending = false;
+                self.refresh_contacts();
             }
             // -- List / shared -----------------------------------------------
             _ => return self.execute_list(action, key),
@@ -1583,6 +1649,32 @@ impl App {
         None
     }
 
+    /// Contacts view fuzzy-search input (#0033). Free-text like the metadata
+    /// search: each edit recomputes the matched contact list. `Enter` leaves
+    /// the input but keeps the filter; `Esc` clears it.
+    fn handle_contacts_search_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Enter => {
+                self.contacts_view.searching = false;
+            }
+            KeyCode::Esc => {
+                self.contacts_view.searching = false;
+                self.contacts_view.query.clear();
+                self.recompute_contact_matches();
+            }
+            KeyCode::Char(c) => {
+                self.contacts_view.query.push(c);
+                self.recompute_contact_matches();
+            }
+            KeyCode::Backspace => {
+                self.contacts_view.query.pop();
+                self.recompute_contact_matches();
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// Recompute the visible view for the current `search_query` (P3).
     ///
     /// `narrow` may be true only when the *lowercased* query changed by
@@ -2450,5 +2542,132 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('2')));
         assert_eq!(app.active_mailbox, 1);
         assert_eq!(app.focus, Focus::List);
+    }
+
+    // -- Contacts view (#0033) -------------------------------------------
+
+    fn contact(addr: &str, name: &str, sent_to: u32) -> crate::contacts::Contact {
+        crate::contacts::Contact {
+            address: addr.into(),
+            display_name: name.into(),
+            sent_to,
+            sent_cc: 0,
+            received: 0,
+            first_seen: "2026-01-01T00:00:00Z".into(),
+            last_seen: "2026-04-08T00:00:00Z".into(),
+            source: crate::contacts::ContactSource::Local,
+        }
+    }
+
+    /// Build an app already in the Contacts view with a seeded index.
+    fn app_in_contacts() -> App {
+        let mut app = app_with_mailboxes();
+        let mut contacts = std::collections::HashMap::new();
+        for c in [
+            contact("alice@foo.com", "Alice Smith", 3),
+            contact("bob@bar.com", "Bob Jones", 2),
+            contact("carol@baz.com", "Carol", 1),
+        ] {
+            contacts.insert(c.address.clone(), c);
+        }
+        app.contacts_view.index = Some(crate::contacts::ContactIndex {
+            account: "test".into(),
+            contacts,
+            built_at: "2026-04-08T00:00:00Z".into(),
+        });
+        app.contacts_view.loaded = true;
+        app.view = View::Contacts;
+        app.recompute_contact_matches();
+        app
+    }
+
+    /// The fuzzy-search input filters the contact list at the App level, and
+    /// `Esc` clears the query and restores the full ranked list.
+    #[test]
+    fn contacts_fuzzy_search_filters_list() {
+        let mut app = app_in_contacts();
+        // Empty query: all three, rank-ordered (sent_to desc): alice, bob, carol.
+        assert_eq!(app.contacts_view.matches.len(), 3);
+        assert_eq!(app.contacts_view.matches[0], "alice@foo.com");
+
+        // `/` arms the search input; typing narrows the list.
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert!(app.contacts_view.searching);
+        for c in "bob".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.contacts_view.matches, vec!["bob@bar.com".to_string()]);
+
+        // `Esc` clears the query and restores the full list.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.contacts_view.searching);
+        assert!(app.contacts_view.query.is_empty());
+        assert_eq!(app.contacts_view.matches.len(), 3);
+    }
+
+    /// Contacts navigation keys move the list cursor and drive the selection.
+    #[test]
+    fn contacts_navigation_moves_cursor() {
+        let mut app = app_in_contacts();
+        assert_eq!(app.contacts_view.list_index, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.contacts_view.list_index, 1);
+        assert_eq!(app.selected_contact().unwrap().address, "bob@bar.com");
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.contacts_view.list_index, 0);
+    }
+
+    /// `Enter`/`n` in Contacts opens the compose wizard seeded with the
+    /// selected contact's address.
+    #[test]
+    fn compose_to_contact_seeds_wizard() {
+        let mut app = app_in_contacts();
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // select bob
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match app.pending_actions.pop_front() {
+            Some(Action::ComposeToContact { to }) => {
+                assert_eq!(to, "Bob Jones <bob@bar.com>");
+            }
+            other => panic!("expected ComposeToContact, got {other:?}"),
+        }
+    }
+
+    /// `v` in Contacts queues a vCard export for the selected contact.
+    #[test]
+    fn vcard_key_queues_export_for_selection() {
+        let mut app = app_in_contacts();
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        match app.pending_actions.pop_front() {
+            Some(Action::SendContactVcard { contact }) => {
+                assert_eq!(contact.address, "alice@foo.com");
+            }
+            other => panic!("expected SendContactVcard, got {other:?}"),
+        }
+    }
+
+    /// Contacts keys must not fire in the Mail view: pressing `v` (vCard) in
+    /// Mail does not queue a contact action (it is not a Mail binding).
+    #[test]
+    fn contacts_keys_do_not_fire_in_mail() {
+        let mut app = app_with_mailboxes();
+        assert_eq!(app.view, View::Mail);
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert!(
+            !app
+                .pending_actions
+                .iter()
+                .any(|a| matches!(a, Action::SendContactVcard { .. })),
+            "v must not queue a vCard export in Mail"
+        );
+        // And a bare `n` in Mail is the New-draft path, not compose-to-contact.
+        app.pending_actions.clear();
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(
+            app
+                .pending_actions
+                .iter()
+                .all(|a| !matches!(a, Action::ComposeToContact { .. })),
+            "n in Mail must be NewDraft, not ComposeToContact"
+        );
     }
 }

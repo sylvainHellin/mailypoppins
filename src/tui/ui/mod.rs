@@ -1,5 +1,6 @@
 mod activity;
 mod compose;
+mod contacts;
 mod headers;
 mod list;
 mod overlays;
@@ -105,7 +106,8 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         }
         views::render_view_switcher(app, frame, left.switcher);
 
-        // Right column: the mail preview panes, or the view placeholder.
+        // Right column: the mail preview panes, the Contacts view, or the
+        // (Calendar) placeholder.
         if app.view == View::Mail {
             let right_panels = Layout::default()
                 .direction(Direction::Vertical)
@@ -113,6 +115,8 @@ pub fn view(app: &mut App, frame: &mut Frame) {
                 .split(right_col);
             headers::render_headers(app, frame, right_panels[0]);
             preview::render_body(app, frame, right_panels[1]);
+        } else if app.view == View::Contacts {
+            contacts::render_contacts(app, frame, right_col);
         } else {
             views::render_placeholder(app.view, frame, right_col);
         }
@@ -123,6 +127,8 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         sidebar::render_sidebar(app, frame, left.sidebar);
         if app.view == View::Mail {
             list::render_email_list(app, frame, left.middle);
+        } else if app.view == View::Contacts {
+            contacts::render_contacts(app, frame, left.middle);
         } else {
             views::render_placeholder(app.view, frame, left.middle);
         }
@@ -132,6 +138,17 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         views::render_view_switcher(app, frame, left.switcher);
     } else if app.view == View::Mail {
         list::render_email_list(app, frame, main_area);
+    } else if app.view == View::Contacts {
+        // Narrowest tier: Contacts fills the frame, switcher pinned below.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(views::SWITCHER_HEIGHT),
+            ])
+            .split(main_area);
+        contacts::render_contacts(app, frame, rows[0]);
+        views::render_view_switcher(app, frame, rows[1]);
     } else {
         // Narrowest tier: placeholder fills the frame, switcher pinned below.
         let rows = Layout::default()

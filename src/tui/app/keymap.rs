@@ -67,6 +67,8 @@ pub enum KeyCtx {
     Preview,
     /// Server (IMAP) search overlay result list.
     ServerSearch,
+    /// Contacts view list (#0033): read-only list + fuzzy search + detail.
+    Contacts,
     /// Activity-log overlay.
     Activity,
     /// Help overlay.
@@ -81,6 +83,7 @@ impl KeyCtx {
             KeyCtx::Sidebar => "SIDEBAR",
             KeyCtx::List => "EMAIL LIST",
             KeyCtx::ServerSearch => "SERVER SEARCH",
+            KeyCtx::Contacts => "CONTACTS",
             KeyCtx::Headers => "HEADERS",
             KeyCtx::Preview => "BODY",
             KeyCtx::Activity => "ACTIVITY LOG",
@@ -94,6 +97,7 @@ impl KeyCtx {
         KeyCtx::Sidebar,
         KeyCtx::List,
         KeyCtx::ServerSearch,
+        KeyCtx::Contacts,
         KeyCtx::Headers,
         KeyCtx::Preview,
         KeyCtx::Activity,
@@ -259,6 +263,15 @@ pub enum KeyAction {
     QuickSync,
     FullSync,
     ServerSearch,
+    // -- Contacts view (#0033) -------------------------------------------
+    ContactsDown,
+    ContactsUp,
+    ContactsTop,
+    ContactsBottom,
+    ContactsSearch,
+    ContactsCompose,
+    ContactsVcard,
+    ContactsRefresh,
     // -- Headers / Preview scroll ----------------------------------------
     HeadersDown,
     HeadersUp,
@@ -446,6 +459,20 @@ pub static KEYMAP: &[KeyBinding] = &[
     manual("O", KeyCtx::ServerSearch, "Save attachment to disk", false),
     manual("Tab", KeyCtx::ServerSearch, "Switch focus", true),
     manual("Esc", KeyCtx::ServerSearch, "Close overlay", true),
+    // -- CONTACTS (#0033) -------------------------------------------------
+    // Read-only list + fuzzy search + detail. Live only in the Contacts view;
+    // dispatched via the pane context like the Mail list. The `/` search input
+    // itself is hand-dispatched (free-text) once armed by ContactsSearch.
+    b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Contacts, KeyAction::ContactsDown, "Navigate contacts", true),
+    b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Contacts, KeyAction::ContactsUp, "", false),
+    row("", Chord::PrefixLeader('g'), None, KeyCtx::Contacts, Guard::None, KeyAction::Manual, "", false),
+    row("", Chord::Char('g'), Some('g'), KeyCtx::Contacts, Guard::None, KeyAction::ContactsTop, "", false),
+    b("gg / G", Chord::Char('G'), KeyCtx::Contacts, KeyAction::ContactsBottom, "Jump to top / bottom", false),
+    b("/", Chord::Char('/'), KeyCtx::Contacts, KeyAction::ContactsSearch, "Fuzzy search", true),
+    b("Enter / n", Chord::Code(SpecialCode::Enter), KeyCtx::Contacts, KeyAction::ContactsCompose, "Compose to contact", true),
+    b("", Chord::Char('n'), KeyCtx::Contacts, KeyAction::ContactsCompose, "", false),
+    b("v", Chord::Char('v'), KeyCtx::Contacts, KeyAction::ContactsVcard, "Send contact as vCard", true),
+    b("r", Chord::Char('r'), KeyCtx::Contacts, KeyAction::ContactsRefresh, "Refresh contact index", true),
     // -- HEADERS ----------------------------------------------------------
     b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Headers, KeyAction::HeadersDown, "Scroll headers", true),
     b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Headers, KeyAction::HeadersUp, "", false),

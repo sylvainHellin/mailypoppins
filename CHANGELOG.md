@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Contacts view in the TUI (#0033).** Switch to Contacts with **`g c`** for
+  a read-only, herdr-style **list + fuzzy search + detail pane** over your
+  local contacts index (the same index that backs compose autocomplete). Press
+  **`/`** to incrementally fuzzy-filter the list, **`j`/`k`** (and `gg`/`G`) to
+  navigate, and the detail pane shows the selected contact's name, address, and
+  interaction stats. From a contact you can **compose to it** (**`Enter`** or
+  **`n`** opens the compose wizard seeded with the recipient — the overlay
+  floats over Contacts, so you return there on submit/cancel), **send it as a
+  vCard** (**`v`** exports the contact to a `.vcf` and starts a new draft with
+  it attached), or **refresh the index** (**`r`** rebuilds it for the active
+  account). The index loads lazily from cache on first switch; the off-Mail
+  hint bar now advertises only keys that actually fire.
 - **Multi-view TUI foundation: view switcher (#0033).** The TUI is now a
   multi-view client. A herdr-style bottom-left **view switcher** (`mail |
   contacts | calendar` chips, active one highlighted) sits under the mailbox

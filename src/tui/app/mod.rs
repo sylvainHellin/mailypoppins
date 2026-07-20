@@ -23,6 +23,9 @@ pub struct App {
     /// Parked mail-view state, restored when the user switches back to `Mail`
     /// (mirrors the `AccountState` proxy pattern; see `MailView`).
     pub mail_view: MailView,
+    /// Contacts view state (#0033): read-only list + fuzzy search + detail
+    /// pane over the local contacts index. Loaded lazily on first switch.
+    pub contacts_view: ContactsView,
     pub running: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -144,6 +147,7 @@ impl App {
             focus: Focus::List,
             view: View::Mail,
             mail_view: MailView::default(),
+            contacts_view: ContactsView::default(),
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -229,6 +233,7 @@ impl App {
             focus: Focus::List,
             view: View::Mail,
             mail_view: MailView::default(),
+            contacts_view: ContactsView::default(),
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -364,6 +369,9 @@ impl App {
         if target == View::Mail {
             self.load_from_mail_view();
         }
+        if target == View::Contacts {
+            self.ensure_contacts_loaded();
+        }
     }
 
     /// Park the mail view's transient proxy state (mirrors `save_to_account`).
@@ -375,6 +383,88 @@ impl App {
     /// `load_from_account`).
     fn load_from_mail_view(&mut self) {
         self.focus = self.mail_view.focus;
+    }
+
+    // -- Contacts view (#0033) -------------------------------------------
+
+    /// Lazily load the active account's contact index from the on-disk cache
+    /// the first time the Contacts view is shown. The cache load is a single
+    /// JSON read (instant); a full rebuild is only triggered by the manual
+    /// refresh key. Mirrors the compose wizard's `load_cache` precedent, so the
+    /// UI thread is never blocked by a mailbox walk here.
+    pub fn ensure_contacts_loaded(&mut self) {
+        if self.contacts_view.loaded {
+            return;
+        }
+        let root = crate::config::account_dir(&self.account_config.name);
+        self.contacts_view.index = crate::contacts::load_cache(&root).ok().flatten();
+        self.contacts_view.loaded = true;
+        self.contacts_view.list_index = 0;
+        self.recompute_contact_matches();
+    }
+
+    /// Force the contact index to reload from the active account's cache
+    /// (invoked when the account changes while Contacts state is already
+    /// loaded, so the pane never shows a stale account's contacts).
+    pub fn reset_contacts_view(&mut self) {
+        self.contacts_view = ContactsView::default();
+    }
+
+    /// Rebuild the active account's contact index from its mailboxes and
+    /// persist the cache (manual refresh key). The index build is a fast
+    /// bounded walk (~100 ms even on the largest local account), so it runs
+    /// synchronously; failures surface as a status message and leave the
+    /// previously-loaded index intact.
+    pub fn refresh_contacts(&mut self) {
+        match crate::contacts::build_index_for_account(&self.account_config) {
+            Ok(index) => {
+                let root = crate::config::account_dir(&self.account_config.name);
+                if let Err(e) = crate::contacts::save_cache(&root, &index) {
+                    self.set_status_level(
+                        format!("Contacts cache save failed: {e}"),
+                        StatusLevel::Error,
+                    );
+                }
+                let count = index.contacts.len();
+                self.contacts_view.index = Some(index);
+                self.contacts_view.loaded = true;
+                self.recompute_contact_matches();
+                self.set_status(format!("Contacts refreshed ({count})"));
+            }
+            Err(e) => {
+                self.set_status_level(
+                    format!("Contacts refresh failed: {e}"),
+                    StatusLevel::Error,
+                );
+            }
+        }
+    }
+
+    /// Recompute the fuzzy-matched address list for the current query, clamping
+    /// the cursor. Called after any query edit, index (re)load, or refresh.
+    pub fn recompute_contact_matches(&mut self) {
+        let query = self.contacts_view.query.clone();
+        let matches: Vec<String> = match &self.contacts_view.index {
+            Some(index) => crate::contacts::search(index, &query, usize::MAX)
+                .into_iter()
+                .map(|m| m.contact.address.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        self.contacts_view.matches = matches;
+        let len = self.contacts_view.matches.len();
+        if len == 0 {
+            self.contacts_view.list_index = 0;
+        } else if self.contacts_view.list_index >= len {
+            self.contacts_view.list_index = len - 1;
+        }
+    }
+
+    /// The `Contact` currently selected in the Contacts list, if any.
+    pub fn selected_contact(&self) -> Option<&crate::contacts::Contact> {
+        let index = self.contacts_view.index.as_ref()?;
+        let addr = self.contacts_view.matches.get(self.contacts_view.list_index)?;
+        index.contacts.get(addr)
     }
 
     pub fn active_kind(&self) -> MailboxKind {
@@ -408,8 +498,18 @@ impl App {
             | Overlay::Mailbox(_)
             | Overlay::Rsvp(_)
             | Overlay::Error(_) => None,
-            // Non-Mail views have no mail panes; only the Global surface (view
-            // switching, quit, help) is live, so the hint bar shows Global.
+            // Contacts view (#0033): the list pane owns the hint bar (unless the
+            // fuzzy-search input is armed, which is free-text — no hint row).
+            Overlay::None if self.view == View::Contacts => {
+                if self.contacts_view.searching {
+                    None
+                } else {
+                    Some(KeyCtx::Contacts)
+                }
+            }
+            // Other non-Mail views (Calendar placeholder) have no pane; only the
+            // view-agnostic Global surface is live, so the hint bar shows Global
+            // (filtered to view-agnostic bindings in the renderer).
             Overlay::None if self.view != View::Mail => Some(KeyCtx::Global),
             Overlay::None => match self.focus {
                 Focus::Sidebar => Some(KeyCtx::Sidebar),
@@ -509,6 +609,12 @@ impl App {
         self.active_account = idx;
         self.accounts[idx].has_unseen = false;
         self.load_from_account(idx);
+        // Contacts are per-account; drop the previous account's index so the
+        // Contacts view reloads lazily for the newly-active account (#0033).
+        self.reset_contacts_view();
+        if self.view == View::Contacts {
+            self.ensure_contacts_loaded();
+        }
         let am = self.active_mailbox;
         if let Some(cached) = self.email_cache.get(am).and_then(|c| c.as_ref()) {
             self.emails = Arc::clone(cached);

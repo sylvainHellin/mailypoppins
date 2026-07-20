@@ -1752,6 +1752,14 @@ pub(super) fn handle_action(
             open_compose_wizard(app, mode);
         }
 
+        Action::ComposeToContact { to } => {
+            open_compose_wizard_seeded(app, to);
+        }
+
+        Action::SendContactVcard { contact } => {
+            send_contact_as_vcard(app, terminal, &contact)?;
+        }
+
         Action::ComposeWizardCancel => {
             app.close_overlay();
             app.focus = Focus::List;
@@ -1819,6 +1827,167 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
     });
     app.focus = Focus::ComposeWizard;
     // No suggestions shown until the user types (see recompute_compose_suggestions).
+}
+
+/// Open the compose wizard as a new draft pre-seeded with a recipient (#0033,
+/// compose-to-contact). Reuses the same overlay + submit path as `n` in the
+/// Mail list; the wizard floats above the Contacts view, so on submit/cancel
+/// the user returns to Contacts (the overlay is view-agnostic). Starts focus on
+/// the Subject field since the recipient is already filled.
+fn open_compose_wizard_seeded(app: &mut App, to: String) {
+    let contacts = {
+        let root = crate::config::account_dir(&app.account_config.name);
+        crate::contacts::load_cache(&root).ok().flatten()
+    };
+    app.overlay = Overlay::Compose(ComposeWizard {
+        mode: ComposeMode::New,
+        to,
+        cc: String::new(),
+        bcc: String::new(),
+        subject: String::new(),
+        focus: ComposeField::Subject,
+        suggestions: Vec::new(),
+        suggestion_idx: 0,
+        contacts,
+    });
+    app.focus = Focus::ComposeWizard;
+}
+
+/// Export a contact to a `.vcf` and attach it to a brand-new draft (#0033,
+/// send-contact-as-vCard). The vCard is written into the drafts mailbox's
+/// `_vcards/` sidecar dir and referenced by absolute path in the draft's
+/// `attachments:` frontmatter (the same plumbing `src/send.rs` already reads).
+/// Then hands off to `$EDITOR` exactly like the new-draft flow.
+///
+/// v1 intentionally targets a *new* draft only: attaching to an existing draft
+/// would need a draft picker + an in-place `attachments:` frontmatter rewrite
+/// (new machinery beyond the reused new-draft path); deferred per the ticket.
+fn send_contact_as_vcard(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    contact: &crate::contacts::Contact,
+) -> Result<()> {
+    let dir = app
+        .find_mailbox_by_kind(MailboxKind::Drafts)
+        .map(|i| app.mailboxes[i].dir.clone())
+        .or_else(|| app.drafts_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Write the .vcf into a sidecar dir beside the drafts so it is stable and
+    // out of the mailbox listing (which only reads `*.md`).
+    let vcard_dir = dir.join("_vcards");
+    if let Err(e) = std::fs::create_dir_all(&vcard_dir) {
+        app.set_status_level(format!("vCard dir failed: {e}"), StatusLevel::Error);
+        return Ok(());
+    }
+    let stem = crate::contacts::vcard_file_stem(contact);
+    let mut vcf_path = vcard_dir.join(format!("{stem}.vcf"));
+    let mut counter = 1usize;
+    while vcf_path.exists() {
+        vcf_path = vcard_dir.join(format!("{stem}-{counter}.vcf"));
+        counter += 1;
+    }
+    let vcard = crate::contacts::contact_to_vcard(contact);
+    if let Err(e) = std::fs::write(&vcf_path, vcard) {
+        app.set_status_level(format!("vCard write failed: {e}"), StatusLevel::Error);
+        return Ok(());
+    }
+
+    // Create a new draft addressed to the contact with the .vcf attached.
+    let recipient = crate::send::format_recipient(&contact.display_name, &contact.address);
+    let subject = format!("Contact: {}", vcard_display_name(contact));
+    let path = match write_vcard_draft(app, &dir, &recipient, &subject, &vcf_path) {
+        Ok(p) => p,
+        Err(e) => {
+            app.set_status_level(format!("Draft creation failed: {e}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
+
+    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+        app.invalidate_cache_idx(idx);
+    }
+
+    // Hand off to $EDITOR (matches the new-draft flow).
+    suspend_terminal(terminal)?;
+    let edit_result = edit_file(&path);
+    resume_terminal(terminal)?;
+    match edit_result {
+        Ok(()) => {
+            app.set_status(format!("vCard draft: {}", recipient));
+        }
+        Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
+    }
+    app.reload_current_mailbox();
+    Ok(())
+}
+
+/// The name shown in the vCard-draft subject: display name if any, else the
+/// address local-part.
+fn vcard_display_name(contact: &crate::contacts::Contact) -> String {
+    if contact.display_name.trim().is_empty() {
+        contact
+            .address
+            .split('@')
+            .next()
+            .unwrap_or(&contact.address)
+            .to_string()
+    } else {
+        contact.display_name.trim().to_string()
+    }
+}
+
+/// Write a new draft addressed to `recipient` with `vcf_path` in the
+/// `attachments:` frontmatter list. Mirrors `write_new_draft_from_wizard`'s
+/// frontmatter shape plus a single attachment entry.
+fn write_vcard_draft(
+    app: &App,
+    dir: &std::path::Path,
+    recipient: &str,
+    subject: &str,
+    vcf_path: &std::path::Path,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let default_from = app
+        .smtp_config
+        .as_ref()
+        .map(|s| s.default_from.clone())
+        .unwrap_or_else(|| app.account_config.default_from.clone());
+    let from = default_from.as_str();
+    let now = chrono::Utc::now().to_rfc2822();
+
+    let slug = slugify_subject_for_filename(subject);
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+    let base_name = if slug.is_empty() {
+        format!("draft-{timestamp}.md")
+    } else {
+        format!("draft-{timestamp}-{slug}.md")
+    };
+    let mut path = dir.join(&base_name);
+    let mut counter = 1usize;
+    while path.exists() {
+        path = dir.join(format!("draft-{timestamp}-{slug}-{counter}.md"));
+        counter += 1;
+    }
+
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("to: {}\n", yaml_escape(recipient)));
+    fm.push_str("cc:\n");
+    fm.push_str("bcc:\n");
+    fm.push_str(&format!("subject: {}\n", yaml_escape(subject)));
+    fm.push_str("status: draft\n");
+    fm.push_str(&format!("from: \"{from}\"\n"));
+    fm.push_str(&format!("date: {now}\n"));
+    fm.push_str("reply_to:\n");
+    fm.push_str("attachments:\n");
+    fm.push_str(&format!(
+        "  - \"{}\"\n",
+        vcf_path.display().to_string().replace('"', "\\\"")
+    ));
+    fm.push_str("---\n\n");
+
+    std::fs::write(&path, fm)?;
+    Ok(path)
 }
 
 fn submit_compose_wizard(
