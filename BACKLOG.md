@@ -16,9 +16,8 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Later
 
-> TUI multi-view roadmap: [docs/plans/tui-restructure-views.md](docs/plans/tui-restructure-views.md). Foundation (#0032) first, then views.
+> TUI multi-view roadmap: [docs/plans/tui-restructure-views.md](docs/plans/tui-restructure-views.md). Foundation (#0032) and the view switcher + Contacts view (#0033) have shipped; #0034 is the remaining view.
 
-- [#0033 View switcher + Contacts view (vCard send)](docs/tickets/0033-view-switcher-contacts-view.md) -- feature
 - [#0034 Local calendar view (iMIP-derived)](docs/tickets/0034-local-calendar-view.md) -- feature
 - [#0031 iMIP cancellations/updates (CANCEL / SEQUENCE)](docs/tickets/0031-imip-cancel-update.md) -- feature
 - [#0035 Graph API admin approval + Azure app verification](docs/tickets/0035-graph-admin-approval.md) -- chore _(blocked)_

@@ -3,9 +3,13 @@ id: 0033
 title: View switcher + Contacts view (with vCard send)
 type: feature
 priority: later
-status: open
+status: done
 created: 2026-07-11
 ---
+
+Shipped in bcc179d + 071b8fb.
+
+Shipped in two units: bcc179d (`View` enum, `MailView` state carve-out, bottom-left view switcher, Calendar placeholder) and 071b8fb (Contacts view: fuzzy search, detail pane, compose-to-contact, vCard 3.0 send). Acceptance criteria met except two documented deviations: (a) view switching is `g m` / `g c` / `g a` (Space was already taken by the List toggle-select action, so leader-prefixed keys were used instead); (b) vCard attach targets a **new draft only** — attaching to an existing draft is deferred, as it would need a draft-picker overlay (possible future ticket).
 
 Multi-view TUI: a top-level `View` enum, herdr-style left column with a bottom-left view switcher, and the first non-mail view (Contacts). Design: [tui-restructure-views](../plans/tui-restructure-views.md) (Stage 2, D10, D11). Depends on [#0032](0032-tui-foundation-package.md).
 
