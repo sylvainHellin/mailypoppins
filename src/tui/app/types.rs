@@ -617,14 +617,69 @@ pub struct ComposeWizard {
 }
 
 /// Which pane currently has focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
     Sidebar,
+    #[default]
     List,
     Headers,
     Preview,
     Search,
     ComposeWizard,
+}
+
+/// The active top-level view (#0033). `Mail` is the full email client (the
+/// original TUI); `Contacts` and `Calendar` are the new panes. Only `Mail`
+/// has state today; the others render placeholders (Contacts content lands in
+/// Unit B, Calendar in #0034).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Mail,
+    Contacts,
+    Calendar,
+}
+
+impl View {
+    /// The three views in switcher / cycle order.
+    pub const ALL: &'static [View] = &[View::Mail, View::Contacts, View::Calendar];
+
+    /// Short chip label for the bottom-left view switcher.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Mail => "mail",
+            View::Contacts => "contacts",
+            View::Calendar => "calendar",
+        }
+    }
+
+    /// The leader continuation key that switches to this view (`g <key>`).
+    pub fn switch_key(self) -> char {
+        match self {
+            View::Mail => 'm',
+            View::Contacts => 'c',
+            View::Calendar => 'a',
+        }
+    }
+}
+
+/// Snapshot of the mail view's proxy state (#0033).
+///
+/// Mirrors the `AccountState` proxy pattern: the mail view's working fields
+/// live *flat* on `App` (so the ~550 existing call sites are untouched), and
+/// this struct is where they are parked when the user switches to another
+/// view and restored when they switch back. `App::save_to_mail_view` /
+/// `App::load_from_mail_view` are the sync points, exactly like
+/// `save_to_account` / `load_from_account`.
+///
+/// Only the *transient* mail-view state that is not already account-proxied
+/// needs parking (focus + the pending leader). The account-proxied fields
+/// (`emails`, `mailboxes`, cursor, selection, ...) are restored from the
+/// active `AccountState` on demand and never diverge across a view switch, so
+/// they do not need duplicating here.
+#[derive(Debug, Clone, Default)]
+pub struct MailView {
+    pub focus: Focus,
 }
 
 /// Messages that drive state transitions (TEA pattern).

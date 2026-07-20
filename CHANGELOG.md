@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Multi-view TUI foundation: view switcher (#0033).** The TUI is now a
+  multi-view client. A herdr-style bottom-left **view switcher** (`mail |
+  contacts | calendar` chips, active one highlighted) sits under the mailbox
+  sidebar, and the new `g` leader combos **`g m`** (Mail), **`g c`**
+  (Contacts), and **`g a`** (Calendar) switch between them from any pane and
+  any view. Mail is the full email client you already know; Contacts and
+  Calendar render clean placeholder panes for now (Contacts content and the
+  local calendar land in follow-ups). Mail-specific keys are gated to the Mail
+  view — only view switching, quit, help (`?`), and the activity log stay live
+  in the placeholder views — while **digits 1–9 still jump mailboxes** in Mail
+  with no leader collision. Internally, the mail-specific `App` state is carved
+  into a `MailView` sub-struct mirroring the existing account-state proxy, so
+  the switch parks and restores per-view state cleanly. No existing key binding
+  changed.
 - **TUI mode/hint bar + `mp dump-keys` (keymap-as-data, #0032).** The TUI now
   shows a herdr-style hint bar above the status line: an accent-background mode
   badge (or `N SELECTED` when a selection is active) plus the next valid

@@ -54,12 +54,23 @@ impl App {
 
         // Global context first.
         if let Some(action) = super::resolve(super::KeyCtx::Global, key, pending, &guard_ok) {
+            // In non-Mail placeholder views only the view-agnostic Global
+            // surface (view switch / quit / help / activity) is live; a
+            // mail-specific Global key resolves but is swallowed here so it
+            // cannot fire (#0033). It still clears any pending leader.
+            if self.view != super::View::Mail && !action.is_view_agnostic() {
+                self.g_pending = false;
+                return None;
+            }
             return self.execute(action, key);
         }
-        // Then the focused pane's context.
-        if let Some(ctx) = self.pane_ctx() {
-            if let Some(action) = super::resolve(ctx, key, pending, &guard_ok) {
-                return self.execute(action, key);
+        // Then the focused pane's context — Mail view only. The placeholder
+        // views have no mail panes, so their key surface is Global-only.
+        if self.view == super::View::Mail {
+            if let Some(ctx) = self.pane_ctx() {
+                if let Some(action) = super::resolve(ctx, key, pending, &guard_ok) {
+                    return self.execute(action, key);
+                }
             }
         }
         // No live binding matched: clear any pending leader (an unrecognised
@@ -193,6 +204,18 @@ impl App {
                     Focus::Search => Focus::List,
                     Focus::ComposeWizard => Focus::ComposeWizard,
                 };
+            }
+            A::SwitchView => {
+                // `g m/c/a`: the continuation key selects the target view.
+                // `switch_view` clears the pending leader itself.
+                if let KeyCode::Char(c) = key.code {
+                    if let Some(&target) =
+                        super::View::ALL.iter().find(|v| v.switch_key() == c)
+                    {
+                        self.switch_view(target);
+                    }
+                }
+                self.g_pending = false;
             }
             // -- Sidebar ------------------------------------------------------
             A::SidebarDown => {
@@ -2327,5 +2350,105 @@ mod tests {
         // The dir picker is now active; the error did NOT fire in between.
         assert!(matches!(app.overlay, Overlay::Dir(_)));
         assert!(app.pending_error.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-view: leader switching, per-view key gating (#0033)
+    // -----------------------------------------------------------------------
+
+    use super::super::View;
+
+    /// `g c` / `g a` / `g m` switch the active top-level view; the leader is
+    /// consumed and `App::view` updates. `g` alone only arms the leader.
+    #[test]
+    fn leader_switches_top_level_view() {
+        let mut app = app_with_mailboxes();
+        assert_eq!(app.view, View::Mail);
+
+        // Bare `g` arms the leader without switching.
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert!(app.g_pending, "g must arm the leader");
+        assert_eq!(app.view, View::Mail);
+
+        // `g c` -> Contacts.
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(app.view, View::Contacts);
+        assert!(!app.g_pending, "leader consumed by the switch");
+
+        // `g a` -> Calendar.
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.view, View::Calendar);
+
+        // `g m` -> back to Mail.
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.view, View::Mail);
+    }
+
+    /// Switching to Mail restores the parked focus (the `MailView` proxy),
+    /// mirroring the `AccountState` save/load pattern.
+    #[test]
+    fn switching_back_to_mail_restores_parked_focus() {
+        let mut app = app_with_mailboxes();
+        app.focus = Focus::Preview;
+        app.switch_view(View::Contacts);
+        // Focus is irrelevant while in a placeholder view; on return it is
+        // restored from the parked mail-view snapshot.
+        app.switch_view(View::Mail);
+        assert_eq!(app.focus, Focus::Preview);
+    }
+
+    /// Mail-specific keys must not fire while a placeholder view is active:
+    /// the Global mail surface (mailbox jump) is gated off, and pane contexts
+    /// are not consulted at all.
+    #[test]
+    fn mail_keys_do_not_fire_in_contacts_or_calendar() {
+        for view in [View::Contacts, View::Calendar] {
+            let mut app = app_with_mailboxes();
+            app.switch_view(view);
+            let before = app.active_mailbox;
+
+            // Digit jump (a Global mail action) is swallowed.
+            app.handle_key(KeyEvent::from(KeyCode::Char('2')));
+            assert_eq!(app.active_mailbox, before, "digit jump must not fire in {view:?}");
+
+            // A List-context key (archive) does nothing: no pane context is
+            // consulted outside Mail, and no overlay/action is produced.
+            app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+            assert!(matches!(app.overlay, Overlay::None));
+            assert!(app.pending_actions.is_empty());
+            assert_eq!(app.view, view, "a bare mail key must not change the view");
+        }
+    }
+
+    /// View-agnostic Global keys (help, quit) still work in placeholder views.
+    #[test]
+    fn view_agnostic_keys_work_in_placeholder_views() {
+        let mut app = app_with_mailboxes();
+        app.switch_view(View::Contacts);
+
+        // Help overlay toggles.
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(matches!(app.overlay, Overlay::Help));
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        // Quit is honoured.
+        let msg = app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(matches!(msg, Some(Message::Quit)));
+    }
+
+    /// Digits 1-9 still jump mailboxes in the Mail view (no leader collision).
+    #[test]
+    fn digits_still_jump_mailboxes_in_mail_view() {
+        let mut app = app_with_mailboxes();
+        assert_eq!(app.view, View::Mail);
+        assert_eq!(app.active_mailbox, 0);
+
+        // `2` -> mailbox index 1 (Drafts).
+        app.handle_key(KeyEvent::from(KeyCode::Char('2')));
+        assert_eq!(app.active_mailbox, 1);
+        assert_eq!(app.focus, Focus::List);
     }
 }

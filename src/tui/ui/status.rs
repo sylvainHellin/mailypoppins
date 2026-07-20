@@ -27,9 +27,17 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
     let pending = app.pending_prefix();
     let (badge, hints): (String, Vec<(&'static str, &'static str)>) = if let Some(p) = pending {
         // Leader pending: show its continuations (e.g. `g` -> `gg`, `G`).
-        let conts: Vec<(&str, &str)> = prefix_continuations(ctx, p)
+        // Global leader continuations (e.g. the `g m/c/a` view switch, #0033)
+        // resolve before the pane context, so surface them alongside the
+        // pane's own continuations whenever we are not already in Global.
+        let mut conts: Vec<(&str, &str)> = prefix_continuations(ctx, p)
             .map(|kb| (kb.keys, kb.desc))
             .collect();
+        if ctx != KeyCtx::Global {
+            for kb in prefix_continuations(KeyCtx::Global, p) {
+                conts.push((kb.keys, kb.desc));
+            }
+        }
         (p.to_uppercase().to_string(), conts)
     } else {
         let hs: Vec<(&str, &str)> = hint_bindings(ctx).map(|kb| (kb.keys, kb.desc)).collect();

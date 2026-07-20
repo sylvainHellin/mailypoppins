@@ -15,6 +15,14 @@ use std::sync::Arc;
 /// Top-level application state.
 pub struct App {
     pub focus: Focus,
+    /// The active top-level view (#0033). `Mail` is the full email client;
+    /// `Contacts` / `Calendar` are placeholder panes for now. Key dispatch
+    /// and rendering branch on this; the mail-specific proxy fields below are
+    /// the active `MailView` projected flat (parked in `mail_view` on switch).
+    pub view: View,
+    /// Parked mail-view state, restored when the user switches back to `Mail`
+    /// (mirrors the `AccountState` proxy pattern; see `MailView`).
+    pub mail_view: MailView,
     pub running: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
@@ -134,6 +142,8 @@ impl App {
 
         let mut app = Self {
             focus: Focus::List,
+            view: View::Mail,
+            mail_view: MailView::default(),
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -217,6 +227,8 @@ impl App {
     pub(crate) fn default_for_tests() -> Self {
         Self {
             focus: Focus::List,
+            view: View::Mail,
+            mail_view: MailView::default(),
             running: true,
             terminal_width: 0,
             terminal_height: 0,
@@ -328,6 +340,43 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------------
+    // View switching (#0033)
+    // ---------------------------------------------------------------
+
+    /// Switch the active top-level view. Parks the current mail-view proxy
+    /// state on the way out and restores it on the way back in (mirroring the
+    /// account save/load pattern). No-op when already on `target`.
+    ///
+    /// Only `Mail` owns view state today; `Contacts` / `Calendar` are
+    /// placeholder panes, so switching to them just records the active view
+    /// (their content — and any state — arrives in #0033 Unit B / #0034).
+    pub fn switch_view(&mut self, target: View) {
+        if target == self.view {
+            return;
+        }
+        // Any pending leader chord is consumed by the switch.
+        self.g_pending = false;
+        if self.view == View::Mail {
+            self.save_to_mail_view();
+        }
+        self.view = target;
+        if target == View::Mail {
+            self.load_from_mail_view();
+        }
+    }
+
+    /// Park the mail view's transient proxy state (mirrors `save_to_account`).
+    fn save_to_mail_view(&mut self) {
+        self.mail_view.focus = self.focus;
+    }
+
+    /// Restore the mail view's transient proxy state (mirrors
+    /// `load_from_account`).
+    fn load_from_mail_view(&mut self) {
+        self.focus = self.mail_view.focus;
+    }
+
     pub fn active_kind(&self) -> MailboxKind {
         self.mailboxes
             .get(self.active_mailbox)
@@ -359,6 +408,9 @@ impl App {
             | Overlay::Mailbox(_)
             | Overlay::Rsvp(_)
             | Overlay::Error(_) => None,
+            // Non-Mail views have no mail panes; only the Global surface (view
+            // switching, quit, help) is live, so the hint bar shows Global.
+            Overlay::None if self.view != View::Mail => Some(KeyCtx::Global),
             Overlay::None => match self.focus {
                 Focus::Sidebar => Some(KeyCtx::Sidebar),
                 Focus::List => Some(KeyCtx::List),

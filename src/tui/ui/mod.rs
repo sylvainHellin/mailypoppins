@@ -8,12 +8,58 @@ mod search;
 mod sidebar;
 mod status;
 mod util;
+mod views;
 mod widgets;
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
-use super::app::{App, Overlay};
+use super::app::{App, Overlay, View};
+
+/// The stacked regions of the herdr-style left column.
+struct LeftColumn {
+    sidebar: ratatui::layout::Rect,
+    /// Email list (Mail view) or placeholder host (non-Mail, narrow tier).
+    middle: ratatui::layout::Rect,
+    /// Activity-log panel, present only when toggled on in the Mail view.
+    activity: Option<ratatui::layout::Rect>,
+    /// Bottom-left view switcher (#0033), always present.
+    switcher: ratatui::layout::Rect,
+}
+
+/// Split the left column into sidebar / middle / optional activity-log /
+/// bottom-left view switcher. The activity-log slot is preserved from the
+/// pre-#0033 layout (toggled by `!`) and only shown in the Mail view; the
+/// switcher is pinned to the very bottom in every view.
+fn split_left_column(app: &App, area: ratatui::layout::Rect, sidebar_height: u16) -> LeftColumn {
+    let show_activity = app.show_activity_log && app.view == View::Mail;
+    let mut constraints = vec![Constraint::Length(sidebar_height), Constraint::Min(0)];
+    if show_activity {
+        constraints.push(Constraint::Length(6));
+    }
+    constraints.push(Constraint::Length(views::SWITCHER_HEIGHT));
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    if show_activity {
+        LeftColumn {
+            sidebar: rows[0],
+            middle: rows[1],
+            activity: Some(rows[2]),
+            switcher: rows[3],
+        }
+    } else {
+        LeftColumn {
+            sidebar: rows[0],
+            middle: rows[1],
+            activity: None,
+            switcher: rows[2],
+        }
+    }
+}
 
 /// Render the entire UI from the current app state.
 pub fn view(app: &mut App, frame: &mut Frame) {
@@ -46,60 +92,57 @@ pub fn view(app: &mut App, frame: &mut Frame) {
         let right_col = columns[1];
 
         let sidebar_height = (app.mailboxes.len() as u16) + 3;
-        let left_panels = if app.show_activity_log {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(sidebar_height),
-                    Constraint::Min(0),
-                    Constraint::Length(6),
-                ])
-                .split(left_col)
-        } else {
-            Layout::default()
+        let left = split_left_column(app, left_col, sidebar_height);
+
+        sidebar::render_sidebar(app, frame, left.sidebar);
+        // Middle slot: the email list in Mail view; empty in placeholder views
+        // (their content occupies the right column instead).
+        if app.view == View::Mail {
+            list::render_email_list(app, frame, left.middle);
+        }
+        if let Some(activity) = left.activity {
+            sidebar::render_activity_log(app, frame, activity);
+        }
+        views::render_view_switcher(app, frame, left.switcher);
+
+        // Right column: the mail preview panes, or the view placeholder.
+        if app.view == View::Mail {
+            let right_panels = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
-                .split(left_col)
-        };
-
-        sidebar::render_sidebar(app, frame, left_panels[0]);
-        list::render_email_list(app, frame, left_panels[1]);
-        if app.show_activity_log && left_panels.len() > 2 {
-            sidebar::render_activity_log(app, frame, left_panels[2]);
+                .split(right_col);
+            headers::render_headers(app, frame, right_panels[0]);
+            preview::render_body(app, frame, right_panels[1]);
+        } else {
+            views::render_placeholder(app.view, frame, right_col);
         }
-
-        let right_panels = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
-            .split(right_col);
-
-        headers::render_headers(app, frame, right_panels[0]);
-        preview::render_body(app, frame, right_panels[1]);
     } else if show_sidebar {
         let sidebar_height = (app.mailboxes.len() as u16) + 2;
-        let left_panels = if app.show_activity_log {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(sidebar_height),
-                    Constraint::Min(0),
-                    Constraint::Length(6),
-                ])
-                .split(main_area)
-        } else {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(sidebar_height), Constraint::Min(0)])
-                .split(main_area)
-        };
+        let left = split_left_column(app, main_area, sidebar_height);
 
-        sidebar::render_sidebar(app, frame, left_panels[0]);
-        list::render_email_list(app, frame, left_panels[1]);
-        if app.show_activity_log && left_panels.len() > 2 {
-            sidebar::render_activity_log(app, frame, left_panels[2]);
+        sidebar::render_sidebar(app, frame, left.sidebar);
+        if app.view == View::Mail {
+            list::render_email_list(app, frame, left.middle);
+        } else {
+            views::render_placeholder(app.view, frame, left.middle);
         }
-    } else {
+        if let Some(activity) = left.activity {
+            sidebar::render_activity_log(app, frame, activity);
+        }
+        views::render_view_switcher(app, frame, left.switcher);
+    } else if app.view == View::Mail {
         list::render_email_list(app, frame, main_area);
+    } else {
+        // Narrowest tier: placeholder fills the frame, switcher pinned below.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(views::SWITCHER_HEIGHT),
+            ])
+            .split(main_area);
+        views::render_placeholder(app.view, frame, rows[0]);
+        views::render_view_switcher(app, frame, rows[1]);
     }
 
     status::render_hint_bar(app, frame, hint_area);

@@ -14,7 +14,10 @@
       { "key": "!", "action": "Toggle activity log" },
       { "key": "L", "action": "Open activity log overlay" },
       { "key": "Ctrl+l", "action": "Open log file in $EDITOR" },
-      { "key": "Ctrl+e", "action": "Open config.toml in $EDITOR" }
+      { "key": "Ctrl+e", "action": "Open config.toml in $EDITOR" },
+      { "key": "g m", "action": "Switch to Mail view" },
+      { "key": "g c", "action": "Switch to Contacts view" },
+      { "key": "g a", "action": "Switch to Calendar view" }
     ]
   },
   {

@@ -222,6 +222,9 @@ pub enum KeyAction {
     JumpMailbox,
     FocusForward,
     FocusBackward,
+    /// Leader `g m` / `g c` / `g a`: switch the top-level view. The executor
+    /// reads the continuation key to pick the target view (#0033).
+    SwitchView,
     // -- Sidebar ----------------------------------------------------------
     SidebarDown,
     SidebarUp,
@@ -266,6 +269,30 @@ pub enum KeyAction {
     PreviewToList,
     /// Hand-dispatched (overlay-internal input). The resolver never returns it.
     Manual,
+}
+
+impl KeyAction {
+    /// Whether this action is meaningful outside the Mail view (#0033).
+    ///
+    /// The non-Mail placeholder views only expose the view-agnostic Global
+    /// surface: view switching (the `g` leader + `g m/c/a`), quit, help, and
+    /// the activity log. Mail-specific Global actions (mailbox/account jump,
+    /// metadata/content search, focus cycling) are gated off so they cannot
+    /// fire while a placeholder view is active. `Manual` stays live because it
+    /// backs the `g` leader toggle.
+    pub fn is_view_agnostic(self) -> bool {
+        matches!(
+            self,
+            KeyAction::Quit
+                | KeyAction::ToggleHelp
+                | KeyAction::ToggleActivityLog
+                | KeyAction::OpenActivityOverlay
+                | KeyAction::OpenLogFile
+                | KeyAction::OpenConfigFile
+                | KeyAction::SwitchView
+                | KeyAction::Manual
+        )
+    }
 }
 
 /// One catalogued key binding.
@@ -362,6 +389,13 @@ pub static KEYMAP: &[KeyBinding] = &[
     b("L", Chord::Char('L'), KeyCtx::Global, KeyAction::OpenActivityOverlay, "Open activity log overlay", false),
     b("Ctrl+l", Chord::CtrlChar('l'), KeyCtx::Global, KeyAction::OpenLogFile, "Open log file in $EDITOR", false),
     b("Ctrl+e", Chord::CtrlChar('e'), KeyCtx::Global, KeyAction::OpenConfigFile, "Open config.toml in $EDITOR", false),
+    // View switcher leader (#0033): `g` opens the leader, then m/c/a picks a
+    // view. Global so it works from every pane and every view. Space is taken
+    // (list selection), so the `g` continuation is the collision-free choice.
+    row("", Chord::PrefixLeader('g'), None, KeyCtx::Global, Guard::None, KeyAction::Manual, "", false),
+    row("g m", Chord::Char('m'), Some('g'), KeyCtx::Global, Guard::None, KeyAction::SwitchView, "Switch to Mail view", true),
+    row("g c", Chord::Char('c'), Some('g'), KeyCtx::Global, Guard::None, KeyAction::SwitchView, "Switch to Contacts view", true),
+    row("g a", Chord::Char('a'), Some('g'), KeyCtx::Global, Guard::None, KeyAction::SwitchView, "Switch to Calendar view", true),
     // -- SIDEBAR ----------------------------------------------------------
     b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Sidebar, KeyAction::SidebarDown, "Navigate mailboxes", true),
     b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Sidebar, KeyAction::SidebarUp, "", false),
