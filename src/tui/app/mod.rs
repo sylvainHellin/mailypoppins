@@ -737,6 +737,7 @@ impl App {
             | Overlay::Attachment(_)
             | Overlay::Dir(_)
             | Overlay::Mailbox(_)
+            | Overlay::Signatures(_)
             | Overlay::Rsvp(_)
             | Overlay::Thread(_)
             | Overlay::Palette(_)
@@ -1826,6 +1827,33 @@ impl App {
         match &mut self.overlay {
             Overlay::Mailbox(p) => Some(p),
             _ => None,
+        }
+    }
+
+    pub fn signatures_overlay_mut(&mut self) -> Option<&mut SignaturesOverlay> {
+        match &mut self.overlay {
+            Overlay::Signatures(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Re-resolve the cached account signature after the signatures layer
+    /// changed under it (#0107).
+    ///
+    /// `signature_content` is read when a draft is created outside the compose
+    /// wizard (reply, forward, `new_draft_skeleton`), so a default that was
+    /// just switched, renamed, deleted or edited has to reach it or those
+    /// drafts keep carrying the old block until the next restart. The wizard
+    /// resolves its own signature fresh and does not depend on this.
+    pub fn refresh_signature_content(&mut self) {
+        self.signature_content = if self.global_config.email.include_signature {
+            crate::config::resolve_signature_markdown(&self.account_config, None)
+        } else {
+            None
+        };
+        let idx = self.active_account;
+        if let Some(acct) = self.accounts.get_mut(idx) {
+            acct.signature_content = self.signature_content.clone();
         }
     }
 

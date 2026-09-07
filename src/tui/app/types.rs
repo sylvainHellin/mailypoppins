@@ -1693,6 +1693,15 @@ pub enum Action {
     OpenEventSource {
         msg: MessageRef,
     },
+    /// Open one app-managed signature file in `$EDITOR` (#0107).
+    ///
+    /// Queued by the signatures overlay (`e`, and after `n` creates a file) so
+    /// the suspend / restore-terminal dance stays in `actions.rs` with every
+    /// other editor launch. The overlay stays open underneath and refreshes
+    /// itself when the editor returns.
+    EditSignatureFile {
+        name: String,
+    },
     /// Append a file path to the cursor draft's `attachments:` frontmatter
     /// (#0098). Carries the raw path the user typed at the attach prompt; the
     /// handler resolves the cursor draft, appends the entry, and refreshes the
@@ -1712,6 +1721,11 @@ pub enum ConfirmAction {
     Delete,
     Send,
     SendApproved,
+    /// Delete the signature under the cursor of the signatures overlay
+    /// (#0107). It carries the overlay itself because the confirm dialog
+    /// replaces it on screen (one overlay at a time): both answers hand the
+    /// list back, refreshed on a yes, untouched on a no.
+    DeleteSignature(SignaturesOverlay),
 }
 
 /// Background RSVP send result (#0029).
@@ -1902,6 +1916,9 @@ pub enum Overlay {
     Dir(DirPicker),
     /// Fuzzy mailbox picker for quick-move (`M`).
     Mailbox(MailboxPicker),
+    /// Signature management (`cs`, #0107): the account's signature files, the
+    /// default marked, with create / rename / edit / delete.
+    Signatures(SignaturesOverlay),
     /// RSVP overlay for a received invite (`V`, #0029).
     Rsvp(RsvpOverlay),
     /// Conversation / threading overlay (`T`, #0008).
@@ -1957,6 +1974,99 @@ pub struct MailboxPicker {
     pub selected: usize,
     /// Emails to move (current selection, or the cursor email).
     pub msgs: Vec<MessageRef>,
+}
+
+/// What the signatures overlay is doing right now (#0107).
+///
+/// The overlay is a list that sometimes needs one line of text from the user
+/// (a name to create, a name to rename to). There is no reusable single-line
+/// input widget in this codebase, so the overlay carries its own buffer and
+/// this mode says which prompt (if any) owns the keyboard, the same shape
+/// [`DirPickerMode`] uses for its two list sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignaturesMode {
+    /// Browsing the list; every key is a command.
+    Browse,
+    /// Typing the name of a signature to create.
+    New,
+    /// Typing the new name of the selected signature.
+    Rename,
+}
+
+/// Overlay state for signature management (`cs`, #0107).
+///
+/// The filesystem is the index ([`crate::signatures`]), so this holds a
+/// snapshot of it plus the cursor: `names` is what the directory listed when
+/// the overlay last refreshed, `default` the account's recorded default (only
+/// when its file still exists). Every mutation goes through the signatures
+/// module and then calls [`SignaturesOverlay::refresh`], so the list can never
+/// claim a file that is no longer there.
+///
+/// `Clone` because a delete hands the whole overlay to the confirm dialog and
+/// takes it back on either answer (see `ConfirmAction::DeleteSignature`).
+#[derive(Debug, Clone)]
+pub struct SignaturesOverlay {
+    /// The account whose default the overlay edits.
+    pub account: String,
+    /// Signature names, sorted, as of the last refresh.
+    pub names: Vec<String>,
+    /// The account's default signature, if it has one on disk.
+    pub default: Option<String>,
+    /// Cursor into `names`.
+    pub selected: usize,
+    /// Browsing, or which prompt owns the keyboard.
+    pub mode: SignaturesMode,
+    /// The prompt's text buffer (unused in [`SignaturesMode::Browse`]).
+    pub input: String,
+}
+
+impl SignaturesOverlay {
+    /// Open on `account`, reading the signatures directory and the recorded
+    /// default.
+    pub fn for_account(account: &str) -> Self {
+        let mut overlay = Self {
+            account: account.to_string(),
+            names: Vec::new(),
+            default: None,
+            selected: 0,
+            mode: SignaturesMode::Browse,
+            input: String::new(),
+        };
+        overlay.refresh();
+        overlay
+    }
+
+    /// Re-read the directory and the recorded default, keeping the cursor in
+    /// range. Called after every mutation, including the ones that happen
+    /// outside the overlay (an `$EDITOR` round trip, a delete that cleared the
+    /// account default).
+    pub fn refresh(&mut self) {
+        self.names = crate::signatures::list();
+        self.default = crate::signatures::default_signature_name(&self.account);
+        if self.selected >= self.names.len() {
+            self.selected = self.names.len().saturating_sub(1);
+        }
+    }
+
+    /// Put the cursor on `name` if the list still holds it.
+    pub fn select(&mut self, name: &str) {
+        if let Some(idx) = self.names.iter().position(|n| n == name) {
+            self.selected = idx;
+        }
+    }
+
+    /// The name under the cursor, or `None` when there are no signatures yet.
+    pub fn selected_name(&self) -> Option<&str> {
+        self.names.get(self.selected).map(String::as_str)
+    }
+
+    /// Whether the cursor sits on the account's default.
+    pub fn selected_is_default(&self) -> bool {
+        match (self.selected_name(), self.default.as_deref()) {
+            (Some(name), Some(default)) => name == default,
+            _ => false,
+        }
+    }
 }
 
 /// Whether the directory picker is in zoxide or browser mode.

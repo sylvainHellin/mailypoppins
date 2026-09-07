@@ -236,6 +236,10 @@ pub enum KeyAction {
     OpenPalette,
     ToggleActivityLog,
     OpenActivityOverlay,
+    /// Open the signature management overlay (`cs`, #0107): the account's
+    /// signature files, with create / rename / edit / delete and the default
+    /// selection.
+    OpenSignatures,
     OpenLogFile,
     OpenConfigFile,
     FilterMetadata,
@@ -577,6 +581,11 @@ pub static KEYMAP: &[KeyBinding] = &[
     p("ff", Chord::Char('f'), 'f', KeyCtx::Global, KeyAction::ServerSearch, "Search all mail (sender, subject, body)", true),
     // `c` compose family (global entry).
     p("cn", Chord::Char('n'), 'c', KeyCtx::Global, KeyAction::NewDraft, "New draft", true),
+    // Signature management (#0107): the compose family is where the user is
+    // already thinking about what goes under their mail. `s` is free in the
+    // family (`ss` is the sync leader's, a different prefix), so this collides
+    // with nothing.
+    p("cs", Chord::Char('s'), 'c', KeyCtx::Global, KeyAction::OpenSignatures, "Manage signatures", false),
     // `g` go family (global jumps).
     p("gm", Chord::Char('m'), 'g', KeyCtx::Global, KeyAction::GoMailbox, "Go to mailboxes (sidebar)", false),
     pg("ga", Chord::Char('a'), 'g', KeyCtx::Global, Guard::MultiAccount, KeyAction::SwitchAccount, "Switch account", false),

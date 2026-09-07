@@ -7,8 +7,8 @@ use super::{
     Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ComposeField,
     ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker,
     DirPickerMode, EmailEntry, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay,
-    RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, ThreadEntry,
-    ThreadOverlay,
+    RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
+    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -24,6 +24,7 @@ impl App {
             Overlay::Error(_) => return self.handle_persistent_error_key(key),
             Overlay::Dir(_) => return self.handle_dir_picker_key(key),
             Overlay::Mailbox(_) => return self.handle_mailbox_picker_key(key),
+            Overlay::Signatures(_) => return self.handle_signatures_key(key),
             Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
             Overlay::Thread(_) => return self.handle_thread_overlay_key(key),
             Overlay::Palette(_) => return self.handle_command_palette_key(key),
@@ -219,6 +220,10 @@ impl App {
             A::ToggleActivityLog => {
                 self.pending_prefix = None;
                 self.show_activity_log = !self.show_activity_log;
+            }
+            A::OpenSignatures => {
+                self.pending_prefix = None;
+                self.open_signatures_overlay();
             }
             A::OpenActivityOverlay => {
                 self.pending_prefix = None;
@@ -924,6 +929,28 @@ impl App {
                                 self.push_action(Action::BatchDelete(msgs));
                             }
                         }
+                        // The one confirmed action that is a local file
+                        // removal rather than a queued `Action`: deleting a
+                        // signature is a `signatures::delete` call, and the
+                        // overlay it came from is restored (refreshed, so a
+                        // default the delete cleared stops being marked).
+                        ConfirmAction::DeleteSignature(mut overlay) => {
+                            let name = overlay.selected_name().map(str::to_string);
+                            if let Some(name) = name {
+                                match crate::signatures::delete(&name) {
+                                    Ok(()) => {
+                                        self.set_status(format!("Deleted signature '{name}'"))
+                                    }
+                                    Err(e) => self.set_status_level(
+                                        format!("Cannot delete: {e:#}"),
+                                        StatusLevel::Error,
+                                    ),
+                                }
+                            }
+                            overlay.refresh();
+                            self.refresh_signature_content();
+                            self.overlay = Overlay::Signatures(overlay);
+                        }
                         _ => {
                             self.push_action(match dialog.action {
                                 ConfirmAction::Approve => Action::Approve,
@@ -932,6 +959,9 @@ impl App {
                                 ConfirmAction::Delete => Action::Delete,
                                 ConfirmAction::Send => Action::Send,
                                 ConfirmAction::SendApproved => Action::SendApproved,
+                                // Consumed by the arm above; the resolver never
+                                // reaches this one.
+                                ConfirmAction::DeleteSignature(_) => return None,
                             });
                         }
                     }
@@ -941,7 +971,18 @@ impl App {
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.close_overlay();
+                // A cancelled signature delete goes back to the signatures
+                // overlay it floated over, not to the mail view (#0107).
+                let taken = std::mem::replace(&mut self.overlay, Overlay::None);
+                if let Overlay::Confirm(ConfirmDialog {
+                    action: ConfirmAction::DeleteSignature(overlay),
+                    ..
+                }) = taken
+                {
+                    self.overlay = Overlay::Signatures(overlay);
+                } else {
+                    self.promote_pending_error();
+                }
             }
             _ => {}
         }
@@ -2059,6 +2100,249 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    // -----------------------------------------------------------------
+    // Signature management overlay (#0107)
+    // -----------------------------------------------------------------
+
+    /// Open the signatures overlay on the active account (`cs`).
+    ///
+    /// An empty signatures directory is not a reason to refuse: the overlay is
+    /// where a first signature gets created, so it opens on an empty list that
+    /// says so.
+    fn open_signatures_overlay(&mut self) {
+        let account = self.account_config.name.clone();
+        self.overlay = Overlay::Signatures(SignaturesOverlay::for_account(&account));
+    }
+
+    /// Route to the browse surface or to whichever prompt owns the keyboard.
+    fn handle_signatures_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let mode = match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.mode,
+            _ => return None,
+        };
+        match mode {
+            SignaturesMode::Browse => self.handle_signatures_browse_key(key),
+            SignaturesMode::New | SignaturesMode::Rename => {
+                self.handle_signatures_prompt_key(key, mode)
+            }
+        }
+    }
+
+    /// The list surface: navigate, set the default, and the four file
+    /// operations. Each mutation goes through [`crate::signatures`] and
+    /// surfaces its validation error on the status line rather than failing
+    /// quietly.
+    fn handle_signatures_browse_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    if overlay.selected + 1 < overlay.names.len() {
+                        overlay.selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter => self.toggle_selected_signature_default(),
+            KeyCode::Char('e') => {
+                match self.selected_signature_name() {
+                    Some(name) => self.push_action(Action::EditSignatureFile { name }),
+                    None => self.set_status(
+                        "No signature to edit; press n to create one".to_string(),
+                    ),
+                }
+            }
+            KeyCode::Char('n') => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::New;
+                    overlay.input.clear();
+                }
+            }
+            KeyCode::Char('r') => {
+                // Seed the prompt with the current name: a rename is usually an
+                // edit of what is there, not a retype.
+                let current = self.selected_signature_name();
+                match current {
+                    Some(name) => {
+                        if let Some(overlay) = self.signatures_overlay_mut() {
+                            overlay.mode = SignaturesMode::Rename;
+                            overlay.input = name;
+                        }
+                    }
+                    None => self.set_status("No signature to rename".to_string()),
+                }
+            }
+            KeyCode::Char('d') => self.confirm_delete_signature(),
+            KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// The two name prompts (create / rename): free text until Enter commits
+    /// or Esc goes back to the list.
+    fn handle_signatures_prompt_key(
+        &mut self,
+        key: KeyEvent,
+        mode: SignaturesMode,
+    ) -> Option<Message> {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::Browse;
+                    overlay.input.clear();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.input.pop();
+                }
+            }
+            KeyCode::Enter => match mode {
+                SignaturesMode::New => self.commit_new_signature(),
+                SignaturesMode::Rename => self.commit_signature_rename(),
+                SignaturesMode::Browse => {}
+            },
+            KeyCode::Char(c) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.input.push(c);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The signature under the overlay's cursor, owned so the caller can then
+    /// take `&mut self` again.
+    fn selected_signature_name(&self) -> Option<String> {
+        match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.selected_name().map(str::to_string),
+            _ => None,
+        }
+    }
+
+    /// Enter on the list: make the cursor signature the account default, or
+    /// clear the default when it already is one. Without the second half there
+    /// would be no way back to "no signature by default" short of deleting the
+    /// file.
+    fn toggle_selected_signature_default(&mut self) {
+        let (account, name, already_default) = match &self.overlay {
+            Overlay::Signatures(overlay) => (
+                overlay.account.clone(),
+                overlay.selected_name().map(str::to_string),
+                overlay.selected_is_default(),
+            ),
+            _ => return,
+        };
+        let Some(name) = name else {
+            self.set_status("No signature selected".to_string());
+            return;
+        };
+
+        let target = if already_default { None } else { Some(name.as_str()) };
+        match crate::signatures::set_default_signature(&account, target) {
+            Ok(()) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.refresh();
+                }
+                self.refresh_signature_content();
+                let msg = if already_default {
+                    format!("'{name}' is no longer the default signature")
+                } else {
+                    format!("'{name}' is now the default signature")
+                };
+                self.set_status(msg);
+            }
+            Err(e) => self.set_status_level(
+                format!("Cannot set the default signature: {e:#}"),
+                StatusLevel::Error,
+            ),
+        }
+    }
+
+    /// Enter at the create prompt. A name the signatures module refuses (empty,
+    /// a path separator, already taken) leaves the prompt open with the text
+    /// intact so it can be fixed; a good one creates the file and drops the
+    /// user straight into `$EDITOR`, which is what they wanted `n` for.
+    fn commit_new_signature(&mut self) {
+        let name = match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.input.clone(),
+            _ => return,
+        };
+        match crate::signatures::create(&name) {
+            Ok(_) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::Browse;
+                    overlay.input.clear();
+                    overlay.refresh();
+                    overlay.select(&name);
+                }
+                self.push_action(Action::EditSignatureFile { name: name.clone() });
+                self.set_status(format!("Created signature '{name}'"));
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot create: {e:#}"), StatusLevel::Error)
+            }
+        }
+    }
+
+    /// Enter at the rename prompt. Same error contract as the create prompt:
+    /// the prompt stays open on a refusal.
+    fn commit_signature_rename(&mut self) {
+        let (old, new) = match &self.overlay {
+            Overlay::Signatures(overlay) => (
+                overlay.selected_name().map(str::to_string),
+                overlay.input.clone(),
+            ),
+            _ => return,
+        };
+        let Some(old) = old else {
+            self.set_status("No signature to rename".to_string());
+            return;
+        };
+        match crate::signatures::rename(&old, &new) {
+            Ok(()) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::Browse;
+                    overlay.input.clear();
+                    // `rename` carries the account default across, so the
+                    // refresh is what shows the marker on the new name.
+                    overlay.refresh();
+                    overlay.select(&new);
+                }
+                self.refresh_signature_content();
+                self.set_status(format!("Renamed '{old}' to '{new}'"));
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot rename: {e:#}"), StatusLevel::Error)
+            }
+        }
+    }
+
+    /// `d`: raise the shared confirm dialog over the overlay, handing it the
+    /// overlay so either answer lands back on the list.
+    fn confirm_delete_signature(&mut self) {
+        let name = self.selected_signature_name();
+        let Some(name) = name else {
+            self.set_status("No signature to delete".to_string());
+            return;
+        };
+        let Overlay::Signatures(overlay) =
+            std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return;
+        };
+        self.overlay = Overlay::Confirm(ConfirmDialog {
+            title: format!("Delete signature '{name}'?"),
+            detail: crate::signatures::signature_file(&name).display().to_string(),
+            action: ConfirmAction::DeleteSignature(overlay),
+        });
     }
 
     /// Command-palette input (`:` / `Ctrl+p`, #0100): a text-input fuzzy finder
@@ -3522,6 +3806,307 @@ mod tests {
         // No match highlighted: picker stays open, nothing queued.
         assert!(matches!(app.overlay, Overlay::Mailbox(_)));
         assert!(app.pending_actions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Signature management overlay (#0107)
+    // -----------------------------------------------------------------------
+
+    /// Both path layers redirected into one tempdir: `config_dir()` for the
+    /// signature files, `mailypoppins_data_dir()` for the state file that
+    /// records the default. Mirrors `signatures::tests::fixture`.
+    struct SigFixture {
+        _dir: tempfile::TempDir,
+        _config: crate::config::test_env::ConfigDirOverride,
+        _data: crate::config::test_env::TestDataDir,
+    }
+
+    fn sig_fixture() -> SigFixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = crate::config::test_env::ConfigDirOverride::new(dir.path());
+        config.set_config_dir(&dir.path().join("config"));
+        SigFixture {
+            _dir: dir,
+            _config: config,
+            _data: crate::config::test_env::TestDataDir::new(),
+        }
+    }
+
+    /// An app on account `work` with `names` already on disk.
+    fn app_with_signatures(names: &[&str]) -> App {
+        let mut app = app_with_emails(sample());
+        app.account_config.name = "work".to_string();
+        for name in names {
+            crate::signatures::write(name, &format!("-- \n{name}")).unwrap();
+        }
+        app
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, c);
+        }
+    }
+
+    /// `cs` opens the overlay on the account's signature files, `Esc` closes it.
+    #[test]
+    fn cs_opens_the_signatures_overlay_and_esc_closes_it() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work", "casual"]);
+
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("`cs` should open the signatures overlay");
+        };
+        assert_eq!(overlay.names, vec!["casual".to_string(), "work".to_string()]);
+        assert_eq!(overlay.account, "work");
+        assert_eq!(overlay.default, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// The overlay opens on an empty directory too: it is where the first
+    /// signature gets created.
+    #[test]
+    fn the_overlay_opens_with_no_signatures_at_all() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&[]);
+
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("the overlay should open on an empty list");
+        };
+        assert!(overlay.names.is_empty());
+        assert_eq!(overlay.selected_name(), None);
+    }
+
+    /// j/k move the cursor and stop at both ends.
+    #[test]
+    fn signatures_navigation_clamps_at_both_ends() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+
+        press(&mut app, 'k'); // already at the top
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 0);
+        press(&mut app, 'j');
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
+        press(&mut app, 'j'); // already at the bottom
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected_name(), Some("work"));
+    }
+
+    /// Enter records the cursor signature as the account default; Enter on the
+    /// one that already is clears it.
+    #[test]
+    fn enter_sets_and_then_clears_the_account_default() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'j'); // cursor on "work"
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            crate::signatures::default_signature_name("work").as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().default.as_deref(),
+            Some("work"),
+            "the list marks the new default"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(crate::signatures::default_signature_name("work"), None);
+        assert_eq!(app.signatures_overlay_mut().unwrap().default, None);
+    }
+
+    /// `e` hands the selected file to the `$EDITOR` action (the suspend /
+    /// restore dance lives in `actions.rs`).
+    #[test]
+    fn e_queues_an_editor_launch_for_the_selected_signature() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'j');
+        press(&mut app, 'e');
+
+        match app.pending_actions.pop_front() {
+            Some(Action::EditSignatureFile { name }) => assert_eq!(name, "work"),
+            other => panic!("expected EditSignatureFile, got {other:?}"),
+        }
+        assert!(
+            matches!(app.overlay, Overlay::Signatures(_)),
+            "the overlay stays open under the editor"
+        );
+    }
+
+    /// `n` prompts for a name; a valid one creates the file, puts the cursor on
+    /// it and opens `$EDITOR`.
+    #[test]
+    fn n_creates_a_signature_and_opens_it_in_the_editor() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+
+        press(&mut app, 'n');
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().mode,
+            SignaturesMode::New
+        );
+        type_text(&mut app, "casual");
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        type_text(&mut app, "l");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(crate::signatures::exists("casual"));
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::Browse);
+        assert_eq!(overlay.selected_name(), Some("casual"));
+        match app.pending_actions.pop_front() {
+            Some(Action::EditSignatureFile { name }) => assert_eq!(name, "casual"),
+            other => panic!("expected EditSignatureFile, got {other:?}"),
+        }
+    }
+
+    /// A name the signatures module refuses is reported and leaves the prompt
+    /// open with the text intact, so it can be fixed rather than retyped.
+    #[test]
+    fn an_invalid_new_name_is_reported_and_keeps_the_prompt_open() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'n');
+        type_text(&mut app, "../evil");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        let status = app.status_message.clone().unwrap_or_default();
+        assert!(status.contains("Cannot create"), "{status}");
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::New);
+        assert_eq!(overlay.input, "../evil");
+        assert_eq!(crate::signatures::list(), vec!["work".to_string()]);
+        assert!(app.pending_actions.is_empty());
+
+        // Esc abandons the prompt and returns to the list.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::Browse);
+        assert!(overlay.input.is_empty());
+    }
+
+    /// `r` seeds the prompt with the current name; committing moves the file
+    /// and carries the account default with it.
+    #[test]
+    fn r_renames_the_selected_signature_and_carries_the_default() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work"]);
+        crate::signatures::set_default_signature("work", Some("work")).unwrap();
+        press(&mut app, 'c');
+        press(&mut app, 's');
+
+        press(&mut app, 'r');
+        assert_eq!(app.signatures_overlay_mut().unwrap().input, "work");
+        type_text(&mut app, "-external");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(crate::signatures::list(), vec!["work-external".to_string()]);
+        assert_eq!(
+            crate::signatures::default_signature_name("work").as_deref(),
+            Some("work-external")
+        );
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::Browse);
+        assert_eq!(overlay.selected_name(), Some("work-external"));
+        assert_eq!(overlay.default.as_deref(), Some("work-external"));
+    }
+
+    /// A rename onto an existing name is refused and reported, and the prompt
+    /// stays open.
+    #[test]
+    fn a_rename_onto_an_existing_name_is_refused() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's'); // cursor on "casual"
+
+        press(&mut app, 'r');
+        for _ in 0.."casual".len() {
+            app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        }
+        type_text(&mut app, "work");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        let status = app.status_message.clone().unwrap_or_default();
+        assert!(status.contains("Cannot rename"), "{status}");
+        assert_eq!(
+            crate::signatures::list(),
+            vec!["casual".to_string(), "work".to_string()]
+        );
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().mode,
+            SignaturesMode::Rename
+        );
+    }
+
+    /// `d` goes through the shared confirm dialog; `y` deletes the file, clears
+    /// a default that named it, and hands the refreshed list back.
+    #[test]
+    fn d_deletes_behind_the_confirm_dialog_and_clears_the_default() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        crate::signatures::set_default_signature("work", Some("work")).unwrap();
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'j'); // cursor on "work"
+
+        press(&mut app, 'd');
+        let Overlay::Confirm(dialog) = &app.overlay else {
+            panic!("`d` should raise the confirm dialog");
+        };
+        assert!(dialog.title.contains("work"), "{}", dialog.title);
+
+        press(&mut app, 'y');
+        assert!(!crate::signatures::exists("work"));
+        assert_eq!(crate::signatures::default_signature_name("work"), None);
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("the list comes back after the delete");
+        };
+        assert_eq!(overlay.names, vec!["casual".to_string()]);
+        assert_eq!(overlay.default, None);
+        assert_eq!(overlay.selected_name(), Some("casual"), "the cursor stays in range");
+    }
+
+    /// Answering `n` to the delete keeps the file and returns to the list.
+    #[test]
+    fn a_cancelled_signature_delete_returns_to_the_list() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'd');
+        press(&mut app, 'n');
+
+        assert!(crate::signatures::exists("casual"));
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("cancelling returns to the signatures overlay");
+        };
+        assert_eq!(
+            overlay.names,
+            vec!["casual".to_string(), "work".to_string()]
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -13,26 +13,26 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 07 |╭ Inbox ─────────────────────────────────╮╭ 󰃭 Invitation ──────────────────────────────────────────────────────────────╮
 08 |│   DATE       SUBJECT                   ││Bauprojekt Ubergabe                                                         │
 09 |│  2026-07-28 󰃭  Einladung: Baustelle… ││When: 2026-08-03T09:00:00+02:00  →  2026-08-03T10:30:00+02:00               │
-10 |│   2026-07-27 Re: Statusberic╭ Command palette ─────────────────────────────────────────╮                             │
-11 |│  2026-07-26  Scan 2026-07-│> █                                                       │                             │
-12 |│   2026-07-24 Wochenrückblick│Quit                                                      │                             │
-13 |│   2026-07-21  Rechnung 2026│Cycle focus forward                                       │ Exchange (no Graph in v1).  │
-14 |│                             │Cycle focus backward                                      │─────────────────────────────╯
-15 |│                             │Toggle this help                                          │─────────────────────────────╮
-16 |│                             │Zoom / unzoom the focused pane                            │                             │
-17 |│                             │Toggle activity log                                       │                             │
-18 |│                             │Send current draft (approve + send)                       │                             │
-19 |│                             │Search all mail (sender, subject, body)                   │                             │
-20 |│                             │New draft                                                 │                             │
-21 |│                             │Manage signatures                                         │                             │
-22 |│                             │Go to mailboxes (sidebar)                                 │                             │
-23 |│                             │Switch account                                            │                             │
-24 |│                             │Quick sync                                                │                             │
-25 |│                             │Full sync                                                 │                             │
-26 |│                             │Activity log overlay                                      │                             │
-27 |╰─────────────────────────────│Open config.toml in $EDITOR                               │                             │
-28 |╭ Activity ───────────────────│type filter  ↑/↓ nav  Enter run  Esc cancel               │                             │
-29 |│  No activity yet            ╰──────────────────────────────────────────────────────────╯                             │
+10 |│   2026-07-27 Re: Statusbericht KW31    ││Where: Raum 2.14, Arcisstrasse                                              │
+11 |│  2026-07-26  Scan 2026-07-26 (3 Sei… ││Organizer: planung@example.org                                              │
+12 |│   2026-07-24 Wochenrückblick: sehr la… ││Your RSVP: No response yet                                                  │
+13 |│   2026-07-21  Rechnung 2026-0714      ││RSVP is emailed to the organizer; not synced to Exchange (no Graph in v1).  │
+14 |│                                        │╰────────────────────────────────────────────────────────────────────────────╯
+15 |│                                        │╭ Body ──────────────────────────────────────────────────────────────────────╮
+16 |│                        ╭ Signatures ────────────────────────────────────────────────────────╮                        │
+17 |│                        │Default: work                                                       │                        │
+18 |│                        │  casual                                                            │                        │
+19 |│                        │★ work                                                              │                        │
+20 |│                        │  work-external                                                     │                        │
+21 |│                        │                                                                    │                        │
+22 |│                        │j/k nav  Enter default  e edit  n new  r rename  d delete  Esc close│                        │
+23 |│                        ╰────────────────────────────────────────────────────────────────────╯                        │
+24 |│                                        ││                                                                            │
+25 |│                                        ││                                                                            │
+26 |│                                        ││                                                                            │
+27 |╰────────────────────────────────────────╯│                                                                            │
+28 |╭ Activity ──────────────────────────────╮│                                                                            │
+29 |│  No activity yet                       ││                                                                            │
 30 |│                                        ││                                                                            │
 31 |│                                        ││                                                                            │
 32 |│                                        ││                                                                            │
@@ -51,6 +51,8 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 05 |bold@43..52
 08 |bold@43..62
 09 |bg:surface+fg:selection+bold@1..41 bold@43..49
-11 |bold@1..30
-12 |bg:surface@31..35
+10 |bold@43..50
+11 |bold@1..41 bold@43..54
+12 |bold@43..54
+19 |bg:surface@26..32
 35 |bold@5..11

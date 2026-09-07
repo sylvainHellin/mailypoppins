@@ -2151,6 +2151,10 @@ pub(super) fn handle_action(
             edit_compose_signature(app, terminal)?;
         }
 
+        Action::EditSignatureFile { name } => {
+            edit_signature_file(app, terminal, &name)?;
+        }
+
         Action::ComposeWizardSubmit => {
             submit_compose_wizard(app, terminal)?;
             // Consume-and-close: `submit_compose_wizard` takes the wizard via
@@ -2467,6 +2471,50 @@ fn edit_compose_signature(
     match edit_result {
         Ok(()) => app.set_status(format!("Signature '{name}' edited")),
         Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
+    }
+    Ok(())
+}
+
+/// Edit one app-managed signature file in `$EDITOR` (#0107).
+///
+/// The signatures overlay's `e`, and the tail of its `n`. Same suspend /
+/// restore dance as [`edit_compose_signature`]; what differs is the caller,
+/// which stays open underneath, so the overlay is refreshed on the way out
+/// (the file may only now exist, or may have gained the content that decides
+/// whether the account signature resolves at all).
+fn edit_signature_file(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    name: &str,
+) -> Result<()> {
+    if let Err(e) = crate::signatures::validate_name(name) {
+        app.set_status_level(format!("Cannot open signature: {e:#}"), StatusLevel::Error);
+        return Ok(());
+    }
+    // Missing means the selection went stale (renamed or deleted elsewhere):
+    // create it rather than dropping the user into `$EDITOR` on a path whose
+    // parent directory may not exist.
+    if !crate::signatures::exists(name) {
+        if let Err(e) = crate::signatures::write(name, "") {
+            app.set_status_level(format!("Cannot open signature: {e:#}"), StatusLevel::Error);
+            return Ok(());
+        }
+    }
+    let path = crate::signatures::signature_file(name);
+
+    suspend_terminal(terminal)?;
+    let edit_result = edit_file(&path);
+    resume_terminal(terminal)?;
+
+    match edit_result {
+        Ok(()) => app.set_status(format!("Signature '{name}' edited")),
+        Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
+    }
+
+    app.refresh_signature_content();
+    if let Overlay::Signatures(overlay) = &mut app.overlay {
+        overlay.refresh();
+        overlay.select(name);
     }
     Ok(())
 }

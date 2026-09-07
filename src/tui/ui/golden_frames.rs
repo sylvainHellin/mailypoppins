@@ -35,7 +35,8 @@ use ratatui::Terminal;
 
 use crate::tui::app::{
     App, CalendarEvent, CommandPalette, ComposeField, ComposeMode, ComposeWizard, EmailEntry,
-    EntryKey, MailboxInfo, MailboxKind, MessageRef, Overlay, SearchField, SearchOverlayFocus, View,
+    EntryKey, MailboxInfo, MailboxKind, MessageRef, Overlay, SearchField, SearchOverlayFocus,
+    SignaturesMode, SignaturesOverlay, View,
 };
 use crate::tui::theme::{self, Theme};
 use crate::types::EventFrontmatter;
@@ -719,6 +720,28 @@ fn golden_help_overlay() {
 fn golden_command_palette() {
     let mut app = mail_fixture();
     app.overlay = Overlay::Palette(CommandPalette::new());
+    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
+}
+
+/// The signatures overlay (`cs`, #0107) in browse mode: three signature files
+/// with the account default starred, the cursor on the second, and the browse
+/// footer. Built from a literal state (never the real signatures directory),
+/// so the frame stays frozen like every other fixture here.
+#[test]
+fn golden_signatures_overlay() {
+    let mut app = mail_fixture();
+    app.overlay = Overlay::Signatures(SignaturesOverlay {
+        account: "work".to_string(),
+        names: vec![
+            "casual".to_string(),
+            "work".to_string(),
+            "work-external".to_string(),
+        ],
+        default: Some("work".to_string()),
+        selected: 1,
+        mode: SignaturesMode::Browse,
+        input: String::new(),
+    });
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 

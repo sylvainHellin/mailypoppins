@@ -6,7 +6,8 @@ use ratatui::Frame;
 
 use super::super::app::{
     App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ConfirmDialog, DirPicker,
-    DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay, ThreadEntry, ThreadOverlay,
+    DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay, SignaturesMode,
+    SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -472,6 +473,138 @@ pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, a
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "type filter  \u{2191}/\u{2193} nav  Enter move  Esc cancel",
+            Style::default().fg(theme::active().text_muted),
+        ))),
+        chunks[2],
+    );
+}
+
+/// Render the signature management overlay (`cs`, #0107).
+///
+/// The account's signature files, the default marked with a star, over a
+/// header line that is either the current default or the name prompt when one
+/// is open. Modelled on [`render_mailbox_picker`]: same centred dialog, same
+/// header / list / footer stack, wider because a signature name plus its
+/// marker needs the room.
+pub(super) fn render_signatures_overlay(
+    overlay: &SignaturesOverlay,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let dialog_width = 70u16.min(area.width.saturating_sub(4));
+    let list_len = overlay.names.len().max(1) as u16;
+    let dialog_height = (list_len + 5).min(area.height.saturating_sub(2));
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(dialog_width)])
+        .flex(Flex::Center)
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(dialog_height)])
+        .flex(Flex::Center)
+        .split(horizontal[0]);
+
+    let dialog_area = vertical[0];
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" Signatures ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::active().border_focused))
+        .style(Style::default().bg(theme::active().bg));
+
+    let block_inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // default line, or the open name prompt
+            Constraint::Min(0),    // signature list
+            Constraint::Length(1), // footer
+        ])
+        .split(block_inner);
+
+    // Header: the prompt owns the line while it is open, so the user always
+    // sees what they are typing where the state would otherwise be shown.
+    let prompt_label = match overlay.mode {
+        SignaturesMode::Browse => None,
+        SignaturesMode::New => Some("New name: "),
+        SignaturesMode::Rename => Some("Rename to: "),
+    };
+    let header = match prompt_label {
+        Some(label) => {
+            let avail = (chunks[0].width as usize)
+                .saturating_sub(label.len() + 1);
+            let value = super::util::scrolled_input_value(&overlay.input, avail);
+            Line::from(vec![
+                Span::styled(label, Style::default().fg(theme::active().border_focused)),
+                Span::styled(value, Style::default().fg(theme::active().text)),
+                Span::styled(
+                    "\u{2588}",
+                    Style::default().fg(theme::active().border_focused),
+                ),
+            ])
+        }
+        None => {
+            let default = overlay
+                .default
+                .as_deref()
+                .unwrap_or("(none)");
+            Line::from(Span::styled(
+                truncate(&format!("Default: {default}"), chunks[0].width as usize),
+                Style::default().fg(theme::active().text_muted),
+            ))
+        }
+    };
+    frame.render_widget(Paragraph::new(header), chunks[0]);
+
+    // The list. The star marks the account default, so "which one do I get by
+    // default" is answerable without reading the header.
+    let inner_width = block_inner.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    if overlay.names.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No signatures yet -- press n to create one",
+            Style::default().fg(theme::active().text_faint),
+        )));
+    } else {
+        for (i, name) in overlay.names.iter().enumerate() {
+            let marker = if overlay.default.as_deref() == Some(name.as_str()) {
+                "\u{2605} "
+            } else {
+                "  "
+            };
+            let label = format!("{marker}{name}");
+            let style = if i == overlay.selected && overlay.mode == SignaturesMode::Browse {
+                Style::default()
+                    .fg(theme::active().heading)
+                    .bg(theme::active().surface)
+            } else if i == overlay.selected {
+                // A prompt is open: keep the row identifiable but unhighlighted,
+                // since the keyboard belongs to the prompt.
+                Style::default().fg(theme::active().heading)
+            } else {
+                Style::default().fg(theme::active().text)
+            };
+            lines.push(Line::from(Span::styled(truncate(&label, inner_width), style)));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), chunks[1]);
+
+    let footer = match overlay.mode {
+        SignaturesMode::Browse => {
+            "j/k nav  Enter default  e edit  n new  r rename  d delete  Esc close"
+        }
+        SignaturesMode::New | SignaturesMode::Rename => "Enter confirm  Esc cancel",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
             Style::default().fg(theme::active().text_muted),
         ))),
         chunks[2],

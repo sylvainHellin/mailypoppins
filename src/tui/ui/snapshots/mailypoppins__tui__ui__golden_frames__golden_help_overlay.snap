@@ -18,35 +18,35 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 12 |│   2026-07-24 Wochenrückblick: seh│  x           Send current draft (approve + send│                                  │
 13 |│   2026-07-21  Rechnung 2026-0714│  ff          Search all mail (sender, subject, │ed to Exchange (no Graph in v1).  │
 14 |│                                  │  cn          New draft                         │──────────────────────────────────╯
-15 |│                                  │  gm          Go to mailboxes (sidebar)         │──────────────────────────────────╮
-16 |│                                  │  ga          Switch account                    │                                  │
-17 |│                                  │  ss          Quick sync                        │                                  │
-18 |│                                  │  sS          Full sync                         │                                  │
-19 |│                                  │  sl          Activity log overlay              │                                  │
-20 |│                                  │  sc          Open config.toml in $EDITOR       │                                  │
-21 |│                                  │  sf          Open log file in $EDITOR          │                                  │
-22 |│                                  │  Space m     Switch to Mail view               │                                  │
-23 |│                                  │  Space c     Switch to Contacts view           │                                  │
-24 |│                                  │  Space a     Switch to Calendar view           │                                  │
-25 |│                                  │                                                │                                  │
-26 |│                                  │  MESSAGE (list, headers, body)                 │                                  │
-27 |╰──────────────────────────────────│  J / K       Next / previous message           │                                  │
-28 |╭ Activity ────────────────────────│  Enter / e   Open in editor (mail read-only)   │                                  │
-29 |│  No activity yet                 │  r           Reply                             │                                  │
-30 |│                                  │  a           Archive                           │                                  │
-31 |│                                  │  d           Delete                            │                                  │
-32 |│                                  │  u           Toggle read/unread                │                                  │
-33 |╰──────────────────────────────────│  *           Toggle flag/star                  │                                  │
-34 |╭ View ────────────────────────────│  M           Move to mailbox (fuzzy picker)    │                                  │
-35 |│     mail  |  contacts  |  calenda│  y           Copy selector (mp://)             │                                  │
-36 |╰──────────────────────────────────│  Esc         Clear selection / return to list  │──────────────────────────────────╯
-37 |╭──────────────────────────────────│  gj / gk     Next / previous message           │──────────────────────────────────╮
-38 |│ HELP                             ╰─────────────────── 1-36/110 ───────────────────╯                                  │
+15 |│                                  │  cs          Manage signatures                 │──────────────────────────────────╮
+16 |│                                  │  gm          Go to mailboxes (sidebar)         │                                  │
+17 |│                                  │  ga          Switch account                    │                                  │
+18 |│                                  │  ss          Quick sync                        │                                  │
+19 |│                                  │  sS          Full sync                         │                                  │
+20 |│                                  │  sl          Activity log overlay              │                                  │
+21 |│                                  │  sc          Open config.toml in $EDITOR       │                                  │
+22 |│                                  │  sf          Open log file in $EDITOR          │                                  │
+23 |│                                  │  Space m     Switch to Mail view               │                                  │
+24 |│                                  │  Space c     Switch to Contacts view           │                                  │
+25 |│                                  │  Space a     Switch to Calendar view           │                                  │
+26 |│                                  │                                                │                                  │
+27 |╰──────────────────────────────────│  MESSAGE (list, headers, body)                 │                                  │
+28 |╭ Activity ────────────────────────│  J / K       Next / previous message           │                                  │
+29 |│  No activity yet                 │  Enter / e   Open in editor (mail read-only)   │                                  │
+30 |│                                  │  r           Reply                             │                                  │
+31 |│                                  │  a           Archive                           │                                  │
+32 |│                                  │  d           Delete                            │                                  │
+33 |╰──────────────────────────────────│  u           Toggle read/unread                │                                  │
+34 |╭ View ────────────────────────────│  *           Toggle flag/star                  │                                  │
+35 |│     mail  |  contacts  |  calenda│  M           Move to mailbox (fuzzy picker)    │                                  │
+36 |╰──────────────────────────────────│  y           Copy selector (mp://)             │──────────────────────────────────╯
+37 |╭──────────────────────────────────│  Esc         Clear selection / return to list  │──────────────────────────────────╮
+38 |│ HELP                             ╰─────────────────── 1-36/111 ───────────────────╯                                  │
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 02 |bold@36..44
 09 |bg:surface+fg:selection+bold@1..35
 11 |bold@1..35
-26 |bold@36..67
+27 |bold@36..67
 35 |bold@5..11
 38 |bold@1..7
