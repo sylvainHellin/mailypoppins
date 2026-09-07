@@ -75,17 +75,12 @@ To: you@example.com
 
 Original message body here.`;
 
-const signatureExample = `[signatures]
-default = "work"
+const signatureExample = `# ~/.config/mailypoppins/signatures/work.md
 
-[signatures.work]
-name = "Work Signature"
-text = """
 -- 
 **Your Name**
 Title | Organization
-your.name@example.com
-"""`;
+your.name@example.com`;
 
 const attachmentStructure = `accounts/<name>/attachments/<message-id>/
   document.pdf
@@ -213,29 +208,32 @@ Email body here.`;
     <section>
       <h2 id="signatures">Signatures</h2>
       <p>
-        Signatures are Markdown, defined per account in <code>config.toml</code> under the
-        <code>[signatures]</code> section. A default signature name is set with
-        <code>signatures.default</code>; each named entry supplies the snippet inline with
-        <code>text</code> or by a <code>path</code> to a Markdown file (<code>~</code> expansion
-        supported, <code>text</code> wins when both are present).
+        A signature is one Markdown file in <code>~/.config/mailypoppins/signatures/</code>,
+        named by its file stem: <code>work.md</code> is the signature <code>work</code>.
+        Which one an account uses by default is app state, recorded in the app's own state
+        file at <code>&lt;data_dir&gt;/state.json</code>.
       </p>
       <p>
         The signature is appended to the draft body when the draft is created: after the
         body for a new message, in the reply area above the quoted content for a reply or
-        forward. An account with no configured signature adds nothing.
+        forward. An account with no default signature adds nothing.
       </p>
-      <Code code={signatureExample} lang="toml" theme="catppuccin-mocha" />
+      <Code code={signatureExample} lang="markdown" theme="catppuccin-mocha" />
       <p>
         Use <code>-s &lt;name&gt;</code> to select a specific signature, or
         <code>--no-signature</code> to skip it entirely.
       </p>
       <p>
-        In the TUI compose wizard the <strong>Signature</strong> field selects which named
+        <code>cs</code> in the TUI opens the signature manager: the files with the default
+        starred, <code>Enter</code> to set or clear the default, <code>e</code> to edit the
+        selected one in <code>$EDITOR</code>, <code>n</code> to create, <code>r</code> to
+        rename, <code>d</code> to delete after a confirmation.
+      </p>
+      <p>
+        In the TUI compose wizard the <strong>Signature</strong> field selects which
         signature the draft uses: cycle it with <code>Up</code>/<code>Down</code> (or
         <code>Ctrl+n</code>/<code>Ctrl+p</code>), and press <code>e</code> to edit the
-        selected signature in <code>$EDITOR</code>. A <code>path</code> signature is edited
-        in place; an inline <code>text</code> signature is edited for that draft only and is
-        never written back to <code>config.toml</code>. The same field appears when you edit
+        selected signature file in <code>$EDITOR</code>. The same field appears when you edit
         an existing draft's recipients (<code>ce</code> in Drafts): changing the selection
         re-splices the signature block in the draft body. The active selection is recorded in
         the draft's <code>signature</code> frontmatter field; the spliced block is wrapped in

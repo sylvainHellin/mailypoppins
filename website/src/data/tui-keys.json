@@ -14,6 +14,7 @@
       { "key": "x", "action": "Send current draft (approve + send)" },
       { "key": "ff", "action": "Search all mail (sender, subject, body)" },
       { "key": "cn", "action": "New draft" },
+      { "key": "cs", "action": "Manage signatures" },
       { "key": "gm", "action": "Go to mailboxes (sidebar)" },
       { "key": "ga", "action": "Switch account" },
       { "key": "ss", "action": "Quick sync" },

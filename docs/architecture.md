@@ -191,6 +191,8 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 |------|---------------|
 | `src/types.rs` | Shared types: `EmailStatus` (the three draft states), `MessageFlags` (the received-mail status axis: seen, answered, forwarded), `MailboxRole` (the store's mailbox key), `EmailFrontmatter`, `EmailDraft`, `EventFrontmatter`, `collapse_hyphens` |
 | `src/config.rs` | Config loading (`~/.config/mailypoppins/config.toml`), `config_dir` + the one-time #0022 legacy move, secrets-backend dispatch, data dir helpers (`mailypoppins_data_dir`, `account_dir`, `store_path`, `blobs_dir`, `drafts_dir`, `tokens_dir`, `logs_dir`, `contacts_cache_path`), legacy-config rejection, logging init |
+| `src/signatures.rs` | App-managed signature files (#0107): one Markdown file per signature at `config_dir()/signatures/<name>.md`, the file stem being both key and display name. Name validation, list/read/write/create/rename/delete, the per-account default via `app_state`, and `migrate_config_signatures`, the one-time copy out of the legacy `[accounts.*.signatures]` tables. |
+| `src/app_state.rs` | App-owned state that is not user-edited config (#0107): `<data_dir>/state.json`, pretty-printed JSON, load/save modelled on `contacts::cache`. Holds the per-account default signature; a missing or corrupt file means "nothing recorded" and is never fatal. |
 | `src/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in). See [secrets.md](secrets.md). |
 | `src/oauth2.rs` | OAuth2 device-code flow, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, XOAUTH2 SASL builder. Scope-parameterised (`IMAP_SMTP_SCOPES` vs `GRAPH_SCOPES`). |
 | `src/ingest.rs` | The receive-path writer: fetched message to one `messages` row plus blobs, FTS maintenance, cursors, `prune_vanished`, `apply_seen_flags`, `graph_uid` |
@@ -258,7 +260,7 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 | `views.rs` | View switcher chrome |
 | `sidebar.rs`, `list.rs`, `headers.rs`, `preview.rs`, `compose.rs`, `status.rs`, `activity.rs` | Mail view panes |
 | `calendar.rs`, `contacts.rs` | The other two views |
-| `overlays.rs`, `search.rs` | Confirm dialog, attachment picker, persistent error, help overlay, server search. The server-search overlay (`f`) is the Outlook-shape form (#0086b): a scope toggle, `From`/`To`/`Subject`/`Keywords` text fields, custom `After`/`Before` dates, an attachment toggle, and an `Advanced` raw-grammar line. The form builds a `search::Query` AST directly (via `SearchForm::build_query` -> `search::from_cli`, no string concatenation) and `Action::ServerSearch` carries the parsed `Query`; a non-blank `Advanced` line takes over and greys the structured fields. |
+| `overlays.rs`, `search.rs` | Confirm dialog, attachment picker, persistent error, help overlay, server search, and the signatures manager (`cs`, #0107): the signature files with the default starred, `Enter` to set or clear it, `e`/`n`/`r`/`d` for edit, create, rename and delete, every mutation going through `crate::signatures`. The server-search overlay (`f`) is the Outlook-shape form (#0086b): a scope toggle, `From`/`To`/`Subject`/`Keywords` text fields, custom `After`/`Before` dates, an attachment toggle, and an `Advanced` raw-grammar line. The form builds a `search::Query` AST directly (via `SearchForm::build_query` -> `search::from_cli`, no string concatenation) and `Action::ServerSearch` carries the parsed `Query`; a non-blank `Advanced` line takes over and greys the structured fields. |
 | `widgets.rs`, `util.rs` | Shared widgets, `pane_border_style`, `hint_span`, `truncate` |
 
 ## TUI layering
@@ -281,7 +283,8 @@ This avoids routing every key handler through indirect access.
 ## Multi-account
 
 Config uses an `[[accounts]]` array.
-Each account has independent IMAP/SMTP settings, mailbox mappings and signatures, and its own store, blob directory and secrets keys (`smtp-password-{name}`, `imap-password-{name}`).
+Each account has independent IMAP/SMTP settings and mailbox mappings, and its own store, blob directory and secrets keys (`smtp-password-{name}`, `imap-password-{name}`).
+Signature files are shared across accounts; what is per-account is which one is the default (`app_state`).
 The TUI shows one account at a time, switching via backtick or Ctrl+1-9, and watches all of them for new mail simultaneously.
 CLI commands target an account via `--account` and default to the first.
 
@@ -323,10 +326,12 @@ The owed server op is drained at the next sync/fetch resume point.
 User-owned config:
 
 - The config file is `~/.config/mailypoppins/config.toml`, a multi-account `[[accounts]]` array.
-  It is user-edited and references signature paths and account-level settings.
+  It is user-edited and holds connection and account-level settings.
 - The secrets file is `~/.config/mailypoppins/secrets.enc`, machine-bound encrypted (see [secrets.md](secrets.md)).
+- The signatures directory is `~/.config/mailypoppins/signatures/`, one `<name>.md` per signature (#0107).
+  App-managed rather than user-owned, but it sits under the config dir because a signature is something the user also edits by hand; the selection of a default is app state and lives in the data dir instead.
 
-Both live under `config_dir()`, overridable with the `MAILYPOPPINS_CONFIG_DIR` env var, which mirrors `MAILYPOPPINS_DATA_DIR` and is what the CLI integration tests point at a tempdir.
+All three live under `config_dir()`, overridable with the `MAILYPOPPINS_CONFIG_DIR` env var, which mirrors `MAILYPOPPINS_DATA_DIR` and is what the CLI integration tests point at a tempdir.
 
 The directory was `~/.config/email` before #0022, and `config::migrate_legacy_config_dir()` moves it once, at startup in `main()`, before anything reads config or secrets.
 This does not contradict the no-migrations invariant: that invariant is scoped to data formats, secret storage and wire protocols, and a directory rename reads not one byte inside the directory.
@@ -352,6 +357,7 @@ Layout under the data dir:
   accounts/<name>/attachments/<message-id>/   # materialised for forward drafts (#0006)
   accounts/<name>/contacts-cache.json
   tokens/<name>.enc                      # OAuth2 / Graph encrypted refresh tokens
+  state.json                             # app state (#0107): per-account default signature
   logs/mailypoppins-YYYY-MM-DD.log
 ```
 
@@ -365,7 +371,7 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 
 ## Testing
 
-- **1126 tests**, run by `cargo test`.
+- **1307 tests**, run by `cargo test`.
 All of them run offline in under a second.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`src/tui/ui/golden_frames.rs`).

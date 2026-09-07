@@ -58,22 +58,9 @@ server = "Sent Items"
 
 [[mailboxes.extra]]          # Additional mailboxes to sync
 server = "Projects"
-
-[signatures]
-default = "work"
-
-[signatures.work]
-name = "Work Signature"
-text = """
--- 
-Your Name
-Title | Organization
-"""
-
-[signatures.personal]
-name = "Personal"
-path = "~/notes/email/signatures/personal.md"
 ```
+
+The file has no signature keys: each signature is a Markdown file in `~/.config/mailypoppins/signatures/`, and the account's default is recorded in the app's own state file. See [Signatures](#signatures).
 
 Passwords are **never** stored in the config file. They live in the OS keyring under keys `smtp-password` and `imap-password`. IMAP password falls back to SMTP password if not set separately.
 
@@ -93,6 +80,7 @@ mailypoppins/
   accounts/<name>/{inbox,archive,sent,drafts,<extra>}/    # mail tree
   accounts/<name>/contacts-cache.json                     # contacts index
   tokens/<name>.enc                                       # OAuth2 tokens
+  state.json                                              # app state (default signature per account)
   logs/mailypoppins-YYYY-MM-DD.log
 ```
 
@@ -238,13 +226,21 @@ Exit codes: `0` = mailbox changed, `1` = error, `2` = timed out.
 
 ## Signatures
 
-A signature is a Markdown snippet, given inline with `text` or by a `path` to a file (`text` wins when both are set).
-It is spliced into the draft body when the draft is created: after the body for a new message, above the quoted content for a reply or forward.
+A signature is one Markdown file in `~/.config/mailypoppins/signatures/`.
+The file name without its extension is the signature's name, so `work.md` is the signature `work`, and creating a signature is creating a file.
+The per-account default is recorded in the app's own state file, `<data_dir>/state.json`.
+
+The signature is spliced into the draft body when the draft is created: after the body for a new message, above the quoted content for a reply or forward.
 So it is visible and editable while you write, and the same text feeds both the plain-text and the HTML part of the sent mail.
 
-An HTML file still works as a `path`: it is converted to Markdown as it is read, keeping links and line breaks.
-An account with no configured signature adds nothing.
-Use `-s <name>` to pick a named signature for one draft, or `--no-signature` to skip it.
+Manage them from the TUI with `cs`, which lists the signatures with the default starred: `Enter` sets or clears the default, `e` opens the selected file in `$EDITOR`, `n` creates one, `r` renames, `d` deletes after a confirmation.
+
+HTML in a signature file is converted to Markdown as it is read, keeping links and line breaks, so a signature exported from another mail client can be pasted in as-is.
+An account with no default signature adds nothing.
+Use `-s <name>` to pick a signature for one draft, or `--no-signature` to skip it.
+
+Signatures used to live in `config.toml` under `[accounts.signatures.*]`.
+The first run after the upgrade copies those entries out to files, keeps the old default, and prints a notice; the tables are dead after that and can be deleted by hand, since mailypoppins never rewrites `config.toml`.
 
 Reply and forward drafts keep a `{{SIGNATURE}}` placeholder between the reply area and the quoted text.
 It no longer carries signature text; it marks where the send path splits the body to place the quoted original.
@@ -264,6 +260,7 @@ Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable a
 | `j`/`k`, arrows | Navigate |
 | `Enter`/`e` | Open in `$EDITOR` (received mail is read-only) |
 | `cn` | New draft |
+| `cs` | Manage signatures |
 | `cr`/`ca`/`cf` | Reply / Reply all / Forward |
 | `cA`/`cD` | Approve draft / back to draft (Drafts only) |
 | `x`/`cX` | Approve and send / Send all approved |
@@ -326,8 +323,11 @@ Run `mp mark-approved <file>` first.
 ### "SMTP authentication failed"
 Check your credentials with `mp config show` and re-run `mp config set-password smtp` if needed.
 
-### "Signature file not found"
-Check the `path` in your `[signatures]` config. Paths support `~` expansion.
+### A draft comes out without its signature
+Check that the account has a default: `mp config show` prints the signatures directory, the default, and every signature file it found. `cs` in the TUI sets the default.
+
+### "Signatures now live as Markdown files"
+The startup notice for the one-time move out of `config.toml`. Your signatures were already copied to `~/.config/mailypoppins/signatures/`; delete the `[accounts.signatures]` tables from `config.toml` to silence it.
 
 ## Building
 

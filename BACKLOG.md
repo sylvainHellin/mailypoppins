@@ -22,7 +22,6 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 - [#0081 QRESYNC, UIDPLUS, and advancing the modseq on a capped pass](docs/tickets/0081-qresync-uidplus.md) -- perf _(the split-out half of #0041, which shipped the session pool and the CONDSTORE delta)_
 - [#0085 On-open re-fetch of an evicted body](docs/tickets/0085-on-open-body-refetch.md) -- feature _(the missing half of #0060, whose eviction sweep shipped; required before lowering a cap below the working set)_
 - [#0101 Conversation-view collapse and inline navigation on top of the thread view](docs/tickets/0101-conversation-view-collapse-inline-nav.md) -- feature _(cross-ref #0008)_
-- [#0107 App-managed signature files with a management overlay](docs/tickets/0107-app-managed-signatures.md) -- feature _(extends #0106; moves signatures out of config.toml)_
 - [#0084 iMIP send-side updates and cancellations](docs/tickets/0084-imip-send-cancel-and-update.md) -- feature _(the split-out send half of #0031, whose receive half shipped)_
 
 ### Distribution / cross-platform (adoption track)

@@ -51,11 +51,23 @@ import AccordionItem from '../components/AccordionItem.astro';
           </p>
         </AccordionItem>
 
-        <AccordionItem question="Signature file not found">
+        <AccordionItem question="My draft came out without a signature">
           <p>
-            Check the path in your config under <code>[signatures]</code>. Paths support
-            <code>~</code> expansion. Verify the file exists at the specified location with
-            <code>ls</code> or <code>mp config show</code>.
+            A signature is a Markdown file in <code>~/.config/mailypoppins/signatures/</code>,
+            and the account needs one of them set as its default.
+            <code>mp config show</code> prints the directory, the current default, and every
+            file it found; press <code>cs</code> in the TUI to set the default, or to create
+            a signature if there is none yet.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="mp warns that my [accounts.signatures] tables are dead">
+          <p>
+            Signatures moved out of <code>config.toml</code> into their own Markdown files.
+            The first run after the upgrade copied your entries to
+            <code>~/.config/mailypoppins/signatures/</code> and kept the account default, so
+            nothing is lost. mailypoppins does not edit <code>config.toml</code> for you:
+            delete the <code>[accounts.signatures]</code> tables yourself and the notice stops.
           </p>
         </AccordionItem>
 

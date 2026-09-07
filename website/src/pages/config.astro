@@ -63,22 +63,11 @@ server = "Archive"
 server = "Sent Items"
 
 [[mailboxes.extra]]         # Additional mailboxes to sync
-server = "Projects"
-
-[signatures]
-default = "work"            # Which signature to use by default
-
-[signatures.work]
-name = "Work Signature"
-text = """
--- 
-Sylvain Hellin
-Managing Director
-"""
-
-[signatures.personal]
-name = "Personal"
-path = "~/notes/email/signatures/personal.md"`} />
+server = "Projects"`} />
+      <p>
+        The file has no signature keys: each signature is a Markdown file under
+        <code>~/.config/mailypoppins/signatures/</code>. See <a href="#signatures-section">Signatures</a>.
+      </p>
     </section>
 
     <!-- Section Breakdown -->
@@ -192,6 +181,7 @@ fetch_concurrency = 4       # Parallel mailbox fetches per sync (1-8)`} />
   accounts/<name>/attachments/<msg-id>/  # attachments a forward carries into a draft
   accounts/<name>/contacts-cache.json    # contacts index
   tokens/<name>.enc                      # OAuth2 tokens
+  state.json                             # app state: each account's default signature
   logs/mailypoppins-YYYY-MM-DD.log`} />
       <p>
         <code>mp config show</code> prints the first three paths for every configured account.
@@ -232,37 +222,46 @@ server = "Projects"
 [[mailboxes.extra]]
 server = "Newsletters"`} />
 
-      <!-- [signatures] -->
-      <h3 id="signatures-section">[signatures]</h3>
+      <!-- signatures -->
+      <h3 id="signatures-section">Signatures</h3>
       <p>
-        Named signature definitions. Set <code>default</code> to the name of the signature
-        to use by default. A signature is a Markdown snippet, given inline with
-        <code>text</code> or by a <code>path</code> to a file (<code>text</code> wins
-        when both are set). Paths support <code>~</code> expansion. An HTML source (a rich
-        signature exported from another mail client, inline or on disk) is converted to
-        Markdown when it is read, links kept as <code>[text](url)</code>, so the draft you
-        edit and both parts of the sent mail are always Markdown, never raw HTML.
+        A signature is one Markdown file in <code>~/.config/mailypoppins/signatures/</code>.
+        The file name without its extension is the signature's name, so <code>work.md</code>
+        is the signature <code>work</code> and creating a signature is creating a file. The
+        account's default is recorded in the app's own state file
+        (<code>&lt;data_dir&gt;/state.json</code>), so <code>config.toml</code> carries nothing
+        about signatures at all.
+      </p>
+      <ConfigExample code={`~/.config/mailypoppins/signatures/
+  work.md
+  work-external.md
+  personal.md`} />
+      <p>
+        Press <code>cs</code> in the TUI to manage them: the list shows every signature with
+        the default starred, <code>Enter</code> sets or clears the default,
+        <code>e</code> opens the selected file in <code>$EDITOR</code>, <code>n</code> creates
+        one, <code>r</code> renames, and <code>d</code> deletes after a confirmation.
+        <code>mp config show</code> prints the directory, the default, and a one-line preview
+        of each file.
+      </p>
+      <p>
+        HTML in a signature file (a rich signature exported from another mail client) is
+        converted to Markdown when it is read, links kept as <code>[text](url)</code>, so the
+        draft you edit and both parts of the sent mail are always Markdown, never raw HTML.
       </p>
       <p>
         The signature is appended to the draft body when you compose, reply, or forward,
         so it is visible and editable in the draft rather than added on send. An account
-        with no configured signature adds nothing. Use <code>-s &lt;name&gt;</code> to pick a
-        named signature or <code>--no-signature</code> to skip it for one draft.
+        with no default signature adds nothing. Use <code>-s &lt;name&gt;</code> to pick a
+        signature or <code>--no-signature</code> to skip it for one draft.
       </p>
-      <ConfigExample code={`[signatures]
-default = "work"
-
-[signatures.work]
-name = "Work Signature"
-text = """
--- 
-Sylvain Hellin
-Managing Director
-"""
-
-[signatures.personal]
-name = "Personal"
-path = "~/notes/email/signatures/personal.md"`} />
+      <p>
+        Signatures used to live in <code>config.toml</code> under
+        <code>[accounts.signatures.*]</code>, inline as <code>text</code> or as a
+        <code>path</code>. The first run after the upgrade copies those entries out to files
+        and keeps the old default, then prints a notice. The tables are dead after that and
+        can be deleted by hand; mailypoppins never rewrites <code>config.toml</code>.
+      </p>
     </section>
 
     <!-- Multi-Account Setup -->
