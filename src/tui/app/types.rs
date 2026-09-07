@@ -1312,14 +1312,10 @@ pub struct ComposeWizard {
     /// only re-splices the body when the selection changed from this, so a plain
     /// recipient edit never disturbs the signature block.
     pub signature_initial: Option<String>,
-    /// The account's signature names, loaded when the wizard opens (#0106).
-    /// Empty when the account configures none; the field then shows "(none)"
-    /// and cycling/edit are no-ops.
+    /// The signature names, loaded from the signatures directory when the
+    /// wizard opens (#0106, #0107). Empty when none exist; the field then shows
+    /// "(none)" and cycling/edit are no-ops.
     pub available_signatures: Vec<String>,
-    /// An inline signature edited in `$EDITOR` for this draft only (#0106).
-    /// Set when the user edits a `text`-only signature: the edited Markdown is
-    /// spliced into the draft without being written back to `config.toml`.
-    pub signature_override: Option<String>,
     /// Fuzzy-matched suggestions for the currently-focused field
     /// (empty for Subject/Body or when no cache exists).
     pub suggestions: Vec<ComposeSuggestion>,
@@ -2110,7 +2106,6 @@ mod tests {
             signature_name: None,
             signature_initial: None,
             available_signatures: Vec::new(),
-            signature_override: None,
             suggestions: Vec::new(),
             suggestion_idx: 0,
             contacts: None,

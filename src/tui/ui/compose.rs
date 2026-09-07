@@ -245,9 +245,6 @@ fn render_signature_field(
     match wizard.signature_name.as_deref() {
         Some(name) if !wizard.available_signatures.is_empty() => {
             spans.push(Span::styled(format!("< {name} >"), selector_style));
-            if wizard.signature_override.is_some() {
-                spans.push(Span::styled("  (edited for this draft)", faint));
-            }
         }
         _ => {
             spans.push(Span::styled("(none)", faint));
@@ -273,7 +270,7 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
 
     if wizard.focus == ComposeField::Signature {
         let text = if wizard.available_signatures.is_empty() {
-            "  No signatures configured for this account (add [accounts.signatures.<name>])"
+            "  No signatures yet (add one as a .md file in the signatures directory)"
                 .to_string()
         } else {
             format!(

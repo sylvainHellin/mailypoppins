@@ -774,7 +774,6 @@ fn golden_compose_wizard_with_body() {
         signature_name: None,
         signature_initial: None,
         available_signatures: Vec::new(),
-        signature_override: None,
         suggestions: Vec::new(),
         suggestion_idx: 0,
         contacts: None,

@@ -5,7 +5,7 @@ use std::io::{self, Write};
 
 use crate::config::{
     account_dir, blobs_dir, config_path, drafts_dir, load_global_config,
-    mailypoppins_data_dir, set_secret, store_path, tokens_dir, AccountConfig,
+    mailypoppins_data_dir, set_secret, store_path, tokens_dir,
 };
 use crate::imap_client::list_mailboxes;
 
@@ -406,17 +406,6 @@ pub fn cmd_config_init() -> Result<()> {
 
     print_account_data_paths(&account_name);
 
-    // Check if existing config.toml has account signature settings to preserve
-    let existing_config: Option<crate::config::GlobalConfig> = if path.exists() {
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| toml::from_str(&c).ok())
-    } else {
-        None
-    };
-    let existing_sigs: Option<&AccountConfig> = existing_config.as_ref()
-        .and_then(|c| c.accounts.iter().find(|a| a.name == account_name));
-
     // -- Build config TOML
     let oauth2_cfg = if is_exchange {
         Some((&oauth2_client_id as &str, &oauth2_tenant_id as &str))
@@ -431,7 +420,6 @@ pub fn cmd_config_init() -> Result<()> {
         &archive_server,
         &sent_server,
         &extra_mailboxes,
-        existing_sigs,
         oauth2_cfg,
     );
 
@@ -1145,7 +1133,6 @@ pub(crate) fn build_init_toml(
     archive_server: &str,
     sent_server: &str,
     extra_mailboxes: &[String],
-    existing_sigs: Option<&AccountConfig>,
     oauth2: Option<(&str, &str)>,
 ) -> String {
     let mut out = String::new();
@@ -1203,44 +1190,9 @@ pub(crate) fn build_init_toml(
         out.push_str(&format!("server = \"{}\"\n", mb));
     }
 
-    // Preserve signature settings from existing config
-    if let Some(existing_acct) = existing_sigs {
-        if !existing_acct.signatures.entries.is_empty() || existing_acct.signatures.default.is_some() {
-            out.push_str("\n[accounts.signatures]\n");
-            if let Some(ref default) = existing_acct.signatures.default {
-                out.push_str(&format!("default = \"{}\"\n", default));
-            }
-            // Emit a TOML basic string so a multi-line inline signature
-            // round-trips (a bare "..." cannot hold literal newlines) (#0099).
-            fn toml_basic_string(s: &str) -> String {
-                let mut out = String::from("\"");
-                for c in s.chars() {
-                    match c {
-                        '\\' => out.push_str("\\\\"),
-                        '"' => out.push_str("\\\""),
-                        '\n' => out.push_str("\\n"),
-                        '\r' => out.push_str("\\r"),
-                        '\t' => out.push_str("\\t"),
-                        _ => out.push(c),
-                    }
-                }
-                out.push('"');
-                out
-            }
-            for (key, entry) in &existing_acct.signatures.entries {
-                out.push_str(&format!("\n[accounts.signatures.{}]\n", key));
-                if let Some(ref name) = entry.name {
-                    out.push_str(&format!("name = \"{}\"\n", name));
-                }
-                if let Some(ref text) = entry.text {
-                    out.push_str(&format!("text = {}\n", toml_basic_string(text)));
-                }
-                if let Some(ref path) = entry.path {
-                    out.push_str(&format!("path = \"{}\"\n", path));
-                }
-            }
-        }
-    }
+    // No signature keys: since #0107 a signature is a Markdown file under
+    // `config_dir()/signatures/`, and the per-account default lives in the app
+    // state file. Rewriting config.toml never has to carry them along.
 
     out
 }

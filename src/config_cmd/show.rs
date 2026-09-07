@@ -187,23 +187,38 @@ pub fn cmd_config_show() -> Result<()> {
             }
         }
 
+        // Signatures are app-managed files since #0107, not config keys: the
+        // directory and the state file are the source of truth here.
         println!("\n  {}", "[signatures]".bold());
+        println!("    dir     = {}", crate::signatures::signatures_dir().display());
         println!(
             "    default = {}",
-            account.signatures.default.as_deref().unwrap_or("(none)")
+            crate::signatures::default_signature_name(&account.name)
+                .unwrap_or_else(|| "(none)".to_string())
         );
-        for (key, entry) in &account.signatures.entries {
-            println!("    [signatures.{}]", key);
-            if let Some(ref name) = entry.name {
-                println!("      name = {}", name);
-            }
-            if let Some(ref text) = entry.text {
-                let preview: String = text.lines().next().unwrap_or_default().chars().take(60).collect();
-                println!("      text = {preview} ...");
-            }
-            if let Some(ref path) = entry.path {
-                println!("      path = {}", path);
-            }
+        let names = crate::signatures::list();
+        if names.is_empty() {
+            println!("    (none)");
+        }
+        for name in &names {
+            // First line with content, skipping the RFC 3676 delimiter, which
+            // every signature starts with and which identifies none of them.
+            let preview: String = crate::signatures::read(name)
+                .unwrap_or_default()
+                .lines()
+                .find(|l| !l.trim().is_empty() && l.trim() != "--")
+                .unwrap_or_default()
+                .chars()
+                .take(60)
+                .collect();
+            println!("    {name}.md: {preview}");
+        }
+        if !account.signatures.entries.is_empty() || account.signatures.default.is_some() {
+            println!(
+                "    {}",
+                "[accounts.signatures] in config.toml is legacy and no longer read (#0107)"
+                    .yellow()
+            );
         }
     }
 

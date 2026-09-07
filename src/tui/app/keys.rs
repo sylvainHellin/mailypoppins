@@ -2600,10 +2600,9 @@ fn current_field_mut(wizard: &mut ComposeWizard) -> &mut String {
     }
 }
 
-/// Move the compose wizard's signature selection one step through the account's
-/// available signatures (#0106). `forward` cycles To -> next; wraps around. A
-/// change drops any per-draft inline edit override. No-op when the account has
-/// no signatures.
+/// Move the compose wizard's signature selection one step through the
+/// available signatures (#0106). `forward` cycles To -> next; wraps around.
+/// No-op when there are no signatures.
 fn cycle_signature(wizard: &mut ComposeWizard, forward: bool) {
     let n = wizard.available_signatures.len();
     if n == 0 {
@@ -2619,7 +2618,6 @@ fn cycle_signature(wizard: &mut ComposeWizard, forward: bool) {
         None => 0,
     };
     wizard.signature_name = Some(wizard.available_signatures[next].clone());
-    wizard.signature_override = None;
 }
 
 /// Aerc-style suggestion acceptance: replace the trailing partial
@@ -3742,7 +3740,6 @@ mod tests {
             signature_name: None,
             signature_initial: None,
             available_signatures: Vec::new(),
-            signature_override: None,
             suggestions: Vec::new(),
             suggestion_idx: 0,
             contacts: None,

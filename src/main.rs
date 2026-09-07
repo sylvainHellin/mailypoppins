@@ -1618,6 +1618,14 @@ async fn main() -> Result<()> {
         GlobalConfig::default()
     });
 
+    // Copy any legacy `[accounts.*.signatures]` tables into the app-managed
+    // signatures directory + state file (#0107), before anything resolves a
+    // signature out of them. Non-fatal: a signature that fails to migrate
+    // costs a warning, not a startup.
+    if let Err(e) = mailypoppins::signatures::migrate_config_signatures(&global_config) {
+        eprintln!("{} signature migration: {e:#}", "⚠".yellow());
+    }
+
     // Initialize the secrets backend (encrypted file by default, or OS keyring
     // if the user opted in via `secrets_backend = "keyring"` in config.toml).
     if let Err(e) = mailypoppins::config::init_secrets_backend(&global_config) {

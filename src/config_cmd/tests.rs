@@ -11,7 +11,6 @@ fn test_build_init_toml_basic() {
         "Sent",
         &[],
         None,
-        None,
     );
 
     assert!(toml.contains("[email]"));
@@ -46,7 +45,6 @@ fn test_build_init_toml_proton_bridge() {
         "Sent",
         &[],
         None,
-        None,
     );
 
     assert!(toml.contains("accept_invalid_certs = true"));
@@ -69,7 +67,6 @@ fn test_build_init_toml_imap_host_omitted_when_empty() {
         "Sent",
         &[],
         None,
-        None,
     );
 
     let imap_pos = toml.find("[accounts.imap]").unwrap();
@@ -90,7 +87,6 @@ fn test_build_init_toml_with_extra_mailboxes() {
         "Sent",
         &extras,
         None,
-        None,
     );
 
     assert!(toml.contains("[[accounts.mailboxes.extra]]"));
@@ -110,7 +106,6 @@ fn test_build_init_toml_parseable() {
         "Archive",
         "Sent",
         &[],
-        None,
         None,
     );
 
@@ -156,7 +151,6 @@ fn test_build_add_account_toml_appended_is_valid() {
         "Sent",
         &[],
         None,
-        None,
     );
 
     let addition = build_add_account_toml(
@@ -188,7 +182,6 @@ fn test_build_init_toml_oauth2_exchange() {
         "Archive",
         "Sent Items",
         &[],
-        None,
         Some(("test-client-id", "test-tenant-id")),
     );
 
@@ -219,7 +212,6 @@ fn test_build_init_toml_password_no_oauth2_section() {
         "Archive",
         "Sent",
         &[],
-        None,
         None,
     );
 

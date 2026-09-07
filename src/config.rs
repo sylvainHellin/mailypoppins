@@ -85,6 +85,14 @@ pub struct AccountConfig {
     pub imap: ImapSettings,
     #[serde(default)]
     pub mailboxes: MailboxesConfig,
+    /// Legacy `[accounts.signatures.*]` tables (pre-#0107).
+    ///
+    /// Dead as a source of signatures: content lives in
+    /// `config_dir()/signatures/<name>.md` and the per-account default in the
+    /// app state file (see [`crate::signatures`]). It still deserializes so an
+    /// untouched `config.toml` loads, and so
+    /// [`crate::signatures::migrate_config_signatures`], the one legitimate
+    /// reader, can copy the old values out. Nothing else may read it.
     #[serde(default)]
     pub signatures: SignaturesConfig,
     /// Per-account retention overrides. Unset fields inherit the global
@@ -116,39 +124,6 @@ impl AccountConfig {
             && self.smtp.host.trim().is_empty()
     }
 
-    /// The account's configured signature names, sorted (#0106). Drives the
-    /// compose wizard's Signature-field selector; empty when the account has
-    /// no `[accounts.signatures.<name>]` tables.
-    pub fn signature_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.signatures.entries.keys().cloned().collect();
-        names.sort();
-        names
-    }
-
-    /// The default signature name for this account, if one is configured
-    /// (`[accounts.signatures] default = "..."`).
-    pub fn default_signature_name(&self) -> Option<&str> {
-        self.signatures.default.as_deref()
-    }
-
-    /// The filesystem `path` of a named signature entry, `~`-expanded (#0106).
-    /// `None` for an unknown name or an entry that only carries inline `text`.
-    /// Used by the TUI to open the signature in `$EDITOR`.
-    pub fn signature_path(&self, name: &str) -> Option<PathBuf> {
-        let entry = self.signatures.entries.get(name)?;
-        let path_str = entry.path.as_ref()?;
-        Some(PathBuf::from(shellexpand::tilde(path_str).into_owned()))
-    }
-
-    /// The inline `text` of a named signature entry, if it has one (#0106). An
-    /// inline signature is edited on a temp copy and applied to the draft only,
-    /// never written back to `config.toml`.
-    pub fn signature_inline_text(&self, name: &str) -> Option<&str> {
-        self.signatures
-            .entries
-            .get(name)
-            .and_then(|e| e.text.as_deref())
-    }
 }
 
 /// Whether the client APPENDs its own copy of a sent message to the Sent
@@ -278,6 +253,9 @@ pub struct MailboxesConfig {
     pub extra: Option<Vec<MailboxMapping>>,
 }
 
+/// Legacy signature tables (pre-#0107), read only by
+/// [`crate::signatures::migrate_config_signatures`]. See the field docs on
+/// [`AccountConfig::signatures`].
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct SignaturesConfig {
     #[serde(default)]
@@ -286,11 +264,11 @@ pub struct SignaturesConfig {
     pub entries: HashMap<String, SignatureEntry>,
 }
 
-/// One named signature. A signature is a Markdown snippet, given either
+/// One legacy named signature (pre-#0107): a Markdown snippet given either
 /// inline via `text` or by a `path` to a Markdown/text file; `text` wins when
 /// both are present. Both optional so a bare `[accounts.signatures.<name>]`
 /// table degrades to "no signature" rather than failing the whole config parse
-/// (#0099).
+/// (#0099). Migration-only, like [`SignaturesConfig`].
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct SignatureEntry {
     #[serde(default)]
@@ -2295,33 +2273,36 @@ body_horizon_days = -1
     }
 
     // -----------------------------------------------------------------------
-    // resolve_signature_markdown (#0099)
+    // resolve_signature_markdown (#0099, app-managed storage since #0107)
     // -----------------------------------------------------------------------
 
-    fn account_with_signature(entry: SignatureEntry) -> AccountConfig {
-        let mut entries = HashMap::new();
-        entries.insert("default".to_string(), entry);
-        AccountConfig {
-            signatures: SignaturesConfig {
-                default: Some("default".to_string()),
-                entries,
-            },
-            ..Default::default()
+    /// Redirects `config_dir()` (signature files) and `mailypoppins_data_dir()`
+    /// (the state file holding the default) into one tempdir.
+    struct SigFixture {
+        _dir: tempfile::TempDir,
+        _config: test_env::ConfigDirOverride,
+        _data: test_env::TestDataDir,
+    }
+
+    fn sig_fixture() -> SigFixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = test_env::ConfigDirOverride::new(dir.path());
+        config.set_config_dir(&dir.path().join("config"));
+        SigFixture {
+            _dir: dir,
+            _config: config,
+            _data: test_env::TestDataDir::new(),
         }
     }
 
-    /// An inline Markdown snippet is the signature, and it wins over a `path`.
-    #[test]
-    fn resolve_signature_prefers_inline_text_over_path() {
-        let account = account_with_signature(SignatureEntry {
-            name: None,
-            text: Some("-- \nAlice".to_string()),
-            path: Some("/no/such/file.md".to_string()),
-        });
-        assert_eq!(
-            resolve_signature_markdown(&account, None).as_deref(),
-            Some("-- \nAlice")
-        );
+    /// Writes a signature file and makes it the account's default.
+    fn account_with_signature(content: &str) -> AccountConfig {
+        crate::signatures::write("default", content).unwrap();
+        crate::signatures::set_default_signature("work", Some("default")).unwrap();
+        AccountConfig {
+            name: "work".to_string(),
+            ..Default::default()
+        }
     }
 
     /// A line-oriented block keeps its breaks: each non-blank line followed by
@@ -2352,54 +2333,50 @@ body_horizon_days = -1
         assert_eq!(to_hard_breaks("-- \nAlice"), "-- \nAlice");
     }
 
-    /// End to end: a multi-line inline signature comes back hard-broken.
+    /// End to end: a multi-line signature file comes back hard-broken, which
+    /// is the #0106 normalisation #0107 left untouched.
     #[test]
-    fn resolve_signature_markdown_hard_breaks_a_multiline_inline_sig() {
-        let account = account_with_signature(SignatureEntry {
-            name: None,
-            text: Some("Sylvain Hellin\nManaging Director".to_string()),
-            path: None,
-        });
+    fn resolve_signature_markdown_hard_breaks_a_multiline_sig() {
+        let _fx = sig_fixture();
+        let account = account_with_signature("Sylvain Hellin\nManaging Director");
         assert_eq!(
             resolve_signature_markdown(&account, None).as_deref(),
             Some("Sylvain Hellin  \nManaging Director")
         );
     }
 
-    /// With no inline text, the `path` file is read as Markdown and its
-    /// trailing whitespace trimmed so the caller owns the spacing.
+    /// The file's trailing whitespace is trimmed so the caller owns the
+    /// spacing around the block.
     #[test]
-    fn resolve_signature_reads_the_path_file_and_trims_trailing_ws() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("sig.md");
-        fs::write(&file, "-- \nBob from a file\n\n").unwrap();
-        let account = account_with_signature(SignatureEntry {
-            name: None,
-            text: None,
-            path: Some(file.to_string_lossy().into_owned()),
-        });
+    fn resolve_signature_reads_the_file_and_trims_trailing_ws() {
+        let _fx = sig_fixture();
+        let account = account_with_signature("-- \nBob from a file\n\n");
         assert_eq!(
             resolve_signature_markdown(&account, None).as_deref(),
             Some("-- \nBob from a file")
         );
     }
 
+    /// An explicit name wins over the account's recorded default.
+    #[test]
+    fn resolve_signature_honours_an_explicit_name() {
+        let _fx = sig_fixture();
+        let account = account_with_signature("the default");
+        crate::signatures::write("other", "the other one").unwrap();
+        assert_eq!(
+            resolve_signature_markdown(&account, Some("other")).as_deref(),
+            Some("the other one")
+        );
+    }
+
     /// An HTML signature file is converted to Markdown at resolve time, so the
     /// editable draft and both MIME parts never see raw HTML (#0102 follow-up).
     #[test]
-    fn resolve_signature_converts_an_html_file_to_markdown() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("sig.html");
-        fs::write(
-            &file,
+    fn resolve_signature_converts_html_to_markdown() {
+        let _fx = sig_fixture();
+        let account = account_with_signature(
             "<p>--<br>\nRobin<br>\n<a href=\"mailto:robin@example.com\">robin@example.com</a></p>",
-        )
-        .unwrap();
-        let account = account_with_signature(SignatureEntry {
-            name: None,
-            text: None,
-            path: Some(file.to_string_lossy().into_owned()),
-        });
+        );
         let md = resolve_signature_markdown(&account, None).expect("signature resolves");
         assert!(!md.contains('<'), "raw HTML leaked into the signature: {md:?}");
         assert!(
@@ -2408,80 +2385,100 @@ body_horizon_days = -1
         );
     }
 
-    /// An inline HTML snippet is converted too, not just files.
-    #[test]
-    fn resolve_signature_converts_inline_html_text() {
-        let account = account_with_signature(SignatureEntry {
-            name: None,
-            text: Some("<b>Alice</b>".to_string()),
-            path: None,
-        });
-        assert_eq!(
-            resolve_signature_markdown(&account, None).as_deref(),
-            Some("**Alice**")
-        );
-    }
-
-    /// An account with no signature configured resolves to `None` (no block).
+    /// An account with no default and no explicit name resolves to `None`.
     #[test]
     fn resolve_signature_is_none_when_unconfigured() {
-        let account = AccountConfig::default();
+        let _fx = sig_fixture();
+        let account = AccountConfig {
+            name: "work".to_string(),
+            ..Default::default()
+        };
         assert!(resolve_signature_markdown(&account, None).is_none());
     }
 
-    /// A named entry with neither `text` nor a readable `path` resolves to
-    /// `None` rather than an empty signature.
+    /// A name with no file behind it resolves to `None` rather than an empty
+    /// signature block.
     #[test]
-    fn resolve_signature_is_none_for_an_empty_entry() {
-        let account = account_with_signature(SignatureEntry::default());
+    fn resolve_signature_is_none_for_a_missing_file() {
+        let _fx = sig_fixture();
+        let account = AccountConfig {
+            name: "work".to_string(),
+            ..Default::default()
+        };
+        assert!(resolve_signature_markdown(&account, Some("ghost")).is_none());
+    }
+
+    /// An empty signature file is no signature.
+    #[test]
+    fn resolve_signature_is_none_for_an_empty_file() {
+        let _fx = sig_fixture();
+        let account = account_with_signature("   \n\n");
+        assert!(resolve_signature_markdown(&account, None).is_none());
+    }
+
+    /// The legacy `[accounts.signatures]` tables no longer resolve anything:
+    /// only the migration reads them (#0107).
+    #[test]
+    fn resolve_signature_ignores_the_legacy_config_tables() {
+        let _fx = sig_fixture();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "default".to_string(),
+            SignatureEntry {
+                name: None,
+                text: Some("-- \nFrom config".to_string()),
+                path: None,
+            },
+        );
+        let account = AccountConfig {
+            name: "work".to_string(),
+            signatures: SignaturesConfig {
+                default: Some("default".to_string()),
+                entries,
+            },
+            ..Default::default()
+        };
         assert!(resolve_signature_markdown(&account, None).is_none());
     }
 }
 
-/// Resolve an account's signature to Markdown text (#0099).
+/// Resolve an account's signature to Markdown text (#0099, storage moved in
+/// #0107).
 ///
 /// The signature is a Markdown snippet appended to the draft body at
 /// creation (compose, reply, forward), so it is visible and editable rather
-/// than injected at send time. `signature_name` picks a named entry;
-/// `None` uses the account's `default` entry. Inline `text` wins over a
-/// `path` file. Trailing whitespace is trimmed so the caller controls the
-/// spacing around the block.
+/// than injected at send time. `signature_name` picks a signature file by
+/// name; `None` uses the account's recorded default. The source is
+/// `config_dir()/signatures/<name>.md` and the default comes from the app
+/// state file, both via [`crate::signatures`]. Trailing whitespace is trimmed
+/// so the caller controls the spacing around the block.
 ///
-/// Returns `None` (no signature block) when nothing is configured, when the
-/// named entry has neither `text` nor `path`, or when the `path` file is
-/// missing (which warns, mirroring the pre-#0099 behaviour).
+/// Returns `None` (no signature block) when the account has no default and no
+/// name was given, when the named file does not exist (which logs: by the time
+/// this runs the TUI owns the terminal, so stderr would be noise), or when the
+/// file is empty.
 pub fn resolve_signature_markdown(
     account: &AccountConfig,
     signature_name: Option<&str>,
 ) -> Option<String> {
     let sig_name = signature_name
         .map(|s| s.to_string())
-        .or_else(|| account.signatures.default.clone())?;
+        .or_else(|| crate::signatures::default_signature_name(&account.name))?;
 
-    let entry = account.signatures.entries.get(&sig_name)?;
+    let Some(content) = crate::signatures::read(&sig_name) else {
+        log::warn!(
+            "[signatures] account '{}' names signature '{sig_name}', but {} does not exist",
+            account.name,
+            crate::signatures::signature_file(&sig_name).display()
+        );
+        return None;
+    };
 
-    if let Some(text) = entry.text.as_ref() {
-        let text = text.trim_end();
-        if !text.is_empty() {
-            return Some(signature_source_to_markdown(text));
-        }
+    let content = content.trim_end();
+    if content.is_empty() {
+        return None;
     }
-
-    let path_str = entry.path.as_ref()?;
-    // Expand ~ in signature path
-    let expanded = shellexpand::tilde(path_str).into_owned();
-    let path = Path::new(&expanded);
-
-    if path.exists() {
-        fs::read_to_string(path)
-            .ok()
-            .map(|s| s.trim_end().to_string())
-            .filter(|s| !s.is_empty())
-            .map(|s| signature_source_to_markdown(&s))
-    } else {
-        eprintln!("{} Signature file not found: {}", "⚠".yellow(), path_str);
-        None
-    }
+    Some(signature_source_to_markdown(content))
 }
 
 /// Normalise a signature source to Markdown with hard line breaks.
