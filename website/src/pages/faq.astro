@@ -65,9 +65,13 @@ import AccordionItem from '../components/AccordionItem.astro';
           <p>
             Signatures moved out of <code>config.toml</code> into their own Markdown files.
             The first run after the upgrade copied your entries to
-            <code>~/.config/mailypoppins/signatures/</code> and kept the account default, so
-            nothing is lost. mailypoppins does not edit <code>config.toml</code> for you:
-            delete the <code>[accounts.signatures]</code> tables yourself and the notice stops.
+            <code>~/.config/mailypoppins/signatures/</code> and kept the account default.
+            mailypoppins does not edit <code>config.toml</code> for you: delete the
+            <code>[accounts.signatures]</code> tables yourself and the notice stops.
+          </p>
+          <p>
+            Read the notice before you delete anything. It lists any entry that could not be
+            copied out, and those tables are the only place that content still exists.
           </p>
         </AccordionItem>
 

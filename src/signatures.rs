@@ -17,6 +17,7 @@
 
 use anyhow::{bail, Context, Result};
 use colored::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -223,6 +224,23 @@ pub fn set_default_signature(account: &str, name: Option<&str>) -> Result<()> {
 // Migration off `[accounts.signatures.*]` (#0107)
 // ---------------------------------------------------------------------------
 
+/// One legacy entry the migration could not copy out, for the notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkippedEntry {
+    account: String,
+    entry: String,
+    reason: String,
+}
+
+/// What one migration run found and what it could not carry over.
+struct MigrationReport {
+    /// Whether any account still carries a `[accounts.*.signatures]` table.
+    legacy_present: bool,
+    /// Entries that reached no file, so their only copy is still in
+    /// `config.toml`.
+    skipped: Vec<SkippedEntry>,
+}
+
 /// Copy any legacy `[accounts.<acct>.signatures.*]` tables into the signatures
 /// directory and the app state file, then say so once.
 ///
@@ -233,53 +251,153 @@ pub fn set_default_signature(account: &str, name: Option<&str>) -> Result<()> {
 /// which is the only nudge the user gets to delete them, since nothing here
 /// rewrites their file.
 ///
+/// The legacy layer was per-account and this one is flat, so two accounts can
+/// arrive with the same entry key and different content. The second one is
+/// migrated under `<account>-<name>` and its default points there, rather than
+/// silently inheriting the first account's signature; identical content is not
+/// a collision and keeps sharing one file. See [`migration_target_name`].
+///
 /// Errors are per-entry and non-fatal: a missing `path` source or an
 /// unwritable file warns and skips. Failing startup over a signature would be
-/// out of proportion to what a signature is.
+/// out of proportion to what a signature is. Skipped entries are named in the
+/// notice, because their content exists nowhere but the tables the notice is
+/// otherwise telling the user to delete.
 pub fn migrate_config_signatures(config: &GlobalConfig) -> Result<()> {
-    let mut legacy_present = false;
+    let report = run_config_signature_migration(config);
+    if report.legacy_present {
+        eprintln!("{}", dead_signature_tables_notice(&report.skipped));
+        log::warn!(
+            "[signatures] legacy [accounts.*.signatures] tables in {} are dead; \
+             signatures now live in {}",
+            crate::config::config_path().display(),
+            signatures_dir().display()
+        );
+    }
+    Ok(())
+}
+
+/// The migration proper, split out so tests can inspect what was skipped
+/// without capturing stderr.
+fn run_config_signature_migration(config: &GlobalConfig) -> MigrationReport {
+    let mut report = MigrationReport {
+        legacy_present: false,
+        skipped: Vec::new(),
+    };
     let mut state = AppState::load();
     let mut state_dirty = false;
+    // Signature name -> the account that claimed it in *this* run. A name that
+    // merely exists on disk is not claimed: that is the rerun / user-edited
+    // case, which keeps the pre-existing "leave it alone" behaviour.
+    let mut claimed: HashMap<String, String> = HashMap::new();
 
     for account in &config.accounts {
         let legacy = &account.signatures;
         if legacy.entries.is_empty() && legacy.default.is_none() {
             continue;
         }
-        legacy_present = true;
+        report.legacy_present = true;
+        // Entry key -> the name it actually landed under, when they differ.
+        let mut renamed: HashMap<String, String> = HashMap::new();
+        // Every name this account resolved to, shared ones included, so its
+        // default is never pointed at a file that belongs to someone else.
+        let mut mine: Vec<String> = Vec::new();
 
         let mut names: Vec<&String> = legacy.entries.keys().collect();
         names.sort();
         for name in names {
             let entry = &legacy.entries[name];
-            if validate_name(name).is_err() {
+            if let Err(e) = validate_name(name) {
                 log::warn!(
                     "[signatures] skipping legacy signature '{name}' of account '{}': \
                      not a usable file name",
                     account.name
                 );
-                continue;
-            }
-            if exists(name) {
+                report.skipped.push(SkippedEntry {
+                    account: account.name.clone(),
+                    entry: name.clone(),
+                    reason: format!("{e}"),
+                });
                 continue;
             }
             let Some(content) = legacy_entry_content(&account.name, name, entry) else {
+                report.skipped.push(SkippedEntry {
+                    account: account.name.clone(),
+                    entry: name.clone(),
+                    reason: match entry.path.as_deref() {
+                        Some(p) => format!("its path {p} could not be read"),
+                        None => "it has neither 'text' nor 'path'".to_string(),
+                    },
+                });
                 continue;
             };
-            match write(name, &content) {
+            let Some(target) = migration_target_name(&account.name, name, &content, &claimed)
+            else {
+                log::warn!(
+                    "[signatures] account '{}': no usable file name for signature '{name}'",
+                    account.name
+                );
+                report.skipped.push(SkippedEntry {
+                    account: account.name.clone(),
+                    entry: name.clone(),
+                    reason: "no usable file name was free for it".to_string(),
+                });
+                continue;
+            };
+            claimed
+                .entry(target.clone())
+                .or_insert_with(|| account.name.clone());
+            mine.push(target.clone());
+            if target != *name {
+                renamed.insert(name.clone(), target.clone());
+            }
+            // An existing file is never overwritten: it is either this entry
+            // from an earlier run, the same content shared with another
+            // account, or something the user has since edited.
+            if exists(&target) {
+                continue;
+            }
+            match write(&target, &content) {
                 Ok(()) => log::info!(
-                    "[signatures] migrated '{name}' to {}",
-                    signature_file(name).display()
+                    "[signatures] migrated '{name}' of account '{}' to {}",
+                    account.name,
+                    signature_file(&target).display()
                 ),
-                Err(e) => log::warn!("[signatures] could not migrate '{name}': {e:#}"),
+                Err(e) => {
+                    log::warn!("[signatures] could not migrate '{name}': {e:#}");
+                    report.skipped.push(SkippedEntry {
+                        account: account.name.clone(),
+                        entry: name.clone(),
+                        reason: format!("it could not be written out ({e})"),
+                    });
+                }
             }
         }
 
-        // The old per-account default, kept only if nothing has recorded one.
+        // The old per-account default, kept only if nothing has recorded one,
+        // and pointed at the disambiguated name when the entry was moved.
         if let Some(default) = legacy.default.as_deref() {
-            if state.default_signature(&account.name).is_none() && validate_name(default).is_ok() {
-                state.set_default_signature(&account.name, Some(default));
-                state_dirty = true;
+            if state.default_signature(&account.name).is_none() {
+                let target = renamed
+                    .get(default)
+                    .cloned()
+                    .unwrap_or_else(|| default.to_string());
+                // A default whose entry this account did not migrate (it was
+                // skipped) must not inherit whatever another account wrote
+                // under that name: no default beats the wrong identity's.
+                let anothers = !mine.contains(&target)
+                    && claimed
+                        .get(&target)
+                        .is_some_and(|owner| *owner != account.name);
+                if anothers {
+                    log::warn!(
+                        "[signatures] account '{}': default '{default}' was not migrated, \
+                         and '{target}' belongs to another account; leaving it unset",
+                        account.name
+                    );
+                } else if validate_name(&target).is_ok() {
+                    state.set_default_signature(&account.name, Some(&target));
+                    state_dirty = true;
+                }
             }
         }
     }
@@ -289,11 +407,76 @@ pub fn migrate_config_signatures(config: &GlobalConfig) -> Result<()> {
             log::warn!("[signatures] could not record migrated defaults: {e:#}");
         }
     }
+    report
+}
 
-    if legacy_present {
-        warn_about_dead_signature_tables();
+/// The file name a legacy entry's content should land under.
+///
+/// The entry's own name when nothing in this run has claimed it (free name,
+/// or a file already on disk, which is the rerun case), and when another
+/// account claimed it but the content is byte-identical, since one file then
+/// serves both. Otherwise `<account>-<name>`, and `<account>-<name>-2`, `-3`
+/// and so on if even that is taken by a third account with other content.
+///
+/// Deterministic given the account order in `config.toml`, so a rerun lands on
+/// the same name and finds the file already there instead of making a second
+/// copy. `None` when no candidate is a usable file stem.
+fn migration_target_name(
+    account: &str,
+    name: &str,
+    content: &str,
+    claimed: &HashMap<String, String>,
+) -> Option<String> {
+    let free_for_us = |candidate: &str| match claimed.get(candidate) {
+        None => true,
+        Some(owner) => owner == account || read(candidate).as_deref() == Some(content),
+    };
+    if free_for_us(name) {
+        return Some(name.to_string());
     }
-    Ok(())
+    for attempt in 1..=99 {
+        let Some(candidate) = disambiguated_name(account, name, attempt) else {
+            continue;
+        };
+        if free_for_us(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `<account>-<name>` for the first attempt, `<account>-<name>-<n>` after
+/// that, with the account part reduced to a safe file stem and truncated so
+/// the whole thing still fits [`MAX_NAME_LEN`]. `None` when nothing usable is
+/// left of the account name.
+fn disambiguated_name(account: &str, name: &str, attempt: usize) -> Option<String> {
+    let suffix = if attempt <= 1 {
+        String::new()
+    } else {
+        format!("-{attempt}")
+    };
+    let cleaned: String = account
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(|c| c == '-' || c == '.');
+    if cleaned.is_empty() {
+        return None;
+    }
+    let budget = MAX_NAME_LEN.checked_sub(name.len() + 1 + suffix.len())?;
+    if budget == 0 {
+        return None;
+    }
+    let prefix: String = cleaned.chars().take(budget).collect();
+    let candidate = format!("{prefix}-{name}{suffix}");
+    validate_name(&candidate).ok()?;
+    Some(candidate)
 }
 
 /// The content a legacy entry should be written out as: inline `text`
@@ -321,27 +504,46 @@ fn legacy_entry_content(
     }
 }
 
-/// One notice that the `[accounts.*.signatures]` tables no longer do anything.
+/// The notice that the `[accounts.*.signatures]` tables no longer do anything.
 ///
 /// Same shape as [`crate::config`]'s self-reference warning: stderr for the
 /// user in front of a terminal, `log::warn!` for the one who ran the TUI and
 /// never saw stderr at all.
-fn warn_about_dead_signature_tables() {
+///
+/// "Can be deleted" is only said when every entry reached a file. An entry the
+/// migration skipped exists nowhere else, and `mp config init` rewrites
+/// `config.toml` without these tables, so a blanket "we copied everything out"
+/// would be the last thing the user read before losing it.
+fn dead_signature_tables_notice(skipped: &[SkippedEntry]) -> String {
     let dir = signatures_dir();
-    eprintln!(
+    let config = crate::config::config_path();
+    if skipped.is_empty() {
+        return format!(
+            "{} Signatures now live as Markdown files in {} (#0107). The \
+             [accounts.*.signatures] tables in {} are no longer read and can be deleted; \
+             your signatures were copied out of them.",
+            "⚠".yellow(),
+            dir.display(),
+            config.display(),
+        );
+    }
+    let mut out = format!(
         "{} Signatures now live as Markdown files in {} (#0107). The \
-         [accounts.*.signatures] tables in {} are no longer read and can be deleted; \
-         your signatures were copied out of them.",
+         [accounts.*.signatures] tables in {} are no longer read.\n\
+         These entries could NOT be copied out, so keep them until you have saved \
+         their content elsewhere:",
         "⚠".yellow(),
         dir.display(),
-        crate::config::config_path().display(),
+        config.display(),
     );
-    log::warn!(
-        "[signatures] legacy [accounts.*.signatures] tables in {} are dead; \
-         signatures now live in {}",
-        crate::config::config_path().display(),
-        dir.display()
-    );
+    for s in skipped {
+        out.push_str(&format!(
+            "\n  - account '{}', signature '{}': {}",
+            s.account, s.entry, s.reason
+        ));
+    }
+    out.push_str("\nEverything else was copied out; delete the tables only once these are handled.");
+    out
 }
 
 #[cfg(test)]
@@ -371,17 +573,33 @@ mod tests {
     }
 
     fn account_with(default: Option<&str>, entries: &[(&str, SignatureEntry)]) -> AccountConfig {
+        named_account_with("work", default, entries)
+    }
+
+    fn named_account_with(
+        name: &str,
+        default: Option<&str>,
+        entries: &[(&str, SignatureEntry)],
+    ) -> AccountConfig {
         let mut map = HashMap::new();
-        for (name, entry) in entries {
-            map.insert((*name).to_string(), entry.clone());
+        for (entry_name, entry) in entries {
+            map.insert((*entry_name).to_string(), entry.clone());
         }
         AccountConfig {
-            name: "work".to_string(),
+            name: name.to_string(),
             signatures: SignaturesConfig {
                 default: default.map(str::to_string),
                 entries: map,
             },
             ..Default::default()
+        }
+    }
+
+    fn inline(text: &str) -> SignatureEntry {
+        SignatureEntry {
+            name: None,
+            text: Some(text.to_string()),
+            path: None,
         }
     }
 
@@ -639,6 +857,132 @@ mod tests {
         assert_eq!(read("default").as_deref(), Some("edited since"));
         assert_eq!(default_signature_name("work").as_deref(), Some("newer"));
         assert_eq!(list(), vec!["default".to_string(), "newer".to_string()]);
+    }
+
+    /// Two accounts, the same entry key, different content: the flat layer has
+    /// one name and they need two files, so the second account's is migrated
+    /// under `<account>-<name>` and its default follows it. Without this,
+    /// account two silently signs with account one's identity.
+    #[test]
+    fn a_cross_account_name_collision_migrates_under_a_disambiguated_name() {
+        let _fx = fixture();
+        let config = config_with(vec![
+            named_account_with("work", Some("default"), &[("default", inline("-- \nAlice"))]),
+            named_account_with("home", Some("default"), &[("default", inline("-- \nAl"))]),
+        ]);
+
+        migrate_config_signatures(&config).unwrap();
+
+        // Both contents survive, under two names.
+        assert_eq!(read("default").as_deref(), Some("-- \nAlice"));
+        assert_eq!(read("home-default").as_deref(), Some("-- \nAl"));
+        // Each account resolves its own.
+        assert_eq!(default_signature_name("work").as_deref(), Some("default"));
+        assert_eq!(
+            default_signature_name("home").as_deref(),
+            Some("home-default")
+        );
+
+        // A rerun makes no second copy and moves nothing.
+        migrate_config_signatures(&config).unwrap();
+        assert_eq!(
+            list(),
+            vec!["default".to_string(), "home-default".to_string()]
+        );
+        assert_eq!(read("default").as_deref(), Some("-- \nAlice"));
+        assert_eq!(read("home-default").as_deref(), Some("-- \nAl"));
+
+        // And it does not clobber the disambiguated file the user has edited.
+        write("home-default", "edited since").unwrap();
+        migrate_config_signatures(&config).unwrap();
+        assert_eq!(read("home-default").as_deref(), Some("edited since"));
+        assert_eq!(
+            list(),
+            vec!["default".to_string(), "home-default".to_string()]
+        );
+    }
+
+    /// The same entry key with byte-identical content is not a collision: one
+    /// file serves both accounts.
+    #[test]
+    fn identical_content_under_one_name_stays_one_file() {
+        let _fx = fixture();
+        let config = config_with(vec![
+            named_account_with("work", Some("default"), &[("default", inline("-- \nAlice"))]),
+            named_account_with("home", Some("default"), &[("default", inline("-- \nAlice"))]),
+        ]);
+
+        migrate_config_signatures(&config).unwrap();
+
+        assert_eq!(list(), vec!["default".to_string()]);
+        assert_eq!(default_signature_name("work").as_deref(), Some("default"));
+        assert_eq!(default_signature_name("home").as_deref(), Some("default"));
+    }
+
+    /// A default whose own entry could not be migrated is left unset rather
+    /// than pointed at the file another account wrote under that name.
+    #[test]
+    fn a_default_never_inherits_another_accounts_file() {
+        let _fx = fixture();
+        let config = config_with(vec![
+            named_account_with("work", Some("default"), &[("default", inline("-- \nAlice"))]),
+            named_account_with(
+                "home",
+                Some("default"),
+                &[(
+                    "default",
+                    SignatureEntry {
+                        name: None,
+                        text: None,
+                        path: Some("/no/such/signature.md".to_string()),
+                    },
+                )],
+            ),
+        ]);
+
+        migrate_config_signatures(&config).unwrap();
+
+        assert_eq!(list(), vec!["default".to_string()]);
+        assert_eq!(default_signature_name("work").as_deref(), Some("default"));
+        assert_eq!(default_signature_name("home"), None);
+    }
+
+    /// An entry that reached no file is named on stderr, and the notice stops
+    /// saying the tables can be deleted: they hold its only copy.
+    #[test]
+    fn the_notice_names_every_entry_it_could_not_copy_out() {
+        let _fx = fixture();
+        let config = config_with(vec![named_account_with(
+            "work",
+            None,
+            &[
+                ("../escape", inline("unsafe name")),
+                (
+                    "gone",
+                    SignatureEntry {
+                        name: None,
+                        text: None,
+                        path: Some("/no/such/signature.md".to_string()),
+                    },
+                ),
+                ("kept", inline("here")),
+            ],
+        )]);
+
+        let report = run_config_signature_migration(&config);
+        let notice = dead_signature_tables_notice(&report.skipped);
+
+        assert_eq!(list(), vec!["kept".to_string()]);
+        assert_eq!(report.skipped.len(), 2, "{:?}", report.skipped);
+        assert!(notice.contains("account 'work', signature '../escape'"), "{notice}");
+        assert!(notice.contains("account 'work', signature 'gone'"), "{notice}");
+        assert!(notice.contains("/no/such/signature.md"), "{notice}");
+        assert!(!notice.contains("can be deleted"), "{notice}");
+        assert!(!notice.contains("kept"), "{notice}");
+
+        // With nothing skipped the old, unqualified wording is unchanged.
+        let clean = dead_signature_tables_notice(&[]);
+        assert!(clean.contains("can be deleted"), "{clean}");
     }
 
     /// Nothing to migrate: no files, no state, no notice.

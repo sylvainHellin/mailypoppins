@@ -262,6 +262,15 @@ server = "Newsletters"`} />
         and keeps the old default, then prints a notice. The tables are dead after that and
         can be deleted by hand; mailypoppins never rewrites <code>config.toml</code>.
       </p>
+      <p>
+        Two accounts could use the same entry name for different signatures, which the flat
+        directory has no room for, so the second one is copied to
+        <code>&lt;account&gt;-&lt;name&gt;.md</code> and that account's default points there.
+        The same name with the same content stays one file. If an entry cannot be copied,
+        because its name is not a usable file name or its <code>path</code> no longer reads,
+        the notice names it and stops telling you the tables can be deleted: they still hold
+        the only copy.
+      </p>
     </section>
 
     <!-- Multi-Account Setup -->

@@ -1070,3 +1070,46 @@ surrounding blank lines intact in one place for every consumer. An `EditDraft`
 re-splice only rewrites the body when the wizard's `signature_name` actually
 changed from `signature_initial`, so a plain recipient edit never disturbs the
 block (and never spuriously adds one to a legacy draft that has no sentinels).
+
+## Flattening a per-account namespace needs a collision rule (2026-09-07)
+
+#0107 moved signatures from `[accounts.<acct>.signatures.<name>]`, a namespace
+keyed by account *and* name, to one flat directory keyed by name alone. The
+first migration walked every account and wrote `signatures/<name>.md`, so two
+accounts that each defined `default` with different content collapsed into the
+first account's file: the second was `continue`d as "already exists" while its
+recorded default still said `default`, and it signed mail with the other
+identity. The rule now is per-run claim tracking (`migration_target_name` in
+`src/signatures.rs`): the first account to claim a name gets it, a second one
+with byte-identical content shares the file, and anything else lands under
+`<account>-<name>` with that account's default pointed at it. Claiming happens
+even when nothing is written, which is what keeps a rerun deterministic: it
+re-derives the same target, finds the file there and leaves it alone, so a
+hand-edited file is never clobbered and no second copy appears. Whenever a
+narrower key becomes a wider one, write the collision case down before the
+happy path.
+
+## A migration notice must not overclaim what it copied (2026-09-07)
+
+The same migration printed "the tables can be deleted; your signatures were
+copied out of them" unconditionally, while per-entry failures (an unusable
+name, a `path` that no longer reads) went to `log::warn!`, which `init_logging`
+routes to a log file rather than stderr. `mp config init` then rewrites
+`config.toml` without those tables, so the user could be told to delete the
+only surviving copy. `run_config_signature_migration` now returns the skipped
+entries and `dead_signature_tables_notice` names each account and entry and
+drops the "can be deleted" phrasing while any remain. Splitting the notice into
+a pure function that returns a `String` is also what makes it testable: nothing
+in the test suite captures stderr.
+
+## In-place file edits break "did the selection change" guards (2026-09-07)
+
+The `EditDraft` re-splice guard described above (`signature_name !=
+signature_initial`) was correct only while a wizard edit produced a new value to
+compare. #0107 made `e` on the Signature field edit `signatures/<name>.md` in
+place, so the name stays identical, the guard stays false, and the draft kept
+the pre-edit block while the status line claimed the signature was updated. The
+wizard now carries a `signature_edited` flag that `edit_compose_signature` sets
+on a successful `$EDITOR` return, and `ComposeWizard::signature_needs_respice`
+ORs it into the comparison. Any guard phrased as "the identifier changed" needs
+revisiting the moment the thing it identifies becomes mutable in place.

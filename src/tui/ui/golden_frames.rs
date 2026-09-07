@@ -796,6 +796,7 @@ fn golden_compose_wizard_with_body() {
         focus: ComposeField::Body,
         signature_name: None,
         signature_initial: None,
+        signature_edited: false,
         available_signatures: Vec::new(),
         suggestions: Vec::new(),
         suggestion_idx: 0,

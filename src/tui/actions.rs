@@ -2253,6 +2253,7 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
         body: String::new(),
         focus: ComposeField::To,
         signature_initial: signature_name.clone(),
+        signature_edited: false,
         signature_name,
         available_signatures,
         suggestions: Vec::new(),
@@ -2289,6 +2290,7 @@ fn open_compose_wizard_seeded(app: &mut App, to: String) {
         body: String::new(),
         focus: ComposeField::Subject,
         signature_initial: signature_name.clone(),
+        signature_edited: false,
         signature_name,
         available_signatures,
         suggestions: Vec::new(),
@@ -2435,8 +2437,13 @@ fn write_vcard_draft(
 ///
 /// Since #0107 a signature is exactly one file, `signatures/<name>.md`, so the
 /// edit is always in place and always persistent: no temp copy, no per-draft
-/// override. The wizard re-resolves the file when it splices the block on
-/// submit, so the new content lands in the draft.
+/// override.
+///
+/// A successful edit is recorded on the wizard ([`note_compose_signature_edited`]).
+/// The submit path re-resolves the file, but on an `EditDraft` it only
+/// re-splices when something changed, and the selection did not: without the
+/// flag the draft would keep the pre-edit block while the status line claimed
+/// the signature was updated.
 fn edit_compose_signature(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -2469,10 +2476,22 @@ fn edit_compose_signature(
     resume_terminal(terminal)?;
 
     match edit_result {
-        Ok(()) => app.set_status(format!("Signature '{name}' edited")),
+        Ok(()) => {
+            note_compose_signature_edited(app);
+            app.set_status(format!("Signature '{name}' edited"));
+        }
         Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
     }
     Ok(())
+}
+
+/// Record on the open compose wizard that its signature file was edited
+/// (#0107), so an `EditDraft` submit re-splices the block even though the
+/// selected name never moved.
+fn note_compose_signature_edited(app: &mut App) {
+    if let Some(wizard) = app.compose_wizard_mut() {
+        wizard.signature_edited = true;
+    }
 }
 
 /// Edit one app-managed signature file in `$EDITOR` (#0107).
@@ -2569,9 +2588,10 @@ fn submit_compose_wizard(
         match crate::draft::rewrite_draft_recipients(&path, &edit) {
             Ok(()) => {
                 // Re-splice the signature block only when the selection changed
-                // from what the wizard opened with (#0106), so a plain recipient
-                // edit leaves the body untouched.
-                let sig_changed = wizard.signature_name != wizard.signature_initial;
+                // from what the wizard opened with (#0106) or the selected file
+                // was edited from the wizard (#0107), so a plain recipient edit
+                // leaves the body untouched.
+                let sig_changed = wizard.signature_needs_respice();
                 if sig_changed {
                     let (sig_md, sig_name) = wizard_signature(app, &wizard);
                     if let Err(e) = crate::draft::rewrite_draft_signature(
@@ -3605,6 +3625,7 @@ mod tests {
             focus: ComposeField::Body,
             signature_name: None,
             signature_initial: None,
+            signature_edited: false,
             available_signatures: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -3647,6 +3668,83 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.ends_with("---\n\n"), "{content:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Editing the signature *file* from the wizard (#0107)
+    // -----------------------------------------------------------------------
+
+    /// `e` on the Signature field edits the file in place, so the selected
+    /// name never changes; before the `signature_edited` flag an `EditDraft`
+    /// submit therefore skipped the re-splice and left the draft carrying the
+    /// pre-edit block while the status line claimed the signature was updated.
+    ///
+    /// The `$EDITOR` round-trip itself cannot run here (it suspends the
+    /// terminal), so this drives the two halves the submit path uses: the flag
+    /// `edit_compose_signature` sets on success, and the re-splice that flag
+    /// gates.
+    #[test]
+    fn a_signature_file_edit_respices_an_edit_draft_on_submit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::test_env::ConfigDirOverride::new(dir.path());
+        cfg.set_config_dir(&dir.path().join("config"));
+        let _data = crate::config::test_env::TestDataDir::new();
+        crate::signatures::write("work", "-- \nAlice").unwrap();
+
+        let mut app = App::default_for_tests();
+        app.account_config.name = "work".to_string();
+        app.overlay = Overlay::Compose(ComposeWizard {
+            mode: ComposeMode::EditDraft {
+                id: "d1".to_string(),
+            },
+            to: "bob@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "Re: hello".to_string(),
+            body: String::new(),
+            focus: ComposeField::Signature,
+            signature_name: Some("work".to_string()),
+            signature_initial: Some("work".to_string()),
+            signature_edited: false,
+            available_signatures: vec!["work".to_string()],
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
+            contacts: None,
+        });
+
+        // A draft carrying the block as it stood when the wizard opened.
+        let path = dir.path().join("draft.md");
+        std::fs::write(
+            &path,
+            "---\nto: bob@example.com\nsubject: \"Re: hello\"\nstatus: draft\n---\n\nThanks.\n",
+        )
+        .unwrap();
+        let opened_with = wizard_signature(&app, app.compose_wizard().unwrap()).0;
+        crate::draft::rewrite_draft_signature(&path, opened_with.as_deref(), Some("work")).unwrap();
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("Alice"),
+            "the draft starts with the pre-edit block"
+        );
+
+        // Nothing has happened yet: a plain recipient edit leaves the body be.
+        assert!(!app.compose_wizard().unwrap().signature_needs_respice());
+
+        // `$EDITOR` rewrites the file and `edit_compose_signature` records it.
+        crate::signatures::write("work", "-- \nAlice B., Team Lead").unwrap();
+        note_compose_signature_edited(&mut app);
+        assert!(
+            app.compose_wizard().unwrap().signature_needs_respice(),
+            "an in-place file edit still has to reach the draft"
+        );
+
+        // What the submit path then does with that decision.
+        let (sig_md, sig_name) = wizard_signature(&app, app.compose_wizard().unwrap());
+        crate::draft::rewrite_draft_signature(&path, sig_md.as_deref(), sig_name.as_deref())
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Alice B., Team Lead"), "{content}");
+        assert!(!content.contains("\nAlice\n"), "{content}");
     }
 }
 

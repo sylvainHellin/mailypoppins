@@ -3924,10 +3924,18 @@ mod tests {
             Some("work"),
             "the list marks the new default"
         );
+        // The cached content follows, or a reply written next still carries
+        // nothing (or the previous default).
+        let cached = app.signature_content.clone().unwrap_or_default();
+        assert!(cached.contains("work"), "{cached:?}");
 
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert_eq!(crate::signatures::default_signature_name("work"), None);
         assert_eq!(app.signatures_overlay_mut().unwrap().default, None);
+        assert_eq!(
+            app.signature_content, None,
+            "clearing the default clears the cached content too"
+        );
     }
 
     /// `e` hands the selected file to the `$EDITOR` action (the suspend /
@@ -4087,6 +4095,96 @@ mod tests {
         assert_eq!(overlay.names, vec!["casual".to_string()]);
         assert_eq!(overlay.default, None);
         assert_eq!(overlay.selected_name(), Some("casual"), "the cursor stays in range");
+    }
+
+    /// A minimal `AccountState` for `name`, carrying `content` as its cached
+    /// signature. A struct literal rather than `AccountState::new`, which
+    /// reads the user's config and keyring (mirrors `helpers::tests::account`).
+    fn account_state(name: &str, content: Option<&str>) -> crate::tui::app::AccountState {
+        crate::tui::app::AccountState {
+            account_config: crate::config::AccountConfig {
+                name: name.to_string(),
+                ..Default::default()
+            },
+            imap_config: None,
+            smtp_config: None,
+            graph_config: None,
+            signature_content: content.map(str::to_string),
+            archive_server_name: "Archive".to_string(),
+            drafts_dir: None,
+            mailboxes: Vec::new(),
+            mailbox_counts: Vec::new(),
+            email_cache: Vec::new(),
+            sidebar_index: 0,
+            active_mailbox: 0,
+            list_index: 0,
+            cursor_ref: None,
+            headers_scroll: 0,
+            preview_scroll: 0,
+            selection: std::collections::HashSet::new(),
+            search_query: String::new(),
+            watcher_active: false,
+            opening: false,
+            outbox: crate::outbox::OutboxCounts::default(),
+            has_unseen: false,
+            sync_health: crate::sync_health::SyncHealth::default(),
+        }
+    }
+
+    /// `signatures::delete` clears the default of *every* account that named
+    /// the file, so the cached content of the accounts that are not active has
+    /// to be re-resolved too: `load_from_account` restores it on a switch and
+    /// `resolve_send_account` hands it to a reply sent from that identity, so a
+    /// stale copy signs mail with a signature that no longer exists.
+    #[test]
+    fn deleting_a_shared_default_refreshes_every_accounts_cached_signature() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["shared"]);
+        crate::signatures::set_default_signature("work", Some("shared")).unwrap();
+        crate::signatures::set_default_signature("home", Some("shared")).unwrap();
+        let cached = crate::config::resolve_signature_markdown(&app.account_config, None);
+        assert!(cached.is_some(), "the fixture starts with a resolved signature");
+        app.signature_content = cached.clone();
+        app.accounts = vec![
+            account_state("work", cached.as_deref()),
+            account_state("home", cached.as_deref()),
+        ];
+        app.active_account = 0;
+
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'd');
+        press(&mut app, 'y');
+
+        assert!(!crate::signatures::exists("shared"));
+        assert_eq!(crate::signatures::default_signature_name("home"), None);
+        assert_eq!(app.signature_content, None);
+        assert_eq!(app.accounts[0].signature_content, None);
+        assert_eq!(
+            app.accounts[1].signature_content, None,
+            "the non-active account kept a signature that no longer exists"
+        );
+    }
+
+    /// The global toggle still wins: with signatures off, a refresh clears
+    /// every account rather than resolving one.
+    #[test]
+    fn refreshing_with_signatures_disabled_clears_every_account() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["shared"]);
+        crate::signatures::set_default_signature("work", Some("shared")).unwrap();
+        crate::signatures::set_default_signature("home", Some("shared")).unwrap();
+        app.accounts = vec![
+            account_state("work", Some("stale")),
+            account_state("home", Some("stale")),
+        ];
+        app.global_config.email.include_signature = false;
+
+        app.refresh_signature_content();
+
+        assert_eq!(app.signature_content, None);
+        assert_eq!(app.accounts[0].signature_content, None);
+        assert_eq!(app.accounts[1].signature_content, None);
     }
 
     /// Answering `n` to the delete keeps the file and returns to the list.
@@ -4324,6 +4422,7 @@ mod tests {
             focus: ComposeField::To,
             signature_name: None,
             signature_initial: None,
+            signature_edited: false,
             available_signatures: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,

@@ -1312,6 +1312,11 @@ pub struct ComposeWizard {
     /// only re-splices the body when the selection changed from this, so a plain
     /// recipient edit never disturbs the signature block.
     pub signature_initial: Option<String>,
+    /// Whether `e` / `Ctrl+E` on the Signature field has opened the file in
+    /// `$EDITOR` during this wizard (#0107). The selection is then unchanged
+    /// but its content is not, so an `EditDraft` submit still has to re-splice
+    /// the block; see [`ComposeWizard::signature_needs_respice`].
+    pub signature_edited: bool,
     /// The signature names, loaded from the signatures directory when the
     /// wizard opens (#0106, #0107). Empty when none exist; the field then shows
     /// "(none)" and cycling/edit are no-ops.
@@ -1334,6 +1339,15 @@ impl ComposeWizard {
     /// the field never receives focus outside a `New` compose.
     pub fn has_body_field(&self) -> bool {
         matches!(self.mode, ComposeMode::New)
+    }
+
+    /// Whether an `EditDraft` submit must rewrite the draft's signature block.
+    ///
+    /// Either the selection moved off what the wizard opened with, or the
+    /// selected file itself was edited from the wizard (#0107): the draft then
+    /// still carries the pre-edit block, and only a re-splice replaces it.
+    pub fn signature_needs_respice(&self) -> bool {
+        self.signature_edited || self.signature_name != self.signature_initial
     }
 
     /// The field after `focus` in Tab order, skipping `Body` when this wizard
@@ -2215,6 +2229,7 @@ mod tests {
             focus: ComposeField::Signature,
             signature_name: None,
             signature_initial: None,
+            signature_edited: false,
             available_signatures: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,

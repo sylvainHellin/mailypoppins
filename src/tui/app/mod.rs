@@ -1845,8 +1845,23 @@ impl App {
     /// just switched, renamed, deleted or edited has to reach it or those
     /// drafts keep carrying the old block until the next restart. The wizard
     /// resolves its own signature fresh and does not depend on this.
+    ///
+    /// Every account is re-resolved, not just the active one: a delete or a
+    /// rename retargets the default of *every* account that pointed at the
+    /// name (`signatures::retarget_defaults`), and a non-active account's
+    /// cached content is what `load_from_account` restores on a switch and
+    /// what `resolve_send_account` hands to a reply sent from that identity.
+    /// The `include_signature` gate is the one `AccountState::new` applies.
     pub fn refresh_signature_content(&mut self) {
-        self.signature_content = if self.global_config.email.include_signature {
+        let include = self.global_config.email.include_signature;
+        for acct in &mut self.accounts {
+            acct.signature_content = if include {
+                crate::config::resolve_signature_markdown(&acct.account_config, None)
+            } else {
+                None
+            };
+        }
+        self.signature_content = if include {
             crate::config::resolve_signature_markdown(&self.account_config, None)
         } else {
             None
