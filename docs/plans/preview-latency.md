@@ -1,6 +1,6 @@
 # Design: preview latency on list navigation
 
-> Status: design, nothing implemented (2026-09-09). Implementer-facing.
+> Status: implemented (2026-09-08) as [#0108](../tickets/0108-coalesce-key-events.md), [#0109](../tickets/0109-retire-inline-image-rendering.md), [#0110](../tickets/0110-retire-auto-mark-read.md) and [#0111](../tickets/0111-retire-rich-html-preview.md); the measurement in #0108 and the contingency decision are still open. Line numbers below predate the removals. Implementer-facing.
 > Owner decisions taken in session 2026-09-09. Four of them are deliberate reversals of shipped tickets: [#0087](../tickets/0087-auto-mark-read-on-open.md), [#0010](../tickets/0010-inline-image-rendering.md), [#0091](../tickets/0091-html-to-text-rendering.md), and the render-time half of [#0093](../tickets/0093-memoise-preview-body-wrap.md).
 > Reviewed once (2026-09-09) against an earlier draft that led with a cache; the cache is demoted here to a contingency behind a measurement.
 > Next free ticket ID at time of writing: #0108.

@@ -820,8 +820,9 @@ fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
             .map(|ct| ct.eq_ignore_ascii_case("html"))
             .unwrap_or(false);
         if is_html {
-            let plain = html2text::from_read(content.as_bytes(), 80)
-                .unwrap_or_else(|_| content.to_string());
+            // Same flatten as the IMAP path: no hard wrap, the preview
+            // re-wraps to the pane width (#0111).
+            let plain = crate::parse::html_to_plain(content);
             (plain, Some(content.to_string()))
         } else {
             (content.to_string(), None)
