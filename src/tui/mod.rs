@@ -156,6 +156,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
     let mut dirty = true;
     while app.running {
         if dirty {
+            // One paint is one `[TIMING] tui_draw` start/done pair in the log
+            // file (#0108). That is the instrument the preview-latency plan
+            // measures against: `rg '\[TIMING\] tui_draw'` over
+            // `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log` gives both the
+            // keypress-to-frame cost and the number of frames a held `j`
+            // painted. Cheap enough to leave in: two `info!` lines per paint,
+            // and the loop only paints when something changed.
+            let _draw_span = crate::timing::TimingSpan::new("tui_draw");
             terminal.draw(|frame| ui::view(&mut app, frame))?;
             dirty = false;
         }
