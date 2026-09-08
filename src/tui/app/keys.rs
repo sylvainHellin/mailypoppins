@@ -3376,8 +3376,18 @@ mod tests {
     fn queued_mark_reads(app: &App) -> usize {
         app.pending_actions
             .iter()
-            .filter(|a| matches!(a, Action::MarkAsRead))
+            .filter(|a| matches!(a, Action::MarkAsRead(_)))
             .count()
+    }
+
+    fn queued_mark_read_refs(app: &App) -> Vec<MessageRef> {
+        app.pending_actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::MarkAsRead(msg) => Some(*msg),
+                _ => None,
+            })
+            .collect()
     }
 
     /// `Tab` into the body pane is an explicit open and marks the message read
@@ -3439,6 +3449,28 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Tab));
         assert_eq!(app.focus, Focus::Preview);
         assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// The queued mark names the row that was opened, so a cursor move landing
+    /// in the same coalesced batch (#0108) cannot redirect it: `Tab` then `J`
+    /// still marks the row `Tab` opened, not the one the cursor ended on.
+    #[test]
+    fn a_queued_mark_read_survives_a_later_cursor_move() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Headers;
+        let opened = app.emails[0].msg.unwrap();
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.list_index, 1, "the cursor moved off the opened row");
+
+        assert_eq!(
+            queued_mark_read_refs(&app),
+            vec![opened],
+            "the mark must name the opened row, not the one under the cursor"
+        );
     }
 
     /// `J` / `K` move the cursor without changing focus, so they are not an

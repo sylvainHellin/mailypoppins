@@ -1178,6 +1178,11 @@ impl App {
     /// row (no `messages` row behind it), a non-message entry, an already-read
     /// row, or a cursor outside the mail view, so a redundant action never
     /// reaches the queue and the mark happens exactly once per open.
+    ///
+    /// The action carries the resolved [`MessageRef`], not an instruction to
+    /// look at the cursor later: with the #0108 drain, a `Tab` and a following
+    /// `J` are applied in one batch and the queue is drained after both, so a
+    /// cursor-resolved mark would write the row the cursor ended on.
     pub(crate) fn queue_mark_open_read(&mut self) {
         if self.view != View::Mail {
             return;
@@ -1186,10 +1191,13 @@ impl App {
             return;
         };
         // A draft row carries no `MessageRef`, so it can never be marked read.
-        if email.read || email.msg.is_none() {
+        let Some(msg) = email.msg else {
+            return;
+        };
+        if email.read {
             return;
         }
-        self.push_action(Action::MarkAsRead);
+        self.push_action(Action::MarkAsRead(msg));
     }
 
     /// Iterate the entries of the current (filtered) view in display

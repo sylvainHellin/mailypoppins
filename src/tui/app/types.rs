@@ -1610,7 +1610,12 @@ pub enum Action {
         dest_idx: usize,
     },
     ToggleRead,
-    MarkAsRead,
+    /// Mark one message read on an explicit open (#0110). Carries the
+    /// [`MessageRef`] the open resolved rather than re-reading the cursor at
+    /// drain time: under the #0108 event coalescing a `Tab` and a `J` land in
+    /// the same batch, and a cursor-resolved mark would write the row the
+    /// cursor ended on instead of the one that was opened.
+    MarkAsRead(MessageRef),
     BatchToggleRead(Vec<MessageRef>),
     /// Toggle the `\Flagged` star on the cursor message (#0007).
     ToggleFlag,
@@ -1790,7 +1795,7 @@ impl Action {
             | Action::BatchDeleteDrafts(_)
             | Action::MoveToMailbox { .. }
             | Action::ToggleRead
-            | Action::MarkAsRead
+            | Action::MarkAsRead(_)
             | Action::BatchToggleRead(_)
             | Action::ToggleFlag
             | Action::BatchToggleFlag(_)
@@ -2343,7 +2348,7 @@ mod tests {
             Action::Fetch,
             Action::Sync,
             Action::ToggleRead,
-            Action::MarkAsRead,
+            Action::MarkAsRead(MessageRef::new(1)),
             Action::ToggleFlag,
             Action::Archive,
             Action::Delete,

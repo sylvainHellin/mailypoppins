@@ -46,6 +46,8 @@ The interim note of [#0108](0108-coalesce-key-events.md) (coalescing marks only 
 
 No `mp --help`, help-overlay or website change was needed: no keymap description and no page under `website/src/pages/` ever claimed a message is marked read automatically.
 
+Follow-up, same day: `Action::MarkAsRead` carries the `MessageRef` the open resolved. It shipped without a payload and `mark_open_read` re-read `selected_email()` at drain time, so under the #0108 coalescing a `Tab` and a `J` in one batch marked the row the cursor ended on instead of the one that was opened. `queue_mark_open_read` and the `Action::EditCurrent` received-row branch now both hand it a ref, matching the `BatchToggleRead(msgs)` shape.
+
 The measurement fields of #0108 are re-taken after this lands.
 
 ## Links

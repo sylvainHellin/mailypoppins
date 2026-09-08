@@ -1138,7 +1138,7 @@ pub(super) fn handle_action(
                 // user comes back to already shows the new state, and before
                 // any reload can read the row back unread (see
                 // lessons-learned, the #0004 ordering trap).
-                mark_open_read(app);
+                mark_open_read(app, msg);
                 return open_readonly_view(app, terminal, msg.row_id());
             }
             // A parse-skipped draft (#0080) has no index row to resolve, so it
@@ -1575,11 +1575,13 @@ pub(super) fn handle_action(
             }
         }
 
-        Action::MarkAsRead => {
+        Action::MarkAsRead(msg) => {
             // The mark that rides on an explicit open (#0110): same path as the
             // manual `u` toggle, no status line of its own. Queued by the two
-            // focus keys, which cannot open a store themselves.
-            mark_open_read(app);
+            // focus keys, which cannot open a store themselves, and carrying
+            // the row they resolved so a later cursor move in the same drained
+            // batch cannot redirect the write (#0108).
+            mark_open_read(app, msg);
         }
 
         Action::BatchToggleRead(msgs) => {
@@ -3328,16 +3330,19 @@ fn set_read_flag(app: &mut App, msgs: Vec<MessageRef>, read: bool) -> bool {
 /// open rather than one per keypress. `u` still toggles either way, and this
 /// never re-marks a row the user toggled back to unread, because it fires only
 /// on the next explicit open.
-fn mark_open_read(app: &mut App) -> bool {
-    let Some(email) = app.selected_email() else {
+///
+/// The message is passed in rather than read off the cursor: the queued
+/// [`Action::MarkAsRead`] is drained after a whole coalesced key batch (#0108),
+/// by which time the cursor may sit on a different row than the one that was
+/// opened. A ref the list no longer holds is a no-op, as is an already-read
+/// one.
+fn mark_open_read(app: &mut App, msg: MessageRef) -> bool {
+    let Some(email) = app.emails.iter().find(|e| e.msg == Some(msg)) else {
         return false;
     };
     if email.read {
         return false;
     }
-    let Some(msg) = email.msg else {
-        return false;
-    };
     set_read_flag(app, vec![msg], true)
 }
 
@@ -3470,12 +3475,20 @@ mod tests {
 
         let mut app = App::default_for_tests();
         app.account_config.name = account.to_string();
-        app.emails = std::sync::Arc::new(vec![entry("Unread", row_id, false)]);
-        app.visible = vec![0];
-        app.list_index = 0;
+        // The cursor sits on a *different* row than the one that was opened,
+        // which is what a `Tab` and a `J` coalesced into one batch produce
+        // (#0108): the mark must follow the ref it was given, not the cursor.
+        app.emails = std::sync::Arc::new(vec![
+            entry("Unread", row_id, false),
+            entry("Moved onto", row_id + 1, false),
+        ]);
+        app.visible = vec![0, 1];
+        app.list_index = 1;
 
-        assert!(mark_open_read(&mut app), "the open marked nothing");
-        assert!(app.selected_email().unwrap().read, "the list row is stale");
+        let msg = MessageRef::new(row_id);
+        assert!(mark_open_read(&mut app, msg), "the open marked nothing");
+        assert!(app.emails[0].read, "the opened list row is stale");
+        assert!(!app.emails[1].read, "the row under the cursor was marked");
 
         let store = crate::store::open_store(account).unwrap();
         assert!(crate::store::read::find_by_id(&store, row_id)
@@ -3494,7 +3507,10 @@ mod tests {
         );
         drop(store);
 
-        assert!(!mark_open_read(&mut app), "an already-read row re-marked");
+        assert!(
+            !mark_open_read(&mut app, msg),
+            "an already-read row re-marked"
+        );
         let store = crate::store::open_store(account).unwrap();
         assert_eq!(
             crate::pending_ops::queued_ops(&store, account).unwrap().len(),
