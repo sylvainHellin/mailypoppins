@@ -7,6 +7,8 @@ status: done
 created: 2026-08-14
 ---
 
+> **Reversed by [#0110](0110-retire-auto-mark-read.md) (2026-09-08).** The trigger described below, the list cursor landing on a new row, marked every row a `j` / `k` walk passed over and queued a `\Seen` op for each. The read bit still converges on open, but the open now has to be one the user performed: `Enter` / `e`, or a focus move into the body pane. Everything about the write path (the `MarkAsRead` arm, `set_read_flag`, the durable queue) survives unchanged; only the trigger went. The text below is kept as the record of what shipped.
+
 Reading a message never changes its read state.
 The read bit moves only through the explicit `m` key (`ToggleRead` -> `apply_set_read`, `src/tui/app/mutations.rs:123`); opening the read-only editor copy or scrolling the preview does not touch it (UX audit §b.1).
 Triaging a full inbox therefore means pressing `m` on every message, which no mainstream client asks of the user.

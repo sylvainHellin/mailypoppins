@@ -9,7 +9,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use super::app::{
     entry_from_row, mailbox_key, status_for_mailbox, Action, App, BgResult, ComposeField,
     ComposeMode, ComposeWizard, Focus, HeldSend, MailboxKind, MessageRef, Overlay,
-    SearchOverlayFocus, SearchResultEntry, StatusLevel, View,
+    SearchOverlayFocus, SearchResultEntry, StatusLevel,
 };
 use super::helpers::{
     edit_file, lib_do_multi_search_graph, lib_do_sync_graph, resume_terminal, suspend_terminal,
@@ -1133,6 +1133,12 @@ pub(super) fn handle_action(
             // `$EDITOR` writable, with the index refreshed afterwards so the
             // list shows what the user just typed.
             if let Some(msg) = app.selected_email_ref() {
+                // Opening a message is the explicit read (#0110). Marked
+                // before the terminal is handed to `$EDITOR` so the list the
+                // user comes back to already shows the new state, and before
+                // any reload can read the row back unread (see
+                // lessons-learned, the #0004 ordering trap).
+                mark_open_read(app);
                 return open_readonly_view(app, terminal, msg.row_id());
             }
             // A parse-skipped draft (#0080) has no index row to resolve, so it
@@ -1570,17 +1576,10 @@ pub(super) fn handle_action(
         }
 
         Action::MarkAsRead => {
-            // The auto-mark that rides on opening an email: same path, no
-            // status line of its own.
-            if let Some(email) = app.selected_email() {
-                if email.read {
-                    return Ok(());
-                }
-                let Some(msg) = email.msg else {
-                    return Ok(());
-                };
-                set_read_flag(app, vec![msg], true);
-            }
+            // The mark that rides on an explicit open (#0110): same path as the
+            // manual `u` toggle, no status line of its own. Queued by the two
+            // focus keys, which cannot open a store themselves.
+            mark_open_read(app);
         }
 
         Action::BatchToggleRead(msgs) => {
@@ -3313,35 +3312,30 @@ fn set_read_flag(app: &mut App, msgs: Vec<MessageRef>, read: bool) -> bool {
     true
 }
 
-/// Auto-mark the message shown in the preview pane as read (#0087).
+/// Mark the message under the cursor read because the user opened it (#0110).
 ///
-/// The trigger is opening a message into the preview, with no dwell timer
-/// (owner decision, 2026-08-14). [`App::take_message_to_auto_mark_read`] yields
-/// the message once per open and skips drafts and already-read rows, and this
-/// reuses the manual [`set_read_flag`] path, so the local write and the owed
+/// The trigger is an explicit open: `Enter` / `e`, or a focus move into the
+/// body pane. This reverses #0087, whose trigger was merely showing a row in
+/// the preview, so a `j` / `k` walk down an unread inbox now leaves it unread
+/// and queues no `\Seen` ops.
+///
+/// Reuses the manual [`set_read_flag`] path, so the local write and the owed
 /// `\Seen` op commit together (#0039) and converge on the next sync (#0004)
-/// rather than opening a second write path. Returns whether a row was marked,
-/// so the caller can force a repaint.
+/// rather than opening a second write path. Returns whether a row was marked.
 ///
-/// Only the plain mail view shows a message in the preview pane: a calendar or
-/// contacts cursor, or any modal overlay, is not an open, so this is a no-op
-/// there and does not disturb the once-per-open tracker. An input-owning focus
-/// is not an open either: while `/` filters the list, every keystroke narrows
-/// `visible` and resets the cursor to the new top row, and marking each
-/// transient top result read would commit `\Seen` ops for messages the user
-/// only filtered past. The row the cursor lands on when the input is left
-/// counts as the open instead.
-pub(crate) fn auto_mark_open_read(app: &mut App) -> bool {
-    if app.view != View::Mail
-        || app.overlay.is_active()
-        || matches!(
-            app.focus,
-            crate::tui::app::Focus::Search | crate::tui::app::Focus::ComposeWizard
-        )
-    {
+/// A Drafts row carries no [`MessageRef`] and an already-read row has nothing
+/// to write, so both are no-ops and the mark costs one store open per genuine
+/// open rather than one per keypress. `u` still toggles either way, and this
+/// never re-marks a row the user toggled back to unread, because it fires only
+/// on the next explicit open.
+fn mark_open_read(app: &mut App) -> bool {
+    let Some(email) = app.selected_email() else {
+        return false;
+    };
+    if email.read {
         return false;
     }
-    let Some(msg) = app.take_message_to_auto_mark_read() else {
+    let Some(msg) = email.msg else {
         return false;
     };
     set_read_flag(app, vec![msg], true)
@@ -3426,6 +3420,89 @@ mod tests {
         }
     }
 
+    /// The mark that rides on an explicit open (#0110) is a real mutation, not
+    /// an intent: the store row gains `\Seen` and exactly one `SetRead` op is
+    /// owed to the server, because it goes through the same `set_read_flag` the
+    /// manual `u` toggle uses (#0039). A second call over the same row is a
+    /// no-op, so re-opening does not queue a duplicate op.
+    #[test]
+    fn opening_a_message_marks_it_read_and_queues_one_server_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let _data_dir = crate::config::test_env::DataDirOverride::set(dir.path());
+
+        // `set_read_flag` resolves the store from the account name rather than
+        // being handed one, so the store has to sit where `open_store` looks.
+        let account = "alice";
+        std::fs::create_dir_all(crate::config::account_dir(account)).unwrap();
+        let store = crate::store::Store::open(crate::config::store_path(account)).unwrap();
+        let blobs = BlobStore::for_account(account);
+        let email = crate::parse::FetchedEmail {
+            from: "Sender <s@example.com>".into(),
+            to: "me@example.com".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: "Unread".into(),
+            date: "Mon, 20 Jul 2026 09:00:00 +0000".into(),
+            body_text: "Hello.".into(),
+            html_body: None,
+            has_attachments: false,
+            message_id: Some("<inbox-1@example.com>".into()),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        let row_id = crate::ingest::ingest_message(
+            &store,
+            &blobs,
+            &crate::ingest::IngestInput {
+                account,
+                mailbox: "inbox",
+                uid: 1,
+                email: &email,
+                raw: None,
+            },
+        )
+        .unwrap()
+        .row_id;
+        drop(store);
+
+        let mut app = App::default_for_tests();
+        app.account_config.name = account.to_string();
+        app.emails = std::sync::Arc::new(vec![entry("Unread", row_id, false)]);
+        app.visible = vec![0];
+        app.list_index = 0;
+
+        assert!(mark_open_read(&mut app), "the open marked nothing");
+        assert!(app.selected_email().unwrap().read, "the list row is stale");
+
+        let store = crate::store::open_store(account).unwrap();
+        assert!(crate::store::read::find_by_id(&store, row_id)
+            .unwrap()
+            .unwrap()
+            .is_read());
+        let queued = crate::pending_ops::queued_ops(&store, account).unwrap();
+        assert_eq!(queued.len(), 1, "expected exactly one owed server op");
+        assert_eq!(
+            queued[0].op,
+            crate::ops::ServerOp::SetRead {
+                message_id: "<inbox-1@example.com>".to_string(),
+                mailbox: "INBOX".to_string(),
+                read: true,
+            }
+        );
+        drop(store);
+
+        assert!(!mark_open_read(&mut app), "an already-read row re-marked");
+        let store = crate::store::open_store(account).unwrap();
+        assert_eq!(
+            crate::pending_ops::queued_ops(&store, account).unwrap().len(),
+            1,
+            "re-opening queued a duplicate op"
+        );
+    }
+
     /// The agenda is only rebuilt when a mutation actually touched an invite,
     /// which is read off the list rows *before* they are removed.
     #[test]
@@ -3440,52 +3517,6 @@ mod tests {
         assert!(any_invite(&app, &[MessageRef::new(2), MessageRef::new(1)]));
         assert!(!any_invite(&app, &[MessageRef::new(2)]));
         assert!(!any_invite(&app, &[MessageRef::new(404)]));
-    }
-
-    /// Auto-mark-read (#0087) only fires in the plain mail view: a Calendar or
-    /// Contacts cursor does not show a message in the preview pane, so opening
-    /// nothing there neither marks a row nor arms the once-per-open tracker.
-    #[test]
-    fn auto_mark_open_read_is_a_no_op_outside_the_mail_view() {
-        let mut app = App::default_for_tests();
-        app.emails = std::sync::Arc::new(vec![entry("Unread", 1, false)]);
-        app.visible = vec![0];
-        app.list_index = 0;
-        app.view = View::Calendar;
-
-        assert!(!auto_mark_open_read(&mut app));
-        assert!(app.auto_read_opened.is_none(), "the tracker was not armed");
-    }
-
-    /// Auto-mark-read (#0087) does not fire while a modal overlay is up: an
-    /// open thread, search or help overlay is what the user is reading, not the
-    /// preview beneath it.
-    #[test]
-    fn auto_mark_open_read_is_a_no_op_under_an_overlay() {
-        let mut app = App::default_for_tests();
-        app.emails = std::sync::Arc::new(vec![entry("Unread", 1, false)]);
-        app.visible = vec![0];
-        app.list_index = 0;
-        app.overlay = Overlay::Help;
-
-        assert!(!auto_mark_open_read(&mut app));
-        assert!(app.auto_read_opened.is_none(), "the tracker was not armed");
-    }
-
-    /// Auto-mark-read (#0087) does not fire while the inline filter owns the
-    /// input: each `/` keystroke narrows `visible` and resets the cursor to
-    /// the new top row, and marking those transient top results read would
-    /// commit `\Seen` ops for messages the user only filtered past.
-    #[test]
-    fn auto_mark_open_read_is_a_no_op_while_the_filter_owns_the_input() {
-        let mut app = App::default_for_tests();
-        app.emails = std::sync::Arc::new(vec![entry("Unread", 1, false)]);
-        app.visible = vec![0];
-        app.list_index = 0;
-        app.focus = crate::tui::app::Focus::Search;
-
-        assert!(!auto_mark_open_read(&mut app));
-        assert!(app.auto_read_opened.is_none(), "the tracker was not armed");
     }
 
     // -----------------------------------------------------------------------

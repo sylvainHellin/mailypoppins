@@ -299,6 +299,11 @@ impl App {
                     Focus::Search => Focus::List,
                     Focus::ComposeWizard => Focus::ComposeWizard,
                 };
+                // Landing in the body pane is an explicit "I am reading this"
+                // and marks the message read (#0110).
+                if self.focus == Focus::Preview {
+                    self.queue_mark_open_read();
+                }
             }
             A::FocusBackward => {
                 self.pending_prefix = None;
@@ -310,6 +315,9 @@ impl App {
                     Focus::Search => Focus::List,
                     Focus::ComposeWizard => Focus::ComposeWizard,
                 };
+                if self.focus == Focus::Preview {
+                    self.queue_mark_open_read();
+                }
             }
             A::SwitchView => {
                 // `Space m/c/a`: the continuation key selects the target view.
@@ -3361,60 +3369,108 @@ mod tests {
         );
     }
 
-    /// Opening an unread message into the preview yields it once (#0087): the
-    /// first call over a new selection returns the message, and a second call
-    /// over the same selection -- a scroll, an idle tick, any redraw -- is a
-    /// no-op, so the mutation and its `\Seen` write fire once per open.
+    // -----------------------------------------------------------------------
+    // Mark-read on an explicit open (#0110, reversing #0087)
+    // -----------------------------------------------------------------------
+
+    fn queued_mark_reads(app: &App) -> usize {
+        app.pending_actions
+            .iter()
+            .filter(|a| matches!(a, Action::MarkAsRead))
+            .count()
+    }
+
+    /// `Tab` into the body pane is an explicit open and marks the message read
+    /// (#0110). The intermediate stop on the headers pane is not: only the
+    /// keypress that lands on `Focus::Preview` queues the mutation, and it
+    /// queues exactly one.
     #[test]
-    fn opening_an_unread_message_yields_it_once() {
+    fn tab_into_the_body_pane_queues_one_mark_read() {
         let mut app = app_with_emails(sample());
         app.list_index = 0;
-        let opened = app.selected_email().unwrap().msg;
+        assert_eq!(app.focus, Focus::List);
 
-        assert_eq!(app.take_message_to_auto_mark_read(), opened);
-        // A preview scroll does not move the list cursor, so re-checking is a
-        // no-op: the message is not re-marked.
-        app.preview_scroll = 5;
-        assert_eq!(app.take_message_to_auto_mark_read(), None);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Headers);
+        assert_eq!(queued_mark_reads(&app), 0, "headers is not an open");
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 1);
     }
 
-    /// Moving the cursor to another message re-arms the auto-mark (#0087): each
-    /// distinct open fires once.
+    /// `Shift+Tab` reaches the body pane from the sidebar, and marks read there
+    /// for the same reason (#0110).
     #[test]
-    fn moving_to_another_message_re_arms_the_auto_mark() {
+    fn shift_tab_into_the_body_pane_queues_one_mark_read() {
         let mut app = app_with_emails(sample());
         app.list_index = 0;
-        let first = app.selected_email().unwrap().msg;
-        assert_eq!(app.take_message_to_auto_mark_read(), first);
+        app.focus = Focus::Sidebar;
 
-        app.list_index = 1;
-        let second = app.selected_email().unwrap().msg;
-        assert_ne!(first, second);
-        assert_eq!(app.take_message_to_auto_mark_read(), second);
+        app.handle_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 1);
     }
 
-    /// A Drafts row has no `messages` row behind it, so it can never be marked
-    /// read on open (#0087, scope item 3).
+    /// An already-read row has nothing to write, so focusing the body pane on
+    /// it queues nothing at all rather than a no-op action that would still
+    /// cost a store open in `actions.rs` (#0110).
     #[test]
-    fn a_draft_row_is_never_auto_marked() {
-        let mut app = app_with_emails(vec![draft_entry("aaa", "One")]);
-        app.list_index = 0;
-        assert_eq!(app.take_message_to_auto_mark_read(), None);
-    }
-
-    /// An already-read message is a no-op on open (#0087, scope item 3), and
-    /// opening it still records the open, so it is not re-considered while it
-    /// stays under the cursor.
-    #[test]
-    fn an_already_read_message_is_not_auto_marked() {
+    fn focusing_the_body_pane_on_a_read_message_queues_nothing() {
         let mut read_row = entry("Read already", "Alice");
         read_row.read = true;
         let mut app = app_with_emails(vec![read_row]);
         app.list_index = 0;
-        assert_eq!(app.take_message_to_auto_mark_read(), None);
-        // The open was recorded, so a manual `m`-to-unread that follows is not
-        // undone by a re-check over the same selection.
-        assert_eq!(app.take_message_to_auto_mark_read(), None);
+        app.focus = Focus::Headers;
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// A Drafts row has no `messages` row behind it, so it can never be marked
+    /// read however the body pane is reached (#0110).
+    #[test]
+    fn focusing_the_body_pane_on_a_draft_queues_nothing() {
+        let mut app = app_with_emails(vec![draft_entry("aaa", "One")]);
+        app.list_index = 0;
+        app.focus = Focus::Headers;
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// `J` / `K` move the cursor without changing focus, so they are not an
+    /// open and mark nothing (#0110, Decision D1). This is the whole point of
+    /// the reversal: walking an unread inbox leaves it unread.
+    #[test]
+    fn next_message_queues_no_mark_read() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.list_index, 1);
+        assert_eq!(app.focus, Focus::List, "J must not move focus");
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// Coming back to Mail from Contacts restores the saved focus, which may be
+    /// the body pane. That restore is not an open (#0110): triggering there
+    /// would re-mark a message the user had manually `u`-toggled to unread
+    /// every time they left and returned.
+    #[test]
+    fn returning_to_the_mail_view_with_the_body_focused_queues_nothing() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Preview;
+
+        app.switch_view(View::Contacts);
+        app.pending_actions.clear();
+        app.switch_view(View::Mail);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 0);
     }
 
     #[test]

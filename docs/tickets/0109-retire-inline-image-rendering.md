@@ -51,4 +51,4 @@ The measurement fields of [#0108](0108-coalesce-key-events.md) are re-taken afte
 
 - Plan: [docs/plans/preview-latency.md](../plans/preview-latency.md), Ticket B and Decision D2.
 - Reverses: [#0010](0010-inline-image-rendering.md).
-- Sibling tickets from the same plan: A ([#0108](0108-coalesce-key-events.md), shipped), C (retire auto-mark-read, reverses [#0087](0087-auto-mark-read-on-open.md)), D (retire the rich HTML render, reverses [#0091](0091-html-to-text-rendering.md)).
+- Sibling tickets from the same plan: A ([#0108](0108-coalesce-key-events.md), shipped), C ([#0110](0110-retire-auto-mark-read.md), retiring auto-mark-read, shipped), D (retire the rich HTML render, reverses [#0091](0091-html-to-text-rendering.md)).

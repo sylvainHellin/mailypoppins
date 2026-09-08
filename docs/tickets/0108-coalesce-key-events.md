@@ -45,10 +45,11 @@ Event order is preserved, which is what `pending_prefix` (the `g` and `c` leader
 
 `Action::suspends_terminal()` is explicit scope of this ticket: an exhaustive match, no wildcard arm, so a new action has to be classified rather than defaulting to "safe to batch".
 
-### Interim behaviour change
+### Interim behaviour change (spent since [#0110](0110-retire-auto-mark-read.md))
 
-`auto_mark_open_read` runs once per loop iteration, so coalescing twenty keypresses into one iteration marks only the final row of the batch read instead of all twenty.
-That is expected between A and C (C retires auto-mark-read entirely), not a regression, and it is recorded here so a bisect does not read it as one.
+`auto_mark_open_read` ran once per loop iteration, so coalescing twenty keypresses into one iteration marked only the final row of the batch read instead of all twenty.
+That was expected between A and C, not a regression, and it is recorded here so a bisect of that window does not read it as one.
+Ticket C retired auto-mark-read outright, so from #0110 onward the drain has no mark to coalesce away.
 
 ## Measurement
 

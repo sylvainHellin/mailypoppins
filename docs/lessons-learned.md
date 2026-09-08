@@ -120,7 +120,7 @@ The first version of `inject_csp_meta` located the insertion point via `lower.fi
 
 ## Background mailbox loads need a generation counter, not just index checks
 
-Moving `load_emails` off the UI thread (P1 step 2) looks like a pure "compare account/mailbox indices on arrival" problem, but two subtler races make index equality insufficient. (1) **Optimistic mutations**: archive/delete remove the entry from `app.emails` *before* the server confirms; a directory walk that started before the file actually moved would resurrect the removed email when its result lands -- indices still match, so only a generation bump in `remove_selected_from_list{,_batch}` catches it. (2) **Reload storms**: successive reloads of the *same* mailbox (fetch result + editor return) can complete out of order; the older walk's snapshot must not clobber the newer one. `App::mailbox_load_generation` is bumped on every `request_mailbox_load` and every optimistic mutation; `BgResult::MailboxLoaded` is applied only when indices *and* generation match (`mailbox_loaded_is_current` in `src/tui/bg.rs`). Stale results also must NOT populate `email_cache` -- the slot stays `None` so the next visit reloads. Related ordering trap: in `Action::EditCurrent` the auto `MarkAsRead` must be queued *before* `reload_current_mailbox`, otherwise the background walk can read the file before the read-flag write and the fresh list briefly shows it unread again.
+Moving `load_emails` off the UI thread (P1 step 2) looks like a pure "compare account/mailbox indices on arrival" problem, but two subtler races make index equality insufficient. (1) **Optimistic mutations**: archive/delete remove the entry from `app.emails` *before* the server confirms; a directory walk that started before the file actually moved would resurrect the removed email when its result lands -- indices still match, so only a generation bump in `remove_selected_from_list{,_batch}` catches it. (2) **Reload storms**: successive reloads of the *same* mailbox (fetch result + editor return) can complete out of order; the older walk's snapshot must not clobber the newer one. `App::mailbox_load_generation` is bumped on every `request_mailbox_load` and every optimistic mutation; `BgResult::MailboxLoaded` is applied only when indices *and* generation match (`mailbox_loaded_is_current` in `src/tui/bg.rs`). Stale results also must NOT populate `email_cache` -- the slot stays `None` so the next visit reloads. Related ordering trap: in `Action::EditCurrent` the `MarkAsRead` that rides on the open must land *before* `reload_current_mailbox`, otherwise the background walk can read the file before the read-flag write and the fresh list briefly shows it unread again.
 
 ## Arc-cached email lists: release the cache slot's strong ref before `Arc::make_mut`
 
@@ -128,7 +128,7 @@ The P2 refactor shares one `Arc<Vec<EmailEntry>>` between `App::emails` and the 
 
 ## Bidirectional read-status sync: server snapshots go stale in flight, and coverage windows must not shrink
 
-Ticket #0004 ("read status resets after fetch; \Seen sync unreliable") turned out to be three independent bugs. (1) **Snapshot clobber**: sync captures server `\Seen`/`isRead` flags in pass 1, then applies them to local frontmatter seconds later; any local mark made *during* that window (auto-mark-on-preview, `m` -- exactly what a user does while a startup auto-fetch or IDLE-triggered sync runs) was silently reverted to the older server state. The fix is a snapshot-staleness guard, **not** a 3-way merge: `sync_local_read_flags{,_with_index}` takes a `snapshot_cutoff` captured *before* the server read, and skips any file whose mtime is at-or-after `cutoff - 1s` (slack for coarse filesystem mtime granularity; erring toward skipping is safe, the file just converges next sync). The skipped file's own local→server propagation is already in flight, so state converges. If both-sides-changed-while-the-app-was-closed conflicts ever matter, the upgrade path is tracking last-synced state per message (true 3-way merge) -- deliberately not built now to avoid a new persistent format. (2) **Probe fast path shrank flag coverage to 10 messages**: the adaptive probe returned early when the newest 10 UIDs were all known, so with no new mail (the common case) webmail read/unread changes on anything older never reached local files. Pass 1 header+FLAGS over the full 100-message window costs ~10 KB; the probe's saving was one small FETCH, so it was removed rather than patched -- if you reintroduce a probe, it may only skip pass **2** (bodies), never pass 1's flag collection. (3) **Graph path substring-matched read state**: `content.contains("read: true")` matched body text too (any email *quoting* that string could never sync unread→read) and diverged from the IMAP path's frontmatter parser; both backends now share the same frontmatter-aware, cutoff-guarded helper. Regression seam: `sync_local_read_flags` is the single choke point both orchestrators feed (IMAP pass-1 flags, Graph `fetch_message_ids`), so `tests/sync_integration.rs` covers both backends by testing it directly.
+Ticket #0004 ("read status resets after fetch; \Seen sync unreliable") turned out to be three independent bugs. (1) **Snapshot clobber**: sync captures server `\Seen`/`isRead` flags in pass 1, then applies them to local frontmatter seconds later; any local mark made *during* that window (the mark that rides on an open, `m` -- exactly what a user does while a startup auto-fetch or IDLE-triggered sync runs) was silently reverted to the older server state. The fix is a snapshot-staleness guard, **not** a 3-way merge: `sync_local_read_flags{,_with_index}` takes a `snapshot_cutoff` captured *before* the server read, and skips any file whose mtime is at-or-after `cutoff - 1s` (slack for coarse filesystem mtime granularity; erring toward skipping is safe, the file just converges next sync). The skipped file's own local→server propagation is already in flight, so state converges. If both-sides-changed-while-the-app-was-closed conflicts ever matter, the upgrade path is tracking last-synced state per message (true 3-way merge) -- deliberately not built now to avoid a new persistent format. (2) **Probe fast path shrank flag coverage to 10 messages**: the adaptive probe returned early when the newest 10 UIDs were all known, so with no new mail (the common case) webmail read/unread changes on anything older never reached local files. Pass 1 header+FLAGS over the full 100-message window costs ~10 KB; the probe's saving was one small FETCH, so it was removed rather than patched -- if you reintroduce a probe, it may only skip pass **2** (bodies), never pass 1's flag collection. (3) **Graph path substring-matched read state**: `content.contains("read: true")` matched body text too (any email *quoting* that string could never sync unread→read) and diverged from the IMAP path's frontmatter parser; both backends now share the same frontmatter-aware, cutoff-guarded helper. Regression seam: `sync_local_read_flags` is the single choke point both orchestrators feed (IMAP pass-1 flags, Graph `fetch_message_ids`), so `tests/sync_integration.rs` covers both backends by testing it directly.
 
 ## In-place YAML frontmatter rewriting (2026-07-11)
 
@@ -976,17 +976,31 @@ read open, so which thread the open runs on is irrelevant to it. The rebuild /
 salvage path (#0066) lives inside `Store::open` and simply runs on whichever
 thread opened the store, foreground or background.
 
-Auto-mark-read on open (#0087) needed no new mutation path: the `MarkAsRead`
-action arm and its `set_read_flag` -> `queue_read_flag` -> `apply_set_read` route
-already existed in `actions.rs`, fully wired to the durable queue, but nothing
-ever dispatched the action. The whole ticket was the *trigger*, not the write.
-The trigger lives in the `run_loop` iteration (not in the render pass): the
-preview always shows `selected_email()`, so "opening a message" is just the list
-cursor landing on a new row, and `App::take_message_to_auto_mark_read` fires once
-per open by remembering the last message in `App::auto_read_opened`. Firing from
-render was rejected: `refresh_preview_body` runs under `&mut App` at frame top
-but a store mutation there mixes read-path and write-path concerns, and the loop
-already owns the post-event settling point where the selection is final.
+Mark-read on open needed no new mutation path: the `MarkAsRead` action arm and
+its `set_read_flag` -> `queue_read_flag` -> `apply_set_read` route already
+existed in `actions.rs`, fully wired to the durable queue, but nothing ever
+dispatched the action. Both #0087 and its reversal #0110 were entirely about the
+*trigger*, not the write.
+
+#0087 put the trigger in the `run_loop` iteration: the preview always shows
+`selected_email()`, so "opening a message" was the list cursor landing on a new
+row, fired once per open by remembering the last message in
+`App::auto_read_opened`. That premise is what made the feature wrong, and
+#0110 reversed it: with a preview that follows the cursor, there is *no* cursor
+move that is not an open, so a `j` / `k` walk marked a whole inbox read and owed
+a `\Seen` op per row. The trigger is now the keypress that constitutes a
+deliberate open, `Enter` / `e` and a focus move into the body pane, and with it
+the once-per-open tracker disappeared: a trigger that fires on a keypress rather
+than on every loop iteration cannot fire twice for one open.
+
+Two placement rules survive the reversal. Firing from render is wrong:
+`refresh_preview_body` runs under `&mut App` at frame top, but a store mutation
+there mixes read-path and write-path concerns. And a key handler cannot open a
+store, so the two focus arms in `keys.rs` push `Action::MarkAsRead` and let
+`actions.rs` do the write, which is the same route the manual `u` toggle takes.
+The `Enter` / `e` path is hooked on the `Action::EditCurrent` *handler*, not on
+its `KeyAction`, because the handler is where it is known that the row under the
+cursor is a message rather than a draft the open will decline.
 
 HTML-to-text in the preview (#0091) needed no external tool and no new crate:
 `html2text` was already a direct dependency, used at ingest by

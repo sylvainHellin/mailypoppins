@@ -369,14 +369,6 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
                 dirty = true;
             }
         }
-
-        // Auto-mark the message shown in the preview as read (#0087). This runs
-        // after events, background results and actions have settled the
-        // selection, and fires once per open: a scroll or an idle tick over the
-        // same message is a no-op.
-        if actions::auto_mark_open_read(&mut app) {
-            dirty = true;
-        }
     }
 
     Ok(())
