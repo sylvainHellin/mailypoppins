@@ -215,7 +215,11 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
                     current_msg = app.update(m);
                 }
                 batched += 1;
-                if batched >= MAX_COALESCED_EVENTS
+                // A quit ends the drain too: whatever is still queued
+                // belongs to the shell, and a queued `e` after `q` would
+                // otherwise dispatch an editor on the way out.
+                if !app.running
+                    || batched >= MAX_COALESCED_EVENTS
                     || drain_started.elapsed() >= COALESCE_BUDGET
                     || app
                         .pending_actions
