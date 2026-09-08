@@ -1002,6 +1002,15 @@ The `Enter` / `e` path is hooked on the `Action::EditCurrent` *handler*, not on
 its `KeyAction`, because the handler is where it is known that the row under the
 cursor is a message rather than a draft the open will decline.
 
+*Superseded by #0111 (2026-09-08): the rich preview render is retired and the
+pane is back to `wrap_and_style_body` over the plain body. What survives is the
+first finding, that `html2text` was already in the tree and no external tool was
+ever needed, which is why `parse::html_to_plain` still uses it and the `css`
+feature stays in `Cargo.toml`. The rest is history: `render_html_body`,
+`style_for_annotations` and `PreviewHtml` no longer exist. The reason for the
+reversal is the last line of the paragraph, the one MIME parse per selection
+change, which a one-slot memo does not amortise across navigation.*
+
 HTML-to-text in the preview (#0091) needed no external tool and no new crate:
 `html2text` was already a direct dependency, used at ingest by
 `parse::html_to_plain` (`config::plain()`) to flatten HTML for the stored body.

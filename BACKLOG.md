@@ -10,7 +10,7 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 > Audit 2026-08-14, owner decisions across performance, UX/workflow and feature-survey: [synthesis](.agents/research/2026-08-14-audit-synthesis.md). Tickets #0087 to #0100 all shipped in 0.9.0 and after; #0101 is the only survivor, parked under Later.
 
-> Preview latency on list navigation: [plan](docs/plans/preview-latency.md), four tickets in order, each measured before the next starts. Ticket A ([#0108](docs/tickets/0108-coalesce-key-events.md), instrumentation and key-event coalescing), Ticket B ([#0109](docs/tickets/0109-retire-inline-image-rendering.md), retiring inline image rendering) and Ticket C ([#0110](docs/tickets/0110-retire-auto-mark-read.md), retiring auto-mark-read) have shipped; D is not cut yet.
+> Preview latency on list navigation: [plan](docs/plans/preview-latency.md), four tickets in order, each measured before the next starts. All four have shipped: Ticket A ([#0108](docs/tickets/0108-coalesce-key-events.md), instrumentation and key-event coalescing), Ticket B ([#0109](docs/tickets/0109-retire-inline-image-rendering.md), retiring inline image rendering), Ticket C ([#0110](docs/tickets/0110-retire-auto-mark-read.md), retiring auto-mark-read) and Ticket D ([#0111](docs/tickets/0111-retire-rich-html-preview.md), retiring the rich HTML preview render). The post-D measurement decides the plan's cache-and-prefetch contingency.
 
 
 ## Next

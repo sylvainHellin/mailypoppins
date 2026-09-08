@@ -7,6 +7,8 @@ status: done
 created: 2026-08-14
 ---
 
+> **Reversed by [#0111](0111-retire-rich-html-preview.md) (2026-09-08).** Ticket D of [docs/plans/preview-latency.md](../plans/preview-latency.md), Decision D3. The rich render below cost a store open and, on the IMAP path, a full raw-RFC822 read and MIME walk on every cursor move, inside the draw. The preview is back to `wrap_and_style_body` over the plain body that ingest flattened. What is described here is history; `store::read::load_html` stays in the store layer, so restoring the render is re-adding a caller.
+
 HTML-to-readable-text is the main comprehension gap of terminal mail (feature survey §c.10, audit synthesis §3).
 Much real mail is HTML-only or HTML-dominant, and the current rendering is poor for it: `render_body` / `wrap_and_style_body` (`src/tui/ui/preview.rs`) parse inline markdown and word-wrap, which does not handle real-world HTML email well.
 Today the escape hatch is `b`, opening the HTML rendition in a browser.

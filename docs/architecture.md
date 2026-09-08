@@ -271,7 +271,7 @@ Background operations run on threads and report back over an `mpsc` channel as `
 - `ui/` renders from `App` state only.
 It opens no store, runs no SQL and performs no I/O.
 - `app/` is not pure in that sense.
-It opens the account store synchronously to load listings, counts, drafts and the preview body, through `open_store` in `app/types.rs` and nine other call sites across `app/mod.rs` and `app/types.rs`.
+It opens the account store synchronously to load listings, counts, drafts and the preview body, through the handful of `open_store` call sites across `app/types.rs` and `app/mod.rs` (six in production code, one fewer since #0111 deleted `load_message_html`).
 Those reads are local, indexed and memoised, so they cost little today, but a new one is a synchronous disk hit inside the update pass and belongs behind an `Action` if it can be slow.
 What stays absolute is the protocol boundary: no SMTP, IMAP, MIME or Graph code in `app/` or `ui/`.
 - Account state proxy pattern.

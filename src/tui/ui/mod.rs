@@ -77,10 +77,6 @@ pub fn view(app: &mut App, frame: &mut Frame) {
     // key comparison. The invite behind the event card is memoised beside it
     // (#0038 scope item 6) and costs nothing for a message that is not one.
     app.refresh_preview_body();
-    // The HTML rendition behind the preview, on the same memo discipline
-    // (#0091). `None` for plain-only mail and drafts, where the plain body is
-    // rendered instead; loaded once per selection change, never per frame.
-    app.refresh_preview_html();
     app.refresh_preview_invite();
 
     // Bottom row: the herdr-style mode/hint bar (#0032), drawn as a bordered
