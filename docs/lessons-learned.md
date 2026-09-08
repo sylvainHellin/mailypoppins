@@ -925,14 +925,14 @@ to `Vec<Line<'static>>`, no ownership rework.
 Two more traps for that cache. (1) Key it in O(1) or the compare is the cost you
 were removing: comparing the whole body `String` every frame is itself O(body
 length), so `PreviewBody` got a content `epoch` that bumps only on a real
-change, and the cache keys on `(epoch, width, image set)`. The skip-draft and
+change, and the cache keys on `(epoch, width)` (it also carried an image-set
+element until #0109 retired inline images). The skip-draft and
 primed paths refill the same text every frame, so the bump has to be gated on an
 actual `(key, text)` change or the epoch churns and the cache never hits. (2)
 Theme is not a cache key: it is set once at startup through a `OnceLock`
 (`theme::init`) with no in-session switch, so the colors baked into the cached
 lines can never go stale. If a runtime theme toggle is ever added, it must
-invalidate this cache (and the invite/image memos, which also bake theme
-colors).
+invalidate this cache (and the invite memo, which also bakes theme colors).
 
 The dirty-flag redraw (same ticket) has one non-obvious safety point: the
 `watch_rx` `Disconnected` arm re-runs every iteration once it fires (the
@@ -1044,8 +1044,10 @@ The pre-#0037 build wrote a `.html` beside every received `.md` and
 time (see the CSP entry above). The #0037 store-only ingest deleted that
 whole path, and the on-demand browser rendition (`html_rendition_for_row`)
 wrote the html blob verbatim -- so inline images silently regressed to broken
-icons in the browser while the TUI preview, which decodes `cid:` parts
-itself, kept working. The rendition now inlines each referenced image part
+icons in the browser while the TUI preview, which decoded `cid:` parts itself
+back then, kept working (that preview path is gone since #0109; only the
+browser rendition decodes `cid:` now). The rendition now inlines each
+referenced image part
 as a `data:` URI (`parse::embed_inline_images`), which needs no extracted
 files and keeps the page self-contained. When a legacy path is nuked, grep
 the lessons in this file for behaviours it carried: the charset meta and CSP

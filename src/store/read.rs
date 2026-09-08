@@ -638,8 +638,9 @@ pub fn load_html(store: &Store, blobs: &BlobStore, message_row: i64) -> Option<S
 /// The raw RFC822 bytes of one message, or `None` when it has none.
 ///
 /// Only the IMAP path stores them: a Graph row has no RFC822 at all (#0042),
-/// so a caller that needs the MIME tree, like the preview's inline-image scan
-/// (#0010), gets `None` there and must degrade rather than guess.
+/// so a caller that needs the MIME tree, like the `b` / `tb` browser
+/// rendition's inline-image scan, gets `None` there and must degrade rather
+/// than guess.
 pub fn load_raw(store: &Store, blobs: &BlobStore, message_row: i64) -> Option<Vec<u8>> {
     let hash: Option<String> = store
         .conn()

@@ -966,10 +966,10 @@ pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
 
 /// Hard ceiling on the decoded bytes of one inline image part.
 ///
-/// The preview decodes these on the render pass's thread, so an image nobody
-/// would want to look at in a terminal cell grid is skipped rather than paid
-/// for. Eight megabytes is far above any real logo or screenshot and far below
-/// anything that would stall a frame.
+/// The `b` / `tb` browser rendition decodes these to embed them as `data:`
+/// URIs, so an image large enough to bloat the page past what a browser wants
+/// to load is skipped rather than paid for. Eight megabytes is far above any
+/// real logo or screenshot and far below anything that would stall the open.
 pub const MAX_INLINE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 /// One image part of a message that the HTML body actually points at.

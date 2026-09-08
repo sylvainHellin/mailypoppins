@@ -91,7 +91,7 @@ pub struct App {
     /// same way (#0038 scope item 6). See [`PreviewInvite`].
     pub preview_invite: PreviewInvite,
     /// The wrapped/styled lines behind the preview pane, memoised by
-    /// `(body epoch, pane width, image set)` (#0093). Rebuilt from
+    /// `(body epoch, pane width)` (#0093, narrowed in #0109). Rebuilt from
     /// [`App::preview_body`] only when one of those moves, so a scroll or an
     /// unrelated keypress reuses the parse instead of redoing it. Refreshed
     /// inside [`crate::tui::ui::preview::render_body`], the one place that

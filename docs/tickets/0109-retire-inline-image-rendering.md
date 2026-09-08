@@ -27,13 +27,13 @@ Delete the feature, the module and its two dependencies. Nothing is replaced.
 - `src/tui/images.rs` goes whole, with its `mod` declaration and the `images::init()` capability probe in `tui::run`. The TUI no longer queries the terminal for a graphics protocol at startup.
 - `ratatui-image` and `image` leave `Cargo.toml`; they had no other call sites.
 
-What stays: `parse::inline_images` and `parse::embed_inline_images`, which the browser path and the `.html` companion depend on and which are one word away from the deleted `load_inline_images`; attachment names in the headers pane (`is_attachment_part` and the paperclip line of #0096 are untouched); and `store::read::load_html`, still read by `b` / `tb` and, until Ticket D, by `refresh_preview_html`.
+What stays: `parse::inline_images` and `parse::embed_inline_images`, which the browser path and the `.html` companion depend on and which are one word away from the deleted `load_inline_images`; the attachment affordance (`is_attachment_part` and the `Attach:` paperclip line of #0096 are untouched; the pane shows only that marker, and the names live in the `to` / `ts` overlay); and `store::read::load_html`, still read by `b` / `tb` and, until Ticket D, by `refresh_preview_html`.
 
 ## Acceptance
 
 - No image-attributable store read, MIME walk or base64 decode occurs for a row with attachments. The absolute form of that ("one store open per keypress") belongs to Ticket D: `refresh_preview_html` still opens a store and still walks the raw MIME tree between B and D.
 - `b` / `tb` still renders inline images in the browser.
-- Attachment names still appear in the headers pane.
+- The headers pane still shows its `Attach:` paperclip line, and `to` / `ts` still list the attachments by name.
 - `cargo test` passes with the four image tests, their `tiny_image` / `drawable` fixtures, the `golden_mail_view_inline_image_placeholders` golden and its snapshot file deleted.
 - No `ratatui_image::` or `image::` reference survives outside `Cargo.lock`.
 
