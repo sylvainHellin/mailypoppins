@@ -38,6 +38,23 @@ use crate::store::drafts;
 /// watcher is a new dependency the ticket deliberately defers.
 const DRAFTS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How many terminal events one iteration folds into a single paint (#0108).
+///
+/// Sized for a held key: at a fast 40/s repeat rate against a ~50 ms frame,
+/// a batch is a handful of events, so 64 is far above the normal case and
+/// only bites on a flood (a bracketed paste, a stuck key). Past that the loop
+/// paints and comes straight back for the rest, which keeps the screen
+/// responsive instead of frozen behind an unbounded drain.
+const MAX_COALESCED_EVENTS: usize = 64;
+
+/// Wall-clock ceiling on one drain (#0108), the second half of the bound.
+///
+/// The batch cap alone is not enough: `app.update` on a cursor move does real
+/// work (mailbox reload, selection recompute), so 64 slow events could hold
+/// the paint for a noticeable time. 50 ms is about three frames at 60 Hz and
+/// well under the ~100 ms at which input stops feeling immediate.
+const COALESCE_BUDGET: Duration = Duration::from_millis(50);
+
 /// Machine-readable dump of the TUI keymap (`mp dump-keys`), used to
 /// regenerate the website key table from the single `KEYMAP` source.
 pub fn dump_keys() -> String {
@@ -169,9 +186,45 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
         }
 
         if let Some(msg) = event::poll_event()? {
-            let mut current_msg = Some(msg);
-            while let Some(m) = current_msg {
-                current_msg = app.update(m);
+            // Drain whatever else is already queued before painting (#0108).
+            //
+            // A held `j` repeats faster than one loop iteration costs, so the
+            // old one-event-per-paint contract made the cursor lag the key by
+            // the whole backlog, each frame paying a full preview rebuild. The
+            // backlog is now folded into the model first and painted once.
+            //
+            // The drain is incremental rather than a bulk read, and that is
+            // load-bearing: whether a key yields a terminal-suspending action
+            // is a property of `pending_actions` *after* `app.update`, since it
+            // depends on `pending_prefix`, focus, the active overlay and the
+            // per-action guards. Once an event has left the kernel tty buffer
+            // it cannot be put back, and `suspend_terminal` hands stdin
+            // straight to `$EDITOR`, so draining past such an action would eat
+            // the first keystrokes of the editing session instead of
+            // delivering them.
+            //
+            // Bounded twice so a flooded queue (a paste, a stuck key, a mouse
+            // reporting terminal) cannot starve the paint: the screen is never
+            // more than one batch stale.
+            let drain_started = Instant::now();
+            let mut batched = 0usize;
+            let mut next = Some(msg);
+            while let Some(msg) = next.take() {
+                let mut current_msg = Some(msg);
+                while let Some(m) = current_msg {
+                    current_msg = app.update(m);
+                }
+                batched += 1;
+                if batched >= MAX_COALESCED_EVENTS
+                    || drain_started.elapsed() >= COALESCE_BUDGET
+                    || app
+                        .pending_actions
+                        .iter()
+                        .any(app::Action::suspends_terminal)
+                {
+                    break;
+                }
+                next = event::poll_pending_event()?;
             }
             // Any input -- keypress or resize -- can change what is shown.
             dirty = true;

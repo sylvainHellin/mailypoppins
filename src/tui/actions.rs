@@ -3372,6 +3372,37 @@ mod tests {
     use super::*;
     use crate::tui::app::EmailEntry;
 
+    /// Every `edit_file` call site in this file must be reachable only from an
+    /// action that `Action::suspends_terminal` returns true for (#0108): the
+    /// event drain in `run_loop` stops on such an action so that the keystrokes
+    /// still sitting in the tty buffer reach `$EDITOR` rather than being
+    /// swallowed by the app.
+    ///
+    /// The mapping cannot be checked by the compiler, so this is a tripwire on
+    /// the count. When it fails, a call site was added or removed: re-derive
+    /// which `Action` reaches it, update `Action::suspends_terminal` in
+    /// `src/tui/app/types.rs`, then update the number below.
+    ///
+    /// The needle is assembled at runtime so this test's own source does not
+    /// contain it and does not count itself.
+    #[test]
+    fn edit_file_call_sites_are_accounted_for() {
+        let needle: String = ["edit_", "file("].concat();
+        let source = include_str!("actions.rs");
+        let sites: Vec<usize> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(&needle))
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert_eq!(
+            sites.len(),
+            10,
+            "the number of {needle}) call sites changed (now at lines {sites:?}); \
+             re-derive the Action::suspends_terminal mapping before updating this count"
+        );
+    }
+
     fn entry(subject: &str, id: i64, is_invite: bool) -> EmailEntry {
         EmailEntry {
             msg: Some(MessageRef::new(id)),

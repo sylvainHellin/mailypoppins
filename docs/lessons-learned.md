@@ -1113,3 +1113,20 @@ wizard now carries a `signature_edited` flag that `edit_compose_signature` sets
 on a successful `$EDITOR` return, and `ComposeWizard::signature_needs_respice`
 ORs it into the comparison. Any guard phrased as "the identifier changed" needs
 revisiting the moment the thing it identifies becomes mutable in place.
+
+## A key-event drain has to be incremental, not a bulk read (2026-09-08)
+
+Coalescing crossterm events before a paint (#0108) looks like a job for "read
+everything the queue has, apply it all, draw once". It is not, because some
+keys end in `$EDITOR`. Whether a key yields a terminal-suspending action is a
+property of `App::pending_actions` *after* `app.update` ran, and depends on
+`pending_prefix`, focus, the active overlay and each action's own guards, so it
+cannot be decided from the raw `KeyEvent`. Worse, the mistake is not
+recoverable: once an event has left the kernel tty buffer there is no way to
+push it back, and `suspend_terminal` only leaves the alternate screen while
+`edit_file` spawns the editor with inherited stdin. A bulk drain that noticed
+the suspending action afterwards would already have eaten the keystrokes the
+editor is owed. The loop therefore polls with a zero timeout, reads exactly one
+event, runs `app.update`, and re-checks the queue, breaking the moment a
+suspending action appears. The same drain is bounded by a batch cap and a
+50 ms budget so a paste or a stuck key cannot starve the paint.

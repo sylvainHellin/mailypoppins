@@ -1726,6 +1726,98 @@ pub enum Action {
     },
 }
 
+impl Action {
+    /// Does handling this action hand the terminal to a child process?
+    ///
+    /// True for every action whose handler reaches `helpers::edit_file`, which
+    /// is always preceded by `helpers::suspend_terminal`: the alternate screen
+    /// is left, raw mode is disabled, and `$EDITOR` inherits stdin. Whatever
+    /// the user types from that moment is the editor's, not ours.
+    ///
+    /// The event drain in `run_loop` (#0108) stops as soon as one of these is
+    /// queued, because an event that has left the kernel tty buffer cannot be
+    /// put back: draining past the action would swallow the first keystrokes
+    /// of the editing session.
+    ///
+    /// The match is exhaustive on purpose, with no wildcard arm. A new action
+    /// must be classified here rather than defaulting to "safe to batch", and
+    /// a new `edit_file` call site must flip its action to `true`. The
+    /// tripwire for the second half is
+    /// `actions::tests::edit_file_call_sites_are_accounted_for`, which fails
+    /// when the number of call sites changes.
+    pub fn suspends_terminal(&self) -> bool {
+        match self {
+            // Reaches `edit_file`. The comment names the path through
+            // `actions::handle_action`.
+            //
+            // `open_readonly_view`, or `edit_new_draft` for a parse-skipped
+            // or drafts row.
+            Action::EditCurrent => true,
+            // `write_draft_and_edit` -> `edit_new_draft`.
+            Action::Reply(_) => true,
+            // Writes the skeleton, then edits it in place.
+            Action::NewDraft => true,
+            Action::OpenLogFile => true,
+            Action::OpenConfigFile => true,
+            // Opens the invite email an agenda row came from.
+            Action::OpenEventSource { .. } => true,
+            // `send_contact_as_vcard` edits the draft it just wrote.
+            Action::SendContactVcard { .. } => true,
+            // `edit_compose_signature` / `edit_signature_file`.
+            Action::ComposeEditSignature => true,
+            Action::EditSignatureFile { .. } => true,
+            // `submit_compose_wizard` edits the new or forwarded draft.
+            Action::ComposeWizardSubmit => true,
+            // `handle_search_result_action` -> `open_readonly_view`.
+            Action::SearchResultOpen => true,
+            // `handle_search_result_action` -> `search_result_draft` ->
+            // `write_draft_and_edit`.
+            Action::SearchResultReply(_) | Action::SearchResultForward => true,
+
+            // Everything else stays inside the alternate screen. Browser and
+            // attachment opens go through `parse::open_file_with_system`,
+            // which detaches a GUI process and does not take our stdin.
+            Action::Send
+            | Action::SendApproved
+            | Action::Approve
+            | Action::BatchApprove(_)
+            | Action::MarkDraft
+            | Action::BatchMarkDraft(_)
+            | Action::Archive
+            | Action::Delete
+            | Action::BatchArchive(_)
+            | Action::BatchDelete(_)
+            | Action::BatchDeleteDrafts(_)
+            | Action::MoveToMailbox { .. }
+            | Action::ToggleRead
+            | Action::MarkAsRead
+            | Action::BatchToggleRead(_)
+            | Action::ToggleFlag
+            | Action::BatchToggleFlag(_)
+            | Action::CopyMessageRef
+            | Action::OpenAttachment(_)
+            | Action::SaveAttachments { .. }
+            | Action::Fetch
+            | Action::LoadMailbox { .. }
+            | Action::FetchAccount(_)
+            | Action::Sync
+            | Action::ServerSearch { .. }
+            | Action::SearchResultJump
+            | Action::SearchResultYankPath
+            | Action::SearchResultFetch
+            | Action::SearchResultArchive
+            | Action::SearchResultOpenInBrowser
+            | Action::OpenHtmlInBrowser(_)
+            | Action::OpenComposeWizard(_)
+            | Action::ComposeWizardCancel
+            | Action::Rsvp { .. }
+            | Action::ComposeToContact { .. }
+            | Action::CopyContactEmail { .. }
+            | Action::AttachFileToDraft { .. } => false,
+        }
+    }
+}
+
 /// Which destructive action a confirmation dialog is guarding.
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -2185,6 +2277,101 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
 mod tests {
     use super::*;
     use std::path::Path;
+
+    // -----------------------------------------------------------------------
+    // Action::suspends_terminal (#0108)
+    // -----------------------------------------------------------------------
+
+    /// The full set of actions whose handler reaches `helpers::edit_file`,
+    /// derived by reading `src/tui/actions.rs`. `EditCurrent` and
+    /// `SearchResultOpen` go through `open_readonly_view`; `Reply`,
+    /// `SearchResultReply` and `SearchResultForward` through
+    /// `write_draft_and_edit`; `NewDraft`, `OpenLogFile`, `OpenConfigFile` and
+    /// `OpenEventSource` edit inline in their own arm; `SendContactVcard`,
+    /// `ComposeEditSignature`, `EditSignatureFile` and `ComposeWizardSubmit`
+    /// through their named helpers.
+    ///
+    /// `actions::tests::edit_file_call_sites_are_accounted_for` is the
+    /// tripwire for the other direction: it fails when the call sites change.
+    #[test]
+    fn suspending_actions_are_all_flagged() {
+        let suspending = vec![
+            Action::EditCurrent,
+            Action::Reply(false),
+            Action::Reply(true),
+            Action::NewDraft,
+            Action::OpenLogFile,
+            Action::OpenConfigFile,
+            Action::OpenEventSource {
+                msg: MessageRef::new(1),
+            },
+            Action::SendContactVcard {
+                contact: crate::contacts::Contact {
+                    address: "a@example.com".to_string(),
+                    display_name: "A".to_string(),
+                    sent_to: 0,
+                    sent_cc: 0,
+                    received: 0,
+                    first_seen: String::new(),
+                    last_seen: String::new(),
+                    source: Default::default(),
+                },
+            },
+            Action::ComposeEditSignature,
+            Action::EditSignatureFile {
+                name: "work".to_string(),
+            },
+            Action::ComposeWizardSubmit,
+            Action::SearchResultOpen,
+            Action::SearchResultReply(false),
+            Action::SearchResultForward,
+        ];
+        for action in suspending {
+            assert!(
+                action.suspends_terminal(),
+                "{action:?} reaches edit_file and must stop the event drain"
+            );
+        }
+    }
+
+    /// The navigation and mutation actions a held key actually produces are
+    /// the ones the drain exists to batch, so a false positive here would
+    /// defeat the whole coalescing.
+    #[test]
+    fn ordinary_actions_do_not_suspend_the_terminal() {
+        let safe = vec![
+            Action::Fetch,
+            Action::Sync,
+            Action::ToggleRead,
+            Action::MarkAsRead,
+            Action::ToggleFlag,
+            Action::Archive,
+            Action::Delete,
+            Action::CopyMessageRef,
+            Action::OpenAttachment(std::path::PathBuf::from("/tmp/a.pdf")),
+            Action::OpenHtmlInBrowser(std::path::PathBuf::from("/tmp/a.html")),
+            Action::OpenComposeWizard(ComposeMode::New),
+            Action::ComposeWizardCancel,
+            Action::SearchResultJump,
+            Action::SearchResultYankPath,
+            Action::SearchResultFetch,
+            Action::SearchResultArchive,
+            Action::SearchResultOpenInBrowser,
+            Action::LoadMailbox {
+                mailbox_idx: 0,
+                generation: 0,
+            },
+            Action::AttachFileToDraft {
+                path: "/tmp/a.pdf".to_string(),
+            },
+        ];
+        for action in safe {
+            assert!(
+                !action.suspends_terminal(),
+                "{action:?} stays inside the alternate screen and must not break the drain"
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // ComposeField navigation order (#0106)

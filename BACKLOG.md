@@ -10,9 +10,7 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 > Audit 2026-08-14, owner decisions across performance, UX/workflow and feature-survey: [synthesis](.agents/research/2026-08-14-audit-synthesis.md). Tickets #0087 to #0100 all shipped in 0.9.0 and after; #0101 is the only survivor, parked under Later.
 
-> Preview latency on list navigation: [plan](docs/plans/preview-latency.md), four tickets in order, each measured before the next starts.
-
-- [#0108 Baseline preview-latency measurement and key-event coalescing](docs/tickets/0108-coalesce-key-events.md) -- perf _(Ticket A of the preview-latency plan)_
+> Preview latency on list navigation: [plan](docs/plans/preview-latency.md), four tickets in order, each measured before the next starts. Ticket A ([#0108](docs/tickets/0108-coalesce-key-events.md), instrumentation and key-event coalescing) has shipped; B, C and D are not cut yet.
 
 
 ## Next

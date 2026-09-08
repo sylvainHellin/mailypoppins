@@ -3,7 +3,7 @@ id: 0108
 title: Baseline preview-latency measurement and key-event coalescing
 type: perf
 priority: now
-status: open
+status: done
 created: 2026-09-08
 ---
 
@@ -113,6 +113,18 @@ Coalescing should cut the frame count well below twenty while leaving the twenty
 - A held `j` across twenty rows paints once per drained batch rather than once per key, and still lands on the twentieth row.
 - A key typed while an action suspends the terminal into `$EDITOR` reaches the editor, not the app.
 - `Action::suspends_terminal()` is true for every action whose handler reaches `edit_file`.
+
+## Done (2026-09-08)
+
+- `9df192f` Instrument the draw pass and store opens (#0108).
+- The commit carrying this line, `Coalesce pending key events before each draw (#0108)`, adds the drain, `Action::suspends_terminal()` and its two tests.
+
+Install either commit on its own to take the before and after of the coalescing; the instrument is in both.
+
+Actions classified as terminal-suspending: `EditCurrent`, `Reply`, `NewDraft`, `OpenLogFile`, `OpenConfigFile`, `OpenEventSource`, `SendContactVcard`, `ComposeEditSignature`, `EditSignatureFile`, `ComposeWizardSubmit`, `SearchResultOpen`, `SearchResultReply`, `SearchResultForward`.
+The ten `edit_file` call sites the plan lists are all reachable from exactly those thirteen, and `suspend_terminal` has no caller that is not paired with one of them, so there is no external viewer or pager to cover.
+
+The measurement fields above are still `TBD`: taking them is manual and was left to Sylvain.
 
 ## Links
 

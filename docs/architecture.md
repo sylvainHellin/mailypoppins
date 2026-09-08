@@ -240,12 +240,12 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 | `batch.rs` | `batch_move_on_server`, `batch_delete_on_server` |
 | `sent.rs` | `ImapSentMailbox`: the APPEND seam the outbox drives, faked in tests |
 | **`src/tui/`** | |
-| `mod.rs` | Event loop (`run_loop`), watcher spawn, background result drain |
+| `mod.rs` | Event loop (`run_loop`), watcher spawn, background result drain. One iteration drains the queued terminal events into the model and then paints once (#0108), bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
 | `actions.rs` | `handle_action()`, the side-effect dispatch for all `Action` variants. Branches on `is_graph()`. |
 | `mutations.rs` | The TUI's `queue_*` entry into the durable mutation queue (#0039): local write plus enqueue, testable without a terminal |
 | `bg.rs` | `handle_bg_result()`, processing background task completions |
 | `helpers.rs` | Terminal suspend and resume, editor, clipboard, the two watcher loops, `lib_do_sync`, `lib_do_sync_graph`, `resolve_send_account` |
-| `event.rs` | Crossterm event polling |
+| `event.rs` | Crossterm event polling: `poll_event` waits up to the 250 ms tick, `poll_pending_event` takes an already-queued event without waiting (the drain step, #0108). Both return `None` for an event we do not model. |
 | `theme.rs` | Named themes, semantic colour slots |
 | `images.rs` | The whole terminal-graphics surface (#0010): the one-shot `ratatui-image` capability query, the row arithmetic for an image in a cell grid, and the `PreviewImages` memo. Never initialised outside `tui::run`, so every test and every golden frame sees no picker and renders `[image: name]` placeholders. |
 | **`src/tui/app/`** | |
