@@ -82,10 +82,6 @@ pub fn view(app: &mut App, frame: &mut Frame) {
     // rendered instead; loaded once per selection change, never per frame.
     app.refresh_preview_html();
     app.refresh_preview_invite();
-    // The inline images of the previewed message, on the same memo discipline
-    // (#0010). Free for a row with no attachments, and free on every terminal
-    // that cannot draw pixels beyond the names the placeholder lines carry.
-    app.refresh_preview_images();
 
     // Bottom row: the herdr-style mode/hint bar (#0032), drawn as a bordered
     // pane like every other pane. The former status bar is gone: its outbox

@@ -7,6 +7,8 @@ status: done
 created: 2026-05-01
 ---
 
+> **Reversed by [#0109](0109-retire-inline-image-rendering.md) (2026-09-08).** In-pane pixel rendering, the `[image: name]` placeholder lines, `src/tui/images.rs` and the `ratatui-image` / `image` dependencies are gone: the per-cursor-move raw-blob read, MIME walk and decode cost more than the feature was worth (see [docs/plans/preview-latency.md](../plans/preview-latency.md), Decision D2). `parse::inline_images` survives, and `b` / `tb` still renders the message with its images in the browser. What follows is the record of what shipped in 2026-08-13.
+
 Render inline images in the terminal preview pane using sixel, the iTerm2 inline-image protocol, or the Kitty graphics protocol.
 
 ## Notes

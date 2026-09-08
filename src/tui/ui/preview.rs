@@ -4,13 +4,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use ratatui_image::StatefulImage;
-
-use super::super::images;
 
 use crate::types::EventFrontmatter;
 
-use super::super::app::{App, BodyKey, Focus, MailboxKind};
+use super::super::app::{App, Focus, MailboxKind};
 use super::super::theme;
 use super::util::pane_border_style;
 
@@ -54,14 +51,13 @@ pub(super) fn render_body(app: &mut App, frame: &mut Frame, area: Rect) {
     // The wrapped/styled `Vec<Line>` product is memoised too (#0093): before
     // this, `wrap_and_style_body` re-parsed inline markdown and re-wrapped the
     // whole body on every frame -- every scroll keystroke and every idle tick.
-    // The cache rebuilds only when the body content, the pane width, or the
-    // inline-image set moved; a scroll then costs one clone of the visible
-    // window instead of an O(body length) re-wrap.
+    // The cache rebuilds only when the body content or the pane width moved;
+    // a scroll then costs one clone of the visible window instead of an
+    // O(body length) re-wrap.
     let inner = block.inner(body_area);
     let inner_width = inner.width;
     let epoch = app.preview_body.epoch();
-    let images_key = app.preview_images.key().clone();
-    if !app.preview_lines.holds(epoch, inner_width, &images_key) {
+    if !app.preview_lines.holds(epoch, inner_width) {
         // HTML-dominant mail (#0091): render the sender's own markup through
         // html2text's rich interface. The plain body for HTML mail is a lossy
         // flatten (html2text plain) re-parsed here as Markdown; rendering the
@@ -69,7 +65,7 @@ pub(super) fn render_body(app: &mut App, frame: &mut Frame, area: Rect) {
         // Plain-only mail, drafts, and a render failure fall back to
         // `wrap_and_style_body` over the stored plain body, which is exactly
         // today's output -- the graceful degradation the ticket asks for.
-        let mut lines = if let Some(html) = app.preview_html.rendered() {
+        let lines = if let Some(html) = app.preview_html.rendered() {
             render_html_body(html, inner_width as usize)
         } else {
             // Drop the signature sentinel comments (#0106) so they never show
@@ -78,16 +74,7 @@ pub(super) fn render_body(app: &mut App, frame: &mut Frame, area: Rect) {
                 .replace("{{SIGNATURE}}", "[signature]");
             wrap_and_style_body(&body, inner_width as usize)
         };
-        // Inline images (#0010) are appended to the text flow rather than
-        // spliced into it: html2text gives no stable anchor for the `<img>` it
-        // dropped, so the honest placement is a labelled block at the end of
-        // the body, in message order. Each image contributes a `[image: name]`
-        // line, and on a terminal that can draw pixels the rows it needs after
-        // it, blank, which the graphics pass below paints over. The block is
-        // part of the memoised product, keyed by the same image set.
-        let placements = append_image_block(&app.preview_images, &mut lines, inner_width);
-        app.preview_lines
-            .fill(epoch, inner_width, images_key, lines, placements);
+        app.preview_lines.fill(epoch, inner_width, lines);
     }
 
     // Render just the scrolled window. The lines are pre-wrapped (one `Line`
@@ -96,21 +83,9 @@ pub(super) fn render_body(app: &mut App, frame: &mut Frame, area: Rect) {
     let visible = app
         .preview_lines
         .visible_slice(app.preview_scroll as usize, inner.height as usize);
-    let placements = app.preview_lines.placements().to_vec();
 
     let content = Paragraph::new(visible).block(block);
     frame.render_widget(content, body_area);
-
-    render_inline_images(app, frame, inner, &placements);
-}
-
-/// Where one inline image landed in the wrapped body: its index into
-/// `app.preview_images` and the body line its first pixel row sits on.
-#[derive(Clone)]
-struct ImagePlacement {
-    index: usize,
-    line: usize,
-    rows: u16,
 }
 
 /// Memoised wrapped/styled preview body (#0093).
@@ -118,20 +93,17 @@ struct ImagePlacement {
 /// [`wrap_and_style_body`] walks the whole body, parses inline markdown and
 /// word-wraps it into one [`Line`] per screen row. Before #0093 that ran on
 /// every frame, so every scroll keystroke and every idle tick re-did O(body
-/// length) work. This slot holds the product (body lines plus the appended
-/// inline-image block) and rebuilds it only when the body content, the pane
-/// width, or the inline-image set changed. Rendering then clones just the
+/// length) work. This slot holds the product and rebuilds it only when the
+/// body content or the pane width changed. Rendering then clones just the
 /// visible window, so a scroll costs O(visible height), not O(body length).
 ///
-/// The key is `(body epoch, width, images key)`, all compared in O(1):
+/// The key is `(body epoch, width)`, both compared in O(1):
 /// - **body content** -- `PreviewBody::epoch` bumps whenever the previewed
 ///   text or its identity changes, which covers a selection move, an async
 ///   body arrival (`prime_preview_body`), and a re-ingest under the same
 ///   cursor (the `mailbox_load_generation` inside the body key moves).
 /// - **width** -- a terminal resize changes `inner_width` and forces a
 ///   re-wrap.
-/// - **images** -- two neighbouring messages could share body text but differ
-///   in inline images; the image memo's key discriminates them.
 ///
 /// The theme is deliberately *not* part of the key: it is process-global and
 /// fixed once at startup (`theme::init` over a `OnceLock`), so no in-session
@@ -140,36 +112,21 @@ struct ImagePlacement {
 pub(crate) struct PreviewLinesCache {
     epoch: u64,
     width: u16,
-    images_key: Option<BodyKey>,
     lines: Vec<Line<'static>>,
-    placements: Vec<ImagePlacement>,
 }
 
 impl PreviewLinesCache {
-    /// True when the cache already answers for this `(epoch, width, images)`
-    /// tuple, so the render pass can skip the re-wrap.
-    pub(crate) fn holds(&self, epoch: u64, width: u16, images_key: &Option<BodyKey>) -> bool {
-        self.epoch == epoch && self.width == width && &self.images_key == images_key
+    /// True when the cache already answers for this `(epoch, width)` pair, so
+    /// the render pass can skip the re-wrap.
+    pub(crate) fn holds(&self, epoch: u64, width: u16) -> bool {
+        self.epoch == epoch && self.width == width
     }
 
     /// Replace the cached product wholesale.
-    fn fill(
-        &mut self,
-        epoch: u64,
-        width: u16,
-        images_key: Option<BodyKey>,
-        lines: Vec<Line<'static>>,
-        placements: Vec<ImagePlacement>,
-    ) {
+    fn fill(&mut self, epoch: u64, width: u16, lines: Vec<Line<'static>>) {
         self.epoch = epoch;
         self.width = width;
-        self.images_key = images_key;
         self.lines = lines;
-        self.placements = placements;
-    }
-
-    fn placements(&self) -> &[ImagePlacement] {
-        &self.placements
     }
 
     /// The `height` rows starting at `scroll`, cloned. The lines are
@@ -195,97 +152,6 @@ impl PreviewLinesCache {
     #[cfg(test)]
     fn cached_width(&self) -> u16 {
         self.width
-    }
-}
-
-/// Append the `[image: name]` lines, and the blank rows a drawable image
-/// needs, to `lines`.
-///
-/// Returns one placement per image the terminal can actually draw; on a
-/// terminal without graphics the placeholder lines are still appended and the
-/// returned list is empty, which is the pre-#0010 experience plus a name.
-fn append_image_block<'a>(
-    images: &images::PreviewImages,
-    lines: &mut Vec<Line<'a>>,
-    width: u16,
-) -> Vec<ImagePlacement> {
-    let mut placements = Vec::new();
-    if images.is_empty() {
-        return placements;
-    }
-    let muted = Style::default().fg(theme::active().text_muted);
-    lines.push(Line::from(String::new()));
-    for (index, image) in images.iter().enumerate() {
-        lines.push(Line::from(Span::styled(
-            format!("[image: {}]", image.name),
-            muted,
-        )));
-        if let Some(rows) = image.rows(width) {
-            placements.push(ImagePlacement {
-                index,
-                line: lines.len(),
-                rows,
-            });
-            for _ in 0..rows {
-                lines.push(Line::from(String::new()));
-            }
-        }
-    }
-    placements
-}
-
-/// Where a reserved image block lands on screen, or `None` when it is
-/// scrolled out of the pane or only half inside it.
-fn placement_rect(placement: &ImagePlacement, scroll: u16, inner: Rect) -> Option<Rect> {
-    let row = placement.line as i64 - i64::from(scroll);
-    if row < 0 || row > i64::from(u16::MAX) {
-        return None;
-    }
-    let area = Rect {
-        x: inner.x,
-        y: inner.y.saturating_add(row as u16),
-        width: inner.width,
-        height: placement.rows,
-    };
-    images::fits_within(area, inner).then_some(area)
-}
-
-/// Paint the images over the rows [`append_image_block`] reserved for them.
-///
-/// An image is drawn only when its whole block is inside the pane: a kitty or
-/// sixel image is painted by the terminal over the cell grid, so a partially
-/// scrolled one would spill past the border instead of clipping like text.
-/// Scrolling it back into view redraws it; the widget re-encodes only when the
-/// target rect changed, so a still frame costs nothing.
-fn render_inline_images(
-    app: &mut App,
-    frame: &mut Frame,
-    inner: Rect,
-    placements: &[ImagePlacement],
-) {
-    if placements.is_empty() {
-        return;
-    }
-    let mut rects: Vec<(usize, Rect)> = Vec::new();
-    for placement in placements {
-        if let Some(area) = placement_rect(placement, app.preview_scroll, inner) {
-            rects.push((placement.index, area));
-        }
-    }
-    if rects.is_empty() {
-        return;
-    }
-    for (index, image) in app.preview_images.iter_mut().enumerate() {
-        let Some((_, area)) = rects.iter().find(|(i, _)| *i == index) else {
-            continue;
-        };
-        let Some(protocol) = image.protocol.as_mut() else {
-            continue;
-        };
-        frame.render_stateful_widget(StatefulImage::default(), *area, protocol);
-        if let Some(Err(e)) = protocol.last_encoding_result() {
-            log::debug!("[images] encoding {} failed: {e}", image.name);
-        }
     }
 }
 
@@ -1129,115 +995,8 @@ mod event_card_tests {
     }
 }
 
-/// The inline-image half of the pane (#0010): what the text flow reserves and
-/// where the graphics land. Rendering itself is the terminal's business; what
-/// is testable offline is the geometry and the degradation, and both are here.
-#[cfg(test)]
-mod inline_image_tests {
-    use super::event_card_tests::line_text;
-    use super::*;
-
-    // -----------------------------------------------------------------
-    // Inline images (#0010)
-    // -----------------------------------------------------------------
-
-    /// A 2x1 red/blue PNG, decoded into a protocol below.
-    fn tiny_image() -> image::DynamicImage {
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            40,
-            20,
-            image::Rgba([255, 0, 0, 255]),
-        ))
-    }
-
-    /// A drawable image, as a terminal with a graphics protocol would produce
-    /// it. The picker is built from a fixed cell size rather than a terminal
-    /// query, so this test needs no tty and no `images::init`.
-    fn drawable(name: &str) -> images::PreviewImage {
-        // `halfblocks()` is the one picker constructor that needs no terminal;
-        // it fixes the cell size at 10x20, which is what `cell_size()` falls
-        // back to here, so the row arithmetic below is the production one.
-        let picker = ratatui_image::picker::Picker::halfblocks();
-        images::PreviewImage {
-            name: name.to_string(),
-            dimensions: Some((40, 20)),
-            protocol: Some(picker.new_resize_protocol(tiny_image())),
-        }
-    }
-
-    /// The name-only shape every terminal without graphics produces.
-    fn placeholder_only(name: &str) -> images::PreviewImage {
-        images::PreviewImage {
-            name: name.to_string(),
-            dimensions: Some((40, 20)),
-            protocol: None,
-        }
-    }
-
-    #[test]
-    fn a_terminal_without_graphics_gets_one_placeholder_line_and_no_pixels() {
-        let mut memo = images::PreviewImages::default();
-        memo.fill(None, vec![placeholder_only("logo.png")]);
-        let mut lines: Vec<Line> = vec![Line::from("body".to_string())];
-        let placements = append_image_block(&memo, &mut lines, 60);
-        assert!(placements.is_empty(), "nothing is drawn without a protocol");
-        // Body, blank separator, placeholder. No reserved rows: the pane must
-        // look exactly as it did before the image existed, plus the name.
-        let text: Vec<String> = lines.iter().map(line_text).collect();
-        assert_eq!(text, vec!["body", "", "[image: logo.png]"]);
-    }
-
-    #[test]
-    fn a_drawable_image_reserves_exactly_the_rows_it_needs() {
-        let mut memo = images::PreviewImages::default();
-        memo.fill(None, vec![drawable("logo.png")]);
-        let mut lines: Vec<Line> = vec![Line::from("body".to_string())];
-        let placements = append_image_block(&memo, &mut lines, 60);
-        assert_eq!(placements.len(), 1);
-        let rows = images::rows_for((40, 20), 60, images::cell_size());
-        assert_eq!(placements[0].rows, rows);
-        assert_eq!(placements[0].index, 0);
-        // The reserved rows follow the placeholder line and are blank, so the
-        // text under them is pushed down instead of being overpainted.
-        assert_eq!(placements[0].line, 3);
-        assert_eq!(lines.len(), 3 + rows as usize);
-        assert!(lines[3..].iter().all(|l| line_text(l).is_empty()));
-    }
-
-    #[test]
-    fn no_images_means_not_one_extra_line() {
-        let memo = images::PreviewImages::default();
-        let mut lines: Vec<Line> = vec![Line::from("body".to_string())];
-        assert!(append_image_block(&memo, &mut lines, 60).is_empty());
-        assert_eq!(lines.len(), 1);
-    }
-
-    #[test]
-    fn a_scrolled_image_is_drawn_only_while_it_fits_whole() {
-        let inner = Rect::new(1, 1, 40, 10);
-        let placement = ImagePlacement {
-            index: 0,
-            line: 6,
-            rows: 4,
-        };
-        // Unscrolled: rows 7..11 of a pane that ends at 11. Fits.
-        assert_eq!(
-            placement_rect(&placement, 0, inner),
-            Some(Rect::new(1, 7, 40, 4))
-        );
-        // One row up: it would start below the pane's last row.
-        assert_eq!(placement_rect(&placement, 0, Rect::new(1, 1, 40, 9)), None);
-        // Scrolled so the block sits in the middle of the pane.
-        assert_eq!(
-            placement_rect(&placement, 3, inner),
-            Some(Rect::new(1, 4, 40, 4))
-        );
-        // Scrolled past the top: half of it would be above the pane.
-        assert_eq!(placement_rect(&placement, 8, inner), None);
-    }
-}
 /// The wrapped-body memo (#0093): the styled lines are built once per
-/// `(body epoch, width, image set)` and rendered as a scrolled window, so a
+/// `(body epoch, width)` and rendered as a scrolled window, so a
 /// scroll or an unrelated keypress no longer re-parses the whole body. What is
 /// testable offline is the wrap product, the cache-key discipline, and the
 /// windowing; all three are here.
@@ -1258,15 +1017,15 @@ mod preview_cache_tests {
     }
 
     #[test]
-    fn cache_hits_only_on_matching_epoch_width_and_images() {
+    fn cache_hits_only_on_matching_epoch_and_width() {
         let mut cache = PreviewLinesCache::default();
         let lines = wrap_and_style_body("hello world", 40);
         let n = lines.len();
-        cache.fill(7, 40, None, lines, Vec::new());
+        cache.fill(7, 40, lines);
 
-        assert!(cache.holds(7, 40, &None), "same key hits");
-        assert!(!cache.holds(8, 40, &None), "a new body epoch misses");
-        assert!(!cache.holds(7, 41, &None), "a resize misses");
+        assert!(cache.holds(7, 40), "same key hits");
+        assert!(!cache.holds(8, 40), "a new body epoch misses");
+        assert!(!cache.holds(7, 41), "a resize misses");
         assert_eq!(cache.line_count(), n);
         assert_eq!(cache.cached_epoch(), 7);
         assert_eq!(cache.cached_width(), 40);
@@ -1281,7 +1040,7 @@ mod preview_cache_tests {
             .join("\n");
         let lines = wrap_and_style_body(&body, 40);
         assert_eq!(lines.len(), 10, "ten short lines, one row each");
-        cache.fill(1, 40, None, lines, Vec::new());
+        cache.fill(1, 40, lines);
 
         let window = cache.visible_slice(2, 3);
         assert_eq!(window.len(), 3);

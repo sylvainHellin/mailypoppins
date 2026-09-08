@@ -866,6 +866,8 @@ The seam has to cover *every* reader inside the binary to help, which is why `pa
 
 ## Terminal graphics are painted over the cell grid, not into it
 
+> Superseded by #0109 (2026-09-08): the preview no longer draws images at all, so nothing in the code answers to this any more. Kept because the three consequences are properties of terminal graphics rather than of our implementation, and whoever proposes drawing pixels in a pane again will need them.
+
 An inline image (#0010) is not cells: kitty, iTerm2 and sixel all paint pixels
 the terminal owns, positioned by the cursor at the moment the escape sequence
 is written, and ratatui's buffer knows nothing about them. Three consequences

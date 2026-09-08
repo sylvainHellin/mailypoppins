@@ -606,25 +606,6 @@ fn golden_mail_view_jump_date_prompt() {
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
-/// A message whose HTML body points at two `cid:` images, on a terminal with
-/// no graphics protocol (#0010).
-///
-/// This is the degraded path, and it is the only inline-image path a golden
-/// frame can ever capture: `images::init` is called from `tui::run` alone, so
-/// the test binary has no picker, every `PreviewImage` carries `protocol:
-/// None`, and the pane reserves no pixel rows. What the frame pins is the
-/// contract for a terminal that cannot draw: one `[image: name]` line per
-/// referenced image, appended after the body, and not one byte of escape
-/// sequence anywhere in the buffer.
-#[test]
-fn golden_mail_view_inline_image_placeholders() {
-    let mut app = mail_fixture();
-    app.list_index = 1;
-    app.prime_preview_body(BODY_ROW_2);
-    app.prime_preview_images(&["logo.png", "signature-photo.jpg"]);
-    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
-}
-
 /// The preview pane zoomed to the whole content area (#TKT-0044).
 ///
 /// What the frame pins is that a zoom is a *layout* change and nothing else:
