@@ -1385,3 +1385,15 @@ The constraint is not a test artifact: any callback the real hub invokes while h
 
 The tree is not rustfmt-clean, and `cargo fmt -- tests/some_file.rs` ignores the path: it formats every target in the workspace, which in P2-U4 turned a one-file addition into 89 modified files across `src/`, `tests/` and `examples/`.
 Format a single new file with `rustfmt --edition 2021 tests/<file>.rs`, and if `cargo fmt` has already run, `git stash push -- src tests examples` reverts the noise recoverably while leaving an untracked new file alone.
+
+## One help snapshot cannot describe two feature configurations
+
+`tests/cli_help_snapshot.rs` is not feature-gated, so it runs under both `cargo test --workspace` and `cargo test --workspace --features daemon` against the single file `tests/snapshots/cli_help_snapshot__cli_help_surface_snapshot.snap`.
+A subcommand that exists only under `--features daemon` therefore makes one of the two runs fail whatever the snapshot holds, which is why P2-U7 landed `mp daemon` with `#[command(hide = true)]`: a hidden command is absent from the `Commands:` block the snapshot walks, so both builds render byte-identical help and the snapshot never moved.
+P4-U1 drops the `cfg` and the `hide` together and moves the snapshot once, with the website command pages in the same commit.
+
+## The daemon start lock is held by whoever waits for readiness, not by whoever binds
+
+`mp daemon start` must hold `daemon.start.lock` across the spawn *and* the readiness wait, because releasing it at spawn time lets a second starter probe a socket the first daemon has not bound yet and spawn a second daemon.
+The child it spawns therefore cannot take the same lock (`flock` is per open file description and the child's fd is closed by `CLOEXEC`), so `start` passes `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` and the child skips the acquisition; a hand-typed `mp daemon run` takes the lock itself and drops it once the socket is bound and the runtime files are written.
+Readiness is a real `daemon.status` round trip rather than the socket file existing, because the inode appears before `accept` does.

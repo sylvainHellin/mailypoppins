@@ -457,6 +457,20 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<Vec<String>>,
     },
+    /// Manage the local mailypoppins daemon (run, start, status, stop, restart).
+    ///
+    /// Hidden and behind the `daemon` cargo feature until P4-U1 makes the
+    /// daemon the default: `tests/cli_help_snapshot.rs` holds one snapshot for
+    /// both the featured and the unfeatured build, so a visible subcommand
+    /// would make one of the two `cargo test` runs fail against a snapshot it
+    /// cannot satisfy. P4-U1 drops both the `cfg` and the `hide` and moves the
+    /// snapshot once.
+    #[cfg(feature = "daemon")]
+    #[command(hide = true)]
+    Daemon {
+        #[command(subcommand)]
+        action: mailypoppins::daemon::lifecycle::DaemonAction,
+    },
 }
 
 /// Operator commands for the durable outbox (#0037).
@@ -1665,6 +1679,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!("mailypoppins started: {:?}", std::env::args().collect::<Vec<_>>());
+
+    // The daemon commands own their startup order (MIG-04, config load, socket)
+    // and must not run the client preamble below, which loads secrets and SMTP
+    // credentials this process has no use for.
+    #[cfg(feature = "daemon")]
+    if let Some(Commands::Daemon { action }) = &cli.command {
+        let code = mailypoppins::daemon::lifecycle::dispatch(action.clone()).await;
+        std::process::exit(code);
+    }
 
     // Move a pre-#0022 ~/.config/email directory before anything reads config
     // or secrets out of it. A failure here is fatal: the alternative is running
@@ -3063,6 +3086,10 @@ async fn main() -> Result<()> {
                 mailypoppins::tui::run()?;
             }
         }
+        // Dispatched and exited before the client preamble above, so control
+        // never arrives here.
+        #[cfg(feature = "daemon")]
+        Some(Commands::Daemon { .. }) => unreachable!("daemon commands exit before dispatch"),
     }
 
     Ok(())
