@@ -149,3 +149,8 @@ required-features = ["daemon"]
 name = "daemon_operations"
 path = "tests/daemon_operations.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_account_runtime"
+path = "tests/daemon_account_runtime.rs"
+required-features = ["daemon"]

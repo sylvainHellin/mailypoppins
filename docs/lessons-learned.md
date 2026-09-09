@@ -1490,3 +1490,11 @@ The ordering that used to be a comment is now a `drop`: the connection task keep
 ## `flock` refuses a second acquire from the same process, so a lock test needs no spawned holder
 
 `flock(2)` is scoped to the open file description, not to the process: opening `store.lock` twice in one process gives two descriptions, and the second `LOCK_EX | LOCK_NB` is refused with `EWOULDBLOCK` exactly as it would be from another process (`fcntl(2)` locks are the opposite, which is where the intuition comes from). A test for the engine lock (#0061, extended to the sync ingest in #0122) therefore holds it with a plain `EngineLock::try_acquire_at` on the test thread and drives the guarded call right after; `tests/engine_lock_ingest.rs` is nine tests and one spawned process, and that one is spawned to pin `mp sync`'s stdout and exit code rather than to hold anything.
+
+## An unresolved import hides every other error in a contract test
+
+`rustc` reports `E0432` for the module a T unit invents, then suppresses the errors that would come from using it, so a contract test can be full of type errors, wrong bounds and misplaced `.await`s and still produce the clean two-line failure the T unit quotes as proof.
+The implementer discovers them one at a time, in a file they are not allowed to edit.
+
+Type-check the test against a throwaway stub before committing it: a scratch crate in `/tmp` with a `path` dependency on this one, the pinned API as `todo!()` bodies with the real field types (so `Send`/`Sync` bounds are exercised for real), and a copy of the test whose two `use` lines point at the stub.
+`cargo test --no-run` there proves the body compiles; the repository still sees only the `E0432` pair.
