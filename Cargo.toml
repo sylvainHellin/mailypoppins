@@ -109,3 +109,8 @@ required-features = ["daemon"]
 name = "daemon_framing"
 path = "tests/daemon_framing.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_runtime_paths"
+path = "tests/daemon_runtime_paths.rs"
+required-features = ["daemon"]

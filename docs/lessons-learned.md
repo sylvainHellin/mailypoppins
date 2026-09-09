@@ -1380,3 +1380,8 @@ A cold figure needs a data directory on a real filesystem and root for `sysctl -
 The P1a-U6 bootstrap prototype (#0119) runs its ten-step sequence under one gate, and its race tests fire a hook at each boundary that calls `mutate` on the bootstrapping thread, which is what makes them deterministic with no threads, no barriers and no sleeps.
 A plain `std::sync::Mutex` held across those hooks deadlocks on itself, so the gate records the thread that owns it and lets a reentrant caller through while another thread blocks.
 The constraint is not a test artifact: any callback the real hub invokes while holding the bootstrap gate (an event hook, a metric, a log sink that reads state) re-enters it the same way.
+
+## `cargo fmt` here reformats 89 files, so format one file with `rustfmt` directly
+
+The tree is not rustfmt-clean, and `cargo fmt -- tests/some_file.rs` ignores the path: it formats every target in the workspace, which in P2-U4 turned a one-file addition into 89 modified files across `src/`, `tests/` and `examples/`.
+Format a single new file with `rustfmt --edition 2021 tests/<file>.rs`, and if `cargo fmt` has already run, `git stash push -- src tests examples` reverts the noise recoverably while leaving an untracked new file alone.
