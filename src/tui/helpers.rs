@@ -291,7 +291,20 @@ pub(super) async fn lib_do_sync(
     // A persistent per-account health surface is #0071.
     let (ops_suffix, result) = crate::sync::tick::run_tick_with_drains(
         || drain_queues(account_config),
-        || sync_mailboxes(imap_config, &account_config.name, &targets, limit, false),
+        // #0113: each mailbox's body download is bounded, so one slow mailbox
+        // (34 MB of Sent mail took 160 seconds) cannot hold a tick that every
+        // other account and every queued mutation is waiting behind. What it
+        // does not download resumes on the next tick from the same cursor.
+        || {
+            sync_mailboxes(
+                imap_config,
+                &account_config.name,
+                &targets,
+                limit,
+                false,
+                imap_config.body_fetch_deadline(),
+            )
+        },
         || drain_queues(account_config),
     )
     .await;
@@ -383,6 +396,15 @@ fn finish_sync(
         msg.push_str(&format!(
             ", {} removal(s) held back (incomplete pass, run a full sync)",
             result.prunes_deferred
+        ));
+    }
+    // The tick was cut on purpose, so it reads as progress rather than as a
+    // failure: the mailbox has more mail on the server and the next tick picks
+    // it up where this one stopped (#0113).
+    if result.bodies_truncated > 0 {
+        msg.push_str(&format!(
+            ", {} mailbox(es) stopped at the fetch deadline (resuming next sync)",
+            result.bodies_truncated
         ));
     }
     msg

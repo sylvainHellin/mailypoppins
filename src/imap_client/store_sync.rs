@@ -17,6 +17,8 @@
 //!   pruned from the fetch's own enumeration of the mailbox, see
 //!   [`crate::imap_client::vanished_uids`]).
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
 use log::info;
 
@@ -39,11 +41,25 @@ use crate::timing::TimingSpan;
 /// IMAP path in the process borrows from.
 pub struct ImapBackend<'a> {
     config: &'a ImapConfig,
+    /// How long one mailbox's fetch may spend on bodies before it stops and
+    /// leaves the rest for the next pass (#0113). `None` is unbounded.
+    body_budget: Option<Duration>,
 }
 
 impl<'a> ImapBackend<'a> {
     pub fn new(config: &'a ImapConfig) -> Self {
-        Self { config }
+        Self { config, body_budget: None }
+    }
+
+    /// Bound each mailbox's body download (#0113).
+    ///
+    /// The budget is per target rather than per sync: the targets run
+    /// concurrently, so a shared clock would spend one mailbox's budget on
+    /// another's download and truncate whichever finished last for no reason of
+    /// its own.
+    pub fn with_body_budget(mut self, budget: Option<Duration>) -> Self {
+        self.body_budget = budget;
+        self
     }
 }
 
@@ -66,6 +82,7 @@ impl SyncBackend for ImapBackend<'_> {
         use futures::stream::StreamExt;
         let concurrency = self.config.fetch_concurrency.clamp(1, 8);
         let config = self.config;
+        let body_budget = self.body_budget;
         futures::stream::iter(targets.iter().zip(knowns).map(|(target, known)| async move {
             // One borrowed session per mailbox, not one shared one: IMAP allows
             // a single SELECTed mailbox per connection, so N mailboxes need N
@@ -82,6 +99,7 @@ impl SyncBackend for ImapBackend<'_> {
                 Some(limit),
                 known,
                 caps,
+                body_budget,
             )
             .await;
             pooled.check(out)
@@ -101,12 +119,18 @@ impl SyncBackend for ImapBackend<'_> {
 ///
 /// `dry_run` fetches and counts what *would* be ingested without touching the
 /// store or the blob directory.
+///
+/// `body_budget` bounds each mailbox's body download (#0113): a TUI tick passes
+/// the account's configured deadline so one slow mailbox cannot hold the tick,
+/// and `mp sync` passes `None`, because it is the explicit recovery path and a
+/// full sync must not be cut short.
 pub async fn sync_mailboxes(
     imap_config: &ImapConfig,
     account_name: &str,
     targets: &[SyncTarget],
     limit: usize,
     dry_run: bool,
+    body_budget: Option<Duration>,
 ) -> Result<SyncResult> {
     info!(
         "sync_mailboxes: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
@@ -121,7 +145,7 @@ pub async fn sync_mailboxes(
 
     let store = Store::open_account(account_name)?;
     let blobs = BlobStore::for_account(account_name);
-    let mut backend = ImapBackend::new(imap_config);
+    let mut backend = ImapBackend::new(imap_config).with_body_budget(body_budget);
 
     run_sync(
         &mut backend,

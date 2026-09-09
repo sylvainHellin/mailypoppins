@@ -372,6 +372,7 @@ mod tests {
             auth_method: crate::config::AuthMethod::Password,
             accept_invalid_certs: false,
             fetch_concurrency: 4,
+            body_fetch_deadline_secs: 30,
         }
     }
 
@@ -421,6 +422,7 @@ mod tests {
             auth_method: crate::config::AuthMethod::Password,
             accept_invalid_certs: false,
             fetch_concurrency: 4,
+            body_fetch_deadline_secs: 30,
         };
         assert_eq!(
             key_of(&base("a@x", 993, "first-token")),

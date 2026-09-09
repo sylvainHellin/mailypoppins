@@ -799,6 +799,7 @@ mod tests {
             accept_invalid_certs: false,
             auth_method: crate::config::AuthMethod::Password,
             fetch_concurrency: 4,
+            body_fetch_deadline_secs: 30,
         });
         app.accounts = vec![acct];
         app.active_account = 0;

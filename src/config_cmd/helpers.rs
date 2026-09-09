@@ -114,6 +114,7 @@ pub(crate) fn test_imap_connection(host: &str, port: u16, username: &str, passwo
         accept_invalid_certs,
         auth_method: crate::config::AuthMethod::Password,
         fetch_concurrency: 1,
+        body_fetch_deadline_secs: 30,
     };
 
     run_async_blocking(async move {

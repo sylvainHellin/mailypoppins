@@ -147,6 +147,16 @@ pub async fn run_sync(
         let new_messages = fetched.messages;
         let state = fetched.state;
         let pending_arrival_mark = fetched.pending_arrival_mark;
+        // A body pass that stopped at its deadline (#0113) left new mail on the
+        // server it never asked for. The backend already reports that through
+        // the coverage arithmetic and declines its own modseq; the flag is read
+        // here as well, so the two consequences hold whatever a backend fills
+        // `download_incomplete` and `highest_modseq` with, and so the status
+        // line can say which pass was cut.
+        let bodies_complete = fetched.bodies_complete;
+        if !bodies_complete {
+            result.bodies_truncated += 1;
+        }
         result.skipped += fetched.skipped;
         if fetched.uidvalidity_reset {
             result.uidvalidity_resets += 1;
@@ -164,7 +174,10 @@ pub async fn run_sync(
         }
 
         if dry_run {
-            coverage.push((fetched.enumeration_complete, fetched.download_incomplete));
+            coverage.push((
+                fetched.enumeration_complete,
+                fetched.download_incomplete || !bodies_complete,
+            ));
             result.saved += new_messages.len();
             continue;
         }
@@ -321,7 +334,7 @@ pub async fn run_sync(
 
         coverage.push((
             fetched.enumeration_complete,
-            fetched.download_incomplete || !unmet.is_empty(),
+            fetched.download_incomplete || !unmet.is_empty() || !bodies_complete,
         ));
         let pending_arrival_mark = mark_below_unmet(pending_arrival_mark, &unmet);
 
@@ -358,7 +371,7 @@ pub async fn run_sync(
                 // modseq", not "clear it": the UPSERT COALESCEs, so a
                 // full-window pass leaves a CONDSTORE pass's resume point
                 // alone (#0041).
-                highest_modseq: fetched.highest_modseq,
+                highest_modseq: fetched.highest_modseq.filter(|_| bodies_complete),
                 deltalink: None,
                 // What this pass owes the next one: the mark below which the
                 // gate must stay shut because an arrival the server lists is
@@ -535,6 +548,9 @@ mod tests {
             enumeration_complete: true,
             download_incomplete: false,
             pending_arrival_mark: None,
+            // #0113: the scripted pass asked for every new UID it was given.
+            // A test that wants a deadline-truncated pass clears this.
+            bodies_complete: true,
             // #0041 added this field; the fake backend is a non-CONDSTORE
             // server, which is what every existing engine test assumed and
             // still asserts.
@@ -741,6 +757,64 @@ mod tests {
         assert_eq!(ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105), 0);
         assert_eq!(result.pruned, 1, "and the reopened gate applies the prune it deferred");
         assert_eq!(fx.rows("inbox"), vec![104, 105], "written once, and the vanished row is gone");
+    }
+
+    /// #0113: a body pass that stopped at its deadline is a short pass, and
+    /// the engine treats it as one all the way through.
+    ///
+    /// The three consequences are the whole reason the truncation is safe. The
+    /// prune is suspended, because the copy that would justify a deletion may
+    /// be exactly the body this pass did not ask for. No modseq is recorded,
+    /// because a `CHANGEDSINCE` resuming from it would skip every later flag
+    /// change on the messages left behind. And the pass is counted, so the
+    /// status line can say the tick was cut rather than reporting it clean.
+    ///
+    /// The fourth is the point of the ticket: the next pass picks up the
+    /// backlog from the same cursor and converges, no full sync required.
+    #[test]
+    fn a_pass_cut_by_the_body_deadline_defers_the_prune_records_no_modseq_and_resumes() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let mut backend = FakeBackend::default();
+
+        // Pass 0 seeds the row the prune will want to delete, so `pruned` is
+        // observable. Pass 1 is the truncated one: the server lists 90, 91 and
+        // 92, the deadline stopped the body fetch after the newest (92), and 91
+        // was never asked for. Pass 2 downloads the backlog and completes.
+        let mut truncated = fetch(vec![(92, raw("newest"))]);
+        truncated.bodies_complete = false;
+        truncated.download_incomplete = true;
+        truncated.listed = vec![90, 91, 92];
+        truncated.vanished = vec![90];
+        truncated.highest_modseq = Some(4_000);
+        let mut rest = fetch(vec![(91, raw("older"))]);
+        rest.listed = vec![91, 92];
+        rest.vanished = vec![90];
+        rest.highest_modseq = Some(4_100);
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![(90, raw("doomed"))])), Ok(truncated), Ok(rest)],
+        );
+
+        let seed = fx.run(&mut backend, &targets);
+        assert_eq!(seed.saved, 1);
+
+        let cut = fx.run(&mut backend, &targets);
+
+        assert_eq!(cut.saved, 1, "a stopped pass still ingests every body it did collect");
+        assert_eq!(cut.bodies_truncated, 1, "and says which mailbox was cut");
+        assert_eq!(cut.pruned, 0, "a pass that skipped a body may not delete a row");
+        assert_eq!(cut.prunes_deferred, 1);
+        assert_eq!(fx.modseq("inbox"), None, "and vouches for no flag it did not look at");
+        assert_eq!(fx.rows("inbox"), vec![90, 92]);
+
+        let done = fx.run(&mut backend, &targets);
+
+        assert_eq!(done.saved, 1, "the backlog resumes on the next pass, from the same cursor");
+        assert_eq!(done.bodies_truncated, 0);
+        assert_eq!(done.pruned, 1, "which reopens the gate and applies the prune it held");
+        assert_eq!(fx.rows("inbox"), vec![91, 92]);
+        assert_eq!(fx.modseq("inbox"), Some(4_100), "a complete pass records its resume point");
     }
 
     /// #0074: the mark may not become a deadlock. A message the store rejects

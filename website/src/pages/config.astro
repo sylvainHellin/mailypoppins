@@ -50,6 +50,7 @@ host = "imap.example.com"   # Falls back to smtp.host if omitted
 port = 993
 username = ""               # Falls back to smtp.username if omitted
 fetch_concurrency = 4       # Mailboxes fetched in parallel per sync (1-8)
+body_fetch_deadline_secs = 30  # Per-mailbox download budget on a TUI sync (0 = unbounded)
 # Password falls back to SMTP password if not set separately
 
 [mailboxes.inbox]
@@ -157,11 +158,22 @@ default_from = "your.name@example.com"`} />
         so more mailboxes finish in about the time of one. Lower it toward <code>1</code>
         if a server throttles concurrent connections.
       </p>
+      <p>
+        <code>body_fetch_deadline_secs</code> is how long a single mailbox may spend
+        downloading message bodies on a sync started by the TUI (default <code>30</code>,
+        maximum <code>600</code>, <code>0</code> for no limit). A mailbox that runs out of
+        budget stops between batches, keeps what it has downloaded, and resumes on the next
+        sync, so a large backlog arrives over several syncs instead of holding one open;
+        newest mail is downloaded first. Nothing is deleted and no flag delta is advanced on
+        a sync that stopped early. <code>mp sync</code> ignores the budget and always
+        downloads everything it owes.
+      </p>
       <ConfigExample code={`[imap]
 host = "imap.example.com"   # Falls back to smtp.host
 port = 993
 username = ""               # Falls back to smtp.username
-fetch_concurrency = 4       # Parallel mailbox fetches per sync (1-8)`} />
+fetch_concurrency = 4       # Parallel mailbox fetches per sync (1-8)
+body_fetch_deadline_secs = 30  # Per-mailbox body download budget, seconds (0 = unbounded)`} />
 
       <!-- Where data lives -->
       <h3 id="data-dir-section">Data directory (not configurable)</h3>

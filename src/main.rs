@@ -1417,7 +1417,18 @@ async fn sync_one_account(
                 .await
             } else {
                 let imap_config = ImapConfig::load(account_config)?;
-                sync_mailboxes(&imap_config, &account_config.name, &targets, limit, dry_run).await
+                // No body deadline (#0113): `mp sync` is the explicit recovery
+                // path, and the pass a user runs to make the store converge is
+                // the one pass that must not stop early.
+                sync_mailboxes(
+                    &imap_config,
+                    &account_config.name,
+                    &targets,
+                    limit,
+                    dry_run,
+                    None,
+                )
+                .await
             }
         },
         || drain_queues_cli(account_config, dry_run, " (after sync)"),

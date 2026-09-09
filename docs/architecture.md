@@ -164,6 +164,8 @@ IMAP allows one SELECTed mailbox per connection, so the mailboxes are fetched in
 The store reads that seed each fetch happen serially first, the network fetches overlap, and ingest runs serially in target order afterwards, so `buffered` (which preserves input order) keeps the #0072 prune ordering and the single-writer SQLite discipline intact.
 Per mailbox, `UID SEARCH ALL` gives the UID list, the last `limit` UIDs are the window, pass 1 fetches `(UID FLAGS)` over the whole window and pass 2 downloads `BODY.PEEK[]` only for UIDs the store does not hold.
 The store answers "which UIDs do I hold" with one query, so there is no local scan and no dedup pass.
+Pass 2 is chunked (20 UIDs per `UID FETCH`, newest chunk first) and, on a TUI tick, bounded by `imap.body_fetch_deadline_secs` per mailbox (default 30, clamped to [0, 600], 0 unbounded); `mp sync` passes no budget (#0113).
+The budget is checked between chunks and never inside one, because abandoning a `UID FETCH` mid-stream would poison the pooled session; a pass that stops sets `MailboxFetch.bodies_complete = false`, which suspends every prune in the pass and blocks the modseq, and the rest resumes from the cursor on the next pass.
 IMAP supports implicit TLS (port 993) and STARTTLS (any other port, for example 1143 for Proton Bridge); the `ImapStream` wrapper injects a fake greeting for STARTTLS because `async_imap` expects one.
 
 ### Graph

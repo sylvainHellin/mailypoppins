@@ -1339,3 +1339,25 @@ the capture and the peer's commit inverts the assertion. Backdating the holder's
 `now` instead costs nothing and removes the budget: the peer's row is stamped
 after it, as in production, and the drain's own clock read strictly follows that
 stamp, so no stall can flip it.
+
+## A deadline goes between commands, never inside one
+
+#0113 bounds the IMAP body fetch so a slow mailbox yields the tick. The obvious
+implementation, `tokio::time::timeout` around the `UID FETCH`, is the one that
+cannot be used: the session is pooled (`imap_client::pool`), and dropping a
+command's response stream mid-stream leaves unread bytes on the connection, so
+the next borrower reads this fetch's mail as the answer to its own command. The
+pool already knows this, which is why a borrower whose op failed poisons the
+session rather than returning it, and a cancelled timeout does not look like a
+failure to anyone.
+
+So the fetch is cut into chunks of 20 UIDs and the clock is read *between* them:
+a chunk that has been asked for is always collected in full, and the pass stops
+at a boundary where the session is idle and clean. The same shape is why the
+first chunk always goes out even on a deadline that has already expired: a pass
+that can stop before doing anything is a pass that can make no progress, and a
+mailbox whose fetch starts late would then never converge.
+
+The rule generalises to every long IMAP or SMTP command in this codebase.
+Bounding one means splitting it into commands you can afford to finish, not
+interrupting the one you are in.

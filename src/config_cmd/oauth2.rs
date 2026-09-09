@@ -119,6 +119,7 @@ pub async fn cmd_oauth2_login(account_name: Option<&str>) -> Result<()> {
             accept_invalid_certs: account.imap.accept_invalid_certs,
             auth_method: AuthMethod::OAuth2,
             fetch_concurrency: 1,
+            body_fetch_deadline_secs: 30,
         };
 
         match async {

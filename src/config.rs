@@ -223,6 +223,21 @@ pub struct ImapSettings {
     /// 1 restores the old serial ordering (one session per mailbox, opened in turn).
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: usize,
+    /// How long one mailbox's fetch may spend downloading bodies before it
+    /// stops and leaves the rest for the next pass (#0113). The budget is
+    /// checked between body chunks, never inside one, so a chunk already asked
+    /// for is always collected in full.
+    ///
+    /// A tick is serial across accounts and one slow mailbox blocks every other
+    /// one behind it: a 34 MB Sent mailbox took 160 seconds, which is 160
+    /// seconds in which nothing else syncs. Stopping early costs nothing but
+    /// latency on the backlog, because a short pass already suspends the prune
+    /// and resumes from its cursor.
+    ///
+    /// `0` means unbounded, which is what `mp sync` uses whatever this says.
+    /// Clamped to [0, 600] at load.
+    #[serde(default = "default_body_fetch_deadline_secs")]
+    pub body_fetch_deadline_secs: u64,
 }
 
 fn default_imap_port() -> u16 {
@@ -234,6 +249,13 @@ fn default_imap_port() -> u16 {
 /// throttling server tolerates.
 fn default_fetch_concurrency() -> usize {
     4
+}
+
+/// The default per-mailbox body-fetch budget on a TUI tick. Thirty seconds is
+/// long enough for an ordinary mailbox to finish in one pass and short enough
+/// that a mailbox that cannot does not hold the tick.
+fn default_body_fetch_deadline_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -457,6 +479,21 @@ pub struct ImapConfig {
     /// Parallel mailbox fetches per sync, clamped to [1, 8]. See
     /// [`ImapSettings::fetch_concurrency`].
     pub fetch_concurrency: usize,
+    /// Per-mailbox body-fetch budget in seconds, clamped to [0, 600]; 0 is
+    /// unbounded. See [`ImapSettings::body_fetch_deadline_secs`] and
+    /// [`ImapConfig::body_fetch_deadline`].
+    pub body_fetch_deadline_secs: u64,
+}
+
+impl ImapConfig {
+    /// The configured budget as a duration, or `None` for unbounded.
+    ///
+    /// `None` is also what the caller passes when the pass must not be cut
+    /// short whatever the config says (`mp sync`, the explicit recovery path).
+    pub fn body_fetch_deadline(&self) -> Option<std::time::Duration> {
+        (self.body_fetch_deadline_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.body_fetch_deadline_secs))
+    }
 }
 
 /// Runtime config for Graph API accounts (no SMTP/IMAP needed).
@@ -918,6 +955,7 @@ impl ImapConfig {
             accept_invalid_certs: account.imap.accept_invalid_certs,
             auth_method: account.auth_method.clone(),
             fetch_concurrency: account.imap.fetch_concurrency.clamp(1, 8),
+            body_fetch_deadline_secs: account.imap.body_fetch_deadline_secs.min(600),
         })
     }
 }

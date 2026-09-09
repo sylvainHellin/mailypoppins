@@ -76,6 +76,10 @@ pub struct SyncResult {
     pub prunes_deferred: usize,
     /// Rows rebound to a new UID after a UIDVALIDITY reset.
     pub uid_rebound: usize,
+    /// Mailboxes whose body fetch stopped at its deadline with new messages
+    /// still to download (#0113). They resume on the next pass; the prune is
+    /// suspended in the meantime like any other short pass.
+    pub bodies_truncated: usize,
     /// Mailboxes whose server-side UIDVALIDITY no longer matched the stored
     /// cursor, and were therefore refetched in full.
     pub uidvalidity_resets: usize,
@@ -141,6 +145,18 @@ pub struct MailboxFetch {
     /// a body did not come back, or the caller failed to ingest one. Backlog
     /// *older* than what the store already holds does not count.
     pub download_incomplete: bool,
+    /// False when the body pass stopped at its deadline with new UIDs it never
+    /// asked for (#0113), which is the one way this fetch is short *by design*
+    /// rather than by accident.
+    ///
+    /// It is not a second spelling of [`download_incomplete`], which the
+    /// coverage arithmetic already sets on such a pass: it names the reason, so
+    /// the engine can refuse to record a modseq off it, count the mailbox for
+    /// the status line, and leave everything else alone. Every path that ran to
+    /// the end of its new UIDs is `true`, backends without a deadline included.
+    ///
+    /// [`download_incomplete`]: MailboxFetch::download_incomplete
+    pub bodies_complete: bool,
     /// The arrival mark to persist for this mailbox: `Some(mark)` while an
     /// arrival above it is still missing, `None` once every arrival is in.
     /// Carried back in by the next fetch so the gate cannot open on a mark that

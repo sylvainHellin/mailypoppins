@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, Result};
 use futures::TryStreamExt;
 use log::{info, warn};
@@ -466,12 +468,17 @@ pub(crate) fn flag_pass(
 /// is already known to be untrustworthy.
 ///
 /// [#0081]: ../../docs/tickets/0081-qresync-uidplus.md
+/// `bodies_complete` is the third (#0113): a pass that stopped at its body
+/// deadline looked at every flag in the window and at only part of the mail, so
+/// the next `CHANGEDSINCE` would skip the flag changes made in between on the
+/// messages it never downloaded. A truncated pass vouches for nothing.
 pub(crate) fn modseq_to_record(
     server: Option<u64>,
     window_is_whole_mailbox: bool,
     enumeration_complete: bool,
+    bodies_complete: bool,
 ) -> Option<i64> {
-    if !window_is_whole_mailbox || !enumeration_complete {
+    if !window_is_whole_mailbox || !enumeration_complete || !bodies_complete {
         return None;
     }
     server.filter(|&m| m > 0).and_then(|m| i64::try_from(m).ok())
@@ -509,6 +516,42 @@ pub(crate) fn new_uids_in_window(
         .collect()
 }
 
+/// How many UIDs one `UID FETCH ... BODY.PEEK[]` asks for (#0113).
+///
+/// Twenty is the Graph batch size and, on the mailbox that motivated the
+/// ticket (34 MB over 100 messages), about 7 MB of mail: small enough that the
+/// deadline is answered within a few seconds of expiring, large enough that the
+/// per-command round trip stays a rounding error next to the download.
+pub(crate) const BODY_CHUNK_SIZE: usize = 20;
+
+/// The body pass's `UID FETCH` commands, newest chunk first.
+///
+/// `new_uids` is ascending (it is read off the ascending window), so the chunks
+/// are taken off the *end*: a pass that stops early has downloaded the newest
+/// mail and left the oldest, which is the half the user is least likely to be
+/// waiting for and the half the next pass picks up from the same cursor. Taking
+/// them off the front would leave the newest message undownloaded for as long
+/// as the backlog takes to drain.
+///
+/// The short chunk is therefore the last one, holding the oldest UIDs.
+pub(crate) fn body_chunks(new_uids: &[u32], chunk: usize) -> Vec<&[u32]> {
+    new_uids.rchunks(chunk.max(1)).collect()
+}
+
+/// Whether the body pass must stop before asking for chunk `index`.
+///
+/// Two rules, and both are load-bearing. The first chunk always goes out, so a
+/// deadline that has already passed still makes progress rather than turning
+/// the pass into a no-op that repeats forever. And the check sits *between*
+/// chunks: wrapping a `UID FETCH` in a timeout would abandon a command
+/// mid-stream and leave unread response bytes on a session that goes back into
+/// the pool ([`super::pool`]), so the next borrower reads this fetch's mail as
+/// the answer to its own command. A chunk that has been asked for is always
+/// collected in full.
+pub(crate) fn stop_before_chunk(index: usize, deadline: Option<Instant>, now: Instant) -> bool {
+    index > 0 && deadline.is_some_and(|d| now >= d)
+}
+
 /// Two-pass fetch for the store ingest path.
 ///
 /// Pass 1 fetches `UID FLAGS` over the whole window, pass 2 downloads
@@ -525,14 +568,22 @@ pub(crate) fn new_uids_in_window(
 /// (see [`KnownUids::resolve`]): a renumbering hands recycled UIDs to different
 /// messages, so carrying the stored list across one would make pass 2 skip
 /// bodies that were never downloaded.
+///
+/// `body_budget` bounds pass 2 (#0113). The clock starts here, so the budget is
+/// this mailbox's whole fetch and each mailbox in a parallel sync gets its own;
+/// `None` is unbounded, which is what `mp sync` asks for. Running out is not an
+/// error: what was downloaded is returned with `bodies_complete: false`, the
+/// coverage arithmetic reports the pass short, and the rest resumes next pass.
 pub async fn fetch_new_raw_on_session(
     session: &mut ImapSession,
     mailbox: &str,
     limit: Option<usize>,
     known: KnownUids,
     caps: ServerCaps,
+    body_budget: Option<Duration>,
 ) -> Result<MailboxFetch> {
     let mut span = TimingSpan::with_context("fetch_new_raw", mailbox.to_string());
+    let deadline = body_budget.map(|budget| Instant::now() + budget);
 
     // `SELECT (CONDSTORE)` only where the server advertised CONDSTORE: it is
     // the command that makes the server report HIGHESTMODSEQ, and a server that
@@ -635,6 +686,9 @@ pub async fn fetch_new_raw_on_session(
             enumeration_complete,
             download_incomplete: coverage.incomplete,
             pending_arrival_mark: coverage.pending_mark,
+            // Nothing was asked for, so nothing was left unasked: the deadline
+            // cannot have cut a pass that never reached the body fetch.
+            bodies_complete: true,
             // An empty window covers the mailbox only when the mailbox is
             // itself empty. `mp sync -n 0` over a populated mailbox fetched no
             // flags and may not advance the resume point (#0041 review).
@@ -642,6 +696,7 @@ pub async fn fetch_new_raw_on_session(
                 server_modseq,
                 window_is_whole_mailbox(0, listed.len()),
                 enumeration_complete,
+                true,
             ),
         }
     };
@@ -697,11 +752,7 @@ pub async fn fetch_new_raw_on_session(
     } else {
         known_flags.len()
     };
-    let recordable_modseq = modseq_to_record(
-        server_modseq,
-        window_is_whole_mailbox(window.len(), listed.len()),
-        enumeration_complete,
-    );
+    let window_whole = window_is_whole_mailbox(window.len(), listed.len());
 
     if new_uids.is_empty() {
         let coverage = arrival_coverage(
@@ -723,7 +774,13 @@ pub async fn fetch_new_raw_on_session(
             enumeration_complete,
             download_incomplete: coverage.incomplete,
             pending_arrival_mark: coverage.pending_mark,
-            highest_modseq: recordable_modseq,
+            bodies_complete: true,
+            highest_modseq: modseq_to_record(
+                server_modseq,
+                window_whole,
+                enumeration_complete,
+                true,
+            ),
         });
     }
     info!(
@@ -733,27 +790,46 @@ pub async fn fetch_new_raw_on_session(
         skipped
     );
 
-    // Pass 2: full bodies for the new UIDs only.
-    let new_set = compress_uid_set(&new_uids);
-    let fetched: Vec<_> = session
-        .uid_fetch(&new_set, "(UID BODY.PEEK[] FLAGS)")
-        .await
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
-    span.mark("pass2_bodies");
-
+    // Pass 2: full bodies for the new UIDs only, one command per chunk so the
+    // deadline has somewhere to be answered (#0113).
+    let chunks = body_chunks(&new_uids, BODY_CHUNK_SIZE);
     let mut out = Vec::new();
-    for msg in fetched.iter() {
-        let Some(uid) = msg.uid else { continue };
-        let Some(body) = msg.body() else { continue };
-        out.push(FetchedRaw {
-            uid,
-            raw: body.to_vec(),
-            flags: flags_of(msg),
-        });
+    let mut bodies_complete = true;
+    for (index, chunk) in chunks.iter().enumerate() {
+        if stop_before_chunk(index, deadline, Instant::now()) {
+            bodies_complete = false;
+            warn!(
+                "[sync] '{}': body fetch stopped at the {}s deadline after {}/{} new message(s); \
+                 the rest resume on the next pass",
+                mailbox,
+                body_budget.map_or(0, |b| b.as_secs()),
+                out.len(),
+                new_uids.len()
+            );
+            break;
+        }
+        let chunk_set = compress_uid_set(chunk);
+        let fetched: Vec<_> = session
+            .uid_fetch(&chunk_set, "(UID BODY.PEEK[] FLAGS)")
+            .await
+            .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+            .try_collect()
+            .await
+            .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+        for msg in fetched.iter() {
+            let Some(uid) = msg.uid else { continue };
+            let Some(body) = msg.body() else { continue };
+            out.push(FetchedRaw {
+                uid,
+                raw: body.to_vec(),
+                flags: flags_of(msg),
+            });
+        }
     }
+    span.mark("pass2_bodies");
+    // The chunks came back newest first; ingest sees the ascending order it saw
+    // when the whole window was one command.
+    out.sort_by_key(|m| m.uid);
 
     let downloaded: Vec<u32> = out.iter().map(|m| m.uid).collect();
     let coverage = arrival_coverage(
@@ -775,7 +851,13 @@ pub async fn fetch_new_raw_on_session(
         enumeration_complete,
         download_incomplete: coverage.incomplete,
         pending_arrival_mark: coverage.pending_mark,
-        highest_modseq: recordable_modseq,
+        bodies_complete,
+        highest_modseq: modseq_to_record(
+            server_modseq,
+            window_whole,
+            enumeration_complete,
+            bodies_complete,
+        ),
     })
 }
 
@@ -1173,27 +1255,80 @@ mod tests {
     fn only_a_pass_that_saw_the_whole_mailbox_may_record_a_modseq() {
         let server = Some(90_060_115_205_545_359u64);
         assert_eq!(
-            modseq_to_record(server, true, true),
+            modseq_to_record(server, true, true, true),
             Some(90_060_115_205_545_359),
             "a full pass over a completely enumerated mailbox"
         );
         assert_eq!(
-            modseq_to_record(server, false, true),
+            modseq_to_record(server, false, true, true),
             None,
             "a capped window may not vouch for the messages below it"
         );
         assert_eq!(
-            modseq_to_record(server, true, false),
+            modseq_to_record(server, true, false, true),
             None,
             "nor may a pass whose own enumeration came back short"
         );
+        assert_eq!(
+            modseq_to_record(server, true, true, false),
+            None,
+            "nor may a pass that stopped at its body deadline (#0113)"
+        );
         // Nothing to record is not a failure; the cursor UPSERT carries the
         // stored value forward on None.
-        assert_eq!(modseq_to_record(None, true, true), None);
-        assert_eq!(modseq_to_record(Some(0), true, true), None);
+        assert_eq!(modseq_to_record(None, true, true, true), None);
+        assert_eq!(modseq_to_record(Some(0), true, true, true), None);
         // A modseq beyond i64 is a server the store cannot represent; it gets
         // the full window forever rather than a truncated resume point.
-        assert_eq!(modseq_to_record(Some(u64::MAX), true, true), None);
+        assert_eq!(modseq_to_record(Some(u64::MAX), true, true, true), None);
+    }
+
+    /// #0113: the body pass is cut into commands, and the cut is from the top.
+    ///
+    /// Forty-five new UIDs are three `UID FETCH`es rather than one, and the
+    /// first one asks for the newest twenty, so a pass that stops after it has
+    /// the newest mail and owes only the backlog. The short chunk is the oldest.
+    #[test]
+    fn the_body_pass_is_chunked_newest_first() {
+        let new_uids: Vec<u32> = (1..=45).collect();
+
+        let chunks = body_chunks(&new_uids, BODY_CHUNK_SIZE);
+
+        assert_eq!(chunks.len(), 3, "45 new UIDs are three FETCH commands, not one");
+        assert_eq!(chunks[0], &(26..=45).collect::<Vec<u32>>()[..], "the newest 20 go first");
+        assert_eq!(chunks[1], &(6..=25).collect::<Vec<u32>>()[..]);
+        assert_eq!(chunks[2], &(1..=5).collect::<Vec<u32>>()[..], "the oldest chunk is the short one");
+        // Every UID is asked for exactly once: a planner that dropped or
+        // duplicated one would leave a message undownloaded forever or fetch it
+        // twice, and neither is visible in the chunk count alone.
+        let mut flat: Vec<u32> = chunks.concat();
+        flat.sort_unstable();
+        assert_eq!(flat, new_uids);
+        // A window smaller than one chunk is still one command.
+        assert_eq!(body_chunks(&[7, 8], BODY_CHUNK_SIZE).len(), 1);
+    }
+
+    /// #0113: where the deadline is answered, and where it is not.
+    ///
+    /// The first chunk always goes out even on a deadline that has already
+    /// passed, or a mailbox whose fetch starts late would download nothing on
+    /// every pass and never converge. From the second chunk on, an expired
+    /// deadline stops the pass. The check is between chunks by construction:
+    /// there is no point at which a `UID FETCH` in flight can be abandoned, so
+    /// a half-read response can never be left on a pooled session.
+    #[test]
+    fn the_deadline_stops_the_next_chunk_and_never_the_first() {
+        let now = Instant::now();
+        let past = now - Duration::from_secs(1);
+        let future = now + Duration::from_secs(30);
+
+        assert!(
+            !stop_before_chunk(0, Some(past), now),
+            "a deadline already spent still buys one chunk, so the pass makes progress"
+        );
+        assert!(stop_before_chunk(1, Some(past), now), "and stops the pass at the next one");
+        assert!(!stop_before_chunk(1, Some(future), now), "a live budget fetches on");
+        assert!(!stop_before_chunk(9, None, now), "no budget never stops (`mp sync`)");
     }
 
     /// The #0041 review blocker, scripted at the only level `fetch_new_raw` is
@@ -1225,7 +1360,7 @@ mod tests {
             "an empty window over 12 listed messages is not whole-mailbox coverage"
         );
         assert_eq!(
-            modseq_to_record(server, window_is_whole_mailbox(window_len, listed_len), true),
+            modseq_to_record(server, window_is_whole_mailbox(window_len, listed_len), true, true),
             None,
             "`mp sync -n 0` must leave the stored modseq where it is"
         );
@@ -1233,14 +1368,14 @@ mod tests {
         // A genuinely empty mailbox still may advance: nothing was missed.
         assert!(window_is_whole_mailbox(0, 0));
         assert_eq!(
-            modseq_to_record(server, window_is_whole_mailbox(0, 0), true),
+            modseq_to_record(server, window_is_whole_mailbox(0, 0), true, true),
             Some(2_000),
             "an empty mailbox has no flags to have skipped"
         );
 
         // And an uncapped pass over the same populated mailbox still records.
         assert_eq!(
-            modseq_to_record(server, window_is_whole_mailbox(listed_len, listed_len), true),
+            modseq_to_record(server, window_is_whole_mailbox(listed_len, listed_len), true, true),
             Some(2_000)
         );
     }
