@@ -1494,6 +1494,23 @@ async fn sync_one_account(
             result.prunes_deferred,
         );
     }
+    // #0115: one line per mailbox that downloaded the same mail it downloaded
+    // last pass. The exit code is unchanged, because nothing failed; what is
+    // wrong is that the work repeats.
+    {
+        let mut names = result.non_converging.clone();
+        names.sort();
+        names.dedup();
+        for name in names {
+            println!(
+                "{} {}'{}' downloaded the same messages again: the fetch is not converging, \
+                 see the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md",
+                "⚠".yellow(),
+                prefix,
+                name,
+            );
+        }
+    }
 
     Ok(())
 }

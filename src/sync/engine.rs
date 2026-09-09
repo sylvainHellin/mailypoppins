@@ -10,7 +10,13 @@
 //!
 //! What it is *not*: a Graph orchestrator. `graph.rs` still runs its own loop
 //! (the parity half of #0059 is parked with the Graph backend), and its #0074
-//! bookkeeping mirrors the one here by hand as it did before.
+//! bookkeeping mirrors the one here by hand as it did before. The #0115
+//! convergence detector rides this loop only, so a Graph pass builds a
+//! `SyncResult` whose `non_converging` is always empty: the account that
+//! motivated it is IMAP, and the Graph half waits for the parked parity work
+//! rather than being mirrored by hand a second time.
+
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use anyhow::Result;
 use log::{info, warn};
@@ -18,9 +24,113 @@ use log::{info, warn};
 use super::{FreshObservation, MailboxFetch, SyncBackend, SyncResult, SyncTarget};
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
-use crate::store::{BlobStore, Store};
+use crate::store::{schema, BlobStore, Store};
 use crate::timing::TimingSpan;
 use crate::types::MailboxRole;
+
+/// Prefix of the per-mailbox `meta` row the non-convergence detector keeps
+/// (#0115). The store is per account (`config::store_path`), so the mailbox
+/// role is the whole key, as it is for every other per-mailbox marker here.
+const NONCONVERGING_PREFIX: &str = "nonconverging:";
+
+fn nonconverging_key(role: &str) -> String {
+    format!("{NONCONVERGING_PREFIX}{role}")
+}
+
+/// The identity of one pass's download: the UID set, order-independent, plus
+/// its size so a hash collision still has to agree on the count.
+fn fingerprint(uids: &[u32]) -> (u64, usize) {
+    let mut sorted = uids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut hasher = DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    (hasher.finish(), sorted.len())
+}
+
+/// The whole state machine of #0115: how many consecutive qualifying passes
+/// have now downloaded the same UID set.
+///
+/// `prev` is the persisted `(hash, count, streak)`, `now` this pass's
+/// fingerprint. The same fingerprint continues the streak, anything else
+/// starts a new one at 1. Pure, so the transition is testable without a store.
+fn advance_streak(prev: Option<(u64, usize, u32)>, now: (u64, usize)) -> (u64, usize, u32) {
+    match prev {
+        Some((hash, count, streak)) if hash == now.0 && count == now.1 => {
+            (now.0, now.1, streak.saturating_add(1))
+        }
+        _ => (now.0, now.1, 1),
+    }
+}
+
+/// Which streak lengths get a log line: the first repeat, the second, then
+/// every tenth. A bug that persists stays visible without one line per tick.
+fn streak_is_loud(streak: u32) -> bool {
+    streak == 2 || streak == 3 || (streak > 3 && streak.is_multiple_of(10))
+}
+
+fn parse_streak_row(value: &str) -> Option<(u64, usize, u32)> {
+    let mut parts = value.split(':');
+    let hash = parts.next()?.parse().ok()?;
+    let count = parts.next()?.parse().ok()?;
+    let streak = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((hash, count, streak))
+}
+
+fn clear_nonconverging(store: &Store, role: &str) {
+    if let Err(e) = schema::clear_meta(store.conn(), &nonconverging_key(role)) {
+        warn!("[sync] could not clear the convergence marker for {role}: {e:#}");
+    }
+}
+
+/// Record what this pass downloaded for one mailbox and say whether the fetch
+/// has stopped converging (#0115).
+///
+/// Returns the streak once it is at 2 or more, which is the state the status
+/// line reports; the log line itself is throttled by [`streak_is_loud`].
+///
+/// A pass with nothing new clears the row: the fetch converged, which is the
+/// whole point of the detector.
+fn note_download_fingerprint(
+    store: &Store,
+    account: &str,
+    target: &SyncTarget,
+    uids: &[u32],
+) -> Option<u32> {
+    let key = nonconverging_key(target.role.as_str());
+    if uids.is_empty() {
+        clear_nonconverging(store, target.role.as_str());
+        return None;
+    }
+    let prev = match schema::get_meta(store.conn(), &key) {
+        Ok(v) => v.as_deref().and_then(parse_streak_row),
+        Err(e) => {
+            warn!("[sync] could not read the convergence marker for {key}: {e:#}");
+            return None;
+        }
+    };
+    let (hash, count, streak) = advance_streak(prev, fingerprint(uids));
+    if let Err(e) = schema::set_meta(store.conn(), &key, &format!("{hash}:{count}:{streak}")) {
+        warn!("[sync] could not record the convergence marker for {key}: {e:#}");
+    }
+    if streak < 2 {
+        return None;
+    }
+    if streak_is_loud(streak) {
+        let min = uids.iter().min().copied().unwrap_or(0);
+        let max = uids.iter().max().copied().unwrap_or(0);
+        warn!(
+            "[sync] '{}' on account '{account}' downloaded the same {count} message(s) \
+             (uids {min}..{max}) on {streak} consecutive passes; the fetch is not converging, \
+             see docs/tickets/0115-warn-on-a-non-converging-fetch.md",
+            target.server_name
+        );
+    }
+    Some(streak)
+}
 
 /// Everything one sync pass needs that is not the transport: where to write,
 /// what to sync and how much of it.
@@ -171,6 +281,12 @@ pub async fn run_sync(
             // this as the one path that may. A modseq recorded under the old
             // UIDVALIDITY describes a mailbox that no longer exists.
             ingest::clear_mailbox_modseq(store, account, target.role.as_str());
+            // And so does the convergence marker (#0115): it fingerprints a
+            // UID set the server has just renumbered, so the pass after this
+            // one would compare two sets that never meant the same thing.
+            if !dry_run {
+                clear_nonconverging(store, target.role.as_str());
+            }
         }
 
         if dry_run {
@@ -222,10 +338,18 @@ pub async fn run_sync(
             };
 
         let mut unmet: Vec<u32> = Vec::new();
+        // #0115: a UID the store has given up on drops out of `unmet`, which is
+        // exactly what makes the pass look complete while the message still has
+        // no row. The server keeps listing it, so every later pass downloads it
+        // again under the same fingerprint: a permanent repeat over a state
+        // #0074 declares expected. The flag is what keeps the detector off it.
+        let mut gave_up = false;
         let mut note_failure = |uid: u32, error: &str| {
             if note_ingest_failure(store, account, target.role.as_str(), &target.server_name, uid, error)
             {
                 unmet.push(uid);
+            } else {
+                gave_up = true;
             }
         };
         for message in &new_messages {
@@ -355,6 +479,31 @@ pub async fn run_sync(
         // has been ingested (see the second pass below).
         if !fetched.vanished.is_empty() {
             prunes.push((target.role.clone(), fetched.vanished));
+        }
+
+        // #0115: a pass that saw the whole mailbox, downloaded everything it
+        // owed and wrote it all has, by construction, nothing left to download
+        // next time. When the next such pass downloads the same UIDs again,
+        // something upstream is refusing to converge (#0112 was the instance
+        // that motivated this), and the streak says so out loud.
+        //
+        // Every other shape of pass is silent rather than reset: a truncated
+        // or short pass is *expected* to leave work behind, so it neither
+        // proves nor disproves convergence and leaves the row as it found it.
+        // A pass that gave up on a message (#0074) is the same shape: it wrote
+        // less than it downloaded, and the give-up is what makes that permanent
+        // rather than a bug to report.
+        let qualifies = fetched.enumeration_complete
+            && !fetched.download_incomplete
+            && bodies_complete
+            && !fetched.uidvalidity_reset
+            && unmet.is_empty()
+            && !gave_up;
+        if qualifies {
+            let uids: Vec<u32> = new_messages.iter().map(|m| m.uid).collect();
+            if note_download_fingerprint(store, account, target, &uids).is_some() {
+                result.non_converging.push(target.server_name.clone());
+            }
         }
 
         let highest_uid = new_messages.iter().map(|m| m.uid as i64).max();
@@ -666,11 +815,181 @@ mod tests {
         fn cursor_mark(&self, mailbox: &str) -> Option<u32> {
             ingest::known_uids_with_cursor(&self.store, "acct", mailbox).unwrap().arrival_mark
         }
+
+        /// The persisted `(hash, count, streak)` of the #0115 detector, or
+        /// `None` when the mailbox has no marker row.
+        fn streak(&self, mailbox: &str) -> Option<(u64, usize, u32)> {
+            schema::get_meta(self.store.conn(), &nonconverging_key(mailbox))
+                .unwrap()
+                .as_deref()
+                .and_then(parse_streak_row)
+        }
     }
 
     // -----------------------------------------------------------------------
     // Engine tests: the loop itself, driven by the fake backend
     // -----------------------------------------------------------------------
+
+    /// #0115, the pure half: only an identical fingerprint continues a streak,
+    /// and the log line is throttled to 2, 3, then every tenth.
+    #[test]
+    fn a_streak_continues_only_on_an_identical_fingerprint() {
+        let first = fingerprint(&[102, 101]);
+        assert_eq!(first, fingerprint(&[101, 102]), "the UID set is order-independent");
+        assert_ne!(first, fingerprint(&[101, 103]));
+
+        assert_eq!(advance_streak(None, first), (first.0, first.1, 1));
+        assert_eq!(advance_streak(Some((first.0, first.1, 1)), first), (first.0, first.1, 2));
+        assert_eq!(advance_streak(Some((first.0, first.1, 9)), first), (first.0, first.1, 10));
+
+        let other = fingerprint(&[101, 103]);
+        assert_eq!(
+            advance_streak(Some((first.0, first.1, 7)), other),
+            (other.0, other.1, 1),
+            "a different set starts over"
+        );
+        // A count that disagrees is a new fingerprint even if the hash did not.
+        assert_eq!(advance_streak(Some((first.0, first.1 + 1, 4)), first), (first.0, first.1, 1));
+
+        let loud: Vec<u32> = (1..=32).filter(|&s| streak_is_loud(s)).collect();
+        assert_eq!(loud, vec![2, 3, 10, 20, 30]);
+
+        assert_eq!(parse_streak_row("7:2:3"), Some((7, 2, 3)));
+        assert_eq!(parse_streak_row("7:2"), None, "a malformed row starts the streak over");
+        assert_eq!(parse_streak_row("7:2:3:4"), None);
+    }
+
+    /// #0115: two complete passes that download the same UIDs are the #0112
+    /// shape, and the pass that sees the repeat says so. A third repeat keeps
+    /// saying it; a pass with a different set is the fetch converging again.
+    #[test]
+    fn a_pass_that_downloads_the_same_uids_again_reports_a_fetch_that_is_not_converging() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let mut backend = FakeBackend::default();
+        let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
+        backend.script(
+            "INBOX",
+            vec![same(), same(), same(), Ok(fetch(vec![(103, raw("three"))]))],
+        );
+
+        let first = fx.run(&mut backend, &targets);
+        assert!(first.non_converging.is_empty(), "one download of a UID set proves nothing");
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
+
+        let second = fx.run(&mut backend, &targets);
+        assert_eq!(second.non_converging, vec!["INBOX".to_string()]);
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(2));
+
+        let third = fx.run(&mut backend, &targets);
+        assert_eq!(third.non_converging, vec!["INBOX".to_string()], "and keeps saying it");
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(3));
+
+        let moved_on = fx.run(&mut backend, &targets);
+        assert!(moved_on.non_converging.is_empty(), "a different set is a fetch making progress");
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
+    }
+
+    /// #0115: a pass that is short by design is expected to leave work behind,
+    /// so it neither counts as a repeat nor clears the streak the passes before
+    /// it built up.
+    #[test]
+    fn a_short_repeat_pass_neither_counts_nor_resets_the_streak() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let mut backend = FakeBackend::default();
+        let same = || fetch(vec![(101, raw("one")), (102, raw("two"))]);
+        let truncated = || {
+            let mut f = same();
+            f.bodies_complete = false;
+            f.download_incomplete = true;
+            Ok(f)
+        };
+        backend.script("INBOX", vec![Ok(same()), truncated(), truncated()]);
+
+        fx.run(&mut backend, &targets);
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
+
+        let cut = fx.run(&mut backend, &targets);
+        assert!(cut.non_converging.is_empty(), "a truncated pass may repeat itself");
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1), "and leaves the marker alone");
+
+        let cut_again = fx.run(&mut backend, &targets);
+        assert!(cut_again.non_converging.is_empty());
+        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
+    }
+
+    /// #0115: a UIDVALIDITY reset renumbered the mailbox, so the fingerprint
+    /// the marker holds describes UIDs that no longer mean anything.
+    #[test]
+    fn a_uidvalidity_reset_clears_the_convergence_marker() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let mut backend = FakeBackend::default();
+        let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
+        let mut reset = fetch(vec![(1, raw("one")), (2, raw("two"))]);
+        reset.uidvalidity_reset = true;
+        reset.state.uid_validity = Some(8);
+        backend.script("INBOX", vec![same(), same(), Ok(reset)]);
+
+        fx.run(&mut backend, &targets);
+        let repeat = fx.run(&mut backend, &targets);
+        assert_eq!(repeat.non_converging, vec!["INBOX".to_string()]);
+
+        let after = fx.run(&mut backend, &targets);
+        assert!(after.non_converging.is_empty());
+        assert_eq!(fx.streak("inbox"), None, "the marker is dropped with the modseq");
+    }
+
+    /// #0115: a pass with nothing new is the fetch converging, which is what
+    /// the detector is watching for, so it drops the marker.
+    #[test]
+    fn a_pass_with_nothing_new_clears_the_convergence_marker() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let mut backend = FakeBackend::default();
+        let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
+        backend.script("INBOX", vec![same(), same(), Ok(fetch(vec![]))]);
+
+        fx.run(&mut backend, &targets);
+        assert_eq!(fx.run(&mut backend, &targets).non_converging, vec!["INBOX".to_string()]);
+
+        let quiet = fx.run(&mut backend, &targets);
+        assert!(quiet.non_converging.is_empty());
+        assert_eq!(fx.streak("inbox"), None);
+    }
+
+    /// #0115 review: the give-up (#0074) must not read as a bug. A message the
+    /// store rejects every pass is dropped from `unmet` once it has burned
+    /// [`ingest::MAX_INGEST_ATTEMPTS`], so from then on every pass looks
+    /// complete while still downloading that UID under an unchanging
+    /// fingerprint. Without the `gave_up` gate the detector would fire forever
+    /// on a state #0074 declares expected.
+    #[test]
+    fn a_message_the_store_gave_up_on_is_not_a_fetch_that_fails_to_converge() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let mut backend = FakeBackend::default();
+        let poisoned = || Ok(fetch(vec![(105, unparsable())]));
+        let passes = ingest::MAX_INGEST_ATTEMPTS + 2;
+        backend.script("INBOX", (0..passes).map(|_| poisoned()).collect());
+
+        for pass in 1..=passes {
+            let result = fx.run(&mut backend, &targets);
+            assert!(
+                result.non_converging.is_empty(),
+                "pass {pass} downloaded a message it cannot write, which is not a repeat"
+            );
+            assert_eq!(fx.streak("inbox"), None, "pass {pass} leaves no marker behind");
+        }
+
+        assert!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105)
+                >= ingest::MAX_INGEST_ATTEMPTS,
+            "the store did give up, so the silence is the gave-up path and not a retry"
+        );
+        assert!(fx.rows("inbox").is_empty(), "and the message still has no row");
+    }
 
     /// The baseline: what the backend hands back is ingested, counted and
     /// cursored, and the next pass's skip list is what the first pass wrote.

@@ -4,10 +4,13 @@ use super::app::{
 };
 
 /// The status level of a completed sync/fetch: Success, unless the drain
-/// suffix says mutations were rolled back, which must not ride a green line
-/// (#0039 review note).
+/// suffix says mutations were rolled back (#0039 review note) or the sync
+/// suffix says a fetch is not converging (#0115). Neither may ride a green
+/// line.
 fn drained_sync_level(text: &str) -> StatusLevel {
-    if text.contains(super::helpers::FAILED_OPS_MARKER) {
+    if text.contains(super::helpers::FAILED_OPS_MARKER)
+        || text.contains(super::helpers::NON_CONVERGING_MARKER)
+    {
         StatusLevel::Warning
     } else {
         StatusLevel::Success
@@ -438,6 +441,21 @@ mod tests {
             StatusLevel::Warning
         ));
         assert!(matches!(drained_sync_level("Sync complete"), StatusLevel::Success));
+    }
+
+    /// #0115: the same rule for the other suffix a green line must not carry.
+    #[test]
+    fn a_non_converging_suffix_downgrades_the_sync_status_to_warning() {
+        assert!(matches!(
+            drained_sync_level(
+                "Synced: 16 new, 84 existing, fetch not converging on Sent Items (see the log)"
+            ),
+            StatusLevel::Warning
+        ));
+        assert!(matches!(
+            drained_sync_level("Synced: 16 new, 84 existing"),
+            StatusLevel::Success
+        ));
     }
 
     // -----------------------------------------------------------------------

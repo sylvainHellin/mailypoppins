@@ -83,6 +83,14 @@ pub struct SyncResult {
     /// Mailboxes whose server-side UIDVALIDITY no longer matched the stored
     /// cursor, and were therefore refetched in full.
     pub uidvalidity_resets: usize,
+    /// Server names of the mailboxes that downloaded the same set of UIDs as
+    /// the pass before them, twice or more in a row (#0115).
+    ///
+    /// A complete pass owes the next one nothing, so a repeat means something
+    /// upstream is handing the same mail back every tick and paying for it
+    /// every tick. The log line carries the detail; this is what the status
+    /// line and `mp sync` report so it cannot pass for a clean sync.
+    pub non_converging: Vec<String>,
     /// Address observations from newly-ingested messages, ready to be merged
     /// into the contacts index by the caller. Empty on `dry_run`.
     pub fresh_observations: Vec<FreshObservation>,

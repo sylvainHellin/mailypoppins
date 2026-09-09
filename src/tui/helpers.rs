@@ -320,6 +320,11 @@ pub(super) async fn lib_do_sync(
 /// sync that also rolled mutations back (#0039 review note).
 pub(crate) const FAILED_OPS_MARKER: &str = "mutation(s) failed and were rolled back";
 
+/// The other substring a finished-sync status line must not carry on a green
+/// line: a fetch that keeps downloading the same mail (#0115). Read by
+/// `tui::bg::drained_sync_level` like [`FAILED_OPS_MARKER`].
+pub(crate) const NON_CONVERGING_MARKER: &str = "fetch not converging";
+
 /// One end of a sync tick on the IMAP path: the outbox, then the mutation
 /// queue, in that order at the head and at the tail (#0114).
 ///
@@ -405,6 +410,18 @@ fn finish_sync(
         msg.push_str(&format!(
             ", {} mailbox(es) stopped at the fetch deadline (resuming next sync)",
             result.bodies_truncated
+        ));
+    }
+    // A sync that re-downloaded the same mail it downloaded last tick is not a
+    // clean sync, however green its counts look (#0115). The marker downgrades
+    // the status line to a warning; the log line says what to do about it.
+    if !result.non_converging.is_empty() {
+        let mut names = result.non_converging.clone();
+        names.sort();
+        names.dedup();
+        msg.push_str(&format!(
+            ", {NON_CONVERGING_MARKER} on {} (see the log)",
+            names.join(", ")
         ));
     }
     msg
