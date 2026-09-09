@@ -8,10 +8,14 @@
 
 mod client;
 mod pool;
-mod proto;
 mod server;
 mod stats;
 mod work;
+
+// `proto` now lives in the lib target (`src/lib.rs`), which the bootstrap
+// tests need; re-exported here so the binary's `crate::proto::…` paths and the
+// lib agree on one copy of the types instead of compiling the module twice.
+pub(crate) use ipc_bench::proto;
 
 use anyhow::{Context, Result};
 use clap::Parser;
