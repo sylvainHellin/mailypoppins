@@ -1361,3 +1361,16 @@ mailbox whose fetch starts late would then never converge.
 The rule generalises to every long IMAP or SMTP command in this codebase.
 Bounding one means splitting it into commands you can afford to finish, not
 interrupting the one you are in.
+
+## An oracle binary is built with `--locked`, or it is not the same binary
+
+Plain `cargo install --path .` re-resolves the dependency graph and is free to walk past `Cargo.lock`, so the installed `mp` can differ from the one `cargo test` builds.
+Capturing the pre-daemon baselines (#0118) hit it: a clap newer than the pinned 4.5.54 renders an empty-string default as `[default: ""]` where 4.5.54 renders `[default: ]`, one line of `mp search --help`, and that single line put the captured `docs/baselines/pre-daemon/cli-help.txt` at odds with `tests/snapshots/cli_help_snapshot__cli_help_surface_snapshot.snap`.
+A baseline, an oracle, or anything else whose whole job is to be compared against the test suite is installed with `cargo install --path . --locked`.
+The difference is invisible until the diff appears, and then it looks like a regression in whatever is being measured.
+
+## `/tmp` is tmpfs on this host, so a cold-cache benchmark taken there measures nothing
+
+The P0-U6 fixture (`examples/mkfixture.rs`) writes its store under `/tmp` by default, and on this machine `/tmp` is a tmpfs: the files never reach a disk, so every figure in `docs/baselines/pre-daemon/measurements.md` is a lower bound against a real data directory and none of them says anything about cold-cache behaviour.
+Dropping the page cache there changes nothing, because there is no page cache to drop.
+A cold figure needs a data directory on a real filesystem and root for `sysctl -w vm.drop_caches=3`, and until both exist the row stays `NOT TAKEN` rather than being filled with the tmpfs number.
