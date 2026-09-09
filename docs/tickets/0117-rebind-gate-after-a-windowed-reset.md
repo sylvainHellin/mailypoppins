@@ -35,7 +35,7 @@ The store ends up with one message twice and another missing, and it stays that 
 
 ## Reproduction
 
-The witness test drove the real engine over three passes, and the fix rewrote it into `a_reset_wider_than_the_window_converges_on_the_next_pass`.
+The witness test drove the real engine over three passes, and the fix rewrote it into `a_reset_wider_than_the_window_converges_on_the_next_full_sync`.
 The store holds `one` on 11 and `two` on 12; the mailbox is recreated holding `three` on 11, `one` on 12 and `two` on 13.
 The detecting pass has a window of one UID, rebinds `two` onto 13 and leaves `one` parked on 11.
 The next pass downloads `one` on 12, finds its row on 11, which that pass lists, declines the rebind, and inserts.
@@ -60,7 +60,7 @@ Options, in rough order of appetite:
 
 ## Acceptance criteria
 
-- A reset whose detecting pass covers only part of the listing converges: each message ends on one row, no row is stranded on a recycled UID, and no message is left undownloadable behind a stale skip-list entry.
+- A reset whose detecting pass covers only part of the listing converges on the next full sync: each message ends on one row, no row is stranded on a recycled UID, and no message is left undownloadable behind a stale skip-list entry.
 - The #0112 guarantee is untouched: N server-side copies of one `Message-ID` still get N rows, and a second pass over an unchanged mailbox still moves no row.
 - The witness test above is rewritten as an assertion of the fixed behaviour.
 
@@ -68,10 +68,19 @@ Options, in rough order of appetite:
 
 The detecting pass now says what it verified before it leaves.
 At the tail of a pass that reported a reset, `ingest::unbind_rows_on_uids` takes every row still parked on a listed UID the pass did not ingest off that UID and onto the `-id` sentinel `store::write::move_row` already uses for a row holding no server UID.
-The UID is then free, so the message the new numbering put there is downloaded on the next pass, and the row is rebindable by construction, so its own message takes it back when that pass downloads it.
+The UID is then free, so the message the new numbering put there is downloadable again, and the row is rebindable by construction, so its own message takes it back when a pass downloads it.
+
+That pass is the next *full* sync, not the next tick, and the commit message and the first changelog wording of this ticket both overstated it.
+`fetch_new_raw_on_session` builds its download window positionally (`listed.iter().rev().take(n)`), so the window is the top of the mailbox and the rows unbound here are below it by construction: freeing a UID does not get it requested on an ordinary windowed tick.
+What the fix changes is that a pass covering the whole listing is no longer blocked, where before the recycled UID sat in the skip list and blocked the full sync exactly as it blocked every other pass, which is the difference between a store that heals and one that does not.
 
 Rows on UIDs the server does not list are left where they are.
 They block nothing, and unbinding them would park a row whose message the recreated mailbox no longer holds on a sentinel no prune touches (`vanished_uids` skips `uid <= 0`).
+
+The unbind set is `listed \ ingested`, which on a windowed pass over a large mailbox is nearly the whole mailbox, and that cost is accepted rather than narrowed.
+After a UIDVALIDITY change every cached UID is a number from a numbering that no longer exists, so a row the pass did not itself verify has no binding worth keeping, and a stale one is worse than a re-download: `apply_flags` would write the server's flags for the new occupant onto it, and a queued move or delete would act on the wrong message.
+The price is paid by every row below the window: it moves to the `-id` sentinel, so it is invisible to the prune and to the flag pass until it is rebound, and the next full sync re-downloads a body the store already holds in order to rebind it.
+The row itself, with its id, its thread assignment and its blob references, is never lost, and the mailbox is whole again after one full sync.
 
 The unbinding runs after the ingest loop rather than before it, which is load-bearing in two directions.
 Before the loop it would take every row off its listed UID, the #0112 seeding guard would have nothing left to decline, and its reset half would become dead code that could be deleted with the suite green.
@@ -92,7 +101,7 @@ The unbinding cannot reach it: the UID is one the pass ingested, which is the st
 
 Tests in `src/sync/engine.rs`:
 
-- `a_reset_wider_than_the_window_converges_on_the_next_pass`, the rewritten witness: each message on one row, `one` back on the row id it started with, and 11 out of the skip list at the end of the detecting pass.
+- `a_reset_wider_than_the_window_converges_on_the_next_full_sync`, the rewritten witness: each message on one row, `one` back on the row id it started with, and 11 out of the skip list at the end of the detecting pass. Its third pass is scripted with the whole remaining listing, which is what a full sync asks for; a windowed tick would not reach 11.
 - `the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset`, the severe half.
   It is the one test that lets the fake backend derive its download set from the store's skip list (`FakeBackend::honour_skip_list`), so "`three` was never asked for" is observable rather than scripted away.
 - `a_reset_leaves_a_row_alone_when_the_new_listing_has_no_uid_for_it`, the other edge.

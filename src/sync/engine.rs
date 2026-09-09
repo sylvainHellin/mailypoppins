@@ -290,14 +290,22 @@ pub async fn run_sync(
         // The severe half is not the duplicate: the stale row keeps the
         // recycled UID in the skip list, so the message the server holds there
         // is never downloaded, and the server still lists that UID so no prune
-        // clears the row either. Nothing converges it, a full sync included.
+        // clears the row either. Nothing converged it, a full sync included.
         //
         // So the pass says what it verified before it leaves: every UID it
         // ingested is a row the server vouched for, and every other listed UID
         // is a claim made under a numbering that no longer exists. The rows
         // holding those claims are unbound, which frees the UID for the message
         // that now wears it and leaves the row rebindable, so its own message
-        // takes it back when a later pass downloads it.
+        // takes it back when a pass downloads it.
+        //
+        // That pass is a full sync, not the next tick. The fetch window is
+        // positional (`listed.iter().rev().take(n)`), so it is the top of the
+        // mailbox, and the rows unbound here are below it by construction: a
+        // freed UID is not a requested one. What the unbind buys is that a
+        // pass covering the whole listing is no longer blocked by a skip-list
+        // entry, where before it was. Until such a pass runs, an unbound row
+        // holds no server UID, so the prune and the flag pass pass over it.
         //
         // Rows on UIDs the server does not list are left alone: they block
         // nothing, and the prune is the path that answers for them.
@@ -1213,8 +1221,18 @@ mod tests {
     }
 
     /// #0117: a UIDVALIDITY reset whose detecting pass covered only part of the
-    /// listing still converges, one row per message and nobody parked on a
-    /// recycled UID.
+    /// listing converges on the next *full* sync, one row per message and
+    /// nobody parked on a recycled UID.
+    ///
+    /// Full sync, not next tick, and the difference is the fetch window rather
+    /// than the skip list: `fetch_new_raw_on_session` builds it positionally
+    /// (`listed.iter().rev().take(n)`), so it is the top of the mailbox, and
+    /// the rows this repairs are below it by construction. Freeing their UIDs
+    /// does not get them asked for on the next ordinary tick; it gets them
+    /// asked for by the first pass whose window reaches them, which is a pass
+    /// covering the whole listing. That is still the whole fix: before it, the
+    /// recycled UID sat in the skip list and a full sync was blocked with
+    /// everything else.
     ///
     /// The guard above degrades the gate on the pass that *detects* the reset,
     /// and that pass is the only one that sees it: `record_mailbox_cursor`
@@ -1235,12 +1253,13 @@ mod tests {
     ///
     /// The window is modelled by hand, as everywhere else here
     /// (`FakeBackend::fetch_targets` records `limit` and does not apply it),
-    /// and so is pass 3's download set. What that set *would* be under a stale
+    /// and so is pass 3's download set, which is scripted as the whole
+    /// remaining listing because that is what a full sync asks for. What that set *would* be under a stale
     /// skip list is the other half, and
     /// `the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset`
     /// derives it from the store rather than scripting it.
     #[test]
-    fn a_reset_wider_than_the_window_converges_on_the_next_pass() {
+    fn a_reset_wider_than_the_window_converges_on_the_next_full_sync() {
         let fx = Fixture::new();
         let targets =
             vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
@@ -1253,9 +1272,12 @@ mod tests {
         renumbered.listed = vec![11, 12, 13];
         renumbered.uidvalidity_reset = true;
         renumbered.state.uid_validity = Some(8);
-        // Pass 3: no reset left to report and the whole listing trusted. Both
-        // remaining UIDs are downloaded, because neither is claimed by a row
-        // any more.
+        // Pass 3, a full sync: no reset left to report and the whole listing
+        // trusted, and its window covers every UID. Both remaining UIDs come
+        // back, because neither is claimed by a row any more. A windowed tick
+        // here would still only reach the top of the mailbox: what the unbind
+        // buys is that this pass is no longer blocked, not that a tick
+        // suffices.
         let mut rest = fetch(vec![(11, raw("three")), (12, raw("one"))]);
         rest.listed = vec![11, 12, 13];
         rest.state.uid_validity = Some(8);
@@ -1292,8 +1314,8 @@ mod tests {
         let known = ingest::known_uids_with_cursor(&fx.store, "acct", "sent").unwrap();
         assert!(
             !known.uids.contains(&11),
-            "and 11 is out of the skip list, so the next pass downloads what the server \
-             actually holds there"
+            "and 11 is out of the skip list, so a pass whose window reaches it downloads what \
+             the server actually holds there"
         );
 
         let after = fx.run(&mut backend, &targets);
@@ -1326,6 +1348,12 @@ mod tests {
     /// This is the one test that hands the backend the *mailbox* and lets it
     /// derive its download set from the store's skip list, which is what makes
     /// "`three` was never asked for" observable rather than scripted away.
+    ///
+    /// The pass that does the downloading is a full sync: the backend is
+    /// offered the whole recreated listing, which is what a window covering
+    /// the mailbox asks for. A windowed tick would not reach 11, because the
+    /// window is the top of the listing; what the unbind changes is that the
+    /// skip list no longer hides 11 from the pass that does reach it.
     #[test]
     fn the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset() {
         let fx = Fixture::new();

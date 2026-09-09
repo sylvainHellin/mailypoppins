@@ -66,7 +66,7 @@ Nothing was lost or stranded, because a later `resume_outbox` files the row.
 
 Each sweep now reads the clock again, `now.max(unix_now())`.
 The `max` keeps an injected timestamp authoritative, which is what the tests that hand this a future `now` rely on, and it cannot shorten a retry ladder: the ladder is wall-clock (`updated + backoff_secs(attempts)`) and a sweep that runs seconds later is entitled to the seconds that actually passed.
-A row this drain has just attempted carries a fresh `updated` and at least `BACKOFF_BASE_SECS`, so no sweep can retry it inside its own loop.
+A row this drain has just attempted carries a fresh `updated` and a backoff of at least `BACKOFF_BASE_SECS` (30s), so no sweep can retry it inside its own loop as long as the loop is shorter than that; a drain whose sweeps span more than 30 seconds can reach the row again, which costs a dedup search against Sent and finds the copy rather than appending a second one.
 
 The test that certified the shipped behaviour was wrong in the same direction.
 `two_racing_drains_append_each_row_exactly_once` drained at `unix_now() + 5`, which put the peer's `updated` five seconds *behind* the holder's `now`, a state the live path cannot reach.

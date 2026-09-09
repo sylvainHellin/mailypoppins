@@ -1288,6 +1288,13 @@ a server-assigned number needs the same question asked of it: what happens when
 a row's claim to a number outlives the numbering, and is there a path that
 notices.
 
+The fix frees the number, which is not the same as asking for it. The download
+window is positional (`listed.iter().rev().take(n)`), so it is the top of the
+mailbox and the freed numbers are below it: the message arrives on the next
+*full* sync, not the next tick. That is still the whole point, because before it
+the full sync was blocked too, but a fix that unblocks a path is worth stating
+as the path it unblocks rather than as "it converges now".
+
 ## Unbind after the ingest loop, not before it
 
 The fix takes every row still sitting on a listed UID the reset pass did not

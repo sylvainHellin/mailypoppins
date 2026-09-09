@@ -794,6 +794,16 @@ pub fn clear_mailbox_modseq(store: &Store, account: &str, mailbox: &str) {
 ///   it would park a row whose message the recreated mailbox no longer holds on
 ///   a sentinel no prune touches (`vanished_uids` skips `uid <= 0`).
 ///
+/// Freeing a UID is not the same as asking for it. The fetch window is
+/// positional (`listed.iter().rev().take(n)` in `fetch_new_raw_on_session`), so
+/// it covers the top of the mailbox, and a row unbound here sits below it by
+/// construction: the message that now wears the freed UID arrives on the first
+/// pass whose window reaches it, which is a full sync. What the unbinding buys
+/// is that such a pass is no longer blocked by the skip list, where before it
+/// was blocked like every other pass; the cost is that until then the unbound
+/// row carries no server UID, so it is outside the prune and the flag pass, and
+/// its body is re-downloaded when its own message comes back.
+///
 /// Unbinding is not a rebind and does not touch the #0112 gate: no message is
 /// moved onto another message's row, the row count is unchanged, and it runs
 /// after the pass's own ingest has decided every rebind. What it leaves behind
