@@ -259,12 +259,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // is what excludes a second daemon.
     drop(start_lock);
 
-    let state = Arc::new(DaemonState {
-        meta,
-        accounts,
-        configured,
-        config,
-    });
+    let state = Arc::new(DaemonState::new(meta, accounts, configured, config));
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(shutdown.clone())?;
 

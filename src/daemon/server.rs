@@ -1,12 +1,15 @@
 //! The socket server: one tokio task per connection, NDJSON JSON-RPC in and
 //! out (P2-U7).
 //!
-//! Phase 2 serves `initialize`, `daemon.status` and `daemon.stop`, and answers
-//! everything else with `-32601` once the connection has handshaken and with
-//! `-32000` before it has. The two `daemon.*` methods are lifecycle surface
-//! rather than domain surface, so they are reachable **before** `initialize`:
-//! `mp daemon status` must be able to describe a daemon whose protocol range
-//! it cannot even negotiate, and `mp daemon stop` must be able to end one. The
+//! `initialize`, `daemon.status` and `daemon.stop` are answered here and are
+//! not registered on the dispatcher: they are lifecycle surface rather than
+//! domain surface, they run *before* a handshake (`mp daemon status` must
+//! describe a daemon whose protocol range it cannot negotiate, and
+//! `mp daemon stop` must be able to end one), and two of them need the
+//! connection's own state, which no domain method may reach. Every other method
+//! goes to [`DaemonState::dispatcher`] under the
+//! [`ClientCtx`](super::dispatch::ClientCtx) the handshake
+//! settled, and an unregistered name comes back as `-32601` from there. The
 //! handshake itself lives in [`super::session`], which owns the per-connection
 //! state [`dispatch_request`] gates on.
 //!
@@ -14,6 +17,7 @@
 //! on it, a `daemon.stop` handler sends on it after its response is flushed,
 //! and the signal task sends on it from outside any connection.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -29,6 +33,7 @@ use mp_protocol::{
     MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
 };
 
+use super::dispatch::Dispatcher;
 use super::runtime::InstanceMeta;
 use super::session::{ConfigReport, Session};
 
@@ -36,7 +41,12 @@ use super::session::{ConfigReport, Session};
 /// [`mp_protocol::ErrorCode`] and is not reachable until P2-U9.
 const PARSE_ERROR: i32 = -32700;
 const INVALID_REQUEST: i32 = -32600;
-const METHOD_NOT_FOUND: i32 = -32601;
+const INTERNAL_ERROR: i32 = -32603;
+
+/// Hands out one id per accepted connection, which is what a
+/// [`ClientCtx`](super::dispatch::ClientCtx) carries and what the event fan-out
+/// will address subscribers by.
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// How much one read may pull off a connection at a time. The frame cap is
 /// enforced by the [`Decoder`], not by this buffer.
@@ -67,14 +77,38 @@ pub struct DaemonState {
     /// file's order. This is what `account.list` reports and what
     /// `message.list` resolves an account name against: a runtime table would
     /// be empty in Phase 2, and a client still has to be able to ask which
-    /// accounts exist.
-    pub configured: Vec<crate::config::AccountConfig>,
+    /// accounts exist. Shared with the methods registered on
+    /// [`DaemonState::dispatcher`], which hold the same list rather than a
+    /// reference back to the state that owns them.
+    pub configured: Arc<Vec<crate::config::AccountConfig>>,
     /// How the configuration looked when this daemon started, reported by the
     /// handshake as `config_status`.
     pub config: ConfigReport,
+    /// Every domain method this build serves, registered once at startup and
+    /// read-only afterwards.
+    pub dispatcher: Dispatcher,
 }
 
 impl DaemonState {
+    /// Assemble the state and register the domain methods on it.
+    pub fn new(
+        meta: InstanceMeta,
+        accounts: Vec<AccountStatus>,
+        configured: Vec<crate::config::AccountConfig>,
+        config: ConfigReport,
+    ) -> Self {
+        let configured = Arc::new(configured);
+        let mut dispatcher = Dispatcher::new();
+        super::methods::register(&mut dispatcher, Arc::clone(&configured));
+        DaemonState {
+            meta,
+            accounts,
+            configured,
+            config,
+            dispatcher,
+        }
+    }
+
     /// The `result` of `daemon.status`.
     ///
     /// The CLI adds `"running": true` and prints the rest verbatim, so this
@@ -132,8 +166,12 @@ pub async fn serve(
                 Ok((stream, _addr)) => {
                     let state = Arc::clone(&state);
                     let shutdown = shutdown.clone();
+                    // Wraps after 2^64 connections, which no daemon reaches.
+                    let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, state, shutdown).await {
+                        if let Err(e) =
+                            handle_connection(stream, connection_id, state, shutdown).await
+                        {
                             debug!("[daemon] connection ended: {e:#}");
                         }
                     });
@@ -158,6 +196,7 @@ pub async fn serve(
 /// other client is unaffected.
 async fn handle_connection(
     stream: tokio::net::UnixStream,
+    connection_id: u64,
     state: Arc<DaemonState>,
     shutdown: watch::Sender<bool>,
 ) -> Result<()> {
@@ -166,7 +205,7 @@ async fn handle_connection(
     let mut buf = vec![0u8; READ_CHUNK];
     // One handshake per connection, so the session dies with the connection and
     // nothing has to expire it.
-    let mut session = Session::new();
+    let mut session = Session::new(connection_id);
 
     loop {
         let read = reader.read(&mut buf).await.context("reading a frame")?;
@@ -189,7 +228,7 @@ async fn handle_connection(
         };
 
         for value in frames {
-            let (reply, stop) = dispatch_request(value, &state, &mut session);
+            let (reply, stop) = dispatch_request(value, &state, &mut session).await;
             if let Some(reply) = reply {
                 writer
                     .write_all(&encode_capped(&reply, MAX_RESPONSE_BYTES)?)
@@ -212,7 +251,7 @@ async fn handle_connection(
 ///
 /// Returns the message to write back (`None` for a notification, which by
 /// JSON-RPC gets no answer) and whether the daemon should shut down afterwards.
-fn dispatch_request(
+async fn dispatch_request(
     value: Value,
     state: &DaemonState,
     session: &mut Session,
@@ -260,42 +299,50 @@ fn dispatch_request(
         );
     }
 
-    match request.method.as_str() {
+    // The id and the method are copied out because the domain arm hands the
+    // whole request to the dispatcher, which takes it by value.
+    let id = request.id.clone();
+    let method = request.method.clone();
+    match method.as_str() {
         "initialize" => match session.initialize(&request.params, state) {
-            Ok(result) => (result_value(request.id, result), false),
+            Ok(result) => (result_value(id, result), false),
             Err(refusal) => (
-                Some(error_value(
-                    request.id,
-                    refusal.code,
-                    refusal.message,
-                    refusal.data,
-                )),
+                Some(error_value(id, refusal.code, refusal.message, refusal.data)),
                 false,
             ),
         },
-        "daemon.status" => (result_value(request.id, state.status_result()), false),
-        "daemon.stop" => (result_value(request.id, json!({"stopping": true})), true),
-        other => match super::methods::dispatch(other, &request.params, state) {
-            Some(Ok(result)) => (result_value(request.id, result), false),
-            Some(Err(refusal)) => (
-                Some(error_value(
-                    request.id,
-                    refusal.code,
-                    refusal.message,
-                    refusal.data,
-                )),
-                false,
-            ),
-            None => (
-                Some(error_value(
-                    request.id,
-                    METHOD_NOT_FOUND,
-                    format!("unknown method {other}"),
-                    None,
-                )),
-                false,
-            ),
-        },
+        "daemon.status" => (result_value(id, state.status_result()), false),
+        "daemon.stop" => (result_value(id, json!({"stopping": true})), true),
+        _ => {
+            // The gate above already refused every unhandshaken connection, so
+            // a session without a context here is a daemon bug rather than a
+            // client's mistake.
+            let Some(ctx) = session.client_ctx() else {
+                return (
+                    Some(error_value(
+                        id,
+                        INTERNAL_ERROR,
+                        "the connection passed the handshake gate without a client context"
+                            .to_string(),
+                        None,
+                    )),
+                    false,
+                );
+            };
+            match state.dispatcher.dispatch(&ctx, request).await {
+                // `revision` and `affected` are dropped here until P3a-U5
+                // turns them into the events a client resyncs from; a query,
+                // which is all this build serves, carries neither.
+                Ok(outcome) => (result_value(id, outcome.result), false),
+                Err(error) => {
+                    let refusal = RpcError::from(error);
+                    (
+                        Some(error_value(id, refusal.code, refusal.message, refusal.data)),
+                        false,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -380,8 +427,8 @@ mod tests {
     /// A daemon state with no accounts, which is the Phase 2 shape.
     fn state_fixture() -> DaemonState {
         use std::path::PathBuf;
-        DaemonState {
-            meta: InstanceMeta {
+        DaemonState::new(
+            InstanceMeta {
                 app_version: "0.0.0-test".to_string(),
                 protocol_min: mp_protocol::PROTOCOL_MIN,
                 protocol_max: mp_protocol::PROTOCOL_MAX,
@@ -391,12 +438,12 @@ mod tests {
                 data_dir: PathBuf::from("/tmp/data"),
                 config_dir: PathBuf::from("/tmp/config"),
             },
-            accounts: Vec::new(),
-            configured: Vec::new(),
-            config: ConfigReport::Absent {
+            Vec::new(),
+            Vec::new(),
+            ConfigReport::Absent {
                 path: PathBuf::from("/tmp/config/config.toml"),
             },
-        }
+        )
     }
 
     fn request(method: &str, id: Option<i64>) -> Value {
@@ -409,12 +456,12 @@ mod tests {
 
     /// `daemon.status` answers before any handshake, which is what lets
     /// `mp daemon status` describe an incompatible daemon.
-    #[test]
-    fn status_answers_without_an_initialize() {
+    #[tokio::test]
+    async fn status_answers_without_an_initialize() {
         let state = state_fixture();
-        let mut session = Session::new();
+        let mut session = Session::new(1);
         let (reply, stop) =
-            dispatch_request(request("daemon.status", Some(7)), &state, &mut session);
+            dispatch_request(request("daemon.status", Some(7)), &state, &mut session).await;
         let reply = reply.expect("a request with an id is answered");
         assert!(!stop);
         assert_eq!(reply["id"], json!(7));
@@ -423,11 +470,12 @@ mod tests {
     }
 
     /// `daemon.stop` is answered first and only then ends the daemon.
-    #[test]
-    fn stop_replies_before_it_shuts_down() {
+    #[tokio::test]
+    async fn stop_replies_before_it_shuts_down() {
         let state = state_fixture();
-        let mut session = Session::new();
-        let (reply, stop) = dispatch_request(request("daemon.stop", Some(1)), &state, &mut session);
+        let mut session = Session::new(1);
+        let (reply, stop) =
+            dispatch_request(request("daemon.stop", Some(1)), &state, &mut session).await;
         assert!(stop, "daemon.stop asks for a shutdown");
         assert_eq!(reply.expect("answered")["result"]["stopping"], json!(true));
     }
@@ -435,21 +483,21 @@ mod tests {
     /// A domain method before the handshake is `-32000`, not `-32601`: the gate
     /// runs before the method lookup, so an uninitialized client cannot probe
     /// which methods a daemon serves.
-    #[test]
-    fn a_domain_method_before_initialize_is_not_initialized() {
+    #[tokio::test]
+    async fn a_domain_method_before_initialize_is_not_initialized() {
         let state = state_fixture();
-        let mut session = Session::new();
+        let mut session = Session::new(1);
         let (reply, stop) =
-            dispatch_request(request("account.list", Some(2)), &state, &mut session);
+            dispatch_request(request("account.list", Some(2)), &state, &mut session).await;
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32000));
     }
 
     /// After the handshake, a method no family serves is `-32601` again.
-    #[test]
-    fn an_unknown_method_after_initialize_is_method_not_found() {
+    #[tokio::test]
+    async fn an_unknown_method_after_initialize_is_method_not_found() {
         let state = state_fixture();
-        let mut session = Session::new();
+        let mut session = Session::new(1);
         let initialize = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -461,14 +509,14 @@ mod tests {
                 "identity": {"data_dir": "/tmp/data", "config_dir": "/tmp/config"},
             },
         });
-        let (reply, _) = dispatch_request(initialize, &state, &mut session);
+        let (reply, _) = dispatch_request(initialize, &state, &mut session).await;
         assert!(
             reply.expect("answered")["result"]["instance_id"] == json!("abcd"),
             "the handshake succeeds against the fixture's own directories"
         );
 
         let (reply, stop) =
-            dispatch_request(request("no.such.method", Some(2)), &state, &mut session);
+            dispatch_request(request("no.such.method", Some(2)), &state, &mut session).await;
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32601));
     }
@@ -514,11 +562,12 @@ mod tests {
     }
 
     /// A request without an id is a notification: no answer, no shutdown.
-    #[test]
-    fn a_notification_gets_no_response() {
+    #[tokio::test]
+    async fn a_notification_gets_no_response() {
         let state = state_fixture();
-        let mut session = Session::new();
-        let (reply, stop) = dispatch_request(request("daemon.status", None), &state, &mut session);
+        let mut session = Session::new(1);
+        let (reply, stop) =
+            dispatch_request(request("daemon.status", None), &state, &mut session).await;
         assert!(reply.is_none());
         assert!(!stop);
     }

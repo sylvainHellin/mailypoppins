@@ -21,8 +21,10 @@
 //! reporting what an account has may not change what it has.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{bail, Context};
+use futures::future::BoxFuture;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
@@ -31,7 +33,9 @@ use mp_protocol::{ErrorCode, RpcError};
 use crate::config::{AccountConfig, AuthMethod};
 use crate::store::schema;
 
-use super::super::server::DaemonState;
+use super::super::dispatch::{
+    CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,
+};
 
 /// The store is there and opens: reads are served.
 pub const STATE_READY: &str = "ready";
@@ -53,13 +57,35 @@ pub struct AccountEntry {
     pub state: String,
 }
 
+/// `account.list` as the dispatcher serves it.
+pub struct AccountList {
+    /// The accounts `config.toml` declared when this daemon started.
+    pub accounts: Arc<Vec<AccountConfig>>,
+}
+
+impl Method for AccountList {
+    fn spec(&self) -> MethodSpec {
+        MethodSpec {
+            name: "account.list",
+            kind: MethodKind::Query,
+            since: 1,
+        }
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        _params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move { Ok(Outcome::query(list(&self.accounts))) })
+    }
+}
+
 /// The `result` of `account.list`.
-pub fn list(state: &DaemonState) -> Value {
+pub fn list(accounts: &[AccountConfig]) -> Value {
     json!({
-        "accounts": entries(&state.configured)
-            .iter()
-            .map(to_json)
-            .collect::<Vec<_>>(),
+        "accounts": entries(accounts).iter().map(to_json).collect::<Vec<_>>(),
     })
 }
 
@@ -138,11 +164,10 @@ fn probe(path: &Path) -> anyhow::Result<()> {
 /// `-32006` carrying the same state [`list`] reports for it, because two
 /// answers about one account may not contradict each other.
 pub fn ready_account<'a>(
-    state: &'a DaemonState,
+    accounts: &'a [AccountConfig],
     name: &str,
 ) -> Result<&'a AccountConfig, RpcError> {
-    let account = state
-        .configured
+    let account = accounts
         .iter()
         .find(|account| account.name == name)
         .ok_or_else(|| RpcError {

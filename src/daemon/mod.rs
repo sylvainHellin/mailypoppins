@@ -7,6 +7,7 @@
 //! then `cargo install --path .` ships an `mp` binary that does not contain a
 //! byte of this module.
 
+pub mod dispatch;
 pub mod lifecycle;
 pub mod methods;
 pub mod runtime;

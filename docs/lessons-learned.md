@@ -1405,3 +1405,13 @@ The derivation is lossy, so `mp --daemon list-messages` could not reproduce `mp 
 
 Resolved in the P2-U12 review pass: the row carries `date_display` beside `date_sort` and the routed path opens no store at all.
 The lesson outlives the workaround: any shape a client renders has to carry the display form of a field beside the sortable one, or own the rendering itself.
+
+## A dispatcher owned by the state its methods read would be a cycle
+
+P3a-U2 put the `Dispatcher` inside `DaemonState`, which is the natural home: connections already share an `Arc<DaemonState>`, and the handshake derives its capability list from `state.dispatcher.specs()`.
+The trap is the other direction. `Method::call` receives no state, so a re-homed `account.list` that still wanted `&DaemonState` would need every registered method to hold an `Arc<DaemonState>` that owns the dispatcher that owns the method: a reference cycle that never drops, built at startup.
+
+The fix is to hand a method only what it reads, not the state it lives in.
+Both Phase 2 methods read one thing, the configured accounts, so `DaemonState::configured` became an `Arc<Vec<AccountConfig>>` and each method holds a clone of that `Arc`.
+`methods::{account,message}::list` take `&[AccountConfig]` instead of `&DaemonState`, which also makes them callable from a test with no daemon at all.
+When Phase 5 adds account runtimes, the same rule applies: hand the method a handle to the runtime, never the state that owns the table of them.

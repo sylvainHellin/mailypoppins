@@ -14,7 +14,9 @@
 //! and a number may not mean the opposite of itself.
 
 use std::path::Path;
+use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::RpcError;
@@ -25,16 +27,51 @@ use crate::store::read::{self, MessageRow};
 use crate::store::Store;
 use crate::tui::app::{build_mailboxes, resolve_date};
 
-use super::super::server::DaemonState;
+use super::super::dispatch::{
+    CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,
+};
 use super::{internal, invalid_params, string_param};
 
+/// `message.list` as the dispatcher serves it.
+pub struct MessageList {
+    /// The accounts `config.toml` declared when this daemon started.
+    pub accounts: Arc<Vec<AccountConfig>>,
+}
+
+impl Method for MessageList {
+    fn spec(&self) -> MethodSpec {
+        MethodSpec {
+            name: "message.list",
+            kind: MethodKind::Query,
+            since: 1,
+        }
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        // The store read is synchronous, as it was when the server called this
+        // method directly. Moving it onto a blocking thread is a change to how
+        // the daemon schedules work, not to how it dispatches, so it belongs
+        // with the account runtimes of Phase 5.
+        Box::pin(async move {
+            list(&params, &self.accounts)
+                .map(Outcome::query)
+                .map_err(DomainError::from)
+        })
+    }
+}
+
 /// The `result` of `message.list`.
-pub fn list(params: &Value, state: &DaemonState) -> Result<Value, RpcError> {
+pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let wanted = string_param(params, "mailbox")?;
     let limit = limit_param(params)?;
 
-    let account = super::account::ready_account(state, &name)?;
+    let account = super::account::ready_account(accounts, &name)?;
     let mailbox = resolve_mailbox(account, &wanted)?;
 
     let path = crate::config::store_path(&name);

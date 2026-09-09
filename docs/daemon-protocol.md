@@ -75,7 +75,8 @@ The directory pair is compared canonically, so a symlinked path is not a mismatc
 An application-version difference alone is diagnostic and does not refuse the connection.
 
 A capability identifier names a method family or a behaviour the daemon will serve, and a client requires only what it cannot work without.
-This build advertises `daemon.status`, `daemon.stop`, `account.list` and `message.list`, which are exactly the methods it serves; a family joins the list in the unit that starts serving it, so requiring one this build does not have is a `capability_missing` at the handshake rather than a `-32601` at the first call.
+This build advertises `daemon.status`, `daemon.stop`, `account.list` and `message.list`, which are exactly the methods it serves: the list is the two lifecycle methods followed by every method registered on the dispatcher, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
+Requiring one this build does not have is a `capability_missing` at the handshake rather than a `-32601` at the first call, and an *optional* capability the daemon lacks is dropped from the connection's agreed set instead of refusing it.
 
 The handshake happens once per connection, and a second `initialize` on the same connection is `-32600`.
 The session state dies with the connection: it is never expired, reused, or transferred.
@@ -86,6 +87,20 @@ The refusal is per request rather than per connection: the connection stays usab
 ## Method families
 
 Methods are domain operations, and each one declares whether it is a query, a command, a long-running operation, or a client-side integration request.
+
+### Method kinds
+
+Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
+Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
+
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list` and `message.list` are queries.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
+
+A method also declares `since`, the first protocol version that served it, which is never below `1`.
+
+`initialize`, `daemon.status` and `daemon.stop` declare no kind, because they are not dispatcher methods: they are lifecycle surface answered by the connection itself, ahead of the handshake gate and outside the domain.
 
 - `state.*` for bootstrap and state diagnostics.
 - `account.*` for listing, selection metadata, sync health, and account operations.
@@ -254,4 +269,5 @@ The error table above, codes `-32000` to `-32009`.
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
 The read-only methods `account.list` and `message.list`, both behind the handshake, with the account states `ready` and `blocked`, `null` as the spelling of an unlimited `message.list`, and `-32602` for a mailbox the account does not have.
 A `message.list` row carries both dates, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
+A `client.type` outside `cli`, `tui` and `gui` is `-32602`, because a method that branches on the caller may not be handed a fourth kind.
 A response above the 16 MiB response cap is a `frame_too_large` error carrying `{limit, seen}`, the same pair an oversized request earns.

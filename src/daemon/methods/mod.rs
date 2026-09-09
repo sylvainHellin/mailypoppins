@@ -6,36 +6,43 @@
 //! the daemon does not become an account's engine before Phase 5, so a running
 //! TUI or `mp sync` keeps the lock while the daemon answers listings beside it.
 //!
-//! The dispatcher is a function rather than a table because the gate in
-//! [`super::server::dispatch_request`] runs first: by the time a method reaches
-//! [`dispatch`], the connection has handshaken, and a method this build does
-//! not serve falls back to `-32601`.
+//! Both are [`Query`](super::dispatch::MethodKind::Query) methods on the
+//! [`Dispatcher`](super::dispatch::Dispatcher) the daemon builds at startup
+//! (P3a-U2): they read, they change nothing, and their outcomes carry neither a
+//! revision nor an affected resource. [`register`] is the single place that
+//! says which methods this build serves; the handshake derives its capability
+//! list from the same table, so a method cannot be served without being
+//! advertised.
+//!
+//! Neither method reads [`DaemonState`](super::server::DaemonState): they take
+//! the configured accounts, which is all the state a Phase 2 read needs, and
+//! holding an `Arc` of that list is what keeps the dispatcher out of a cycle
+//! with the state that owns it.
 
 pub mod account;
 pub mod message;
+
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use mp_protocol::RpcError;
 
-use super::server::DaemonState;
+use crate::config::AccountConfig;
+
+use super::dispatch::Dispatcher;
 
 /// JSON-RPC's own "invalid params".
 const INVALID_PARAMS: i32 = -32602;
 /// JSON-RPC's own "internal error".
 const INTERNAL_ERROR: i32 = -32603;
 
-/// Answer one domain method, or `None` when this build does not serve it.
-pub fn dispatch(
-    method: &str,
-    params: &Value,
-    state: &DaemonState,
-) -> Option<Result<Value, RpcError>> {
-    match method {
-        "account.list" => Some(Ok(account::list(state))),
-        "message.list" => Some(message::list(params, state)),
-        _ => None,
-    }
+/// Register every domain method this build serves.
+pub fn register(dispatcher: &mut Dispatcher, accounts: Arc<Vec<AccountConfig>>) {
+    dispatcher.register(Arc::new(account::AccountList {
+        accounts: Arc::clone(&accounts),
+    }));
+    dispatcher.register(Arc::new(message::MessageList { accounts }));
 }
 
 /// A required string parameter, or `-32602` naming it.
