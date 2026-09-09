@@ -36,6 +36,14 @@
 //! second row, so the thread assignment and the blob references survive the
 //! renumbering.
 //!
+//! That rebind is gated by a [`RebindPolicy`] the caller supplies (#0112).
+//! Taken unconditionally it also swallows the case a server-as-truth mirror
+//! has to be able to hold: a mailbox carrying several server-side copies of
+//! one `Message-ID`. Each copy would land on the same row and flip its `uid`
+//! to whichever copy was ingested last, so the other copies are absent from
+//! the skip list on the next pass, are reported new, are downloaded in full,
+//! and rebind the row back, forever.
+//!
 //! ## Synthesised Message-ID
 //!
 //! A message with no `Message-ID` header gets `sha256-<hex16>@local.invalid`,
@@ -107,6 +115,35 @@ pub struct IngestOutcome {
     pub uid_rebound: bool,
 }
 
+/// Whether ingest may move an existing row onto the UID being ingested.
+///
+/// The `message_id` fallback exists to absorb a UIDVALIDITY reset; the policy
+/// is how a caller that knows what the server currently holds keeps it from
+/// absorbing a duplicate copy as well (#0112).
+pub enum RebindPolicy<'a> {
+    /// Any candidate may be rebound: the behaviour ingest always had, and what
+    /// every caller that cannot say what the server holds gets.
+    Always,
+    /// A candidate may be rebound only when the UID it is parked on is not one
+    /// the server is currently listing for this mailbox.
+    ///
+    /// The set holds server UIDs only, so the two locally written UID shapes
+    /// are rebindable by construction and need no special case: the `-id` move
+    /// sentinel ([`crate::store::write`]) is negative, and the synthetic
+    /// [`graph_uid`] is a 63-bit hash no `u32` listing can contain.
+    UnlessListed(&'a std::collections::HashSet<i64>),
+}
+
+impl RebindPolicy<'_> {
+    /// Whether a candidate row parked on `candidate_uid` may be rebound.
+    fn permits(&self, candidate_uid: i64) -> bool {
+        match self {
+            RebindPolicy::Always => true,
+            RebindPolicy::UnlessListed(listed) => !listed.contains(&candidate_uid),
+        }
+    }
+}
+
 /// The blob kinds a message row can reference.
 const KIND_BODY: &str = "body";
 const KIND_HTML: &str = "html";
@@ -130,6 +167,21 @@ pub fn ingest_message(
     store: &Store,
     blobs: &BlobStore,
     input: &IngestInput<'_>,
+) -> Result<IngestOutcome> {
+    ingest_message_with_policy(store, blobs, input, &RebindPolicy::Always)
+}
+
+/// [`ingest_message`], with the caller stating which rows the `message_id`
+/// fallback may rebind (#0112).
+///
+/// A second entry point rather than a field on [`IngestInput`]: the struct is
+/// built at some thirty call sites and exactly one of them, the sync engine,
+/// holds a server listing to decide with.
+pub fn ingest_message_with_policy(
+    store: &Store,
+    blobs: &BlobStore,
+    input: &IngestInput<'_>,
+    rebind: &RebindPolicy<'_>,
 ) -> Result<IngestOutcome> {
     let mut span = TimingSpan::with_context(
         "store_ingest",
@@ -207,7 +259,8 @@ pub fn ingest_message(
         .conn()
         .unchecked_transaction()
         .context("opening ingest transaction")?;
-    let outcome = ingest_in_tx(&tx, blobs, input, &message_id, &in_reply_to, &references, &refs)?;
+    let outcome =
+        ingest_in_tx(&tx, blobs, input, &message_id, &in_reply_to, &references, &refs, rebind)?;
     tx.commit().context("committing ingest transaction")?;
     span.mark("committed");
 
@@ -225,6 +278,7 @@ fn ingest_in_tx(
     in_reply_to: &Option<String>,
     references: &Option<String>,
     refs: &[BlobRef],
+    rebind: &RebindPolicy<'_>,
 ) -> Result<IngestOutcome> {
     let email = input.email;
 
@@ -246,17 +300,7 @@ fn ingest_in_tx(
     let existing = match existing {
         Some(found) => Some(found),
         None => {
-            let by_mid = tx
-                .query_row(
-                    "SELECT id, thread_id
-                     FROM messages
-                     WHERE account = ?1 AND mailbox = ?2 AND message_id = ?3
-                     ORDER BY id LIMIT 1",
-                    (input.account, input.mailbox, message_id),
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .context("looking up the message through the message_id index")?;
+            let by_mid = rebindable_row(tx, input, message_id, rebind)?;
             uid_rebound = by_mid.is_some();
             by_mid
         }
@@ -407,6 +451,61 @@ fn ingest_in_tx(
         inserted: existing.is_none(),
         uid_rebound,
     })
+}
+
+/// The row the `message_id` index offers for this UID to rebind onto, or
+/// `None` when the message owes a row of its own.
+///
+/// Eligibility is part of candidate *selection*, and that is the whole point.
+/// Filtering after `ORDER BY id LIMIT 1` would keep answering with the
+/// lowest-id row once that row became ineligible, so a mailbox holding several
+/// copies of one `Message-ID` would decline every rebind after the first and
+/// strand the remaining rows on whatever UID they were parked on. A row parked
+/// on the negative move sentinel is never pruned ([`crate::imap_client`] skips
+/// only `uid > 0`), so nothing would ever come back for it.
+///
+/// The ineligible set is not pushed into the SQL as a `NOT IN`: it is the
+/// server's whole UID listing, thousands of values on a large mailbox and well
+/// past what a bound-parameter list may carry. The candidate set is the other
+/// way round, one row per copy the mailbox holds, so it is read in preference
+/// order and the first eligible row wins. `ORDER BY (uid >= 0), id` is that
+/// preference: a row waiting on the move sentinel is always rebindable and is
+/// offered ahead of one parked on a number the server may still be using.
+fn rebindable_row(
+    tx: &Transaction<'_>,
+    input: &IngestInput<'_>,
+    message_id: &str,
+    rebind: &RebindPolicy<'_>,
+) -> Result<Option<(i64, Option<String>)>> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT id, thread_id, uid
+             FROM messages
+             WHERE account = ?1 AND mailbox = ?2 AND message_id = ?3
+             ORDER BY (uid >= 0), id",
+        )
+        .context("preparing the message_id index lookup")?;
+    let mut rows = stmt
+        .query((input.account, input.mailbox, message_id))
+        .context("looking up the message through the message_id index")?;
+    let mut declined: Option<i64> = None;
+    while let Some(row) = rows.next().context("reading a message_id index candidate")? {
+        let id: i64 = row.get(0)?;
+        let thread: Option<String> = row.get(1)?;
+        let uid: i64 = row.get(2)?;
+        if rebind.permits(uid) {
+            return Ok(Some((id, thread)));
+        }
+        declined.get_or_insert(uid);
+    }
+    if let Some(uid) = declined {
+        warn!(
+            "Not rebinding UID {} in '{}/{}' onto the row on UID {}: the server still lists \
+             that UID, so {} is a second copy and gets its own row",
+            input.uid, input.account, input.mailbox, uid, message_id
+        );
+    }
+    Ok(None)
 }
 
 /// Every blob hash currently referenced by a message row.

@@ -13,7 +13,9 @@
 
 use std::collections::HashSet;
 
-use mailypoppins::ingest::{ingest_message, IngestInput, IngestOutcome};
+use mailypoppins::ingest::{
+    ingest_message, ingest_message_with_policy, IngestInput, IngestOutcome, RebindPolicy,
+};
 use mailypoppins::parse::{parse_rfc822_to_fetched_email, FetchedEmail};
 use mailypoppins::store::{blobs::BlobHash, BlobStore, Store};
 use tempfile::TempDir;
@@ -39,6 +41,44 @@ impl Fixture {
     fn ingest_raw(&self, mailbox: &str, uid: i64, raw: &[u8]) -> IngestOutcome {
         let email = parse_rfc822_to_fetched_email(raw).expect("fixture must parse");
         self.ingest(mailbox, uid, &email, Some(raw))
+    }
+
+    /// [`Fixture::ingest_raw`] under the #0112 rebind gate: `listed` is what
+    /// the server is holding for this mailbox on this pass, and a row parked on
+    /// one of those UIDs may not be moved onto another.
+    fn ingest_raw_listed(
+        &self,
+        mailbox: &str,
+        uid: i64,
+        raw: &[u8],
+        listed: &[i64],
+    ) -> IngestOutcome {
+        let email = parse_rfc822_to_fetched_email(raw).expect("fixture must parse");
+        let listed: HashSet<i64> = listed.iter().copied().collect();
+        ingest_message_with_policy(
+            &self.store,
+            &self.blobs,
+            &IngestInput { account: "acct", mailbox, uid, email: &email, raw: Some(raw) },
+            &RebindPolicy::UnlessListed(&listed),
+        )
+        .unwrap()
+    }
+
+    /// Every `(id, uid)` in one mailbox, lowest row id first.
+    fn mailbox_rows(&self, mailbox: &str) -> Vec<(i64, i64)> {
+        let conn = self.store.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, uid FROM messages WHERE account = 'acct' AND mailbox = ?1 \
+                 ORDER BY id",
+            )
+            .unwrap();
+        let out = stmt
+            .query_map([mailbox], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        out
     }
 
     fn ingest(
@@ -576,8 +616,21 @@ fn uidvalidity_reset_rebinds_the_row_and_keeps_thread_and_refs() {
     assert_eq!(f.int(after.row_id, "uid"), 5001, "the uid must be updated in place");
     assert_eq!(after.thread_id, root.message_id, "the thread assignment must survive");
     assert_eq!(f.blob_refs(after.row_id), refs_before, "blob references must survive");
-    for (_, _, hash, _) in refs_before {
-        assert_eq!(f.refcount(&hash), 1, "a rebind must not double-count a reference");
+    for (_, _, hash, _) in &refs_before {
+        assert_eq!(f.refcount(hash), 1, "a rebind must not double-count a reference");
+    }
+
+    // #0112: a reset pass reaches this same rebind through the gate, carrying
+    // the empty listing that says "nothing the server lists can be trusted to
+    // decline a rebind". It must still land on the same row.
+    let again = f.ingest_raw_listed("inbox", 5002, &reply, &[]);
+    assert!(again.uid_rebound, "the reset policy must still absorb the renumbering");
+    assert!(!again.inserted);
+    assert_eq!(again.row_id, before.row_id);
+    assert_eq!(f.message_rows(), 2);
+    assert_eq!(f.blob_refs(again.row_id), refs_before);
+    for (_, _, hash, _) in &refs_before {
+        assert_eq!(f.refcount(hash), 1);
     }
 }
 
@@ -695,6 +748,183 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
     .resolve(Some(42));
     assert!(!reset);
     assert_eq!(skip, HashSet::from([7]));
+
+    // #0112: the same rebind through the gate the sync engine now supplies. A
+    // reset pass carries the empty listing, because a renumbered server's UIDs
+    // say nothing about which message wears them, so the row still follows its
+    // message rather than being duplicated.
+    let moved_again = f.ingest_raw_listed("inbox", 10, &reply, &[]);
+    assert!(moved_again.uid_rebound);
+    assert!(!moved_again.inserted);
+    assert_eq!(moved_again.row_id, before.row_id);
+    assert_eq!(f.message_rows(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// 4b. The rebind gate (#0112)
+// ---------------------------------------------------------------------------
+
+/// A message the server holds several copies of.
+fn duplicated() -> Vec<u8> {
+    message(
+        "From: a@example.com\r\n\
+         Subject: Re: Webseite LOC\r\n\
+         Message-ID: <dup@example.com>\r\n",
+        b"duplicated body\r\n",
+    )
+}
+
+/// The defect #0112 fixes, at the ingest layer. N UIDs the server lists for one
+/// `Message-ID` are N messages in that mailbox and owe N rows; collapsing them
+/// onto one row is what left the other copies out of the skip list and made the
+/// fetch re-download them on every pass forever.
+#[test]
+fn n_listed_copies_of_one_message_id_get_n_rows() {
+    let f = Fixture::new();
+    let raw = duplicated();
+    let listed = [6540, 6542, 6543];
+
+    let first = f.ingest_raw_listed("sent", 6540, &raw, &listed);
+    let second = f.ingest_raw_listed("sent", 6542, &raw, &listed);
+    let third = f.ingest_raw_listed("sent", 6543, &raw, &listed);
+
+    assert!(first.inserted && second.inserted && third.inserted);
+    assert!(
+        !first.uid_rebound && !second.uid_rebound && !third.uid_rebound,
+        "a UID the server is still listing is not a renumbering"
+    );
+    assert_eq!(
+        f.mailbox_rows("sent").iter().map(|(_, uid)| *uid).collect::<Vec<_>>(),
+        listed.to_vec(),
+        "three listed copies, three rows, one per server UID"
+    );
+    assert_eq!(f.message_rows(), 3);
+    assert_eq!(second.thread_id, first.thread_id, "copies of one message are one thread");
+    assert_eq!(third.thread_id, first.thread_id);
+    // The bodies are byte-identical, so the blob store holds one file per hash
+    // and each of the three rows holds a reference to it.
+    for (_, _, hash, _) in f.blob_refs(first.row_id) {
+        assert_eq!(f.refcount(&hash), 3, "one reference per row, not one per hash");
+    }
+}
+
+/// The other half of the same rule: ingest never rebinds twice onto one row, so
+/// the copies stay put once they have their rows. This is the pass-2 half of
+/// "the same mailbox synced twice reports nothing new".
+#[test]
+fn a_second_pass_over_the_same_copies_changes_no_row() {
+    let f = Fixture::new();
+    let raw = duplicated();
+    let listed = [6540, 6542];
+    f.ingest_raw_listed("sent", 6540, &raw, &listed);
+    f.ingest_raw_listed("sent", 6542, &raw, &listed);
+    let before = f.mailbox_rows("sent");
+
+    // Both UIDs come back on the next pass: identity hits, nothing moves.
+    let again = f.ingest_raw_listed("sent", 6540, &raw, &listed);
+    f.ingest_raw_listed("sent", 6542, &raw, &listed);
+
+    assert!(!again.inserted && !again.uid_rebound);
+    assert_eq!(f.mailbox_rows("sent"), before, "no row id and no uid moved");
+}
+
+/// The unconditional policy is still reachable and still collapses, which is
+/// what a UIDVALIDITY reset needs: the row follows its message onto a UID the
+/// renumbered server is listing.
+#[test]
+fn the_unconditional_policy_still_rebinds_onto_a_listed_uid() {
+    let f = Fixture::new();
+    let raw = duplicated();
+
+    let first = f.ingest_raw("sent", 6540, &raw);
+    let second = f.ingest_raw("sent", 6542, &raw);
+
+    assert!(second.uid_rebound && !second.inserted);
+    assert_eq!(second.row_id, first.row_id);
+    assert_eq!(f.message_rows(), 1);
+}
+
+/// A reset pass has no usable listing, so it rebinds through an empty one. That
+/// must not put every copy back on the lowest-id row: a candidate this pass has
+/// already moved onto a UID is off limits for the rest of it, which is how N
+/// copies survive a renumbering as N rows.
+#[test]
+fn a_reset_pass_maps_n_copies_onto_n_rows() {
+    let f = Fixture::new();
+    let raw = duplicated();
+    let listed = [6540, 6542];
+    let first = f.ingest_raw_listed("sent", 6540, &raw, &listed);
+    let second = f.ingest_raw_listed("sent", 6542, &raw, &listed);
+
+    // The server renumbers. The listing is meaningless now, so the pass carries
+    // only what it has itself ingested.
+    let moved_a = f.ingest_raw_listed("sent", 11, &raw, &[]);
+    let moved_b = f.ingest_raw_listed("sent", 12, &raw, &[11]);
+
+    assert!(moved_a.uid_rebound && !moved_a.inserted);
+    assert!(moved_b.uid_rebound && !moved_b.inserted);
+    assert_eq!(moved_a.row_id, first.row_id);
+    assert_eq!(moved_b.row_id, second.row_id, "the second copy must not land on the first row");
+    assert_eq!(f.message_rows(), 2, "a renumbering must not lose a copy");
+    assert_eq!(
+        f.mailbox_rows("sent").iter().map(|(_, uid)| *uid).collect::<Vec<_>>(),
+        vec![11, 12]
+    );
+}
+
+/// A row parked on the `-id` move sentinel is rebound whatever the listing
+/// says: negative is a value no server produces, so the gate can never decline
+/// it. With duplicates present, the second sentinel row must be rebound too
+/// rather than stranded on a number nothing will ever prune.
+#[test]
+fn rows_parked_on_the_move_sentinel_are_all_rebound() {
+    let f = Fixture::new();
+    let raw = duplicated();
+    f.ingest_raw_listed("inbox", 101, &raw, &[101, 102]);
+    f.ingest_raw_listed("inbox", 102, &raw, &[101, 102]);
+    let mut parked = Vec::new();
+    for (id, _) in f.mailbox_rows("inbox") {
+        mailypoppins::store::write::move_row(&f.store, id, "archive").unwrap();
+        parked.push(id);
+    }
+    assert_eq!(
+        f.mailbox_rows("archive"),
+        parked.iter().map(|id| (*id, -*id)).collect::<Vec<_>>(),
+        "both rows wait on the sentinel"
+    );
+
+    // The destination mailbox syncs and lists both copies.
+    let a = f.ingest_raw_listed("archive", 7, &raw, &[7, 8]);
+    let b = f.ingest_raw_listed("archive", 8, &raw, &[7, 8]);
+
+    assert!(a.uid_rebound && !a.inserted);
+    assert!(b.uid_rebound && !b.inserted, "the second sentinel row must not be stranded");
+    assert_eq!(f.message_rows(), 2, "and no third row is invented for it");
+    assert_eq!(f.mailbox_rows("archive"), vec![(parked[0], 7), (parked[1], 8)]);
+}
+
+/// A sent-copy placeholder is written ahead of the server under a `graph_uid`,
+/// a 63-bit hash of the Message-ID. No `u32` listing can contain it, so the
+/// gate permits its rebind onto the real UID once the server files the message.
+#[test]
+fn a_graph_uid_placeholder_is_still_rebound_onto_the_real_uid() {
+    let f = Fixture::new();
+    let raw = message(
+        "From: a@example.com\r\n\
+         Subject: just sent\r\n\
+         Message-ID: <sent-copy@example.com>\r\n",
+        b"sent body\r\n",
+    );
+    let placeholder_uid = mailypoppins::ingest::graph_uid("<sent-copy@example.com>");
+    assert!(placeholder_uid > u32::MAX as i64, "the hash is far above any server UID");
+    let placeholder = f.ingest_raw_listed("sent", placeholder_uid, &raw, &[]);
+
+    let filed = f.ingest_raw_listed("sent", 6600, &raw, &[6600]);
+
+    assert!(filed.uid_rebound && !filed.inserted);
+    assert_eq!(filed.row_id, placeholder.row_id, "the placeholder row takes the real UID");
+    assert_eq!(f.message_rows(), 1);
+    assert_eq!(f.mailbox_rows("sent"), vec![(placeholder.row_id, 6600)]);
 }
 
 /// The same Message-ID in another mailbox is a copy, not the same row: identity

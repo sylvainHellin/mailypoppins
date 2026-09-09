@@ -16,7 +16,7 @@ use anyhow::Result;
 use log::{info, warn};
 
 use super::{FreshObservation, MailboxFetch, SyncBackend, SyncResult, SyncTarget};
-use crate::ingest::{self, IngestInput, MailboxCursor};
+use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
 use crate::store::{BlobStore, Store};
 use crate::timing::TimingSpan;
@@ -184,6 +184,30 @@ pub async fn run_sync(
         // One poisoned message never stops the batch: every failure `continue`s
         // to the next message, so the rest of the window is ingested normally
         // and only the prune is held back.
+        // The rebind gate (#0112). Ingest may move an existing row onto the UID
+        // it is writing only when the server cannot still be holding the UID
+        // that row is parked on; otherwise the two are separate server-side
+        // copies of one message and each owes a row of its own.
+        //
+        // Two kinds of pass cannot supply a listing that decides it, and both
+        // degrade to the unconditional rebind ingest always did. A UIDVALIDITY
+        // reset renumbered the mailbox, so a listed UID says nothing about
+        // which message wears it and a row whose old number was recycled must
+        // still be allowed to follow its message (#0038). A short enumeration
+        // listed fewer UIDs than the mailbox announced under EXISTS, a listing
+        // already untrusted for pruning and no more trustworthy here.
+        //
+        // What survives the degradation is the set growing as the pass ingests:
+        // a row this pass has already put on a UID is not moved off it again,
+        // which is what keeps N copies of one Message-ID from collapsing back
+        // onto the lowest-id row.
+        let mut server_uids: std::collections::HashSet<i64> =
+            if fetched.uidvalidity_reset || !fetched.enumeration_complete {
+                std::collections::HashSet::new()
+            } else {
+                fetched.listed.iter().map(|&uid| uid as i64).collect()
+            };
+
         let mut unmet: Vec<u32> = Vec::new();
         let mut note_failure = |uid: u32, error: &str| {
             if note_ingest_failure(store, account, target.role.as_str(), &target.server_name, uid, error)
@@ -202,7 +226,7 @@ pub async fn run_sync(
             };
             email.flags = message.flags;
 
-            let outcome = ingest::ingest_message(
+            let outcome = ingest::ingest_message_with_policy(
                 store,
                 blobs,
                 &IngestInput {
@@ -212,9 +236,13 @@ pub async fn run_sync(
                     email: &email,
                     raw: Some(&message.raw),
                 },
+                &RebindPolicy::UnlessListed(&server_uids),
             );
             match outcome {
                 Ok(outcome) => {
+                    // Whatever row now holds this UID is off limits to the rest
+                    // of the pass: see the gate's comment above.
+                    server_uids.insert(message.uid as i64);
                     ingest::clear_ingest_failure(
                         store,
                         account,
@@ -420,7 +448,20 @@ mod tests {
 
     /// A fetch that saw the whole mailbox and downloaded everything it owed:
     /// the shape that opens the prune gate.
+    ///
+    /// `listed` is derived from the UIDs the caller scripts rather than left
+    /// empty, because an empty listing is the #0112 gate's degradation path:
+    /// defaulting to it would take every test here down the unconditional
+    /// rebind and leave the gate itself unexercised. A test that wants the
+    /// degradation says so by clearing the field, and
+    /// `an_empty_listing_falls_back_to_the_unconditional_rebind` is where it is
+    /// asserted on purpose.
     fn fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
+        let listed: Vec<u32> = {
+            let mut uids: Vec<u32> = messages.iter().map(|(uid, _)| *uid).collect();
+            uids.sort_unstable();
+            uids
+        };
         MailboxFetch {
             messages: messages
                 .into_iter()
@@ -430,6 +471,7 @@ mod tests {
             known_flags: Vec::new(),
             state: MailboxState { uid_validity: Some(7), uid_next: Some(200), exists: 2 },
             vanished: Vec::new(),
+            listed,
             uidvalidity_reset: false,
             enumeration_complete: true,
             download_incomplete: false,
@@ -820,6 +862,173 @@ mod tests {
                 .is_none(),
             "so the next pass does the full window rather than a delta"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The rebind gate (#0112)
+    // -----------------------------------------------------------------------
+
+    /// The reported loop, through the real engine. The server lists three UIDs
+    /// carrying one `Message-ID`, which is three messages in that mailbox and
+    /// owes three rows. Collapsing them onto one row is what kept the other two
+    /// out of the skip list, so every pass reported them new, downloaded them
+    /// in full and rebound the row back, forever.
+    ///
+    /// The second pass is the regression assertion: the skip list the engine
+    /// hands the transport holds all three UIDs, which under the bug held one.
+    #[test]
+    fn n_listed_copies_of_one_message_id_get_n_rows_and_the_next_pass_skips_them_all() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let mut backend = FakeBackend::default();
+        let copy = || raw("dup");
+        backend.script(
+            "Sent Items",
+            vec![
+                Ok(fetch(vec![(6540, copy()), (6542, copy()), (6543, copy())])),
+                Ok({
+                    // Pass 2: the server lists the same three UIDs and the
+                    // store holds them all, so nothing is new.
+                    let mut f = fetch(vec![]);
+                    f.listed = vec![6540, 6542, 6543];
+                    f.skipped = 3;
+                    f
+                }),
+            ],
+        );
+
+        let first = fx.run(&mut backend, &targets);
+
+        assert_eq!(first.saved, 3, "three listed copies, three rows");
+        assert_eq!(first.uid_rebound, 0, "a listed UID is not a renumbering");
+        assert_eq!(fx.rows("sent"), vec![6540, 6542, 6543]);
+
+        let second = fx.run(&mut backend, &targets);
+
+        assert_eq!(second.saved, 0, "an unchanged mailbox has nothing new on the next pass");
+        assert_eq!(second.uid_rebound, 0);
+        assert_eq!(fx.rows("sent"), vec![6540, 6542, 6543], "and no row's uid moved");
+        assert_eq!(
+            backend.seen[1].2, 3,
+            "the skip list pass 2 is handed holds every copy the server lists"
+        );
+    }
+
+    /// Finding A, through the engine: two rows parked on the `-id` move
+    /// sentinel with one `Message-ID`. The destination pass must rebind both,
+    /// not rebind the first and strand the second on a negative UID that
+    /// nothing prunes and nothing rebinds again.
+    #[test]
+    fn both_rows_on_the_move_sentinel_are_rebound_when_the_destination_syncs() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        let copy = || raw("dup");
+        backend.script("INBOX", vec![Ok(fetch(vec![(101, copy()), (102, copy())]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        fx.run(&mut backend, &targets);
+        assert_eq!(fx.rows("inbox"), vec![101, 102]);
+
+        // The user archives both copies. Each row parks on `uid = -id`.
+        let ids: Vec<i64> = {
+            let conn = fx.store.conn();
+            let mut stmt = conn
+                .prepare("SELECT id FROM messages WHERE mailbox = 'inbox' ORDER BY id")
+                .unwrap();
+            let out = stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+            out
+        };
+        for id in &ids {
+            crate::store::write::move_row(&fx.store, *id, "archive").unwrap();
+        }
+        assert_eq!(fx.rows("archive"), vec![-ids[1], -ids[0]], "both wait on the sentinel");
+
+        // The server acknowledges: gone from INBOX, two copies in Archive.
+        let mut gone = fetch(vec![]);
+        gone.vanished = vec![101, 102];
+        backend.script("INBOX", vec![Ok(gone)]);
+        backend.script("Archive", vec![Ok(fetch(vec![(7, copy()), (8, copy())]))]);
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(result.uid_rebound, 2, "both sentinel rows follow their message");
+        assert_eq!(result.saved, 0, "and neither copy is invented as a third row");
+        assert_eq!(fx.rows("archive"), vec![7, 8]);
+        assert_eq!(
+            fx.store
+                .conn()
+                .query_row("SELECT COUNT(*) FROM messages WHERE uid < 0", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "no row is stranded on a negative UID"
+        );
+    }
+
+    /// The degradation, stated explicitly (#0112, review finding E and G). A
+    /// backend that cannot list, and a pass whose enumeration came back short,
+    /// both hand the engine a listing it may not decline a rebind with, so the
+    /// rebind is taken unconditionally as it always was. Every other test here
+    /// derives `listed` from the UIDs it scripts precisely so it does *not*
+    /// come down this path.
+    #[test]
+    fn an_empty_listing_falls_back_to_the_unconditional_rebind() {
+        for short_enumeration in [false, true] {
+            let fx = Fixture::new();
+            let targets =
+                vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+            let mut backend = FakeBackend::default();
+            let blind = |uid: u32| {
+                let mut f = fetch(vec![(uid, raw("dup"))]);
+                if short_enumeration {
+                    // The server listed fewer UIDs than it announced under
+                    // EXISTS: a listing already untrusted for pruning.
+                    f.enumeration_complete = false;
+                } else {
+                    // A backend with no listing at all, which is what the Graph
+                    // path is: its synthetic uid is a content hash that never
+                    // renumbers.
+                    f.listed = Vec::new();
+                }
+                Ok(f)
+            };
+            backend.script("Sent Items", vec![blind(6540), blind(6542)]);
+
+            let first = fx.run(&mut backend, &targets);
+            assert_eq!(first.saved, 1);
+            let second = fx.run(&mut backend, &targets);
+
+            assert_eq!(second.saved, 0, "short_enumeration={short_enumeration}");
+            assert_eq!(second.uid_rebound, 1, "the rebind is taken with no listing to decline it");
+            assert_eq!(fx.rows("sent"), vec![6542], "one row, moved onto the newer UID");
+        }
+    }
+
+    /// A UIDVALIDITY reset renumbers the mailbox, so its listing says nothing
+    /// about which message wears which UID and the rebind must be taken even
+    /// onto a listed one. What survives the degradation is that the pass does
+    /// not rebind twice onto one row: N copies come out of a reset as N rows.
+    #[test]
+    fn a_reset_rebinds_every_copy_onto_its_own_row() {
+        let fx = Fixture::new();
+        let targets = vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let mut backend = FakeBackend::default();
+        let copy = || raw("dup");
+        let mut renumbered = fetch(vec![(11, copy()), (12, copy())]);
+        renumbered.uidvalidity_reset = true;
+        backend.script(
+            "Sent Items",
+            vec![Ok(fetch(vec![(6540, copy()), (6542, copy())])), Ok(renumbered)],
+        );
+
+        fx.run(&mut backend, &targets);
+        assert_eq!(fx.rows("sent"), vec![6540, 6542]);
+
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(result.uidvalidity_resets, 1);
+        assert_eq!(result.uid_rebound, 2, "each copy follows the row it was on");
+        assert_eq!(result.saved, 0, "a renumbering must not duplicate the mailbox");
+        assert_eq!(fx.rows("sent"), vec![11, 12]);
     }
 
     // -----------------------------------------------------------------------

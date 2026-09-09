@@ -6,7 +6,9 @@
 //! describes -- across ingest, re-ingest of the same UID, a UIDVALIDITY rebind,
 //! a delete and a prune.
 
-use mailypoppins::ingest::{ingest_message, prune_vanished, IngestInput};
+use mailypoppins::ingest::{
+    ingest_message, ingest_message_with_policy, prune_vanished, IngestInput, RebindPolicy,
+};
 use mailypoppins::parse::FetchedEmail;
 use mailypoppins::store::search::{fts_expression, index_drift, search};
 use mailypoppins::store::{BlobStore, Store};
@@ -31,6 +33,20 @@ impl Fixture {
             &self.store,
             &self.blobs,
             &IngestInput { account: "acct", mailbox, uid, email, raw: None },
+        )
+        .unwrap()
+        .row_id
+    }
+
+    /// [`Fixture::ingest`] under the #0112 rebind gate: `listed` is what the
+    /// server holds for this mailbox on this pass.
+    fn ingest_listed(&self, mailbox: &str, uid: i64, email: &FetchedEmail, listed: &[i64]) -> i64 {
+        let listed: std::collections::HashSet<i64> = listed.iter().copied().collect();
+        ingest_message_with_policy(
+            &self.store,
+            &self.blobs,
+            &IngestInput { account: "acct", mailbox, uid, email, raw: None },
+            &RebindPolicy::UnlessListed(&listed),
         )
         .unwrap()
         .row_id
@@ -276,6 +292,24 @@ fn a_uidvalidity_rebind_keeps_one_indexed_entry() {
     let rebound = f.ingest("inbox", 9001, &email("a", "a@example.com", "Renumbered", "same content"));
     assert_eq!(rebound, row);
     assert_eq!(f.hits("renumbered"), vec![row]);
+    assert_eq!(index_drift(&f.store).unwrap(), (0, 0));
+}
+
+/// The insert branch's twin (#0112): a second server-side copy of one message
+/// is a second row, so it is a second entry in the index and both are found.
+/// The rebind test above pins the other branch, and the pair is what says the
+/// index follows the rows rather than the `Message-ID`.
+#[test]
+fn a_second_copy_of_one_message_is_indexed_as_its_own_entry() {
+    let f = Fixture::new();
+    let copy = || email("a", "a@example.com", "Duplicated", "same content");
+    let first = f.ingest_listed("sent", 6540, &copy(), &[6540, 6542]);
+    let second = f.ingest_listed("sent", 6542, &copy(), &[6540, 6542]);
+
+    assert_ne!(second, first, "a listed copy owes a row of its own");
+    let mut hits = f.hits("duplicated");
+    hits.sort_unstable();
+    assert_eq!(hits, vec![first, second], "and an index entry of its own");
     assert_eq!(index_drift(&f.store).unwrap(), (0, 0));
 }
 

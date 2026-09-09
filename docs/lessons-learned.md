@@ -1157,3 +1157,44 @@ editor is owed. The loop therefore polls with a zero timeout, reads exactly one
 event, runs `app.update`, and re-checks the queue, breaking the moment a
 suspending action appears. The same drain is bounded by a batch cap and a
 50 ms budget so a paste or a stuck key cannot starve the paint.
+
+## A fallback lookup that repairs one case silently swallows its neighbour (2026-09-09)
+
+Ingest's `message_id` fallback (#0112) was written for a UIDVALIDITY reset and
+its doc comment said so, but nothing enforced it, so it also fired whenever a
+mailbox held two server-side copies of one message. Both copies landed on one
+row whose UID flipped to whichever was ingested last, the other copy stayed out
+of the skip list, and the fetch re-downloaded it forever. Every log line read
+as success: `16 new, 84 already ingested`, spans committing, blobs deduping.
+The tell was arithmetic, not an error: sum `copies - 1` over the mailbox and it
+equals the stable "new" count exactly. When a lookup exists to repair one
+narrow situation, the caller has to state that the situation holds; a doc
+comment naming it is not a guard.
+
+## Gating a `LIMIT 1` lookup after the fact invents a phantom row
+
+The obvious way to fix the above is to keep the `ORDER BY id LIMIT 1` candidate
+query and reject its answer when it is ineligible. That is wrong once the fix
+lands, and only looks right before it: at most one row per
+`(mailbox, message_id)` exists today *because* the unconditional rebind
+collapses them, so the moment several rows can coexist, `LIMIT 1` returns an
+arbitrary one and keeps returning it. Two rows parked on the `-id` move
+sentinel under one Message-ID is the concrete break: the first ingest rebinds
+row 1, the second still picks row 1, now ineligible, so it inserts a third row
+and strands row 2 on a negative UID that nothing prunes (`vanished_uids` skips
+`uid > 0` only) and nothing rebinds again. Eligibility has to be part of
+candidate *selection*. Reading every candidate in preference order and taking
+the first eligible one is the version that stays correct, and it beats a SQL
+`NOT IN` here because the ineligible set is the server's whole UID listing,
+thousands of values, while the candidate set is one row per copy.
+
+## A test helper's default decides which branch the whole suite exercises
+
+`MailboxFetch` gained a `listed` field for the #0112 gate, and the engine tests'
+`fetch()` helper could have defaulted it to an empty vec. An empty listing is
+the gate's degradation path, so that default would have quietly sent every
+existing engine test down the unconditional rebind and left the gate itself
+untested while the suite stayed green. The helper derives `listed` from the
+UIDs each test scripts, and the degradation gets its own test that clears the
+field on purpose. When a new field has a "cannot answer" value, a test helper
+must not pick it by default.

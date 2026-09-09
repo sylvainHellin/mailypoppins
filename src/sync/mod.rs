@@ -118,6 +118,15 @@ pub struct MailboxFetch {
     /// UIDs the store holds for this mailbox that the server no longer lists.
     /// See [`crate::imap_client::vanished_uids`].
     pub vanished: Vec<u32>,
+    /// Every UID the server listed for this mailbox on this pass, ascending.
+    ///
+    /// The engine reads it as "what the server is currently holding", which is
+    /// what decides whether ingest may move an existing row onto a new UID or
+    /// owes the message a row of its own
+    /// ([`crate::ingest::RebindPolicy`], #0112). An empty listing means the
+    /// backend cannot answer, and the gate degrades to the unconditional
+    /// rebind ingest always did.
+    pub listed: Vec<u32>,
     /// True when the server's UIDVALIDITY no longer matches the stored one, so
     /// this fetch deliberately skipped nothing and redownloaded the window.
     pub uidvalidity_reset: bool,
