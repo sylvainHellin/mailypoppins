@@ -19,7 +19,7 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::proto::{ChunkFrame, Request, Response};
+use crate::proto::{ChunkFrame, CompactEnvelope, Delivery, Envelope, Request, Response};
 use crate::work::Workload;
 
 /// One sample's stage timings, in microseconds.
@@ -31,6 +31,12 @@ pub struct Sample {
     pub dispatch: f64,
     pub server_serialize: f64,
     pub deserialize: f64,
+    /// Reading the handle file, `handle` delivery only, client side.
+    pub handle_read: f64,
+    /// Writing the handle file, `handle` delivery only, server side.
+    pub handle_write: f64,
+    /// Bytes the handle file held.
+    pub handle_bytes: u64,
     /// Sum of the client-observed stages: what a caller waits for.
     pub total: f64,
     /// Frames the answer took, response included.
@@ -57,10 +63,10 @@ impl Client {
     }
 
     /// One request/response exchange, timed.
-    pub async fn sample(&mut self, workload: Workload) -> Result<Sample> {
+    pub async fn sample(&mut self, workload: Workload, delivery: Delivery) -> Result<Sample> {
         let id = self.next_id;
         self.next_id += 1;
-        let request = Request::new(id, workload.as_str(), workload.streams());
+        let request = Request::new(id, workload.as_str(), delivery);
 
         let t0 = Instant::now();
         let payload = serde_json::to_string(&request).context("encoding the request")?;
@@ -90,11 +96,17 @@ impl Client {
 
         let mut response: Option<Response> = None;
         let mut rows = 0usize;
+        // A chunked body is reassembled, because a client that only counted
+        // the frames would not be paying what a real one pays.
+        let mut body = String::new();
         for frame in &self.frames {
             let text = frame.trim_end();
             if text.starts_with("{\"jsonrpc\":\"2.0\",\"method\":") {
                 let chunk: ChunkFrame = serde_json::from_str(text).context("decoding a chunk")?;
-                rows += chunk.params.rows.len();
+                rows += chunk.params.rows.len() + chunk.params.compact.len();
+                if let Some(slice) = chunk.params.text {
+                    body.push_str(&slice);
+                }
             } else {
                 let decoded: Response =
                     serde_json::from_str(text).context("decoding the response")?;
@@ -105,8 +117,49 @@ impl Client {
             }
         }
         let t4 = Instant::now();
+        std::hint::black_box(&body);
 
-        let response = response.expect("the loop breaks only on a response frame");
+        let mut response = response.expect("the loop breaks only on a response frame");
+
+        // A handle answer is not answered until the client has the bytes: the
+        // read and the decode of the file are part of what the caller waits
+        // for, so they are timed like any other stage.
+        let (mut handle_read, mut handle_decode) = (0.0, 0.0);
+        if let Some(handle) = response.result.handle.take() {
+            let inline_rows = rows;
+            let t5 = Instant::now();
+            let file = std::fs::read_to_string(&handle.path)
+                .with_context(|| format!("reading the handle file {}", handle.path))?;
+            let t6 = Instant::now();
+            if inline_rows == 0 {
+                // NDJSON: one record per line, decoded like any other row.
+                for line in file.lines() {
+                    if line.starts_with('[') {
+                        let row: CompactEnvelope =
+                            serde_json::from_str(line).context("decoding a handle record")?;
+                        std::hint::black_box(&row);
+                    } else {
+                        let row: Envelope =
+                            serde_json::from_str(line).context("decoding a handle record")?;
+                        std::hint::black_box(&row);
+                    }
+                    rows += 1;
+                }
+            } else {
+                std::hint::black_box(&file);
+            }
+            let t7 = Instant::now();
+            if file.len() as u64 != handle.bytes {
+                return Err(anyhow!(
+                    "the handle claims {} bytes but the file holds {}",
+                    handle.bytes,
+                    file.len()
+                ));
+            }
+            handle_read = (t6 - t5).as_secs_f64() * 1e6;
+            handle_decode = (t7 - t6).as_secs_f64() * 1e6;
+        }
+        let t8 = Instant::now();
         if response.result.row_count as usize != rows {
             return Err(anyhow!(
                 "the answer carried {rows} rows but claims {}",
@@ -121,8 +174,11 @@ impl Client {
             round_trip: us(t2, t3),
             dispatch: response.meta.dispatch_us as f64,
             server_serialize: response.meta.serialize_us as f64,
-            deserialize: us(t3, t4),
-            total: us(t0, t4),
+            deserialize: us(t3, t4) + handle_decode,
+            handle_read,
+            handle_write: response.meta.handle_write_us as f64,
+            handle_bytes: response.meta.handle_bytes,
+            total: us(t0, t8),
             frames: self.frames.len() as u32,
             bytes: response.meta.bytes,
         })

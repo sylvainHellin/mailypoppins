@@ -7,6 +7,7 @@
 //! Run recipe and output shape: see README.md.
 
 mod client;
+mod pool;
 mod proto;
 mod server;
 mod stats;
@@ -20,6 +21,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
+use crate::proto::Delivery;
 use crate::stats::Stat;
 use crate::work::{Fixture, Workload};
 
@@ -46,6 +48,29 @@ struct Args {
     /// Machine-readable output on stdout, one JSON object.
     #[arg(long)]
     json: bool,
+    /// How the answer travels (P1a-U4): `single` frame, `chunked` frames, or a
+    /// temp-file `handle` the client reads. Default: `chunked` for w3, the
+    /// whole-account dump, and `single` for everything else.
+    #[arg(long)]
+    delivery: Option<String>,
+    /// Where a `handle` delivery materialises its file. The default is the
+    /// system temp dir, which is tmpfs on this host; point it at a real disk to
+    /// measure the handle without the page cache doing the work.
+    #[arg(long)]
+    handle_dir: Option<PathBuf>,
+    /// P1a-U5: run the read-pool scenario with this many read connections
+    /// instead of the direct-versus-socket A/B.
+    #[arg(long)]
+    pool: Option<usize>,
+    /// P1a-U5: put a 5000-row list load and a sync-like writer in flight
+    /// beside the measured preview reads.
+    #[arg(long)]
+    contend: bool,
+    /// P1a-U5 control: contend with the writer only, no list load, which
+    /// separates what the WAL writer costs a reader from what the reader queue
+    /// costs it.
+    #[arg(long)]
+    writer_only: bool,
     /// Run the direct call on a dedicated OS thread outside the tokio runtime
     /// instead of inline on the runtime's main task.
     #[arg(long)]
@@ -61,6 +86,8 @@ struct Args {
 #[derive(Serialize)]
 struct Report {
     workload: String,
+    /// How the answer travelled: `single`, `chunked` or `handle`.
+    delivery: &'static str,
     samples: usize,
     p50_us: f64,
     p95_us: f64,
@@ -72,6 +99,11 @@ struct Report {
     bytes: u64,
     /// Frames one answer took, response frame included. Summed over the steps.
     frames: u32,
+    /// Bytes a `handle` delivery put in the file instead of on the wire.
+    file_bytes: u64,
+    /// Payload bytes moved per second at the p50 round trip, wire and file
+    /// together, in MB/s (decimal, matching `bytes`).
+    throughput_mbps: f64,
     /// One entry per round trip of a composite scenario; a single-step run has
     /// one entry that repeats the head figures.
     steps: Vec<StepReport>,
@@ -112,6 +144,33 @@ async fn main() -> Result<()> {
     let steps = scenario(&args.workload)?;
     ensure_fixture(&args.fixture)?;
 
+    if let Some(size) = args.pool {
+        let contend = args.contend || args.writer_only;
+        let report = pool::run(
+            &args.fixture,
+            size,
+            contend,
+            contend && !args.writer_only,
+            args.samples,
+            args.warmup,
+        )
+        .await?;
+        if args.json {
+            println!("{}", serde_json::to_string(&report)?);
+        } else {
+            pool::print_human(&report);
+        }
+        return Ok(());
+    }
+
+    let delivery = match args.delivery.as_deref() {
+        Some(name) => name.parse::<Delivery>()?,
+        None => steps[0].default_delivery(),
+    };
+    let handle_dir = args.handle_dir.clone().unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&handle_dir)
+        .with_context(|| format!("creating {}", handle_dir.display()))?;
+
     let run_dir = std::env::temp_dir().join(format!("ipc-bench-{}", std::process::id()));
     let (listener, sock) = server::bind(&run_dir)?;
 
@@ -119,13 +178,14 @@ async fn main() -> Result<()> {
     // direct caller never share a connection either.
     let server_fixture = Fixture::open(&args.fixture)?;
     let local = Direct::new(Fixture::open(&args.fixture)?, args.direct_thread)?;
-    let server = tokio::spawn(async move { server::serve_one(listener, server_fixture).await });
+    let server =
+        tokio::spawn(async move { server::serve_one(listener, server_fixture, handle_dir).await });
 
     let mut client = client::Client::connect(&sock).await?;
 
     for _ in 0..args.warmup {
         for step in &steps {
-            client.sample(*step).await?;
+            client.sample(*step, delivery).await?;
         }
         local.run(&steps)?;
     }
@@ -142,6 +202,9 @@ async fn main() -> Result<()> {
     let mut step_totals: Vec<Vec<f64>> = steps.iter().map(|_| Vec::with_capacity(args.samples)).collect();
     let mut step_bytes = vec![0u64; steps.len()];
     let mut step_frames = vec![0u32; steps.len()];
+    let mut handle_read = Vec::with_capacity(args.samples);
+    let mut handle_write = Vec::with_capacity(args.samples);
+    let mut file_bytes = 0u64;
 
     for _ in 0..args.samples {
         // The pair is taken in one iteration so both sides see the same cache
@@ -150,7 +213,7 @@ async fn main() -> Result<()> {
 
         let mut agg = client::Sample::default();
         for (i, step) in steps.iter().enumerate() {
-            let s = client.sample(*step).await?;
+            let s = client.sample(*step, delivery).await?;
             step_totals[i].push(s.total);
             step_bytes[i] = s.bytes;
             step_frames[i] = s.frames;
@@ -160,10 +223,16 @@ async fn main() -> Result<()> {
             agg.dispatch += s.dispatch;
             agg.server_serialize += s.server_serialize;
             agg.deserialize += s.deserialize;
+            agg.handle_read += s.handle_read;
+            agg.handle_write += s.handle_write;
+            agg.handle_bytes += s.handle_bytes;
             agg.total += s.total;
             agg.bytes += s.bytes;
             agg.frames += s.frames;
         }
+        handle_read.push(agg.handle_read);
+        handle_write.push(agg.handle_write);
+        file_bytes = agg.handle_bytes;
         serialize.push(agg.serialize);
         frame_write.push(agg.frame_write);
         round_trip.push(agg.round_trip);
@@ -195,6 +264,8 @@ async fn main() -> Result<()> {
     stages.insert("dispatch".to_string(), Stat::of(&mut dispatch));
     stages.insert("server_serialize".to_string(), Stat::of(&mut server_serialize));
     stages.insert("deserialize".to_string(), Stat::of(&mut deserialize));
+    stages.insert("handle_read".to_string(), Stat::of(&mut handle_read));
+    stages.insert("handle_write".to_string(), Stat::of(&mut handle_write));
     stages.insert("direct".to_string(), Stat::of(&mut direct));
 
     let step_reports = steps
@@ -212,8 +283,10 @@ async fn main() -> Result<()> {
         })
         .collect();
 
+    let moved = bytes + file_bytes;
     let report = Report {
         workload: args.workload.clone(),
+        delivery: delivery.as_str(),
         samples: args.samples,
         p50_us: head.p50_us,
         p95_us: head.p95_us,
@@ -222,6 +295,12 @@ async fn main() -> Result<()> {
         framing,
         bytes,
         frames,
+        file_bytes,
+        throughput_mbps: if head.p50_us > 0.0 {
+            ((moved as f64 / head.p50_us) * 100.0).round() / 100.0
+        } else {
+            0.0
+        },
         steps: step_reports,
         direct_mode: if args.direct_thread { "thread" } else { "inline" },
         order: if args.direct_first { "direct-first" } else { "rpc-first" },
@@ -340,8 +419,16 @@ fn run_steps(fixture: &Fixture, steps: &[Workload]) -> Result<f64> {
 
 fn print_human(r: &Report) {
     println!(
-        "workload {} | {} samples | {} bytes in {} frame(s) | direct {}, {}",
-        r.workload, r.samples, r.bytes, r.frames, r.direct_mode, r.order
+        "workload {} | delivery {} | {} samples | {} wire bytes + {} file bytes in {} frame(s) | {:.2} MB/s | direct {}, {}",
+        r.workload,
+        r.delivery,
+        r.samples,
+        r.bytes,
+        r.file_bytes,
+        r.frames,
+        r.throughput_mbps,
+        r.direct_mode,
+        r.order
     );
     println!("round trip  p50 {:>10.2} us  p95 {:>10.2} us  max {:>10.2} us", r.p50_us, r.p95_us, r.max_us);
     println!("{:<18} {:>12} {:>12} {:>12}", "stage", "p50 us", "p95 us", "max us");

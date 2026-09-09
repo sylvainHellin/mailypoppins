@@ -1,8 +1,9 @@
 # ipc-bench
 
 Phase 1a risk spike (ticket #0119): what a JSON-RPC round trip over a Unix socket costs against the
-same work done as a direct library call (P1a-U1, P1a-U2), and what a 5000-row list costs whole
-against paged (P1a-U3).
+same work done as a direct library call (P1a-U1, P1a-U2), what a 5000-row list costs whole against
+paged (P1a-U3), how a payload over the frame cap should travel (P1a-U4), and how many read
+connections an account needs under load (P1a-U5).
 
 Standalone Cargo package with its own `Cargo.lock` and an empty `[workspace]` table, so it is never a
 member of the root package: `cargo test` at the repo root neither builds it nor counts its tests.
@@ -23,7 +24,9 @@ another one; when the directory holds no store the harness builds it with exactl
 (`--rows 5000`), so a first run on a clean machine works with no arguments.
 
 Flags: `--workload <id>`, `--samples N` (default 2000), `--warmup N` (default 20, untimed),
-`--fixture <dir>` (default `/tmp/mp-ipc-fixture`), `--json`, `--direct-thread`, `--direct-first`.
+`--fixture <dir>` (default `/tmp/mp-ipc-fixture`), `--json`, `--direct-thread`, `--direct-first`,
+`--delivery <single|chunked|handle>`, `--handle-dir <dir>`, `--pool N`, `--contend`,
+`--writer-only`.
 
 `--direct-thread` runs the direct half of the A/B on a dedicated OS thread outside the tokio runtime
 instead of inline on the runtime, and `--direct-first` takes it before the round trip rather than
@@ -39,7 +42,7 @@ the stages is not the same either.
 |---|---|---|
 | `w1` | one envelope plus its body, `<alpha-inbox-42@fixture.invalid>` (the cursor-move preview) | ~1.2 kB, 1 frame |
 | `w2` | `list_mailbox(alpha, Bulk)`, 5000 rows | ~1.9 MB, 1 frame |
-| `w3` | `list_account(alpha)`, 5501 rows, streamed in 200-row chunks | ~2.1 MB, 28 frames |
+| `w3` | `list_account(alpha)`, the whole-account dump, chunked in 200-row frames by default | ~2.1 MB, 28 frames |
 | `w4` | the 10 MiB body, `<big-body@fixture.invalid>` | ~10.2 MB, 1 frame |
 | `whole` | `list_mailbox(alpha, Bulk)`, 5000 rows, compact positional encoding | ~1.23 MB, 1 frame |
 | `page` | 200 rows of the same listing, `LIMIT`/`OFFSET`, compact | ~50 kB, 1 frame |
@@ -63,17 +66,58 @@ credit for the smaller read it really makes.
 what to do about the responses is P1a-U4's decision, and a harness that refused to send them could
 not measure the thing that decision needs.
 
+## Delivery (P1a-U4)
+
+`--delivery` sends the same answer three ways, which is the comparison
+`docs/baselines/decisions/large-payloads.md` rests on:
+
+| value | what the client sees |
+|---|---|
+| `single` | one response frame carrying the whole payload, cap or no cap |
+| `chunked` | `bench.chunk` notifications (200 rows, or 256 KiB of a body) then a response with the counts |
+| `handle` | a response carrying `{"handle": {"path", "expires_at", "bytes"}}`, the payload in a file the client reads and decodes |
+
+The default is `chunked` for `w3`, the whole-account dump, and `single` for everything else, so the
+P1a-U1 and P1a-U3 recipes measure what they measured before this flag existed.
+
+A handle holds NDJSON, one record per line, when the answer is rows; when it is a body it holds the
+raw bytes and the envelope stays inline in the frame. The file is written under `--handle-dir`
+(default: the system temp dir, tmpfs on this host) and is never fsynced. The server unlinks the
+previous handle when it writes the next one, so a run leaves one file behind and not `samples` of
+them. The client verifies the file length against `handle.bytes` on every sample.
+
+Stages `handle_write` (server) and `handle_read` (client) are reported beside the others, and
+`file_bytes` and `throughput_mbps` join `bytes` in the JSON.
+
+## The read pool (P1a-U5)
+
+`--pool N` replaces the whole A/B with a different scenario: the server holds N read connections,
+each owned by one thread (`Connection: Send + !Sync`), and the measured client asks for `w1` in a
+loop. `--contend` puts a second client asking for the whole 5000-row listing back to back and a
+writer thread committing sync-like transactions on its own connection; `--writer-only` keeps the
+writer and drops the list load, which separates what a WAL writer costs a reader from what the
+reader queue costs it.
+
+The writer mutates the store it runs against (it flips `\Seen` on `Bulk` rows and inserts rows into
+a `SyncScratch` mailbox), so point `--fixture` at a copy rather than at the one the other workloads
+read.
+
+The scenario prints its own object: `{scenario, pool, contend, load, samples, preview_p50_us,
+preview_p95_us, preview_max_us, load_samples, load_p50_us, load_p95_us, writes, write_p50_us,
+write_p95_us}`. `src/pool.rs` has its own connection handler, simpler than `src/server.rs`: this
+scenario asks about queueing, so it carries neither chunking nor handles.
+
 ## Output
 
 `--json` writes one object to stdout:
 
 ```json
-{"workload":"w1","samples":2000,"p50_us":38.37,"p95_us":85.31,"max_us":267.94,
+{"workload":"w1","delivery":"single","samples":2000,"p50_us":38.37,"p95_us":85.31,"max_us":267.94,
  "stages":{"serialize":{...},"frame_write":{...},"round_trip":{...},"dispatch":{...},
            "server_serialize":{...},"deserialize":{...},"direct":{...}},
  "framing":{"delimiter_scan_us_p50":0.02,"delimiter_scan_us_max":1.46,
             "scanned_bytes":1291,"share_of_p50_pct":0.05},
- "bytes":1197,"frames":1,
+ "bytes":1197,"frames":1,"file_bytes":0,"throughput_mbps":31.42,
  "steps":[{"method":"w1","bytes":1197,"frames":1,"p50_us":38.41,"p95_us":62.01}],
  "direct_mode":"inline","order":"rpc-first"}
 ```

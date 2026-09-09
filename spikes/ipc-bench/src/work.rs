@@ -12,7 +12,7 @@ use mailypoppins::store::{BlobStore, Store};
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::proto::{CompactEnvelope, Envelope, WorkResult, PAGE_ROWS};
+use crate::proto::{CompactEnvelope, Delivery, Envelope, WorkResult, PAGE_ROWS};
 
 /// The account every workload reads. The fixture has two; `alpha` is the one
 /// that carries the 5000-row `Bulk` mailbox and the oversized body.
@@ -74,10 +74,16 @@ impl Workload {
         }
     }
 
-    /// W3 is the only one whose answer is a stream: it is the workload that
-    /// cannot fit a single frame at any plausible cap.
-    pub fn streams(self) -> bool {
-        self == Workload::W3
+    /// How this workload's answer travels unless `--delivery` says otherwise.
+    ///
+    /// W3 is the whole-account dump, the one workload that cannot fit a single
+    /// frame at any plausible cap, so chunked frames are its baseline and the
+    /// P1a-U1/U3 recipes keep the shape they were measured under.
+    pub fn default_delivery(self) -> Delivery {
+        match self {
+            Workload::W3 => Delivery::Chunked,
+            _ => Delivery::Single,
+        }
     }
 }
 
