@@ -23,6 +23,7 @@
 //! [`#0042`]: https://github.com/sylvainhellin/mailypoppins/blob/main/docs/tickets/0042-graph-delta-sync.md
 
 pub mod engine;
+pub mod tick;
 
 use anyhow::Result;
 

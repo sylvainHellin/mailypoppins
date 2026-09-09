@@ -1303,6 +1303,58 @@ fn configured_mailbox_names(account: &AccountConfig) -> String {
     }
 }
 
+/// One end of a `mp sync` tick: the outbox, then the mutation queue (#0114).
+///
+/// The outbox goes first so a message that reached the server before the last
+/// crash gets its Sent copy before this sync reads the mailbox it belongs in
+/// (#0037 item 5); the mutation queue follows (#0039), so a move, delete or
+/// flag toggle enqueued locally (by the TUI, or by a CLI invocation that
+/// crashed before its op ran) is retired against the same mailboxes. Nothing is
+/// drained and nothing is printed when nothing is owed, so a clean account adds
+/// no traffic and no output at either end.
+///
+/// The returned suffix is always empty: this path reports on stdout rather than
+/// in a status line, and only the shape of
+/// [`mailypoppins::sync::tick::run_tick_with_drains`] is borrowed.
+/// `label` distinguishes the tail's report lines from the head's, since
+/// both print above the `✓ Synced` summary and would otherwise be four
+/// identical `↻` lines when work was queued at both ends.
+async fn drain_queues_cli(account_config: &AccountConfig, dry_run: bool, label: &str) -> String {
+    if dry_run {
+        return String::new();
+    }
+    let drained = mailypoppins::send::resume_outbox(account_config).await;
+    if drained.completed > 0 || drained.still_open > 0 {
+        println!(
+            "  {} outbox{label}: {} completed, {} still pending",
+            "↻".dimmed(),
+            drained.completed,
+            drained.still_open + drained.awaiting_submission
+        );
+    }
+    match pending_ops::resume_account(account_config).await {
+        Ok(Some(ops)) if ops.completed > 0 || ops.failed > 0 => {
+            println!(
+                "  {} mutations{label}: {} completed, {} failed",
+                "↻".dimmed(),
+                ops.completed,
+                ops.failed
+            );
+        }
+        Ok(_) => {}
+        // Loud but not fatal: the tail drain must not turn a sync that worked
+        // into a failed command, and the queue is retried on the next tick.
+        Err(e) => {
+            eprintln!("  {} mutations: drain failed: {e:#}", "⚠".yellow());
+            log::warn!(
+                "[pending_ops] draining {} at the sync tick failed: {e:#}",
+                account_config.name
+            );
+        }
+    }
+    String::new()
+}
+
 /// One account's `mp sync`: the outbox drain, the sync itself, the contacts
 /// hook, and the per-account summary lines.
 ///
@@ -1344,51 +1396,34 @@ async fn sync_one_account(
             .collect()
     };
 
-    if !dry_run {
-        // Resume the outbox first: a message that reached the server
-        // before the last crash gets its Sent copy before this sync
-        // reads the mailbox it belongs in (#0037 item 5).
-        let drained = mailypoppins::send::resume_outbox(account_config).await;
-        if drained.completed > 0 || drained.still_open > 0 {
-            println!(
-                "  {} outbox: {} completed, {} still pending",
-                "↻".dimmed(),
-                drained.completed,
-                drained.still_open + drained.awaiting_submission
-            );
-        }
-
-        // The sync tick is also the mutation queue's drain tick (#0039): a
-        // move, delete or flag toggle enqueued locally (by the TUI, or by a
-        // CLI invocation that crashed before its op ran) is retired here,
-        // before this sync reads the mailboxes those ops changed. Nothing is
-        // drained when nothing is owed, so a clean account adds no traffic.
-        if let Some(ops) = pending_ops::resume_account(account_config).await? {
-            if ops.completed > 0 || ops.failed > 0 {
-                println!(
-                    "  {} mutations: {} completed, {} failed",
-                    "↻".dimmed(),
-                    ops.completed,
-                    ops.failed
-                );
+    // The tick drains at both ends (#0114): once before the read, so the
+    // server has converged by the time this sync looks at it, and once after,
+    // so anything queued while the tick was in flight (a TUI running alongside
+    // this one) is retired now instead of waiting for the next tick. Both ends
+    // run whether the sync itself succeeded or failed, because the ticks that
+    // fail are the long ones.
+    let (_suffix, result) = mailypoppins::sync::tick::run_tick_with_drains(
+        || drain_queues_cli(account_config, dry_run, ""),
+        || async {
+            if account_config.auth_method == AuthMethod::Graph {
+                let graph_config = GraphConfig::load(account_config)?;
+                graph::sync_mailboxes_graph(
+                    &graph_config,
+                    &account_config.name,
+                    &targets,
+                    limit,
+                    dry_run,
+                )
+                .await
+            } else {
+                let imap_config = ImapConfig::load(account_config)?;
+                sync_mailboxes(&imap_config, &account_config.name, &targets, limit, dry_run).await
             }
-        }
-    }
-
-    let result = if account_config.auth_method == AuthMethod::Graph {
-        let graph_config = GraphConfig::load(account_config)?;
-        graph::sync_mailboxes_graph(
-            &graph_config,
-            &account_config.name,
-            &targets,
-            limit,
-            dry_run,
-        )
-        .await?
-    } else {
-        let imap_config = ImapConfig::load(account_config)?;
-        sync_mailboxes(&imap_config, &account_config.name, &targets, limit, dry_run).await?
-    };
+        },
+        || drain_queues_cli(account_config, dry_run, " (after sync)"),
+    )
+    .await;
+    let result = result?;
 
     if !dry_run {
         // Incremental contacts-index update (best-effort).

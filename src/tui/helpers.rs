@@ -279,24 +279,23 @@ pub(super) async fn lib_do_sync(
         })
         .collect();
 
-    // The sync tick is also the outbox's retry tick: a Sent copy that could
-    // not be appended when the message was sent lands here (#0037 item 5).
-    crate::send::resume_outbox(account_config).await;
-
-    // And the mutation queue's drain tick (#0039): archive, delete, move and
-    // flag toggles enqueued locally are retired before this sync reads the
-    // mailboxes they changed, under the engine lock. Drained before the read
-    // so the server has converged by the time the reconcile looks at it.
-    let ops_suffix = drain_pending_ops(account_config).await;
-
+    // The tick drains at both ends (#0114): the head so the server has
+    // converged by the time the reconcile reads it, the tail so anything the
+    // TUI queued *during* the tick does not wait for the next one.
+    //
     // An account-level failure (a refused login above all) has to reach the
     // log: the status line it otherwise becomes loses every race against a
     // concurrent account that succeeded, which is how #0068 stayed invisible
     // for seven weeks. The per-mailbox path already warns
     // (`imap_client::store_sync`); this is its account-level equivalent.
     // A persistent per-account health surface is #0071.
-    let result = sync_mailboxes(imap_config, &account_config.name, &targets, limit, false)
-        .await
+    let (ops_suffix, result) = crate::sync::tick::run_tick_with_drains(
+        || drain_queues(account_config),
+        || sync_mailboxes(imap_config, &account_config.name, &targets, limit, false),
+        || drain_queues(account_config),
+    )
+    .await;
+    let result = result
         .inspect_err(|e| log::error!("[sync] account '{}' failed: {e:#}", account_config.name))?;
     Ok((format!("{}{ops_suffix}", finish_sync(account_config, &result)), SyncResultMeta {
         new_inbox_mail: result.new_inbox_mail.clone(),
@@ -307,6 +306,22 @@ pub(super) async fn lib_do_sync(
 /// handler can honestly downgrade the status level of an otherwise-successful
 /// sync that also rolled mutations back (#0039 review note).
 pub(crate) const FAILED_OPS_MARKER: &str = "mutation(s) failed and were rolled back";
+
+/// One end of a sync tick on the IMAP path: the outbox, then the mutation
+/// queue, in that order at the head and at the tail (#0114).
+///
+/// The sync tick is also the outbox's retry tick: a Sent copy that could not be
+/// appended when the message was sent lands here (#0037 item 5). The mutation
+/// queue follows (#0039): archive, delete, move and flag toggles enqueued
+/// locally are retired under the engine lock.
+///
+/// Both halves are no-ops when nothing is queued (one cheap `COUNT` each, no
+/// backend, no lock, no log line), so running this twice per tick costs an
+/// idle account nothing and returns an empty suffix.
+async fn drain_queues(account_config: &AccountConfig) -> String {
+    crate::send::resume_outbox(account_config).await;
+    drain_pending_ops(account_config).await
+}
 
 /// Drain the account's pending-mutation queue at the sync/fetch resume point
 /// (#0039), returning a status suffix that names any failures.
@@ -496,20 +511,26 @@ pub(super) async fn lib_do_sync_graph(
     // Same reason as the IMAP path above: an account-level failure has to be
     // in the log, not only in a status line another account will overwrite
     // (#0068, #0071).
-    // The mutation queue drains here too (#0039), before the Graph read. Graph
-    // has no outbox resume (its resubmit is a no-op), but move / delete /
-    // mark-read ops are real work the queue owes the server.
-    let ops_suffix = drain_pending_ops(account_config).await;
-
-    let result = crate::graph::sync_mailboxes_graph(
-        graph_config,
-        &account_config.name,
-        &targets,
-        limit,
-        false,
+    // The mutation queue drains at both ends of the tick here too (#0039,
+    // #0114), before and after the Graph read. Graph has no outbox resume (its
+    // resubmit is a no-op), but move / delete / mark-read ops are real work the
+    // queue owes the server.
+    let (ops_suffix, result) = crate::sync::tick::run_tick_with_drains(
+        || drain_pending_ops(account_config),
+        || {
+            crate::graph::sync_mailboxes_graph(
+                graph_config,
+                &account_config.name,
+                &targets,
+                limit,
+                false,
+            )
+        },
+        || drain_pending_ops(account_config),
     )
-    .await
-    .inspect_err(|e| log::error!("[sync] account '{}' failed: {e:#}", account_config.name))?;
+    .await;
+    let result = result
+        .inspect_err(|e| log::error!("[sync] account '{}' failed: {e:#}", account_config.name))?;
 
     Ok((format!("{}{ops_suffix}", finish_sync(account_config, &result)), SyncResultMeta {
         new_inbox_mail: result.new_inbox_mail.clone(),
