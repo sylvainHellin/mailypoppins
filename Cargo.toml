@@ -119,3 +119,8 @@ required-features = ["daemon"]
 name = "daemon_lifecycle"
 path = "tests/daemon_lifecycle.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_handshake"
+path = "tests/daemon_handshake.rs"
+required-features = ["daemon"]
