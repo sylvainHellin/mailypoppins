@@ -12,7 +12,7 @@ Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Sing
 
 ```sh
 cargo install --path .   # install / reinstall, run after every code change
-cargo test               # offline, <0.5s
+cargo test               # offline, ~7s
 cargo insta review       # approve markdown_to_html snapshot diffs
 ```
 
