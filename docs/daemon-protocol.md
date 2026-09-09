@@ -60,15 +60,27 @@ The result names:
 - `daemon.version`, the daemon's application version.
 - `protocol.selected`, the version both sides will speak, always inside the daemon's range.
 - `instance_id`, which identifies this daemon process and appears in every event.
-- `capabilities`, the identifiers the daemon offers.
-- `platform`, the host and transport facts a client cannot infer.
-- `lifecycle`, the shutdown and restart behaviour of this instance.
-- `config_status`, the current state of the configuration on disk.
+- `capabilities`, the identifiers the daemon offers, in the daemon's own order.
+- `platform`, the host and transport facts a client cannot infer: `os` as Rust names it (`linux`, `macos`) and `transport`, which is `unix_socket` on every connection this build serves.
+- `lifecycle`, the shutdown and restart behaviour of this instance: `idle_shutdown_seconds`, `restart_required`, `shutdown_on_last_client`. A daemon that runs until it is stopped reports a null idle timeout and both flags false.
+- `config_status`, the current state of the configuration on disk: `state` of `ok`, `absent` or `invalid`, the `path` the daemon read, the `accounts` count, and `problems`, whose first entry is the message a client shows the user when the state is `invalid`.
+
+A daemon serves in all three configuration states.
+An absent or unparseable `config.toml` is zero accounts and a diagnostic, never a refused connection or a refused startup.
 
 Compatibility is decided by the declared ranges and the required capabilities.
 Disjoint ranges give `protocol_incompatible`, a required capability the daemon does not offer gives `capability_missing`, and a differing directory pair gives `identity_mismatch`.
+The directory pair is compared canonically, so a symlinked path is not a mismatch, and the refusal reports the paths as each side spelled them.
 An application-version difference alone is diagnostic and does not refuse the connection.
-Any domain method issued before a successful `initialize` gives `not_initialized`.
+
+A capability identifier names a method family or a behaviour the daemon will serve, and a client requires only what it cannot work without.
+This build advertises `daemon.status` and `daemon.stop`, which are exactly the methods it serves; the domain families join the list in the unit that starts serving them, so requiring `account.list` from this build is a `capability_missing` at the handshake rather than a `-32601` at the first call.
+
+The handshake happens once per connection, and a second `initialize` on the same connection is `-32600`.
+The session state dies with the connection: it is never expired, reused, or transferred.
+
+Any method other than `initialize` and the two lifecycle methods below issued before a successful `initialize` gives `not_initialized`, ahead of the method lookup, so an uninitialized client cannot probe which methods a daemon serves.
+The refusal is per request rather than per connection: the connection stays usable and the `initialize` that should have come first still works on it.
 
 ## Method families
 
@@ -90,6 +102,35 @@ Methods are domain operations, and each one declares whether it is a query, a co
 - `daemon.*` for status and graceful lifecycle control.
 
 `initialize` is the one method outside a family, because it runs before any family gate exists.
+
+### Lifecycle methods
+
+`daemon.status` and `daemon.stop` are the two methods reachable **before** the handshake.
+They are lifecycle surface rather than domain surface, they touch no account data, and the exemption is what lets `mp daemon status` describe a daemon whose protocol range it cannot negotiate and `mp daemon stop` end one.
+Every other method, known or unknown, is gated.
+
+`daemon.status` takes `{}` and returns:
+
+```json
+{
+  "instance_id": "1f0c…",
+  "app_version": "0.9.0",
+  "protocol": {"min": 1, "max": 1},
+  "pid": 40321,
+  "started_at": "2026-01-01T09:12:44.512Z",
+  "data_dir": "/home/alice/.local/share/mailypoppins",
+  "config_dir": "/home/alice/.config/mailypoppins",
+  "accounts": [{"name": "work", "state": "opening"}]
+}
+```
+
+The fields are the daemon's own `daemon.json` metadata plus the live account list, so a client comparing them against its own paths learns whether it is talking to the daemon it meant to.
+`accounts` is empty until account runtimes exist, and an account state is one of `opening`, `ready`, `blocked`.
+`mp daemon status --json` prints this object with a leading `"running": true`, or the same keys with null values and `"running": false` when nothing answers.
+
+`daemon.stop` takes `{}` and returns `{"stopping": true}`.
+The response is written and flushed before the shutdown starts, so the caller always learns the daemon accepted the request.
+Open connections are not drained: the daemon unlinks its runtime files and exits, and a client that loses the socket mid-call reconnects.
 
 ## Error codes
 
@@ -150,5 +191,6 @@ Initial version, introduced with the daemon in #0120.
 
 Newline-framed JSON-RPC 2.0 over a Unix-domain socket, with a 1 MiB request frame cap inclusive of the terminator.
 The `initialize` handshake with the client, protocol, capabilities, and identity params, and the daemon, protocol, instance, capabilities, platform, lifecycle, and config-status result.
+The `daemon.status` and `daemon.stop` methods, reachable before the handshake, and the `not_initialized` gate on everything else.
 The error table above, codes `-32000` to `-32009`.
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.

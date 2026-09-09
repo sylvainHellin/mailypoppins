@@ -1,13 +1,14 @@
 //! The socket server: one tokio task per connection, NDJSON JSON-RPC in and
 //! out (P2-U7).
 //!
-//! Phase 2 serves exactly two methods, `daemon.status` and `daemon.stop`, and
-//! answers everything else with `-32601`. Both are lifecycle surface rather
-//! than domain surface, so they are reachable **before** the `initialize`
-//! handshake that P2-U9 adds: `mp daemon status` must be able to describe a
-//! daemon whose protocol range it cannot even negotiate, and `mp daemon stop`
-//! must be able to end one. [`dispatch_request`] marks the single place where
-//! P2-U9 inserts the `not_initialized` gate for every other method.
+//! Phase 2 serves `initialize`, `daemon.status` and `daemon.stop`, and answers
+//! everything else with `-32601` once the connection has handshaken and with
+//! `-32000` before it has. The two `daemon.*` methods are lifecycle surface
+//! rather than domain surface, so they are reachable **before** `initialize`:
+//! `mp daemon status` must be able to describe a daemon whose protocol range
+//! it cannot even negotiate, and `mp daemon stop` must be able to end one. The
+//! handshake itself lives in [`super::session`], which owns the per-connection
+//! state [`dispatch_request`] gates on.
 //!
 //! Shutdown is a [`watch`] channel rather than a flag: the accept loop selects
 //! on it, a `daemon.stop` handler sends on it after its response is flushed,
@@ -28,6 +29,7 @@ use mp_protocol::{
 };
 
 use super::runtime::InstanceMeta;
+use super::session::{ConfigReport, Session};
 
 /// JSON-RPC standard codes this unit emits. The daemon range lives in
 /// [`mp_protocol::ErrorCode`] and is not reachable until P2-U9.
@@ -60,6 +62,9 @@ pub struct DaemonState {
     /// Accounts the daemon knows about, empty unless account runtimes were
     /// opted into with `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`.
     pub accounts: Vec<AccountStatus>,
+    /// How the configuration looked when this daemon started, reported by the
+    /// handshake as `config_status`.
+    pub config: ConfigReport,
 }
 
 impl DaemonState {
@@ -152,6 +157,9 @@ async fn handle_connection(
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut decoder = Decoder::new(MAX_REQUEST_BYTES);
     let mut buf = vec![0u8; READ_CHUNK];
+    // One handshake per connection, so the session dies with the connection and
+    // nothing has to expire it.
+    let mut session = Session::new();
 
     loop {
         let read = reader.read(&mut buf).await.context("reading a frame")?;
@@ -174,7 +182,7 @@ async fn handle_connection(
         };
 
         for value in frames {
-            let (reply, stop) = dispatch_request(value, &state);
+            let (reply, stop) = dispatch_request(value, &state, &mut session);
             if let Some(reply) = reply {
                 writer
                     .write_all(&frame::encode(&reply)?)
@@ -197,7 +205,11 @@ async fn handle_connection(
 ///
 /// Returns the message to write back (`None` for a notification, which by
 /// JSON-RPC gets no answer) and whether the daemon should shut down afterwards.
-fn dispatch_request(value: Value, state: &DaemonState) -> (Option<Value>, bool) {
+fn dispatch_request(
+    value: Value,
+    state: &DaemonState,
+    session: &mut Session,
+) -> (Option<Value>, bool) {
     let request: Request = match serde_json::from_value(value) {
         Ok(request) => request,
         Err(e) => {
@@ -225,13 +237,35 @@ fn dispatch_request(value: Value, state: &DaemonState) -> (Option<Value>, bool) 
         );
     }
 
-    // P2-U9 inserts the handshake gate here: every method except `initialize`,
-    // `daemon.status` and `daemon.stop` becomes `-32000 not_initialized` until
-    // the connection has been initialized. The two lifecycle methods below stay
-    // reachable without a handshake on purpose -- `mp daemon status` describes
-    // daemons whose protocol range it cannot negotiate, and `mp daemon stop`
-    // ends them.
+    // The handshake gate: every method except `initialize` and the two
+    // lifecycle methods is `-32000 not_initialized` until this connection has
+    // handshaken. The refusal is per request, so the connection stays usable
+    // and the `initialize` that should have come first still works on it.
+    if let Some(refusal) = session.gate(&request.method) {
+        return (
+            Some(error_value(
+                request.id,
+                refusal.code,
+                refusal.message,
+                refusal.data,
+            )),
+            false,
+        );
+    }
+
     match request.method.as_str() {
+        "initialize" => match session.initialize(&request.params, state) {
+            Ok(result) => (result_value(request.id, result), false),
+            Err(refusal) => (
+                Some(error_value(
+                    request.id,
+                    refusal.code,
+                    refusal.message,
+                    refusal.data,
+                )),
+                false,
+            ),
+        },
         "daemon.status" => (result_value(request.id, state.status_result()), false),
         "daemon.stop" => (result_value(request.id, json!({"stopping": true})), true),
         other => (
@@ -308,6 +342,9 @@ mod tests {
                 config_dir: PathBuf::from("/tmp/config"),
             },
             accounts: Vec::new(),
+            config: ConfigReport::Absent {
+                path: PathBuf::from("/tmp/config/config.toml"),
+            },
         }
     }
 
@@ -324,7 +361,9 @@ mod tests {
     #[test]
     fn status_answers_without_an_initialize() {
         let state = state_fixture();
-        let (reply, stop) = dispatch_request(request("daemon.status", Some(7)), &state);
+        let mut session = Session::new();
+        let (reply, stop) =
+            dispatch_request(request("daemon.status", Some(7)), &state, &mut session);
         let reply = reply.expect("a request with an id is answered");
         assert!(!stop);
         assert_eq!(reply["id"], json!(7));
@@ -336,16 +375,50 @@ mod tests {
     #[test]
     fn stop_replies_before_it_shuts_down() {
         let state = state_fixture();
-        let (reply, stop) = dispatch_request(request("daemon.stop", Some(1)), &state);
+        let mut session = Session::new();
+        let (reply, stop) = dispatch_request(request("daemon.stop", Some(1)), &state, &mut session);
         assert!(stop, "daemon.stop asks for a shutdown");
         assert_eq!(reply.expect("answered")["result"]["stopping"], json!(true));
     }
 
-    /// Everything else is `-32601` until P2-U9 and the domain families land.
+    /// A domain method before the handshake is `-32000`, not `-32601`: the gate
+    /// runs before the method lookup, so an uninitialized client cannot probe
+    /// which methods a daemon serves.
     #[test]
-    fn an_unknown_method_is_method_not_found() {
+    fn a_domain_method_before_initialize_is_not_initialized() {
         let state = state_fixture();
-        let (reply, stop) = dispatch_request(request("account.list", Some(2)), &state);
+        let mut session = Session::new();
+        let (reply, stop) =
+            dispatch_request(request("account.list", Some(2)), &state, &mut session);
+        assert!(!stop);
+        assert_eq!(reply.expect("answered")["error"]["code"], json!(-32000));
+    }
+
+    /// After the handshake, an unknown method is `-32601` again, until the
+    /// domain families land.
+    #[test]
+    fn an_unknown_method_after_initialize_is_method_not_found() {
+        let state = state_fixture();
+        let mut session = Session::new();
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "client": {"type": "cli", "version": "0.9.0"},
+                "protocol": {"min": 1, "max": 1},
+                "capabilities": {"required": [], "optional": []},
+                "identity": {"data_dir": "/tmp/data", "config_dir": "/tmp/config"},
+            },
+        });
+        let (reply, _) = dispatch_request(initialize, &state, &mut session);
+        assert!(
+            reply.expect("answered")["result"]["instance_id"] == json!("abcd"),
+            "the handshake succeeds against the fixture's own directories"
+        );
+
+        let (reply, stop) =
+            dispatch_request(request("account.list", Some(2)), &state, &mut session);
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32601));
     }
@@ -354,7 +427,8 @@ mod tests {
     #[test]
     fn a_notification_gets_no_response() {
         let state = state_fixture();
-        let (reply, stop) = dispatch_request(request("daemon.status", None), &state);
+        let mut session = Session::new();
+        let (reply, stop) = dispatch_request(request("daemon.status", None), &state, &mut session);
         assert!(reply.is_none());
         assert!(!stop);
     }

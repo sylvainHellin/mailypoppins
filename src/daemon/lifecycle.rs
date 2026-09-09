@@ -29,33 +29,34 @@
 //! Readiness is a real `daemon.status` round trip over the socket, not the
 //! existence of a file: a socket inode appears before `accept` does, and the
 //! whole point of `mp daemon start` returning is that the next command can
-//! connect. The client here is a blocking `std` socket rather than `mp-client`,
-//! which P2-U9 introduces.
+//! connect. The round trip goes through `mp-client`, but without an
+//! `initialize`: `daemon.status` and `daemon.stop` are lifecycle surface and
+//! answer before a handshake, which is exactly what lets these commands
+//! describe and end a daemon whose protocol range they cannot negotiate.
 
 use std::fs::{self, File, Permissions};
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use colored::Colorize;
 use log::{error, info, warn};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use mp_protocol::frame;
-use mp_protocol::{Request, RequestId, JSONRPC_VERSION, PROTOCOL_MAX, PROTOCOL_MIN};
+use mp_client::Connection;
+use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
 use super::runtime::{
     self, acquire_start_lock, ensure_runtime_dir, instance_path, pid_path, probe_socket,
     remove_stale_socket, socket_path, InstanceMeta, SocketProbe,
 };
 use super::server::{serve, AccountStatus, DaemonState};
+use super::session::ConfigReport;
 
 /// Test-only hook: make `run` exit nonzero after logging is up and before the
 /// socket is bound, so `mp daemon start` has a deterministic dead child to
@@ -128,10 +129,10 @@ pub enum DaemonAction {
 pub async fn dispatch(action: DaemonAction) -> i32 {
     let outcome = match action {
         DaemonAction::Run { foreground_logs } => run(foreground_logs).await.map(|()| EXIT_OK),
-        DaemonAction::Start { timeout_secs } => start(Duration::from_secs(timeout_secs)),
-        DaemonAction::Status { json } => status(json),
-        DaemonAction::Stop { timeout_secs } => stop(Duration::from_secs(timeout_secs)),
-        DaemonAction::Restart => restart(),
+        DaemonAction::Start { timeout_secs } => start(Duration::from_secs(timeout_secs)).await,
+        DaemonAction::Status { json } => status(json).await,
+        DaemonAction::Stop { timeout_secs } => stop(Duration::from_secs(timeout_secs)).await,
+        DaemonAction::Restart => restart().await,
     };
     match outcome {
         Ok(code) => code,
@@ -182,21 +183,44 @@ async fn run(foreground_logs: bool) -> Result<()> {
     crate::config::migrate_legacy_config_dir()?;
 
     // A missing config.toml is not a startup failure: the daemon serves zero
-    // accounts until one is written (the plan's Daemon-lifecycle section).
-    let accounts = match crate::config::load_global_config() {
-        Ok(config) => {
-            echo(&format!(
-                "config loaded, {} accounts",
-                config.accounts.len()
-            ));
-            account_statuses(&config)
-        }
-        Err(e) => {
-            warn!("[daemon] no usable config, serving zero accounts: {e:#}");
-            if foreground_logs {
-                eprintln!("no usable config, serving zero accounts: {e:#}");
+    // accounts until one is written (the plan's Daemon-lifecycle section). The
+    // handshake reports which of the three cases this daemon is in, so a client
+    // can tell "no accounts yet" from "your config does not parse".
+    let config_path = crate::config::config_path();
+    let (accounts, config) = if !config_path.exists() {
+        echo(&format!("no config at {}", config_path.display()));
+        (
+            Vec::new(),
+            ConfigReport::Absent {
+                path: config_path.clone(),
+            },
+        )
+    } else {
+        match crate::config::load_global_config() {
+            Ok(config) => {
+                echo(&format!(
+                    "config loaded, {} accounts",
+                    config.accounts.len()
+                ));
+                let report = ConfigReport::Loaded {
+                    path: config_path.clone(),
+                    accounts: config.accounts.len(),
+                };
+                (account_statuses(&config), report)
             }
-            Vec::new()
+            Err(e) => {
+                warn!("[daemon] no usable config, serving zero accounts: {e:#}");
+                if foreground_logs {
+                    eprintln!("no usable config, serving zero accounts: {e:#}");
+                }
+                (
+                    Vec::new(),
+                    ConfigReport::Invalid {
+                        path: config_path.clone(),
+                        problem: format!("{e:#}"),
+                    },
+                )
+            }
         }
     };
 
@@ -231,7 +255,11 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // is what excludes a second daemon.
     drop(start_lock);
 
-    let state = Arc::new(DaemonState { meta, accounts });
+    let state = Arc::new(DaemonState {
+        meta,
+        accounts,
+        config,
+    });
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(shutdown.clone())?;
 
@@ -341,16 +369,16 @@ fn account_statuses(config: &crate::config::GlobalConfig) -> Vec<AccountStatus> 
 // ---------------------------------------------------------------------------
 
 /// Detached start: spawn `mp daemon run`, wait for a real `daemon.status`.
-fn start(timeout: Duration) -> Result<i32> {
+async fn start(timeout: Duration) -> Result<i32> {
     let socket = socket_path();
-    if query_status().is_ok() {
+    if query_status().await.is_ok() {
         info!("[daemon] start: a daemon is already running");
         return Ok(EXIT_OK);
     }
 
     let Some(_lock) = acquire_start_lock()? else {
         // Another starter is ahead of us; its daemon is the one daemon.
-        return Ok(match wait_ready(timeout, None)? {
+        return Ok(match wait_ready(timeout, None).await? {
             Some(_) => EXIT_OK,
             None => {
                 report_start_failure(
@@ -369,7 +397,7 @@ fn start(timeout: Duration) -> Result<i32> {
     }
 
     let mut child = spawn_detached()?;
-    match wait_ready(timeout, Some(&mut child))? {
+    match wait_ready(timeout, Some(&mut child)).await? {
         Some(_) => Ok(EXIT_OK),
         None => {
             // The child may still be alive but wedged; it is ours until we
@@ -421,10 +449,10 @@ fn spawn_detached() -> Result<Child> {
 }
 
 /// Poll for readiness until `timeout`, failing early if `child` dies.
-fn wait_ready(timeout: Duration, mut child: Option<&mut Child>) -> Result<Option<Value>> {
+async fn wait_ready(timeout: Duration, mut child: Option<&mut Child>) -> Result<Option<Value>> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(status) = query_status() {
+        if let Ok(status) = query_status().await {
             return Ok(Some(status));
         }
         if let Some(child) = child.as_mut() {
@@ -436,7 +464,7 @@ fn wait_ready(timeout: Duration, mut child: Option<&mut Child>) -> Result<Option
         if Instant::now() >= deadline {
             return Ok(None);
         }
-        std::thread::sleep(POLL);
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -458,8 +486,8 @@ fn report_start_failure(what: &str) {
 // ---------------------------------------------------------------------------
 
 /// Report whether a daemon answers, as JSON or as one human-readable block.
-fn status(as_json: bool) -> Result<i32> {
-    let running = query_status().ok();
+async fn status(as_json: bool) -> Result<i32> {
+    let running = query_status().await.ok();
     let object = status_object(running.as_ref());
     let code = if running.is_some() {
         EXIT_OK
@@ -552,9 +580,9 @@ fn string_of(value: &Value) -> String {
 // ---------------------------------------------------------------------------
 
 /// Ask the daemon to stop, and wait until it is really gone.
-fn stop(timeout: Duration) -> Result<i32> {
+async fn stop(timeout: Duration) -> Result<i32> {
     let socket = socket_path();
-    if query_status().is_err() {
+    if query_status().await.is_err() {
         // Nothing answers. A leftover socket from a crashed daemon is swept
         // here, because "stop" is exactly when a user expects that tidying.
         if matches!(probe_socket(&socket), SocketProbe::Stale) {
@@ -565,7 +593,7 @@ fn stop(timeout: Duration) -> Result<i32> {
     }
 
     let pid = read_instance_meta().map(|meta| meta.pid);
-    match rpc("daemon.stop") {
+    match rpc("daemon.stop").await {
         Ok(_) => info!("[daemon] stop: the daemon acknowledged the shutdown"),
         Err(e) => {
             // The socket answered `daemon.status` a moment ago, so an
@@ -588,7 +616,7 @@ fn stop(timeout: Duration) -> Result<i32> {
 
     let deadline = Instant::now() + timeout;
     loop {
-        if !socket.exists() && query_status().is_err() {
+        if !socket.exists() && query_status().await.is_err() {
             println!("{} daemon stopped", "\u{2713}".green());
             return Ok(EXIT_OK);
         }
@@ -599,14 +627,14 @@ fn stop(timeout: Duration) -> Result<i32> {
                 daemon_log_path().display()
             );
         }
-        std::thread::sleep(POLL);
+        tokio::time::sleep(POLL).await;
     }
 }
 
 /// Stop whatever runs and start this executable's daemon.
-fn restart() -> Result<i32> {
+async fn restart() -> Result<i32> {
     let previous = read_instance_meta().map(|meta| meta.pid);
-    let code = stop(Duration::from_secs(10))?;
+    let code = stop(Duration::from_secs(10)).await?;
     if code != EXIT_OK {
         return Ok(code);
     }
@@ -615,10 +643,10 @@ fn restart() -> Result<i32> {
     if let Some(pid) = previous {
         let deadline = Instant::now() + Duration::from_secs(10);
         while process_alive(pid) && Instant::now() < deadline {
-            std::thread::sleep(POLL);
+            tokio::time::sleep(POLL).await;
         }
     }
-    start(Duration::from_secs(10))
+    start(Duration::from_secs(10)).await
 }
 
 /// Whether `pid` still exists (signal 0 probes without delivering).
@@ -633,55 +661,34 @@ fn process_alive(pid: u32) -> bool {
 // ---------------------------------------------------------------------------
 
 /// `daemon.status` against the socket, or an error if nothing usable answers.
-fn query_status() -> Result<Value> {
-    rpc("daemon.status")
+async fn query_status() -> Result<Value> {
+    rpc("daemon.status").await
 }
 
-/// One blocking request/response round trip on the admin socket.
+/// One request/response round trip on the admin socket, through `mp-client`.
 ///
-/// Deliberately not `mp-client`: that crate arrives in P2-U9 with the
-/// `initialize` handshake, and the lifecycle commands must work against a
-/// daemon whose protocol they cannot negotiate.
-fn rpc(method: &str) -> Result<Value> {
+/// Deliberately **without** an `initialize`: `daemon.status` and `daemon.stop`
+/// are lifecycle surface and answer before the handshake, so these commands
+/// keep working against a daemon whose protocol range this build cannot
+/// negotiate. That is the case `mp daemon restart` exists for.
+async fn rpc(method: &str) -> Result<Value> {
     let socket = socket_path();
-    let stream = UnixStream::connect(&socket)
-        .with_context(|| format!("connecting to {}", socket.display()))?;
-    stream.set_read_timeout(Some(RPC_TIMEOUT))?;
-    stream.set_write_timeout(Some(RPC_TIMEOUT))?;
-
-    let request = Request {
-        jsonrpc: JSONRPC_VERSION.to_string(),
-        id: Some(RequestId::Num(1)),
-        method: method.to_string(),
-        params: json!({}),
+    let call = async {
+        let mut connection = Connection::connect(&socket)
+            .await
+            .with_context(|| format!("connecting to {}", socket.display()))?;
+        connection
+            .call(method, json!({}))
+            .await
+            .with_context(|| format!("{method} failed"))
     };
-    let bytes = frame::encode(&request).map_err(|e| anyhow!("encoding {method}: {e}"))?;
-    (&stream)
-        .write_all(&bytes)
-        .with_context(|| format!("sending {method}"))?;
-
-    let mut line = String::new();
-    BufReader::new(&stream)
-        .read_line(&mut line)
-        .with_context(|| format!("reading the answer to {method}"))?;
-    if line.trim().is_empty() {
-        bail!("the daemon closed the connection without answering {method}");
+    match tokio::time::timeout(RPC_TIMEOUT, call).await {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "the daemon did not answer {method} within {}s",
+            RPC_TIMEOUT.as_secs()
+        ),
     }
-    let value: Value = serde_json::from_str(line.trim())
-        .with_context(|| format!("parsing the {method} answer"))?;
-    if let Some(error) = value.get("error") {
-        bail!(
-            "{method} failed: {}",
-            error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
-        );
-    }
-    value
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow!("the answer to {method} carried no result"))
 }
 
 /// `daemon.json`, when it is there and parses.
