@@ -1458,3 +1458,12 @@ It queues them for `drain_events` and calls a fan-out installed once at startup,
 Synchronous, on the thread that emitted, is what makes `operation.cancel` an honest `Command`: by the time `OperationRegistry::cancel` returns, the finished event is published, so `CanonicalState::revision()` is the number that event travelled at.
 A publisher task draining in the background would make the outcome's revision a guess below the event's.
 The lock discipline that allows it is that every mutation collects its events under the registry lock, releases it, and only then calls the fan-out, so nothing the canonical state does can re-enter the operation table.
+
+## Two contract tests can pin two rules that contradict each other
+
+P3a-U3 pinned a client tracker that treats any revision above `watermark + 1` as a gap; P3a-U5 pinned coalescing, where a merged entry takes the newer revision and the older number never travels.
+Both suites are green, because Phase 3a commits no change of its own and the burst hook names distinct resources on purpose, so nothing coalesces on a stream any test watches.
+The contradiction only shows when the two documents are read side by side, which is what the phase exit sweep is for: a unit-by-unit review sees one rule at a time and each one is correct alone.
+
+The general form: a contract split across units needs a reader at the end whose job is the seams, not the units.
+Cross-check the invariants a later unit weakened against the ones an earlier unit pinned, and when they disagree, write down which one the wire actually guarantees rather than quietly picking the stricter one.

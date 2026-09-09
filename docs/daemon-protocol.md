@@ -48,7 +48,7 @@ This build advertises the range `{min: 1, max: 1}`.
 The first request on a connection is `initialize`, and it is the only method a client may call before initialization succeeds.
 Its params are:
 
-- `client.type`, one of `cli`, `tui`, or `gui`, and `client.version`, the client's application version.
+- `client.type`, one of `cli`, `tui`, or `gui`, and `client.version`, the client's application version. A fourth kind is `-32602`: a daemon that branches on the caller may not be handed a kind it has no branch for.
 - `protocol.min` and `protocol.max`, the range the client can speak.
 - `capabilities.required` and `capabilities.optional`, identifier lists.
 - `identity.data_dir` and `identity.config_dir`, sent always and as a pair.
@@ -75,7 +75,8 @@ The directory pair is compared canonically, so a symlinked path is not a mismatc
 An application-version difference alone is diagnostic and does not refuse the connection.
 
 A capability identifier names a method family or a behaviour the daemon will serve, and a client requires only what it cannot work without.
-This build advertises `daemon.status`, `daemon.stop`, `account.list`, `mailbox.list`, `message.list`, `operation.cancel`, `operation.status` and `state.bootstrap`, which are exactly the methods it serves: the list is the two lifecycle methods followed by every method registered on the dispatcher, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
+This build advertises `daemon.status`, `daemon.stop`, `account.list`, `mailbox.list`, `message.list`, `operation.cancel`, `operation.status` and `state.bootstrap`, which are exactly the methods it serves: the list is the two lifecycle methods followed by every method registered on the dispatcher, in method-name order, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
+A daemon started with the `test.operation` hook of `docs/daemon-operations.md` advertises that method too, which is the derivation working rather than an exception to it.
 Requiring one this build does not have is a `capability_missing` at the handshake rather than a `-32601` at the first call, and an *optional* capability the daemon lacks is dropped from the connection's agreed set instead of refusing it.
 
 The handshake happens once per connection, and a second `initialize` on the same connection is `-32600`.
@@ -87,22 +88,7 @@ The refusal is per request rather than per connection: the connection stays usab
 ## Method families
 
 Methods are domain operations, and each one declares whether it is a query, a command, a long-running operation, or a client-side integration request.
-
-### Method kinds
-
-Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
-Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
-
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.list` and `operation.status` are queries.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
-- **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
-
-A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
-`durable` is the default and what a method that never thought about cancellation means: the work outlives the client that asked for it.
-A method declares `client_scoped` when its work has no reason to continue once the client that wanted the answer is gone.
-
-`initialize`, `daemon.status` and `daemon.stop` declare no kind, because they are not dispatcher methods: they are lifecycle surface answered by the connection itself, ahead of the handshake gate and outside the domain.
+The families, all of them reserved here and served over the phases of the migration:
 
 - `state.*` for bootstrap and state diagnostics.
 - `account.*` for listing, selection metadata, sync health, and account operations.
@@ -120,6 +106,22 @@ A method declares `client_scoped` when its work has no reason to continue once t
 - `daemon.*` for status and graceful lifecycle control.
 
 `initialize` is the one method outside a family, because it runs before any family gate exists.
+
+### Method kinds
+
+Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
+Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
+
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.list`, `operation.status` and `state.bootstrap` are the queries this build serves.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel` is the one command this build serves.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. No method of this build declares it: the long-running work is sync, authentication and the rebuilds, all of which arrive in Phase 5, and until then the only operation is the one the `test.operation` hook registers. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
+
+A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
+`durable` is the default and what a method that never thought about cancellation means: the work outlives the client that asked for it.
+A method declares `client_scoped` when its work has no reason to continue once the client that wanted the answer is gone.
+
+`initialize`, `daemon.status` and `daemon.stop` declare no kind, because they are not dispatcher methods: they are lifecycle surface answered by the connection itself, ahead of the handshake gate and outside the domain.
 
 ### Lifecycle methods
 
@@ -198,6 +200,22 @@ Bootstrapping twice on one connection is allowed and is what a client does after
 `account.list`, `mailbox.list` and `message.list` are the read-only domain methods.
 All three take the store path the CLI takes (`store::read`) and none acquires the account's `EngineLock`: the daemon does not become an account's engine before Phase 5, so a running TUI or `mp sync` keeps the lock while the daemon answers listings beside it.
 
+`account.list` takes `{}` and returns:
+
+```json
+{"accounts": [{"name": "work", "default": true, "backend": "imap", "state": "ready"}]}
+```
+
+It reports the configuration, not the runtimes: every `[[accounts]]` entry of `config.toml`, in the file's order, which is the order an `-A`-less command already treats as authoritative.
+`default` is true for the first configured account and no other, because the CLI has no other notion of a default.
+`backend` follows `auth_method` alone, `graph` for Graph and `imap` for everything else, and is independent of `state`.
+`state` is decided on disk: an account whose store exists and opens is `ready`, and one with no store yet is `blocked`, since it cannot serve a read until `mp sync` writes one.
+This build never reports `opening` here: nothing on this path is asynchronous, so no account is ever between states, which is why the same account is `opening` in a bootstrap snapshot and `ready` or `blocked` in this answer.
+The two report different things, the runtime and the store on disk, and the bootstrap section above says which is which.
+
+That `state` is probed read-only: the daemon opens the store file with `SQLITE_OPEN_READ_ONLY` and checks the schema stamp and the required tables, rather than going through `Store::open`, which creates a missing store and rebuilds a corrupt one.
+Asking which accounts exist may not create or destroy a cache, so a file that fails the probe is `blocked` and is left exactly as it was found.
+
 `mailbox.list` takes `{"account": str}` and returns one account's sidebar hierarchy:
 
 ```json
@@ -216,19 +234,8 @@ Drafts are listed here and refused by `message.list`, exactly as the sidebar lis
 `total` is every message the mailbox holds, the count the sidebar shows, with the Drafts row counted from the draft index because drafts are not message rows.
 `unread` is how many of them the server has not flagged `\Seen`, and is `0` for Drafts, which have no read state.
 `badge` is what the sidebar prints beside the label, which is `total` in this build.
+Unlike the other two, `mailbox.list` opens the account's store twice, once for the grouped totals and once to count the rows without `\Seen`; it is a read either way and the second open is a cost rather than a contract, recorded in ticket #0121.
 An unknown account is `account_unknown` and a configured account with no readable store is `account_not_ready`, the same two refusals `message.list` makes.
-
-`account.list` takes `{}` and returns:
-
-```json
-{"accounts": [{"name": "work", "default": true, "backend": "imap", "state": "ready"}]}
-```
-
-It reports the configuration, not the runtimes: every `[[accounts]]` entry of `config.toml`, in the file's order, which is the order an `-A`-less command already treats as authoritative.
-`default` is true for the first configured account and no other, because the CLI has no other notion of a default.
-`backend` follows `auth_method` alone, `graph` for Graph and `imap` for everything else, and is independent of `state`.
-`state` is decided on disk: an account whose store exists and opens is `ready`, and one with no store yet is `blocked`, since it cannot serve a read until `mp sync` writes one.
-This build never reports `opening`: nothing here is asynchronous, so no account is ever between states.
 
 `message.list` takes `{"account": str, "mailbox": str, "limit": u32|null}` and returns:
 
@@ -260,10 +267,6 @@ An absent `limit` and `limit: null` both mean every message; `limit: 0` means no
 An empty mailbox of a ready account is an empty listing, not an error.
 
 `mp --daemon list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
-
-The `state` an account reports is probed read-only: the daemon opens the store file with `SQLITE_OPEN_READ_ONLY` and checks the schema stamp and the required tables, rather than going through `Store::open`, which creates a missing store and rebuilds a corrupt one.
-Asking which accounts exist may not create or destroy a cache, so a file that fails the probe is `blocked` and is left exactly as it was found.
-
 
 ### Long-running operations
 
@@ -356,12 +359,19 @@ State changes reach clients as the `state.event` notification, whose `params` is
 
 `instance_id` is the daemon instance that produced the event, and a client that sees an unfamiliar instance has been reconnected to a new daemon and must bootstrap again.
 `revision` is the monotonic state revision the event moves the client to, and `0` is the pre-bootstrap sentinel that never appears on the wire.
-`kind` selects the client's handler, for example `message.flags_changed`.
+`kind` selects the client's handler, for example `account.state_changed`.
 `payload` is an object so a kind can gain fields without a version bump.
 
-Revisions are strictly increasing and dense within an instance, and every committed change takes the next one.
-A client compares each event against its watermark and does one of four things: an event exactly one above it is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one more than one above it is a gap; and one from an unfamiliar instance is refused whatever its number, because revisions are only comparable within the daemon process that issued them.
-A gap and an instance change both poison the stream, so nothing further is applied until a fresh `state.bootstrap` clears it: a client that kept applying past a gap would build a state nothing on the daemon's side corresponds to.
+The revision counter is dense: it is strictly increasing within an instance and every committed change takes the next number, so no number is ever skipped on the daemon's side.
+What one connection receives is strictly increasing but not necessarily dense, because coalescing merges two queued events into one that carries the newer revision and the older number never travels.
+Delivery order is therefore the contract, and the daemon says so itself when something was lost: a `state.resync_required` notification, never a hole a client has to infer.
+
+A client compares each event against its watermark and does one of four things: an event above it is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one from an unfamiliar instance is refused whatever its number, because revisions are only comparable within the daemon process that issued them; and a `state.resync_required` poisons the stream until a fresh `state.bootstrap` clears it.
+An instance change poisons it the same way: a client that kept applying past either would build a state nothing on the daemon's side corresponds to.
+
+`mp-client`'s `StateTracker` is stricter than that today and treats any jump above `watermark + 1` as a gap, which is exact only on a stream that coalesced nothing.
+The two agree in this build, because Phase 3a registers no method that commits a change and the only producer is the burst hook, whose events name distinct resources on purpose.
+Reconciling them, by having the daemon carry the highest revision a merged entry superseded or by dropping the arithmetic in favour of the daemon's own control message, is a Phase 3b item and is in `BACKLOG.md`.
 
 ### Event kinds
 
@@ -378,7 +388,8 @@ Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbo
 `state.remove` says that a resource is gone, with a payload of `{resource}`.
 A removal is a fact about a moment and is never merged with anything, in either direction, including another removal of the same resource.
 
-`operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described below.
+`operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
+The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.removed` and `outbox.counts_changed`, which are not wire kinds: those changes travel as `state.invalidate` and `state.remove`, and the six kinds listed here are the whole of what a client sees.
 
 ### Delivery, coalescing and caps
 
@@ -398,6 +409,7 @@ A client that stops reading therefore costs the daemon a bounded amount of memor
 When a push would exceed either cap the queue overflows: every queued domain event is discarded, the queue is poisoned, and one `state.resync_required` notification is sent with `params` of `{instance_id, reason}`, where the reason is `event_queue_overflow`.
 A poisoned queue accepts no further domain event until the client calls `state.bootstrap` again, which clears the poison: sending more would build a state nothing on the daemon's side corresponds to.
 Lifecycle events are the exception and survive both the discard and the poison, because no snapshot carries them and a re-bootstrap would not bring them back.
+They do not survive the re-bootstrap itself: a second `state.bootstrap` empties the whole queue, lifecycle events included, so a progress report queued behind a resync is lost where the same report queued behind an overflow is kept. That is an inconsistency of this build rather than a rule, recorded in ticket #0121 and in `BACKLOG.md`.
 If the control notification itself cannot be written, the daemon closes that connection and keeps serving every other one.
 
 A client that receives `state.resync_required` discards its state and calls `state.bootstrap`.
@@ -417,21 +429,32 @@ A new fixture whose name matches no rule fails the suite rather than being skipp
 
 ### Version 1
 
-Initial version, introduced with the daemon in #0120.
+Initial version, introduced with the daemon in #0120 and completed in #0121.
+One entry, because nothing shipped against version 1 before it was whole: the two tickets are phases of one migration and no client outside this repository has spoken it.
 
+**Transport.**
 Newline-framed JSON-RPC 2.0 over a Unix-domain socket, with a 1 MiB request frame cap inclusive of the terminator.
-The `initialize` handshake with the client, protocol, capabilities, and identity params, and the daemon, protocol, instance, capabilities, platform, lifecycle, and config-status result.
-The `daemon.status` and `daemon.stop` methods, reachable before the handshake, and the `not_initialized` gate on everything else.
-The error table above, codes `-32000` to `-32009`.
-The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
-The `state.invalidate` and `state.remove` event kinds, with the payloads `{resource, scope}` and `{resource}`, the coalescing rules above, the 512-event and 4 MiB per-connection caps, and `event_queue_overflow` as the reason an exceeded cap resyncs a client.
-The read-only methods `account.list` and `message.list`, both behind the handshake, with the account states `ready` and `blocked`, `null` as the spelling of an unlimited `message.list`, and `-32602` for a mailbox the account does not have.
-A `message.list` row carries both dates, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
-A `client.type` outside `cli`, `tui` and `gui` is `-32602`, because a method that branches on the caller may not be handed a fourth kind.
-The `state.bootstrap` method, whose result carries the negotiated `capabilities` of the calling connection, a `revision` that is never `0`, and a snapshot of `accounts`, `mailboxes`, `drafts`, `outbox`, `holds`, `operations` and `diagnostics`, with one key per account in the three maps.
-The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
-The `account.state_changed` event kind, with its `{account, state}` payload.
 A response above the 16 MiB response cap is a `frame_too_large` error carrying `{limit, seen}`, the same pair an oversized request earns.
-The `mailbox.list` method, whose result is the sidebar hierarchy of one account with the three counts `total`, `unread` and `badge` per mailbox.
-The `operation.status` and `operation.cancel` methods, the five operation states, the `operation.progress` and `operation.finished` lifecycle event kinds with the payloads above, `-32602` for a cancel or a status on a terminal or unknown operation, the `cancel_scope` declaration of `durable` or `client_scoped`, and the rule that a disconnect cancels only that connection's non-terminal client-scoped work.
-The bootstrap snapshot's `operations` array, which lists the daemon's unsettled operations in start order, each rendered as an `operation.status` result.
+
+**Handshake and lifecycle.**
+The `initialize` handshake with the client, protocol, capabilities, and identity params, and the daemon, protocol, instance, capabilities, platform, lifecycle, and config-status result.
+A `client.type` outside `cli`, `tui` and `gui` is `-32602`, because a method that branches on the caller may not be handed a fourth kind.
+The `daemon.status` and `daemon.stop` methods, reachable before the handshake, and the `not_initialized` gate on everything else.
+The advertised capability list is the two lifecycle methods followed by the dispatcher's table in method-name order, derived rather than written out.
+
+**Errors.**
+The error table above, codes `-32000` to `-32009`.
+
+**Methods.**
+The read-only `account.list`, `mailbox.list` and `message.list`, all behind the handshake and none taking an engine lock.
+`account.list` reports the account states `ready` and `blocked` from a read-only store probe; `mailbox.list` returns the sidebar hierarchy of one account with the three counts `total`, `unread` and `badge` per mailbox; `message.list` spells an unlimited listing as `null`, refuses a mailbox the account does not have with `-32602`, and carries both dates per row, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
+The `state.bootstrap` method, whose result carries the negotiated `capabilities` of the calling connection, a `revision` that is never `0`, and a snapshot of `accounts`, `mailboxes`, `drafts`, `outbox`, `holds`, `operations` and `diagnostics`, with one key per account in the three maps.
+Its `operations` array lists the daemon's unsettled operations in start order, each rendered as an `operation.status` result.
+The `operation.status` and `operation.cancel` methods, the five operation states, `-32602` for a cancel or a status on a terminal or unknown operation, the `cancel_scope` declaration of `durable` or `client_scoped`, and the rule that a disconnect cancels only that connection's non-terminal client-scoped work.
+Every method declares a kind (`Query`, `Command`, `Operation`, `ClientIntegration`), a `since` of at least `1`, and a `cancel_scope`.
+
+**State and events.**
+The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
+The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
+The six event kinds: `state.invalidate` `{resource, scope}` and `state.remove` `{resource}`, the replacements `account.state_changed` `{account, state}` and `draft.changed` `{account, id, subject, status, valid}`, and the two lifecycle kinds `operation.progress` and `operation.finished` with the payloads above.
+The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.
