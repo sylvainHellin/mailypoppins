@@ -9,9 +9,9 @@
 //!
 //! This file pins the extension of the lock to that half, and it is **not**
 //! feature-gated: it is a change to existing library behaviour and belongs in
-//! the default suite. Every test is `#[ignore]`d until the implementation
-//! lands, so `cargo test --workspace` stays green in the meantime (the plan's
-//! P3b-U1 note recommends exactly this).
+//! the default suite. The implementation landed in P3b-U1 / P3b-U2, so every
+//! test here runs as part of `cargo test --workspace` (they were `#[ignore]`d
+//! while the plan's P3b-U1 note recommended it, and are not any more).
 //!
 //! # The API this pins
 //!

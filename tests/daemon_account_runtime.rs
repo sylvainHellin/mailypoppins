@@ -600,6 +600,11 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
     assert_eq!(second.error, first.error, "and the same result");
 
     // The join is scoped to the run, not cached: the next tick starts a body.
+    // The gate needs a fresh permit for it: a `notify_one` delivered to an
+    // already registered waiter wakes that waiter and stores nothing, so the
+    // call that released the first body left the gate empty. This one has no
+    // waiter to wake, so it stores the permit the third body consumes.
+    gate.notify_one();
     let third = within("a tick after the join", runtime.tick(TickKind::Quick)).await;
     assert!(!third.joined);
     assert_eq!(
@@ -861,8 +866,11 @@ async fn a_preview_read_is_served_while_a_list_load_and_a_write_are_in_flight() 
     assert_eq!(rows, 1);
 
     // The write in flight: a separate connection on its own thread, which is
-    // what the daemon's writer is. It commits continuously until stopped.
+    // what the daemon's writer is. It commits continuously until stopped, and
+    // announces its first commit so the preview read below starts against a
+    // writer that is genuinely in flight rather than one still opening.
     let stop = Arc::new(AtomicBool::new(false));
+    let (first_commit_tx, first_commit_rx) = tokio::sync::oneshot::channel::<()>();
     let writer = {
         let stop = Arc::clone(&stop);
         let path = store_path(&dir);
@@ -873,17 +881,25 @@ async fn a_preview_read_is_served_while_a_list_load_and_a_write_are_in_flight() 
                 .execute_batch("CREATE TABLE IF NOT EXISTS _pool_probe (id INTEGER PRIMARY KEY)")
                 .expect("the writer creates its scratch table");
             let mut written = 0u64;
+            let mut announce = Some(first_commit_tx);
             while !stop.load(Ordering::SeqCst) {
                 store
                     .conn()
                     .execute("INSERT INTO _pool_probe DEFAULT VALUES", [])
                     .expect("the writer commits");
                 written += 1;
+                if let Some(tx) = announce.take() {
+                    let _ = tx.send(());
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             written
         })
     };
+
+    within("the writer's first commit", first_commit_rx)
+        .await
+        .expect("the writer announces its first commit");
 
     // The preview read: the short one the pool exists to keep out of the queue.
     let preview = {
