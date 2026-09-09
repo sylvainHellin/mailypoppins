@@ -11,17 +11,25 @@
 //!   account every `-A`-less command already means.
 //! - `backend`: `auth_method` alone. `graph` is Graph, everything else reaches
 //!   its server over IMAP.
-//! - `state`: the store on disk. Present and openable is [`STATE_READY`];
-//!   anything else is [`STATE_BLOCKED`], because an account with no store
-//!   cannot serve a read and will not until `mp sync` writes one. It is never
-//!   `opening`: nothing here is asynchronous, so no account is ever between
-//!   states.
+//! - `state`: the store on disk. Present and readable at the current schema
+//!   version is [`STATE_READY`]; anything else is [`STATE_BLOCKED`], because an
+//!   account with no store cannot serve a read and will not until `mp sync`
+//!   writes one. It is never `opening`: nothing here is asynchronous, so no
+//!   account is ever between states.
+//!
+//! The probe behind `state` is read-only on purpose, see [`state_of_path`]:
+//! reporting what an account has may not change what it has.
 
+use std::path::Path;
+
+use anyhow::{bail, Context};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
 use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, AuthMethod};
+use crate::store::schema;
 
 use super::super::server::DaemonState;
 
@@ -78,18 +86,50 @@ pub fn backend_of(account: &AccountConfig) -> &'static str {
 }
 
 /// Whether an account can serve reads, decided on disk.
-///
-/// The existence check comes first on purpose: `Store::open` would *create* the
-/// file, and probing an account must not give it a store it never had.
 pub fn state_of(account: &str) -> &'static str {
-    let path = crate::config::store_path(account);
+    state_of_path(&crate::config::store_path(account))
+}
+
+/// The state of one store file, probed without writing a byte to it.
+///
+/// `Store::open` is the wrong tool here twice over: it *creates* the file when
+/// it is missing, and it *deletes and rebuilds* it when it is corrupt or
+/// stamped with another schema version. Both are right for a command the user
+/// asked to work on that account and wrong for a question about it: answering
+/// `account.list` may not give an account a store it never had, and may not
+/// throw away a cache whose owner is a running TUI or `mp sync`.
+///
+/// So the probe opens read-only, which creates nothing, and runs the same two
+/// structural checks [`crate::store::Store::open`] validates with, minus the
+/// `integrity_check` a listing has no business paying for. A store that passes
+/// here is one `message.list` may then open normally.
+pub fn state_of_path(path: &Path) -> &'static str {
     if !path.exists() {
         return STATE_BLOCKED;
     }
-    match crate::store::Store::open(&path) {
-        Ok(_) => STATE_READY,
+    match probe(path) {
+        Ok(()) => STATE_READY,
         Err(_) => STATE_BLOCKED,
     }
+}
+
+/// Read-only structural probe of a store file: it opens as a database, it is
+/// stamped with the current schema version, and every required table is there.
+fn probe(path: &Path) -> anyhow::Result<()> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} read-only", path.display()))?;
+    match schema::stamped_version(&conn)? {
+        Some(schema::SCHEMA_VERSION) => {}
+        Some(other) => bail!(
+            "schema version {other}, expected {}",
+            schema::SCHEMA_VERSION
+        ),
+        None => bail!("no schema version stamp"),
+    }
+    if !schema::all_tables_present(&conn)? {
+        bail!("schema v{} is incomplete", schema::SCHEMA_VERSION);
+    }
+    Ok(())
 }
 
 /// The configured account behind `name`, once it can serve a read.
@@ -167,6 +207,52 @@ mod tests {
         assert_eq!(entries[0].backend, "imap");
         assert!(!entries[1].default);
         assert_eq!(entries[1].backend, "graph", "auth_method alone decides");
+    }
+
+    /// A file at the store path that is not a store is `blocked`, and the probe
+    /// leaves it exactly as it found it: `Store::open` would have deleted it and
+    /// written a fresh schema in its place, which is a cache `account.list` has
+    /// no mandate to destroy.
+    #[test]
+    fn a_garbage_store_file_is_blocked_and_survives_the_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.sqlite3");
+        let garbage = b"this is not a SQLite database".to_vec();
+        std::fs::write(&path, &garbage).expect("write the garbage file");
+
+        assert_eq!(state_of_path(&path), STATE_BLOCKED);
+        assert_eq!(
+            std::fs::read(&path).expect("the file is still there"),
+            garbage,
+            "probing an account may not rewrite what is at its store path"
+        );
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = path.with_file_name(format!("store.sqlite3{suffix}"));
+            assert!(
+                !sidecar.exists(),
+                "the probe left {} behind",
+                sidecar.display()
+            );
+        }
+    }
+
+    /// A path with nothing at it is `blocked`, and stays a path with nothing at
+    /// it: a question about an account may not create its store.
+    #[test]
+    fn a_missing_store_is_blocked_and_is_not_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("never-synced").join("store.sqlite3");
+        assert_eq!(state_of_path(&path), STATE_BLOCKED);
+        assert!(!path.exists(), "the probe created {}", path.display());
+    }
+
+    /// A real store, written by the real opener, is `ready`.
+    #[test]
+    fn a_store_of_the_current_schema_is_ready() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.sqlite3");
+        drop(crate::store::Store::open(&path).expect("create a store"));
+        assert_eq!(state_of_path(&path), STATE_READY);
     }
 
     /// An entry survives the round trip through the wire shape.

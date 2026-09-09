@@ -4,20 +4,17 @@
   "result": {
     "accounts": [
       {
-        "address": "sylvain.hellin@tum.de",
+        "backend": "imap",
         "default": true,
-        "last_sync_at": "2025-11-18T07:41:02Z",
-        "name": "tum",
+        "name": "work",
         "state": "ready"
       },
       {
-        "address": "sylvain@example.org",
+        "backend": "graph",
         "default": false,
-        "last_sync_at": "2025-11-18T07:39:55Z",
-        "name": "proton",
-        "state": "syncing"
+        "name": "personal",
+        "state": "blocked"
       }
-    ],
-    "revision": 4217
+    ]
   }
 }

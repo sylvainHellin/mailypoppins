@@ -17,7 +17,8 @@ A frame contains no raw newline: `serde_json` escapes newlines inside string val
 A request frame is capped at `MAX_REQUEST_BYTES`, which is 1 MiB.
 The cap counts the terminator, so a frame of exactly 1 MiB is accepted and one byte more is refused.
 It is enforced on the decoder's buffer rather than on a completed line, so a client that streams past the limit without ever sending a terminator is cut off instead of buffered.
-The response direction carries its own cap, which is why `Decoder::new` takes a limit instead of reading the constant.
+The response direction carries its own cap, `MAX_RESPONSE_BYTES`, which is 16 MiB, which is why `Decoder::new` takes a limit instead of reading either constant.
+Both sides read that one constant: the daemon refuses to write a reply above it and answers `frame_too_large` with `{limit, seen}` on the request's own id, and a client sizes its decoder by it, so an oversized answer is a named error on both ends rather than a truncated frame on one and a dropped connection on the other.
 
 A breach of the cap, invalid UTF-8, or invalid JSON closes that connection and nothing else.
 Other connections and the daemon itself keep running.
@@ -162,6 +163,7 @@ This build never reports `opening`: nothing here is asynchronous, so no account 
     "from": "Ivana <ivana@example.com>",
     "subject": "Bericht",
     "date_sort": "2026-07-02T11:57:30",
+    "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
     "flags": {"seen": true, "answered": true, "forwarded": true},
     "has_attachments": true
   }]
@@ -170,14 +172,18 @@ This build never reports `opening`: nothing here is asynchronous, so no account 
 
 `mailbox` accepts a role, a slug or a sidebar label, exactly as `mp list-messages --mailbox` does, and the answer echoes the resolved id rather than the spelling that was sent.
 The order is the store's, `date_sort DESC, id DESC`, the same rows `mp list-messages` and the TUI list show.
-`message_id` is verbatim as ingest stored it, angle brackets included; `from` and `subject` travel as `""` when the header was absent, because the shape says `str`; `date_sort` is `tui::app::resolve_date`'s sort key, so every stack derives it the same way.
+`message_id` is verbatim as ingest stored it, angle brackets included; `from`, `subject` and `date_display` travel as `""` when the header was absent, because the shape says `str`.
+The two dates are both carried because neither can be derived from the other: `date_sort` is `tui::app::resolve_date`'s UTC sort key, so every stack orders the same way, and `date_display` is the `Date:` header as the store holds it, which is the column a listing prints.
 `flags` carries the three axes named above and not the store's fourth, `\Flagged`.
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
 An empty mailbox of a ready account is an empty listing, not an error.
 
-What the shape does not carry yet is a display date: `date_sort` is derived from the `Date:` header and cannot be turned back into it.
-`mp --daemon list-messages` therefore takes everything but that one printed column from the daemon and reads the header from the same store, which a later revision of this shape removes the need for.
+`mp --daemon list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
+
+The `state` an account reports is probed read-only: the daemon opens the store file with `SQLITE_OPEN_READ_ONLY` and checks the schema stamp and the required tables, rather than going through `Store::open`, which creates a missing store and rebuilds a corrupt one.
+Asking which accounts exist may not create or destroy a cache, so a file that fails the probe is `blocked` and is left exactly as it was found.
+
 
 ## Error codes
 
@@ -247,3 +253,5 @@ The `daemon.status` and `daemon.stop` methods, reachable before the handshake, a
 The error table above, codes `-32000` to `-32009`.
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
 The read-only methods `account.list` and `message.list`, both behind the handshake, with the account states `ready` and `blocked`, `null` as the spelling of an unlimited `message.list`, and `-32602` for a mailbox the account does not have.
+A `message.list` row carries both dates, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
+A response above the 16 MiB response cap is a `frame_too_large` error carrying `{limit, seen}`, the same pair an oversized request earns.

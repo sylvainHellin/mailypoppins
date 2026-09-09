@@ -4,7 +4,9 @@
 //! from the same query, in the same order (`date_sort DESC, id DESC`), as
 //! `mp list-messages` and the TUI list. `date_sort` is
 //! [`crate::tui::app::resolve_date`]'s sort key, so all three stacks derive a
-//! date the same way rather than each parsing the header again.
+//! date the same way rather than each parsing the header again, and
+//! `date_display` is the `Date:` header as the store holds it, which is the
+//! column a listing prints.
 //!
 //! `total` is how many messages the mailbox holds and ignores `limit`, which is
 //! the "In the store: N" of `mp list-messages`. `limit: null` and an absent
@@ -57,10 +59,16 @@ pub fn list(params: &Value, state: &DaemonState) -> Result<Value, RpcError> {
 
 /// One stored row on the wire.
 ///
-/// The two nullable headers travel as `""` rather than `null`, because the
+/// The three nullable headers travel as `""` rather than `null`, because the
 /// shape says `str`. `flags` carries the three axes the protocol names and not
 /// the store's fourth (`\Flagged`): a client that needs the star waits for the
 /// version that adds it.
+///
+/// Both dates are here because neither can be derived from the other:
+/// `date_sort` is `resolve_date`'s UTC sort key, and `date_display` is the
+/// `Date:` header as the store holds it, which is the column a listing prints.
+/// A client renders from the wire alone rather than reading the store beside
+/// the daemon.
 pub fn to_json(row: &MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
@@ -70,6 +78,7 @@ pub fn to_json(row: &MessageRow) -> Value {
         "from": row.from.clone().unwrap_or_default(),
         "subject": row.subject.clone().unwrap_or_default(),
         "date_sort": date_sort,
+        "date_display": row.date_display.clone().unwrap_or_default(),
         "flags": {
             "seen": flags.seen,
             "answered": flags.answered,

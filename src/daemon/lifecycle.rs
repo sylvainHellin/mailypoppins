@@ -710,10 +710,17 @@ fn canonical(path: &Path) -> PathBuf {
 
 /// A `1`/`true`-style environment opt-in.
 fn env_flag(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        let value = value.trim();
-        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-    })
+    std::env::var(name).is_ok_and(|value| flag_value(&value))
+}
+
+/// Whether one variable's value means "on".
+///
+/// Split out of [`env_flag`] so the rule is testable without setting a process
+/// environment, which no test may do while the others run beside it. Empty,
+/// blank, `0` and `false` in any case are off; anything else is on.
+fn flag_value(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
 }
 
 /// A fresh instance id: 128 random bits as hex, which is enough for a client to
@@ -771,11 +778,18 @@ mod tests {
         assert_eq!(object["accounts"][0]["state"], json!("opening"));
     }
 
-    /// The opt-in variables are read the same way everywhere: unset and `0` are
-    /// both off, so a shell that exports `FOO=0` does not turn a hook on.
+    /// The opt-in variables are read the same way everywhere: unset, empty,
+    /// blank, `0` and `false` are all off, so a shell that exports `FOO=0` does
+    /// not turn a hook on.
     #[test]
     fn env_flag_is_off_for_unset_empty_and_zero() {
         assert!(!env_flag("MAILYPOPPINS_A_VARIABLE_NOBODY_SETS"));
+        for off in ["", " ", "0", " 0 ", "false", "FALSE", "False"] {
+            assert!(!flag_value(off), "{off:?} is off");
+        }
+        for on in ["1", "true", "TRUE", "yes", " 1 "] {
+            assert!(flag_value(on), "{on:?} is on");
+        }
     }
 
     /// Instance ids are unique per call and shaped like the fixture.

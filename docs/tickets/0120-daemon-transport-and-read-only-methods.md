@@ -73,14 +73,10 @@ A hidden `mp account list` behind the same feature gate is the oracle, and `the_
 The command is not new surface a user can find; it becomes visible with the rest of the daemon work at P4-U1.
 `--daemon` itself is gated for the same reason the subcommands are, one gate more than section 3.0 asked for, which specified only `hide = true`.
 
-### `message.list` carries no display date, and the routed CLI reads the header locally
+### `message.list` carries both dates
 
 The wire shape the plan fixes for `message.list` carries `date_sort`, which is `tui::app::resolve_date`'s sort key and cannot be turned back into the date a listing prints.
-`mp list-messages` prints a display date derived from the `Date:` header, so a routed listing built from the wire shape alone would differ from the direct one in exactly one column, and the parity criterion would fail on a field the protocol simply does not carry.
-
-The compromise: `mp --daemon list-messages` takes the rows, their order and the total from the daemon, and reads that one column from the same store the daemon read, which takes no engine lock like every other read on this path.
-It is a Phase 2 concession and it is written down in `docs/daemon-protocol.md` beside the shape it patches.
-Adding a `date_display` field to `message.list` is a protocol change with a changelog entry, and it is carried in `BACKLOG.md` as the first follow-up out of this phase rather than slipped in late.
+The row therefore carries `date_display` beside it, the `Date:` header as the store holds it, so `mp --daemon list-messages` renders from the wire alone and opens no store of its own.
 
 ## Gate evidence
 

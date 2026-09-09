@@ -554,6 +554,99 @@ fn domain_fixtures_use_the_declared_method_families() {
     }
 }
 
+/// The read-only response fixtures carry exactly the fields
+/// `docs/daemon-protocol.md` documents for them.
+///
+/// The key lists are written out here rather than read from the daemon's
+/// `to_json`, so a field silently added, renamed or dropped on the wire fails
+/// this test instead of regenerating a fixture that agrees with the new code
+/// and with nothing else. Changing one of these lists is a protocol change and
+/// needs a changelog entry.
+#[test]
+fn the_read_only_response_fixtures_carry_the_documented_fields() {
+    const ACCOUNT_ENTRY: &[&str] = &["backend", "default", "name", "state"];
+    const MESSAGE_ROW: &[&str] = &[
+        "date_display",
+        "date_sort",
+        "flags",
+        "from",
+        "has_attachments",
+        "message_id",
+        "subject",
+        "uid",
+    ];
+    const MESSAGE_FLAGS: &[&str] = &["answered", "forwarded", "seen"];
+
+    let accounts = load("account.list.response.json");
+    assert_keys(&accounts["result"], &["accounts"], "account.list result");
+    let entries = accounts["result"]["accounts"]
+        .as_array()
+        .expect("account.list result.accounts is an array");
+    assert!(
+        entries.len() >= 2,
+        "the fixture shows both a default and a non-default account, got {accounts}"
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        assert_keys(entry, ACCOUNT_ENTRY, &format!("accounts[{index}]"));
+    }
+
+    let messages = load("message.list.response.json");
+    assert_keys(
+        &messages["result"],
+        &["account", "mailbox", "total", "messages"],
+        "message.list result",
+    );
+    let rows = messages["result"]["messages"]
+        .as_array()
+        .expect("message.list result.messages is an array");
+    assert!(
+        !rows.is_empty(),
+        "a fixture with no message documents no row shape, got {messages}"
+    );
+    for (index, row) in rows.iter().enumerate() {
+        assert_keys(row, MESSAGE_ROW, &format!("messages[{index}]"));
+        assert_keys(
+            &row["flags"],
+            MESSAGE_FLAGS,
+            &format!("messages[{index}].flags"),
+        );
+    }
+}
+
+/// The `message.list` request carries the three params the method takes and no
+/// fourth: `offset` and `since_revision` belong to later versions of the shape
+/// and a fixture may not promise them.
+#[test]
+fn the_message_list_request_carries_the_documented_params() {
+    let value = load("message.list.request.json");
+    assert_keys(
+        &value["params"],
+        &["account", "mailbox", "limit"],
+        "message.list params",
+    );
+    let value = load("account.list.request.json");
+    assert_eq!(
+        value["params"],
+        json!({}),
+        "account.list takes no parameters"
+    );
+}
+
+/// The keys of a JSON object, sorted, or a failure naming what came instead.
+fn assert_keys(value: &Value, expected: &[&str], label: &str) {
+    let map = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{label} is a JSON object, got {value}"));
+    let mut found: Vec<&str> = map.keys().map(String::as_str).collect();
+    found.sort_unstable();
+    let mut want: Vec<&str> = expected.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        found, want,
+        "{label} carries exactly the documented fields, got {value}"
+    );
+}
+
 /// `initialize` is deliberately not namespaced: it is the one method a client
 /// may call before initialization, so it cannot live behind a family gate.
 #[test]

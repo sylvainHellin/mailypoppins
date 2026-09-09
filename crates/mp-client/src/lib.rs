@@ -26,7 +26,7 @@ pub use types::{
     ClientError, ClientInfo, ClientKind, ConfigStatus, Identity, InitializeResult, PlatformInfo,
 };
 
-/// Largest response frame this client buffers, terminator included. Capped
-/// separately from [`mp_protocol::MAX_REQUEST_BYTES`], because a listing
-/// legitimately dwarfs the call that asked for it.
-pub const MAX_RESPONSE_BYTES: usize = 16 << 20;
+/// Largest response frame this client buffers, terminator included: the
+/// protocol's own cap, re-exported so the client and the daemon cannot drift
+/// apart on the number the daemon enforces.
+pub use mp_protocol::MAX_RESPONSE_BYTES;

@@ -25,7 +25,8 @@ use tokio::sync::watch;
 
 use mp_protocol::frame::{self, Decoder, FrameError};
 use mp_protocol::{
-    ErrorResponse, Request, RequestId, Response, RpcError, JSONRPC_VERSION, MAX_REQUEST_BYTES,
+    ErrorCode, ErrorResponse, Request, RequestId, Response, RpcError, JSONRPC_VERSION,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
 };
 
 use super::runtime::InstanceMeta;
@@ -191,7 +192,7 @@ async fn handle_connection(
             let (reply, stop) = dispatch_request(value, &state, &mut session);
             if let Some(reply) = reply {
                 writer
-                    .write_all(&frame::encode(&reply)?)
+                    .write_all(&encode_capped(&reply, MAX_RESPONSE_BYTES)?)
                     .await
                     .context("writing a response")?;
                 writer.flush().await.context("flushing a response")?;
@@ -325,6 +326,37 @@ fn error_value(id: Option<RequestId>, code: i32, message: String, data: Option<V
     })
 }
 
+/// Encode one reply, or the refusal that replaces it when it is too big.
+///
+/// The client decodes with the same cap, so a reply above it would be a frame
+/// the reader rejects and a connection that dies mid-answer. Sending
+/// `frame_too_large` instead keeps the failure a named error carrying the cap
+/// and the size that breached it, on the id the caller is waiting for, which is
+/// the same pair the decoder reports for an oversized request.
+fn encode_capped(reply: &Value, cap: usize) -> Result<Vec<u8>> {
+    let bytes = frame::encode(reply)?;
+    if bytes.len() <= cap {
+        return Ok(bytes);
+    }
+    warn!(
+        "[daemon] a {}-byte response exceeds the {cap}-byte cap; answering frame_too_large",
+        bytes.len()
+    );
+    let id = reply
+        .get("id")
+        .and_then(|id| serde_json::from_value::<RequestId>(id.clone()).ok());
+    let refusal = error_value(
+        id,
+        ErrorCode::FrameTooLarge.code(),
+        format!(
+            "the response is {} bytes, over the {cap}-byte response cap",
+            bytes.len()
+        ),
+        Some(json!({"limit": cap, "seen": bytes.len()})),
+    );
+    Ok(frame::encode(&refusal)?)
+}
+
 /// Map a framing failure onto the wire error that describes it.
 fn frame_error(error: &FrameError) -> RpcError {
     match error {
@@ -439,6 +471,46 @@ mod tests {
             dispatch_request(request("no.such.method", Some(2)), &state, &mut session);
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32601));
+    }
+
+    /// A reply over the cap becomes `frame_too_large` on the id the caller is
+    /// waiting for, carrying the cap and the size that breached it. The cap is
+    /// a parameter of [`encode_capped`] rather than a constant it reads, which
+    /// is what makes this checkable without a 16 MiB fixture.
+    #[test]
+    fn a_response_over_the_cap_becomes_frame_too_large() {
+        let reply = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {"messages": "x".repeat(4096)},
+        });
+        let oversized = frame::encode(&reply).expect("encodes").len();
+        let bytes = encode_capped(&reply, 256).expect("an oversized reply still encodes");
+        assert!(bytes.len() <= 256, "the refusal itself fits in the cap");
+        let sent: Value = serde_json::from_str(
+            std::str::from_utf8(&bytes)
+                .expect("a frame is UTF-8")
+                .trim_end(),
+        )
+        .expect("a JSON frame");
+        assert_eq!(sent["id"], json!(9), "the refusal answers the same request");
+        assert_eq!(
+            sent["error"]["code"],
+            json!(ErrorCode::FrameTooLarge.code())
+        );
+        assert_eq!(
+            sent["error"]["data"],
+            json!({"limit": 256, "seen": oversized})
+        );
+        assert!(sent.get("result").is_none(), "got {sent}");
+    }
+
+    /// A reply under the cap goes out untouched.
+    #[test]
+    fn a_response_under_the_cap_is_written_verbatim() {
+        let reply = json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}});
+        let bytes = encode_capped(&reply, MAX_RESPONSE_BYTES).expect("encodes");
+        assert_eq!(bytes, frame::encode(&reply).expect("encodes"));
     }
 
     /// A request without an id is a notification: no answer, no shutdown.

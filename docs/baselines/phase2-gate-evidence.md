@@ -18,10 +18,12 @@ timeout 900 cargo test --workspace --features daemon --offline
 timeout 600 cargo test --workspace --offline
 ```
 
-1470 tests pass under the feature, 0 failed, 3 ignored in the doc-tests plus 1 skipped for want of root (below).
+1477 tests pass under the feature, 0 failed, 3 ignored in the doc-tests plus 1 skipped for want of root (below).
 1352 pass without it, 0 failed, across 20 result lines.
 
-The 118 difference is the daemon's own: 92 in the six gated `[[test]]` targets (`daemon_framing` 29, `daemon_runtime_paths` 17, `daemon_protocol_fixtures` 15, `daemon_handshake` 12, `daemon_lifecycle` 10, `daemon_read_only_methods` 9) and 26 in the inline `#[cfg(test)]` modules inside `src/daemon/`, which is `cargo test --lib` at 1171 under the feature against 1145 without it.
+The 125 difference is the daemon's own: 94 in the six gated `[[test]]` targets (`daemon_framing` 29, `daemon_runtime_paths` 17, `daemon_protocol_fixtures` 17, `daemon_handshake` 12, `daemon_lifecycle` 10, `daemon_read_only_methods` 9) and 31 in the inline `#[cfg(test)]` modules inside `src/daemon/`, which is `cargo test --lib` at 1176 under the feature against 1145 without it.
+
+The figures moved by 7 in the P2-U12 review pass: two fixture tests for the documented field sets of the read-only responses, three for the read-only store probe in `methods/account.rs`, and two for the response cap in `server.rs`.
 
 The plain figure is 1352 against Phase 1a's 1335, and all 17 additions are new files: `tests/test_selection_guard.rs` (5), the `mp-client` unit tests (5) and doc-test (1), and the `mp-protocol` unit tests (6).
 No pre-existing test changed.
@@ -35,11 +37,11 @@ cargo test --workspace --features daemon --offline \
   --test daemon_lifecycle --test daemon_handshake --test daemon_protocol_fixtures
 ```
 
-Green: 10 in `daemon_lifecycle`, 12 in `daemon_handshake`, 15 in `daemon_protocol_fixtures`, 37 total, 0 failed.
+Green: 10 in `daemon_lifecycle`, 12 in `daemon_handshake`, 17 in `daemon_protocol_fixtures`, 39 total, 0 failed.
 
 `daemon_lifecycle` drives the real binary in a temp data root: `run` binds the socket and answers `status`, `status` without a daemon exits 1 and says so, `stop` removes only its own socket, `stop` without a daemon exits 0, `restart` yields a new instance id, `SIGTERM` to a foreground daemon exits 0 and unlinks the socket, and `run` performs the `MIG-04` legacy config-directory move before the first config read.
 
-`daemon_protocol_fixtures` is the committed-fixtures half: every required fixture is present, each round-trips through its type byte-identically, each is stored canonically, each survives a frame round trip, each declares JSON-RPC 2.0, and `initialize` is the only unnamespaced method.
+`daemon_protocol_fixtures` is the committed-fixtures half: every required fixture is present, each round-trips through its type byte-identically, each is stored canonically, each survives a frame round trip, each declares JSON-RPC 2.0, `initialize` is the only unnamespaced method, and the read-only request and response fixtures carry exactly the fields `docs/daemon-protocol.md` documents.
 
 Passes.
 

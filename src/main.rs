@@ -1397,13 +1397,12 @@ async fn routed_list_messages(
         )
         .await;
         let total = result["total"].as_u64().unwrap_or_default() as usize;
-        let dates = date_headers(&account.name, &info.id);
         let rows = result["messages"]
             .as_array()
             .map(|messages| {
                 messages
                     .iter()
-                    .map(|message| row_from_wire(message, &info.id, &dates))
+                    .map(|message| row_from_wire(message, &info.id))
                     .collect()
             })
             .unwrap_or_default();
@@ -1416,40 +1415,18 @@ async fn routed_list_messages(
     Ok(())
 }
 
-/// The `Date:` headers of one mailbox, by uid.
-///
-/// The one field the routed listing does not get from the daemon: the Phase 2
-/// `message.list` shape carries `date_sort`, the derived sort key, and not the
-/// header `read_cmd::render_list` prints, and a sort key cannot be turned back
-/// into the header it came from. Until the shape carries a display date (see
-/// `docs/daemon-protocol.md`), the routed path fills that column from the same
-/// store the daemon read, which takes no engine lock like every other read. A
-/// store it cannot open costs the date column, not the listing.
-#[cfg(feature = "daemon")]
-fn date_headers(account: &str, mailbox: &str) -> std::collections::HashMap<i64, String> {
-    let Ok(store) = received_store(account) else {
-        return std::collections::HashMap::new();
-    };
-    match mailypoppins::store::read::list_mailbox(&store, account, mailbox) {
-        Ok(rows) => rows
-            .into_iter()
-            .filter_map(|row| row.date_display.map(|date| (row.uid, date)))
-            .collect(),
-        Err(_) => std::collections::HashMap::new(),
-    }
-}
-
 /// One `message.list` entry as the row the renderer takes.
 ///
-/// The fields the wire does not carry are the ones nothing in a listing reads:
-/// the store id, the other recipients, the body blob, the thread. `flags` is
-/// rebuilt as the token string the store holds, so `MessageRow::flags` parses
-/// it back into the same three bits.
+/// Everything a listing prints comes off the wire, `date_display` included, so
+/// the routed path opens no store of its own. The fields the wire does not
+/// carry are the ones nothing in a listing reads: the store id, the other
+/// recipients, the body blob, the thread. `flags` is rebuilt as the token
+/// string the store holds, so `MessageRow::flags` parses it back into the same
+/// three bits.
 #[cfg(feature = "daemon")]
 fn row_from_wire(
     message: &serde_json::Value,
     mailbox: &str,
-    dates: &std::collections::HashMap<i64, String>,
 ) -> mailypoppins::store::read::MessageRow {
     let uid = message["uid"].as_i64().unwrap_or_default();
     let text = |key: &str| {
@@ -1473,7 +1450,7 @@ fn row_from_wire(
         reply_to: None,
         bcc: None,
         subject: text("subject"),
-        date_display: dates.get(&uid).cloned(),
+        date_display: text("date_display"),
         flags: Some(
             MessageFlags {
                 seen: flag("seen"),

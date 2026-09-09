@@ -2,29 +2,38 @@
   "id": 4,
   "jsonrpc": "2.0",
   "result": {
-    "account": "tum",
-    "mailbox": "INBOX",
+    "account": "work",
+    "mailbox": "inbox",
     "messages": [
       {
-        "date": "2025-11-18T06:58:11Z",
-        "flags": [
-          "\\Seen"
-        ],
-        "from": "anna.mueller@tum.de",
+        "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
+        "date_sort": "2026-07-02T11:57:30",
+        "flags": {
+          "answered": true,
+          "forwarded": false,
+          "seen": true
+        },
+        "from": "Ivana <ivana@example.com>",
         "has_attachments": false,
+        "message_id": "<Bericht@example.com>",
         "subject": "Re: Obermeyer Center steering meeting",
         "uid": 1846
       },
       {
-        "date": "2025-11-17T21:03:47Z",
-        "flags": [],
+        "date_display": "Wed, 1 Jul 2026 09:00:00 +0200",
+        "date_sort": "2026-07-01T07:00:00",
+        "flags": {
+          "answered": false,
+          "forwarded": false,
+          "seen": false
+        },
         "from": "billing@example.com",
         "has_attachments": true,
+        "message_id": "<Invoice-2025-114@example.com>",
         "subject": "Invoice 2025-114",
         "uid": 1845
       }
     ],
-    "revision": 4217,
-    "total": 5127
+    "total": 2
   }
 }

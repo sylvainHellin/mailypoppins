@@ -20,7 +20,7 @@
 //! message.list  {"account":str,"mailbox":str,"limit":u32|null}
 //!   -> {"account":str,"mailbox":str,"total":u64,
 //!       "messages":[{"uid":i64,"message_id":str,"from":str,"subject":str,
-//!                    "date_sort":str,
+//!                    "date_sort":str,"date_display":str,
 //!                    "flags":{"seen":bool,"answered":bool,"forwarded":bool},
 //!                    "has_attachments":bool}]}
 //! ```
@@ -615,7 +615,7 @@ fn account_entry<'a>(result: &'a Value, name: &str) -> &'a Value {
 }
 
 /// What `message.list` must report for one stored row: the store's own values,
-/// with the two nullable headers flattened to the empty string.
+/// with the three nullable headers flattened to the empty string.
 fn expected_message(row: &read::MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
@@ -625,6 +625,7 @@ fn expected_message(row: &read::MessageRow) -> Value {
         "from": row.from.clone().unwrap_or_default(),
         "subject": row.subject.clone().unwrap_or_default(),
         "date_sort": date_sort,
+        "date_display": row.date_display.clone().unwrap_or_default(),
         "flags": {
             "seen": flags.seen,
             "answered": flags.answered,
@@ -764,6 +765,7 @@ async fn message_list_reports_the_store_rows_newest_first() {
                 "from",
                 "subject",
                 "date_sort",
+                "date_display",
                 "flags",
                 "has_attachments",
             ],

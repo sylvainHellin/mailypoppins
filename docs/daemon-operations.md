@@ -119,8 +119,9 @@ A stale socket after a crash needs no intervention.
 `mp daemon start` probes the path while it holds the start lock and removes the socket only on `Stale`, and `mp daemon run` does the same before it binds.
 `mp daemon stop` sweeps one too when nothing answers.
 
-A `daemon.pid` naming a dead or recycled process is harmless, because nothing locks on it.
-It is read for exactly one purpose, the `SIGTERM` fallback in `stop`, and only after the socket has already answered a `daemon.status`, which proves a daemon is there to signal.
+A `daemon.pid` naming a dead or recycled process is harmless, because nothing locks on it and nothing signals it.
+It is read for exactly one purpose, `cleanup` at shutdown, which unlinks it only while it still names the exiting instance.
+The pid that gets signalled comes from `daemon.json`: the `SIGTERM` fallback in `stop` uses it, and only after the socket has already answered a `daemon.status`, which proves a daemon is there to signal, and `restart` polls it to watch the previous instance go away.
 A `daemon.json` left behind by a crash is overwritten by the next start.
 
 An unsafe socket is the case that needs a human.

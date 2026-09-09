@@ -32,6 +32,15 @@ pub const PROTOCOL_MAX: u32 = 1;
 /// [`frame::Decoder::new`] takes the limit rather than reading this constant.
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 
+/// Largest response frame the protocol allows, terminator included: 16 MiB.
+///
+/// Sixteen times the request cap, because a listing legitimately dwarfs the
+/// call that asked for it. Both sides read this one constant: the daemon
+/// refuses to write a reply above it with `frame_too_large`, and a client sizes
+/// its decoder by it, so an oversized answer is a named error on both ends
+/// rather than a truncated frame on one and a closed connection on the other.
+pub const MAX_RESPONSE_BYTES: usize = 16 << 20;
+
 /// Method of the notification that carries an [`EventEnvelope`] as its params.
 pub const METHOD_STATE_EVENT: &str = "state.event";
 

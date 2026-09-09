@@ -1400,6 +1400,8 @@ Readiness is a real `daemon.status` round trip rather than the socket file exist
 
 ## A wire shape that carries only a derived date cannot render the CLI listing
 
-`message.list` (P2-U11) carries `date_sort`, the UTC sort key `tui::app::resolve_date` derives, while `read_cmd::render_list` prints `messages.date_display`, the `Date:` header verbatim with the sender's offset.
-The derivation is lossy, so `mp --daemon list-messages` cannot reproduce `mp list-messages` byte for byte from the wire alone, and it fills that one column from the local store while taking everything else printed (which messages, in which order, how many the mailbox holds) from the daemon.
-Any later shape that a client renders has to carry the display form of a field beside the sortable one, or own the rendering itself.
+`message.list` (P2-U11) carried `date_sort`, the UTC sort key `tui::app::resolve_date` derives, while `read_cmd::render_list` prints `messages.date_display`, the `Date:` header verbatim with the sender's offset.
+The derivation is lossy, so `mp --daemon list-messages` could not reproduce `mp list-messages` byte for byte from the wire alone, and it filled that one column from the local store while taking everything else printed (which messages, in which order, how many the mailbox holds) from the daemon.
+
+Resolved in the P2-U12 review pass: the row carries `date_display` beside `date_sort` and the routed path opens no store at all.
+The lesson outlives the workaround: any shape a client renders has to carry the display form of a field beside the sortable one, or own the rendering itself.

@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
+use log::info;
 use serde_json::{json, Value};
 
 use mp_protocol::{ErrorCode, RpcError, PROTOCOL_MAX, PROTOCOL_MIN};
@@ -51,10 +52,9 @@ pub struct Session {
 #[derive(Clone, Debug)]
 struct Negotiated {
     /// The protocol version both sides speak.
-    #[allow(dead_code)]
     protocol: u32,
-    /// `cli`, `tui` or `gui`, kept for the logs and for Phase 5 policy.
-    #[allow(dead_code)]
+    /// `cli`, `tui` or `gui`, logged at the handshake and kept for Phase 5
+    /// policy, which decides what a client kind may do.
     client_kind: String,
 }
 
@@ -99,10 +99,14 @@ impl Session {
         let protocol = select_protocol(&request)?;
         check_capabilities(&request)?;
 
-        self.negotiated = Some(Negotiated {
+        let negotiated = self.negotiated.insert(Negotiated {
             protocol,
             client_kind: request.client_kind.clone(),
         });
+        info!(
+            "[daemon] a {} client completed initialize at protocol version {}",
+            negotiated.client_kind, negotiated.protocol
+        );
 
         Ok(json!({
             "daemon": {"version": state.meta.app_version},
