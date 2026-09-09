@@ -8,8 +8,21 @@ connections an account needs under load (P1a-U5).
 Standalone Cargo package with its own `Cargo.lock` and an empty `[workspace]` table, so it is never a
 member of the root package: `cargo test` at the repo root neither builds it nor counts its tests.
 It does take a path dependency on `mailypoppins`, because both sides of the comparison must read the
-real store through the real read path (`mailypoppins::store::read`). Everything here is deleted at
-the Phase 1a exit gate; only the measurements survive, under `docs/baselines/`.
+real store through the real read path (`mailypoppins::store::read`). The decisions it produced live
+under `docs/baselines/decisions/`, and the bootstrap algorithm it proved is written up in
+`docs/plans/daemon-bootstrap.md`.
+
+## Why this outlives the Phase 1a gate
+
+The plan has P1a-U7 delete `spikes/` at the gate. It is kept instead, unchanged and still outside the
+workspace, for one reason: Phase 6 (P6-U10) has to re-run these workloads against the complete
+dispatcher, and a benchmark rewritten from its own report is not the same benchmark. The four
+decision artifacts are only comparable to a Phase 6 number if the harness that produced them still
+exists.
+
+What the gate line actually protects is the product tree, and that half holds: nothing under `src/`,
+`tests/` or `Cargo.toml` refers to the spike, `cargo metadata --no-deps` at the repo root lists one
+workspace member, and `cargo test` is 1335 tests with or without this directory present.
 
 ## Run recipe
 

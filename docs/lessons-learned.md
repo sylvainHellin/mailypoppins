@@ -1374,3 +1374,9 @@ The difference is invisible until the diff appears, and then it looks like a reg
 The P0-U6 fixture (`examples/mkfixture.rs`) writes its store under `/tmp` by default, and on this machine `/tmp` is a tmpfs: the files never reach a disk, so every figure in `docs/baselines/pre-daemon/measurements.md` is a lower bound against a real data directory and none of them says anything about cold-cache behaviour.
 Dropping the page cache there changes nothing, because there is no page cache to drop.
 A cold figure needs a data directory on a real filesystem and root for `sysctl -w vm.drop_caches=3`, and until both exist the row stays `NOT TAKEN` rather than being filled with the tmpfs number.
+
+## A serialized section that can call back into itself needs a reentrant gate, not a `Mutex`
+
+The P1a-U6 bootstrap prototype (#0119) runs its ten-step sequence under one gate, and its race tests fire a hook at each boundary that calls `mutate` on the bootstrapping thread, which is what makes them deterministic with no threads, no barriers and no sleeps.
+A plain `std::sync::Mutex` held across those hooks deadlocks on itself, so the gate records the thread that owns it and lets a reentrant caller through while another thread blocks.
+The constraint is not a test artifact: any callback the real hub invokes while holding the bootstrap gate (an event hook, a metric, a log sink that reads state) re-enters it the same way.
