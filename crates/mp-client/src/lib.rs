@@ -19,9 +19,11 @@
 //! ```
 
 mod connection;
+mod state;
 mod types;
 
 pub use connection::Connection;
+pub use state::{Observe, StateTracker};
 pub use types::{
     ClientError, ClientInfo, ClientKind, ConfigStatus, Identity, InitializeResult, PlatformInfo,
 };

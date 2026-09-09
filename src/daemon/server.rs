@@ -29,13 +29,14 @@ use tokio::sync::watch;
 
 use mp_protocol::frame::{self, Decoder, FrameError};
 use mp_protocol::{
-    ErrorCode, ErrorResponse, Request, RequestId, Response, RpcError, JSONRPC_VERSION,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    ErrorCode, ErrorResponse, EventEnvelope, Notification, Request, RequestId, Response, RpcError,
+    JSONRPC_VERSION, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, METHOD_STATE_EVENT,
 };
 
 use super::dispatch::Dispatcher;
 use super::runtime::InstanceMeta;
 use super::session::{ConfigReport, Session};
+use super::state::{seeds_from_config, CanonicalState, ConnectionId, EventQueue, InstanceId};
 
 /// JSON-RPC standard codes this unit emits. The daemon range lives in
 /// [`mp_protocol::ErrorCode`] and is not reachable until P2-U9.
@@ -87,6 +88,12 @@ pub struct DaemonState {
     /// Every domain method this build serves, registered once at startup and
     /// read-only afterwards.
     pub dispatcher: Dispatcher,
+    /// The one canonical state of this daemon process: what `state.bootstrap`
+    /// captures and what every connection's event queue is fed from. Held here
+    /// so the connection loop can subscribe a socket, and held by the
+    /// `state.bootstrap` method through its own `Arc` rather than a reference
+    /// back to the state that owns the dispatcher.
+    pub canonical: Arc<CanonicalState>,
 }
 
 impl DaemonState {
@@ -98,14 +105,26 @@ impl DaemonState {
         config: ConfigReport,
     ) -> Self {
         let configured = Arc::new(configured);
+        // Seeded from the configuration alone: Phase 3a opens no store and
+        // starts no runtime, so every account is `opening` with zeroed counts
+        // until something reports otherwise.
+        let canonical = Arc::new(CanonicalState::new(
+            InstanceId::new(meta.instance_id.clone()),
+            seeds_from_config(&configured),
+        ));
         let mut dispatcher = Dispatcher::new();
-        super::methods::register(&mut dispatcher, Arc::clone(&configured));
+        super::methods::register(
+            &mut dispatcher,
+            Arc::clone(&configured),
+            Arc::clone(&canonical),
+        );
         DaemonState {
             meta,
             accounts,
             configured,
             config,
             dispatcher,
+            canonical,
         }
     }
 
@@ -200,6 +219,24 @@ async fn handle_connection(
     state: Arc<DaemonState>,
     shutdown: watch::Sender<bool>,
 ) -> Result<()> {
+    // Subscribed on accept and attached to the fan-out by `state.bootstrap`:
+    // the queue endpoint has to exist before the bootstrap that registers it,
+    // and a connection that never bootstraps is fed nothing.
+    let conn = ConnectionId(connection_id);
+    let queue = state.canonical.subscribe(conn);
+    let result = serve_connection(stream, connection_id, &state, shutdown, queue).await;
+    state.canonical.unsubscribe(conn);
+    result
+}
+
+/// The read/write loop of one connection, with its subscription already made.
+async fn serve_connection(
+    stream: tokio::net::UnixStream,
+    connection_id: u64,
+    state: &DaemonState,
+    shutdown: watch::Sender<bool>,
+    mut queue: EventQueue,
+) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut decoder = Decoder::new(MAX_REQUEST_BYTES);
     let mut buf = vec![0u8; READ_CHUNK];
@@ -208,7 +245,20 @@ async fn handle_connection(
     let mut session = Session::new(connection_id);
 
     loop {
-        let read = reader.read(&mut buf).await.context("reading a frame")?;
+        // One socket carries both directions. Both arms are cancellation-safe:
+        // `read` keeps whatever it has not returned, and `ready` re-checks the
+        // queue before it waits, so a change committed while the reader was
+        // selected is not lost.
+        //
+        // P3a-U6 replaces this writer with coalescing and backpressure; until
+        // then a queue nobody drains grows without a bound.
+        let read = tokio::select! {
+            read = reader.read(&mut buf) => read.context("reading a frame")?,
+            _ = queue.ready() => {
+                write_events(&mut writer, &mut queue, &state.meta.instance_id).await?;
+                continue;
+            }
+        };
         if read == 0 {
             return Ok(());
         }
@@ -228,7 +278,7 @@ async fn handle_connection(
         };
 
         for value in frames {
-            let (reply, stop) = dispatch_request(value, &state, &mut session).await;
+            let (reply, stop) = dispatch_request(value, state, &mut session).await;
             if let Some(reply) = reply {
                 writer
                     .write_all(&encode_capped(&reply, MAX_RESPONSE_BYTES)?)
@@ -244,7 +294,48 @@ async fn handle_connection(
                 return Ok(());
             }
         }
+        // Between requests, never inside one: a response frame and an event
+        // frame may not interleave on the wire.
+        if !queue.is_empty() {
+            write_events(&mut writer, &mut queue, &state.meta.instance_id).await?;
+        }
     }
+}
+
+/// Drain one connection's queue into `state.event` notifications.
+///
+/// One notification per committed change, in revision order, each carrying the
+/// [`EventEnvelope`] `docs/daemon-protocol.md` fixes. Deliberately minimal:
+/// P3a-U6 owns coalescing, the queue bounds and the `state.resync_required`
+/// overflow path, and this is the seam it replaces.
+async fn write_events<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    queue: &mut EventQueue,
+    instance_id: &str,
+) -> Result<()> {
+    let drained = queue.drain();
+    if drained.is_empty() {
+        return Ok(());
+    }
+    for (revision, change) in drained {
+        let notification = Notification {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: METHOD_STATE_EVENT.to_string(),
+            params: serde_json::to_value(EventEnvelope {
+                instance_id: instance_id.to_string(),
+                revision: revision.get(),
+                kind: change.kind().to_string(),
+                payload: change.payload(),
+            })
+            .context("serialising an event envelope")?,
+        };
+        writer
+            .write_all(&frame::encode(&notification)?)
+            .await
+            .context("writing an event")?;
+    }
+    writer.flush().await.context("flushing an event")?;
+    Ok(())
 }
 
 /// Answer one frame.

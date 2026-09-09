@@ -21,6 +21,7 @@
 
 pub mod account;
 pub mod message;
+pub mod state;
 
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ use mp_protocol::RpcError;
 use crate::config::AccountConfig;
 
 use super::dispatch::Dispatcher;
+use super::state::{fake_ready_delay, CanonicalState};
 
 /// JSON-RPC's own "invalid params".
 const INVALID_PARAMS: i32 = -32602;
@@ -38,11 +40,19 @@ const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 
 /// Register every domain method this build serves.
-pub fn register(dispatcher: &mut Dispatcher, accounts: Arc<Vec<AccountConfig>>) {
+pub fn register(
+    dispatcher: &mut Dispatcher,
+    accounts: Arc<Vec<AccountConfig>>,
+    canonical: Arc<CanonicalState>,
+) {
     dispatcher.register(Arc::new(account::AccountList {
         accounts: Arc::clone(&accounts),
     }));
     dispatcher.register(Arc::new(message::MessageList { accounts }));
+    dispatcher.register(Arc::new(self::state::StateBootstrap::new(
+        canonical,
+        fake_ready_delay(),
+    )));
 }
 
 /// A required string parameter, or `-32602` naming it.

@@ -1,0 +1,125 @@
+{
+  "id": 4,
+  "jsonrpc": "2.0",
+  "result": {
+    "capabilities": [
+      "state.bootstrap",
+      "account.list",
+      "message.list"
+    ],
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "revision": 4217,
+    "snapshot": {
+      "accounts": [
+        {
+          "name": "work",
+          "state": "ready",
+          "sync_health": {
+            "state": "ok"
+          }
+        },
+        {
+          "name": "perso",
+          "state": "opening",
+          "sync_health": {
+            "state": "unknown"
+          }
+        }
+      ],
+      "diagnostics": [],
+      "drafts": {
+        "perso": [],
+        "work": [
+          {
+            "id": "2026-07-02-angebot",
+            "status": "parsed",
+            "subject": "Angebot",
+            "valid": true
+          }
+        ]
+      },
+      "holds": [],
+      "mailboxes": {
+        "perso": [
+          {
+            "badge": 0,
+            "label": "Inbox",
+            "role": "inbox",
+            "slug": "inbox",
+            "total": 0,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Drafts",
+            "role": "drafts",
+            "slug": "drafts",
+            "total": 0,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Sent",
+            "role": "sent",
+            "slug": "sent",
+            "total": 0,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Archive",
+            "role": "archive",
+            "slug": "archive",
+            "total": 0,
+            "unread": 0
+          }
+        ],
+        "work": [
+          {
+            "badge": 12,
+            "label": "Inbox",
+            "role": "inbox",
+            "slug": "inbox",
+            "total": 1841,
+            "unread": 12
+          },
+          {
+            "badge": 3,
+            "label": "Drafts",
+            "role": "drafts",
+            "slug": "drafts",
+            "total": 3,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Sent",
+            "role": "sent",
+            "slug": "sent",
+            "total": 402,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Archive",
+            "role": "archive",
+            "slug": "archive",
+            "total": 9130,
+            "unread": 0
+          }
+        ]
+      },
+      "operations": [],
+      "outbox": {
+        "perso": {
+          "failed": 0,
+          "queued": 0
+        },
+        "work": {
+          "failed": 0,
+          "queued": 1
+        }
+      }
+    }
+  }
+}

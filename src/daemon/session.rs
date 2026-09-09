@@ -480,6 +480,7 @@ mod tests {
                 "daemon.stop".to_string(),
                 "account.list".to_string(),
                 "message.list".to_string(),
+                "state.bootstrap".to_string(),
             ]
         );
     }

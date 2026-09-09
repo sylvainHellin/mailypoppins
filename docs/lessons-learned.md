@@ -1415,3 +1415,18 @@ The fix is to hand a method only what it reads, not the state it lives in.
 Both Phase 2 methods read one thing, the configured accounts, so `DaemonState::configured` became an `Arc<Vec<AccountConfig>>` and each method holds a clone of that `Arc`.
 `methods::{account,message}::list` take `&[AccountConfig]` instead of `&DaemonState`, which also makes them callable from a test with no daemon at all.
 When Phase 5 adds account runtimes, the same rule applies: hand the method a handle to the runtime, never the state that owns the table of them.
+
+## A borrowed reader that drops notifications cannot be given events later
+
+`mp_client::Connection` reads with a borrowed reader and sequential calls, and until P3a-U4 `call` classified a server-initiated notification as `Ignorable` and dropped it.
+That is invisible while nothing is subscribed and lossy the moment a connection bootstraps: an event committed while a call is in flight arrives on the same socket as the reply, and dropping it opens a revision gap the client can only exit by bootstrapping again.
+Buffering the frame instead costs one `VecDeque`, and `next_notification` hands buffered frames over before it reads: no owned reader task, no receiver, and the "one borrowed reader, calls are sequential" design stays intact.
+
+The daemon side has the mirror rule: a connection's queued events are written **between** requests, never inside one, because a response frame and an event frame may not interleave on the wire.
+
+## A `Notify` selected against a socket read must re-check before it waits
+
+The daemon's per-connection writer is a `tokio::select!` over `reader.read` and the connection's event queue, and `select!` drops whichever future did not win.
+A queue wake-up implemented as a bare `notified().await` loses every `notify_waiters` that fires while the read arm is being polled, and the events sit in the queue until the *next* unrelated frame arrives.
+The fix is the register-then-check pattern `CancelToken::cancelled` already uses: create the `notified()` future, check the queue, and only then await.
+A push that races the check has already registered, and one that lands before it is seen by the check.

@@ -67,6 +67,16 @@ pub const FAIL_START_ENV: &str = "MAILYPOPPINS_DAEMON_FAIL_START";
 /// daemon creates no runtime and acquires no engine lock.
 pub const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
 
+/// Test-only hook: flip every configured account to `ready` this many
+/// milliseconds after the **first** `state.bootstrap`, so an `opening`
+/// snapshot converges by event while Phase 3a still starts no runtimes.
+///
+/// Declared in [`super::state`], where the daemon reads it and where
+/// `tests/daemon_bootstrap.rs` imports it, and re-exported here so the daemon's
+/// four environment hooks are named in one place. Documented in
+/// `docs/daemon-operations.md` beside them.
+pub use super::state::FAKE_READY_ENV;
+
 /// Internal handshake between `start` and the `run` it spawns: the parent holds
 /// the start lock, so the child must not block on it.
 const START_LOCK_HELD_ENV: &str = "MAILYPOPPINS_DAEMON_START_LOCK_HELD";

@@ -75,7 +75,7 @@ The directory pair is compared canonically, so a symlinked path is not a mismatc
 An application-version difference alone is diagnostic and does not refuse the connection.
 
 A capability identifier names a method family or a behaviour the daemon will serve, and a client requires only what it cannot work without.
-This build advertises `daemon.status`, `daemon.stop`, `account.list` and `message.list`, which are exactly the methods it serves: the list is the two lifecycle methods followed by every method registered on the dispatcher, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
+This build advertises `daemon.status`, `daemon.stop`, `account.list`, `message.list` and `state.bootstrap`, which are exactly the methods it serves: the list is the two lifecycle methods followed by every method registered on the dispatcher, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
 Requiring one this build does not have is a `capability_missing` at the handshake rather than a `-32601` at the first call, and an *optional* capability the daemon lacks is dropped from the connection's agreed set instead of refusing it.
 
 The handshake happens once per connection, and a second `initialize` on the same connection is `-32600`.
@@ -147,6 +147,48 @@ The fields are the daemon's own `daemon.json` metadata plus the live account lis
 `daemon.stop` takes `{}` and returns `{"stopping": true}`.
 The response is written and flushed before the shutdown starts, so the caller always learns the daemon accepted the request.
 Open connections are not drained: the daemon unlinks its runtime files and exits, and a client that loses the socket mid-call reconnects.
+
+### Bootstrap
+
+`state.bootstrap` takes `{}` and hands over the whole state a client mirrors, plus the revision it was captured at, as one serialised operation:
+
+```json
+{
+  "instance_id": "1f0c…",
+  "revision": 4217,
+  "capabilities": ["state.bootstrap", "account.list"],
+  "snapshot": {
+    "accounts": [{"name": "work", "state": "opening", "sync_health": {"state": "unknown"}}],
+    "mailboxes": {"work": [{"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0}]},
+    "drafts": {"work": []},
+    "outbox": {"work": {"queued": 0, "failed": 0}},
+    "holds": [],
+    "operations": [],
+    "diagnostics": []
+  }
+}
+```
+
+`capabilities` is what **this connection** agreed on at its handshake, not the daemon's whole list: a client acts on what it may use, and the offer is already in the `initialize` result.
+`revision` is never `0`, which the client keeps as its own pre-bootstrap sentinel.
+
+`mailboxes`, `drafts` and `outbox` carry one key per listed account, always, so a client indexes them by account name without a null check.
+A daemon with no configured account answers an empty `accounts` array and three empty objects.
+`holds`, `operations` and `diagnostics` are arrays that nothing in this build fills.
+
+An account's `state` is one of `opening`, `ready` or `blocked`, and it reports the runtime rather than the store: it answers "has this account's runtime come up", where `account.list`'s `state` answers "can I read this account's store on disk".
+The two are deliberately different questions, and this build has no account runtimes, so every account is `opening` at a bootstrap.
+For an `opening` account all counts are `0` and the draft list is empty, exactly as the TUI presents an account it has not opened yet; readiness arrives afterwards as an ordinary event.
+`sync_health` is an object whose `state` is `unknown`, `ok` or `failed`, and a fresh bootstrap reports `unknown`.
+
+The ordering rule is the reason a bootstrap is one serialised operation.
+The daemon registers the connection as a subscriber **before** it captures the snapshot, so every change committed from the registration onwards is already queued; a register-last daemon loses exactly the changes that land between the capture and the start of queuing.
+The client initialises its watermark to the reported revision and silently drops every event at or below it, which is what makes register-first safe: an event for a change the snapshot already carries is recognised as redundant instead of applied twice.
+The drop is silent by design, because a correct daemon queues that event in the first place and a `duplicate` marker on the wire would be a shape carried for nothing.
+Together the two rules give the invariant: a change made anywhere around a bootstrap reaches the client either as one delivered event or as part of the snapshot, never as two applications and never as none.
+
+`state.bootstrap` is a query and sits behind the handshake gate like every other domain method: called before `initialize` it is `not_initialized`, and the connection stays usable.
+Bootstrapping twice on one connection is allowed and is what a client does after a gap, a resync request or an instance change.
 
 ### Read-only methods
 
@@ -238,9 +280,16 @@ State changes reach clients as the `state.event` notification, whose `params` is
 `kind` selects the client's handler, for example `message.flags_changed`.
 `payload` is an object so a kind can gain fields without a version bump.
 
+Revisions are strictly increasing and dense within an instance, and every committed change takes the next one.
+A client compares each event against its watermark and does one of four things: an event exactly one above it is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one more than one above it is a gap; and one from an unfamiliar instance is refused whatever its number, because revisions are only comparable within the daemon process that issued them.
+A gap and an instance change both poison the stream, so nothing further is applied until a fresh `state.bootstrap` clears it: a client that kept applying past a gap would build a state nothing on the daemon's side corresponds to.
+
+`account.state_changed` is the kind an account's readiness travels as, with a payload of `{account, state}` where `state` is the `opening`/`ready`/`blocked` the snapshot uses, plus a `reason` when it is `blocked`.
+It is what converges a snapshot taken while an account was still `opening`, and it needs no second bootstrap.
+
 `state.bootstrap` returns a snapshot and the revision it was taken at, as one serialised operation.
 Events with a higher revision are queued during that operation and released in revision order after the response frame, so a client applies every change exactly once.
-A gap in the revision sequence means the client missed an event and must bootstrap again.
+An event frame and a response frame never interleave: a connection's queued events are written between requests.
 
 When the daemon cannot preserve that guarantee, for example after an event queue overflow, it sends the `state.resync_required` notification with `params` of `{instance_id, reason}`.
 A client that receives it discards its state and calls `state.bootstrap`.
@@ -270,4 +319,7 @@ The `state.event` and `state.resync_required` notifications, and the `{instance_
 The read-only methods `account.list` and `message.list`, both behind the handshake, with the account states `ready` and `blocked`, `null` as the spelling of an unlimited `message.list`, and `-32602` for a mailbox the account does not have.
 A `message.list` row carries both dates, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
 A `client.type` outside `cli`, `tui` and `gui` is `-32602`, because a method that branches on the caller may not be handed a fourth kind.
+The `state.bootstrap` method, whose result carries the negotiated `capabilities` of the calling connection, a `revision` that is never `0`, and a snapshot of `accounts`, `mailboxes`, `drafts`, `outbox`, `holds`, `operations` and `diagnostics`, with one key per account in the three maps.
+The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
+The `account.state_changed` event kind, with its `{account, state}` payload.
 A response above the 16 MiB response cap is a `frame_too_large` error carrying `{limit, seen}`, the same pair an oversized request earns.

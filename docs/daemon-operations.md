@@ -134,7 +134,7 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Three environment variables exist for the contract tests and for the migration.
+Four environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.
@@ -146,11 +146,16 @@ Absent, the daemon creates no runtime and takes no engine lock, and `daemon.stat
 Present, it reports every configured account as `opening` and leaves it there, since nothing opens a store or takes a lock before Phase 5 either.
 It is an environment variable rather than a flag so it cannot leak into `mp --help` or into anyone's muscle memory.
 
+`MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS=<n>` flips every configured account to `ready` `n` milliseconds after the **first** `state.bootstrap`, committing one change per account in `config.toml` order.
+Phase 3a starts no account runtimes, so nothing else would ever report readiness and the snapshot would never converge by event.
+The countdown starts at the bootstrap rather than at daemon startup, so a client that bootstraps cannot lose the race against it and no test has to sleep to win it.
+It is what pins the readiness event in `tests/daemon_bootstrap.rs`, and its name is `mailypoppins::daemon::state::FAKE_READY_ENV` so the test and the daemon cannot drift apart.
+
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
 
-All three read as set for any value other than empty, `0` or `false`.
-A test that runs `mp` as a subprocess should `env_remove` the first two, or an exported hook in the developer's shell will change what the test observes.
+The three flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness hook reads as absent unless its value parses as a number of milliseconds.
+A test that runs `mp` as a subprocess should `env_remove` the first three, or an exported hook in the developer's shell will change what the test observes.
 
 ## Login mode
 

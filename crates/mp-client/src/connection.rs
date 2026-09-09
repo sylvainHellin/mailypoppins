@@ -4,9 +4,14 @@
 //! `&mut self`: one request goes out, its answer comes back, and the id counter
 //! never has more than one outstanding value. That is what lets the reader
 //! treat a reply carrying another id as a protocol violation rather than match
-//! answers against a table of pending calls. Server-initiated notifications
-//! (`state.event` and friends) are skipped; delivering them is Phase 3 work and
-//! needs an owned reader task, not a borrowed one.
+//! answers against a table of pending calls.
+//!
+//! Server-initiated notifications (`state.event` and friends) arrive on the
+//! same socket, at any moment, including in the middle of waiting for a reply.
+//! [`Connection::call`] therefore buffers them instead of dropping them, and
+//! [`Connection::next_notification`] hands them over in arrival order. A method
+//! rather than a subscription receiver, so the borrowed-reader design stays
+//! intact: an owned reader task would have to undo it.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -16,7 +21,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use mp_protocol::frame::{self, Decoder};
-use mp_protocol::{Request, RequestId, RpcError, JSONRPC_VERSION, PROTOCOL_MAX, PROTOCOL_MIN};
+use mp_protocol::{
+    Notification, Request, RequestId, RpcError, JSONRPC_VERSION, PROTOCOL_MAX, PROTOCOL_MIN,
+};
 
 use crate::types::{
     ClientError, ClientInfo, ConfigStatus, Identity, InitializeResult, PlatformInfo,
@@ -34,6 +41,9 @@ pub struct Connection {
     decoder: Decoder,
     /// Frames decoded but not yet consumed, in arrival order.
     pending: VecDeque<Value>,
+    /// Notifications that arrived while a call was outstanding, in arrival
+    /// order, waiting for [`Connection::next_notification`].
+    notifications: VecDeque<Value>,
     /// The id of the next request; monotonic for the connection's lifetime.
     next_id: i64,
 }
@@ -54,6 +64,7 @@ impl Connection {
             stream,
             decoder: Decoder::new(MAX_RESPONSE_BYTES),
             pending: VecDeque::new(),
+            notifications: VecDeque::new(),
             next_id: 1,
         })
     }
@@ -111,13 +122,61 @@ impl Connection {
         })
     }
 
+    /// The next server-initiated notification, or `None` when the daemon closed
+    /// the connection.
+    ///
+    /// Returns a notification an earlier [`Connection::call`] already buffered
+    /// if there is one, and otherwise reads until one arrives. A reply frame
+    /// seen here answers no outstanding call, so it is kept for the next call
+    /// to refuse by id rather than swallowed.
+    pub async fn next_notification(&mut self) -> Option<Notification> {
+        loop {
+            if let Some(value) = self.notifications.pop_front() {
+                match serde_json::from_value(value) {
+                    Ok(notification) => return Some(notification),
+                    // A frame shaped like a notification that does not parse as
+                    // one is not worth killing the connection over, and the
+                    // caller is waiting for the next real event.
+                    Err(_) => continue,
+                }
+            }
+            // Sort what is already decoded, keeping the arrival order of both
+            // classes: a reply here answers no outstanding call and is left for
+            // the next `call` to refuse by id.
+            let mut replies = VecDeque::new();
+            while let Some(value) = self.pending.pop_front() {
+                if is_notification(&value) {
+                    self.notifications.push_back(value);
+                } else {
+                    replies.push_back(value);
+                }
+            }
+            self.pending = replies;
+            if !self.notifications.is_empty() {
+                continue;
+            }
+
+            let mut buf = [0u8; READ_CHUNK];
+            match self.stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return None,
+                Ok(read) => match self.decoder.push(&buf[..read]) {
+                    Ok(frames) => self.pending.extend(frames),
+                    Err(_) => return None,
+                },
+            }
+        }
+    }
+
     /// Read frames until the answer to `id` arrives.
     async fn read_reply(&mut self, id: i64) -> Result<Value, ClientError> {
         loop {
             while let Some(value) = self.pending.pop_front() {
                 match classify(&value, id) {
                     Frame::Ours => return Ok(value),
-                    Frame::Ignorable => continue,
+                    // Kept rather than dropped: a client that bootstrapped is
+                    // owed every event, and one that arrives while a call is in
+                    // flight is the normal case, not an oddity.
+                    Frame::Ignorable => self.notifications.push_back(value),
                     Frame::Foreign(other) => {
                         return Err(ClientError::Protocol(format!(
                             "the daemon answered id {other} while {id} was outstanding"
@@ -142,11 +201,19 @@ impl Connection {
     }
 }
 
+/// Whether one frame is a server-initiated notification: a method, no id.
+fn is_notification(value: &Value) -> bool {
+    value.get("method").is_some()
+        && matches!(value.get("id"), None | Some(Value::Null))
+        && value.get("error").is_none()
+}
+
 /// What one decoded frame is, relative to the call waiting for an answer.
 enum Frame {
     /// The answer to the outstanding call.
     Ours,
-    /// A notification, which Phase 2 has no reader task to deliver.
+    /// A server-initiated notification, buffered for
+    /// [`Connection::next_notification`].
     Ignorable,
     /// An answer to an id nobody asked for; carries it, for the message.
     Foreign(String),
