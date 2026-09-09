@@ -67,6 +67,29 @@
 //! [`unfinished_rows`] after it is `done`: an operator has to be told which
 //! recipient never got it, and there is nowhere else to tell them.
 //!
+//! ## One drain per account
+//!
+//! [`drain`] is the state machine and takes no lock, so two of them running at
+//! once for one account each read the open rows, each miss what the other has
+//! not finished, and each APPEND them. That is not hypothetical: every send
+//! calls the drain to file its own Sent copy, so six sends inside six seconds
+//! ran six overlapping drains and left the oldest message in Sent six times
+//! (#0116). [`drain_guarded`] is therefore the only entry point the live path
+//! uses. It runs the pass under the same per-account advisory lock the
+//! mutation queue drains under ([`crate::engine_lock`]), so at most one drain
+//! per account exists at a time, in this process or any other, and a drain
+//! that is refused the lock does nothing at all rather than duplicating work
+//! the holder is already doing. The holder sweeps again while a pass completed
+//! something, so a row a refused peer left behind is filed by the holder
+//! instead of waiting for the next tick.
+//!
+//! `flock` is what makes the lock safe to hold across a slow APPEND: the
+//! kernel releases it when the holding fd closes, however the holder went
+//! away, so a killed process leaves nothing to reap and no lease to expire.
+//! What a killed process does leave is a row whose APPEND may or may not have
+//! landed, which is why the attempt is committed to the row *before* the
+//! APPEND runs (see below) rather than after it.
+//!
 //! ## Exactly once
 //!
 //! SMTP runs at most once per row *and recipient*: [`record_submission`] is the
@@ -78,11 +101,19 @@
 //! for a human who has established that the message did not arrive; it clears
 //! the marker, so the row is again a single-attempt row rather than a second
 //! attempt on top of an unknown first, and it inherits the same delivered set.
-//! The APPEND is idempotent by construction instead: a retry (`attempts > 0`)
-//! first runs `UID SEARCH HEADER MESSAGE-ID` in the Sent mailbox and skips the
-//! APPEND on a hit, because the previous attempt may have been ambiguous in the
-//! same way SMTP can be. `APPENDUID` is the definitive acknowledgement and its
-//! UID is stored on the row.
+//! The APPEND is idempotent by construction instead: an attempt that is not
+//! the row's first (`attempts > 0`) runs `UID SEARCH HEADER MESSAGE-ID` in the
+//! Sent mailbox first and skips the APPEND on a hit, because the earlier
+//! attempt may have been ambiguous in the same way SMTP can be. `APPENDUID` is
+//! the definitive acknowledgement and its UID is stored on the row.
+//!
+//! `attempts` counts APPENDs *started*, not APPENDs that failed: the increment
+//! is committed immediately before the request goes out, which is the same
+//! trick `submission_started_at` plays for SMTP. A drain that dies inside its
+//! APPEND therefore leaves `attempts > 0` behind, so the drain that reclaims
+//! the row runs the dedup search first instead of blindly appending a copy the
+//! server may already hold. The first attempt on a row still costs no search,
+//! because the decision reads the counter as it was before the increment.
 //!
 //! ## The admission gate
 //!
@@ -187,11 +218,16 @@ pub struct OutboxRow {
     pub message_id: String,
     pub raw_blob: BlobHash,
     pub state: OutboxState,
-    /// APPEND attempts made so far. SMTP has no counter: it runs at most once.
+    /// APPEND attempts *started* so far, committed before each one goes out
+    /// rather than after it comes back, so an attempt whose process died is
+    /// counted too (#0116). SMTP has no counter: it runs at most once.
     pub attempts: i64,
     pub last_error: Option<String>,
     pub appended_uid: Option<i64>,
     pub created: i64,
+    /// When the row last moved: a state transition, a recorded failure, or the
+    /// commit that opened an APPEND attempt. Read with [`backoff_secs`] to
+    /// decide whether the row may be attempted again.
     pub updated: i64,
     /// When the sender last committed "the SMTP session is about to open".
     /// `None` means the transport was provably never entered for this row.
@@ -986,11 +1022,13 @@ pub fn record_append(
             Ok(OutboxState::Done)
         }
         AppendOutcome::Failed(err) => {
+            // `attempts` was already incremented by `begin_append_attempt`
+            // before the request went out, so a failure only records what went
+            // wrong and restarts the backoff clock.
             store
                 .conn()
                 .execute(
-                    "UPDATE outbox SET attempts = attempts + 1, last_error = ?2, updated = ?3
-                     WHERE id = ?1",
+                    "UPDATE outbox SET last_error = ?2, updated = ?3 WHERE id = ?1",
                     rusqlite::params![id, err, now],
                 )
                 .context("recording a failed APPEND")?;
@@ -1336,6 +1374,67 @@ pub struct DrainResult {
     pub awaiting_submission: usize,
 }
 
+/// How many passes one guarded drain makes at most.
+///
+/// The lock holder does the work its refused peers could not (see
+/// [`drain_guarded`]), and a pass that completed nothing has nothing left to
+/// pick up, so the loop normally stops after two. The ceiling is only there so
+/// that an account being sent from continuously cannot hold the lock forever;
+/// what it leaves behind waits for the next tick, which is where it would have
+/// waited anyway.
+const MAX_SWEEPS: usize = 4;
+
+/// [`drain`] under the per-account engine lock: the entry point the live path
+/// uses.
+///
+/// `Ok(None)` means another drain for this account is already running, here or
+/// in another process, and this call did nothing. That is a success: the
+/// holder files the Sent copies, including the one this caller was about to
+/// duplicate (#0116).
+pub async fn drain_guarded<M: SentMailbox>(
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    mailbox: &mut M,
+    now: i64,
+) -> Result<Option<DrainResult>> {
+    let lock_path = crate::config::account_dir(account).join("store.lock");
+    drain_guarded_at(&lock_path, store, blobs, account, mailbox, now).await
+}
+
+/// The mechanism, split out so a test can point it at a tempdir, exactly as
+/// [`crate::engine_lock::EngineLock::try_acquire_at`] is.
+pub async fn drain_guarded_at<M: SentMailbox>(
+    lock_path: &std::path::Path,
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    mailbox: &mut M,
+    now: i64,
+) -> Result<Option<DrainResult>> {
+    let Some(_lock) = crate::engine_lock::EngineLock::try_acquire_at(lock_path, account)? else {
+        info!("[outbox] another engine is draining {account}; leaving the APPENDs to it");
+        return Ok(None);
+    };
+
+    // Sweep again while the last pass got somewhere: a peer that was refused
+    // the lock left its row for whoever holds it, and a row enqueued while
+    // this drain was inside a slow APPEND is not in the pass that started
+    // before it existed.
+    let mut total = DrainResult::default();
+    for _ in 0..MAX_SWEEPS {
+        let pass = drain(store, blobs, account, mailbox, now).await?;
+        total.completed += pass.completed;
+        total.deduped += pass.deduped;
+        total.still_open = pass.still_open;
+        total.awaiting_submission = pass.awaiting_submission;
+        if pass.completed == 0 {
+            break;
+        }
+    }
+    Ok(Some(total))
+}
+
 /// Drive every `sent_pending_append` row for `account` towards `done`.
 ///
 /// Half of the resume path: it runs on startup and on the normal sync tick, and
@@ -1344,9 +1443,14 @@ pub struct DrainResult {
 /// credentials, which the caller owns: [`crate::send::resume_outbox`] runs
 /// [`sweep_pending_sends`] and the resubmission around this pass.
 ///
-/// Retries are safe by construction: a row that has already been attempted
-/// (`attempts > 0`) runs the Message-ID dedup search first and skips the APPEND
-/// on a hit, so an ambiguous earlier attempt cannot produce a second copy.
+/// This is the state machine and it takes no lock, so it is the shape a test
+/// drives. Two of these running at once for one account APPEND the same rows
+/// twice; the live path therefore goes through [`drain_guarded`] instead.
+///
+/// Retries are safe by construction: a row whose counter says an APPEND has
+/// already been started for it runs the Message-ID dedup search first and skips
+/// the APPEND on a hit, so an earlier attempt that was ambiguous, or that died
+/// with its process, cannot produce a second copy.
 pub async fn drain<M: SentMailbox>(
     store: &Store,
     blobs: &BlobStore,
@@ -1374,7 +1478,17 @@ pub async fn drain<M: SentMailbox>(
             continue;
         };
 
-        let outcome = append_once(blobs, mailbox, &row, &target).await;
+        // Read the counter before the attempt is committed: an increment is
+        // what marks the attempt as started, so the question "has this row been
+        // appended before?" has to be asked of the row as it was.
+        let attempted_before = row.attempts > 0;
+        if !begin_append_attempt(store, row.id, now)? {
+            // The row left `sent_pending_append` between the SELECT and here.
+            // Nothing to do and nothing to report: whoever moved it owns it.
+            continue;
+        }
+
+        let outcome = append_once(blobs, mailbox, &row, &target, attempted_before).await;
         let deduped = matches!(outcome, AppendOutcome::AlreadyPresent { .. });
         match record_append(store, blobs, row.id, &outcome)? {
             OutboxState::Done => {
@@ -1391,16 +1505,46 @@ pub async fn drain<M: SentMailbox>(
     Ok(result)
 }
 
+/// Commit "an APPEND for this row is about to go out" before it goes out.
+///
+/// The APPEND's half of `submission_started_at`. A process killed inside its
+/// APPEND leaves the row exactly as this statement left it, so the next drain
+/// reads `attempts > 0`, runs the dedup search and cannot file a second copy of
+/// a message the server may already hold. `updated` moves with it, so the
+/// row's own backoff is what holds the reclaim off until the dead attempt can
+/// no longer be in flight.
+///
+/// `false` when the row is no longer waiting for an APPEND, which is the
+/// caller's signal to leave it alone.
+fn begin_append_attempt(store: &Store, id: i64, now: i64) -> Result<bool> {
+    let changed = store
+        .conn()
+        .execute(
+            "UPDATE outbox SET attempts = attempts + 1, updated = ?2
+             WHERE id = ?1 AND state = 'sent_pending_append'",
+            rusqlite::params![id, now],
+        )
+        .context("opening an APPEND attempt on the outbox row")?;
+    Ok(changed == 1)
+}
+
 /// One APPEND attempt for one row, dedup search included.
+///
+/// `attempted_before` is the row's attempt counter as it stood before this
+/// attempt was committed. It keeps the search off the common path: a row nobody
+/// has ever appended cannot already be in Sent under this Message-ID, because
+/// the ID is minted per build and the outbox admits one row per draft.
 async fn append_once<M: SentMailbox>(
     blobs: &BlobStore,
     mailbox: &mut M,
     row: &OutboxRow,
     target: &str,
+    attempted_before: bool,
 ) -> AppendOutcome {
-    if row.attempts > 0 {
-        // The previous attempt may have been ambiguous (the copy landed but the
-        // acknowledgement did not come back), so look before appending.
+    if attempted_before {
+        // The earlier attempt may have been ambiguous (the copy landed but the
+        // acknowledgement did not come back, or the process died holding it),
+        // so look before appending.
         match mailbox.search_message_id(target, &row.message_id).await {
             Ok(uids) if !uids.is_empty() => {
                 info!(

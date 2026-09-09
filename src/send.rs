@@ -2184,9 +2184,14 @@ async fn mark_source_after_send(draft: &EmailDraft, ctx: &SendContext) {
 
 /// Run every outstanding APPEND for one account, best effort.
 ///
-/// Shared by the post-send settle, the startup resume and the sync tick. Never
-/// returns an error: a Sent copy that has to wait for the next tick is not a
-/// reason to fail whatever the caller was doing.
+/// Shared by the post-send settle, the startup resume and the sync tick, which
+/// is why it drains under the engine lock: three callers on one account is a
+/// normal Tuesday, and unguarded drains APPEND the same rows once each
+/// (#0116). A drain that is refused the lock reports nothing done, and the
+/// holder files its rows.
+///
+/// Never returns an error: a Sent copy that has to wait for the next tick is
+/// not a reason to fail whatever the caller was doing.
 pub async fn drain_account(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
@@ -2215,8 +2220,10 @@ pub async fn drain_account(
         }
     };
 
+    // The session is opened on first use, so a drain that is refused the lock
+    // costs no server traffic.
     let mut mailbox = crate::imap_client::ImapSentMailbox::new(imap_config);
-    let result = crate::outbox::drain(
+    let result = crate::outbox::drain_guarded(
         store,
         blobs,
         &account.name,
@@ -2226,7 +2233,8 @@ pub async fn drain_account(
     .await;
     mailbox.close().await;
     match result {
-        Ok(result) => result,
+        Ok(Some(result)) => result,
+        Ok(None) => crate::outbox::DrainResult::default(),
         Err(e) => {
             log::warn!("[outbox] draining {} failed: {e:#}", account.name);
             crate::outbox::DrainResult::default()

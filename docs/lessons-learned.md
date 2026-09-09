@@ -1198,3 +1198,52 @@ untested while the suite stayed green. The helper derives `listed` from the
 UIDs each test scripts, and the degradation gets its own test that clears the
 field on purpose. When a new field has a "cannot answer" value, a test helper
 must not pick it by default.
+
+## An idle-looking async entry point is re-entrant as soon as two of its callers exist
+
+`outbox::drain` reads its rows once, works through them one network round trip
+at a time, and was called by every send as well as by the sync tick. Nothing in
+its shape says "one at a time", and nothing enforced it, so six sends in six
+seconds ran six overlapping drains and each one appended the rows the others had
+not finished yet: 6, 5, 4, 3, 2 and 1 copies of six messages on the server
+(#0116). The mutation queue next door had taken the per-account advisory lock for
+this exact reason since #0061, and the outbox simply never did. A durable queue
+whose drain is not serialised has a duplicate-work bug waiting for the first slow
+item; here it was a 19.7 MB message taking 5.8 seconds.
+
+## `flock` beats a lease when the work item can be arbitrarily slow
+
+The alternative to a per-account lock was a per-row claim with a timeout, which
+is the usual shape for a durable queue with no daemon behind it. It does not
+survive this workload. The lease has to outlast the slowest APPEND or a live
+attempt is reclaimed under itself, and the reclaiming drain cannot distinguish
+"the copy is not on the server" from "the copy is still being uploaded", so it
+appends and the duplicate is back. `flock` needs no lease because the kernel
+already knows whether the holder is alive, and it releases on `close(2)` however
+the holder went away. Reach for a lease only when the lock cannot be held for the
+duration of the work.
+
+## Count the attempt before the request, not after the answer
+
+`outbox.attempts` counted APPENDs that had come back failed, and the dedup search
+was gated on it, so a first attempt never searched. That gate is right on the
+common path (the Message-ID is minted per build, so nothing can be there yet) and
+wrong everywhere else: a process killed inside its APPEND left `attempts = 0`, so
+the next drain could not tell it from a row nobody had ever touched and appended
+a second copy of a message the server already held. Committing the increment
+immediately before the request, exactly as `submission_started_at` is committed
+before the SMTP session, makes the ambiguity durable at the cost of one UPDATE.
+The gate keeps its cheapness by reading the counter as it stood before the
+increment.
+
+## A concurrency test that passes against the broken code proves nothing
+
+The race here only reproduces if the second drain starts while the first is
+*inside* its APPEND, which no amount of `tokio::join!` guarantees on its own. The
+fake Sent mailbox has to park the first APPEND on a `Notify` and let the racing
+drain run to completion before releasing it, and the ledger of appended copies
+has to be shared by both sessions, since a per-session fake cannot answer "how
+many copies does this account have". Both new tests were run against the
+unguarded code before being run against the fixed code: the race test reports two
+copies of the first message, and the kill test reports zero dedup searches on the
+reclaim.

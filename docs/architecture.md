@@ -126,7 +126,9 @@ A Graph account writes the local bit and queues nothing (answered lives in exten
 Submission is per recipient: each recipient gets an individual envelope while the visible To and Cc headers are preserved for all, which gives per-recipient success and failure tracking.
 `src/outbox.rs` owns the four-state machine (`pending_send`, `sent_pending_append`, `done`, `failed`) and the exactly-once marker: `submission_started_at` is committed immediately before the SMTP session opens, so a `pending_send` row found on restart says whether the transport was ever entered.
 Rows that provably never reached it are resubmitted; rows that died inside it are parked in `failed` for a human and never auto re-sent.
-The APPEND to the server's Sent mailbox is retried until acknowledged, and a retry first searches Sent by Message-ID so it cannot duplicate.
+The APPEND to the server's Sent mailbox is retried until acknowledged, and any attempt that is not the row's first searches Sent by Message-ID before appending so it cannot duplicate.
+`attempts` is incremented immediately before the request goes out rather than after it comes back (#0116), which is what makes an attempt whose process died look like the retry it is.
+The drain itself runs under the per-account engine lock (`outbox::drain_guarded`), because every send drains the account to file its own copy and unguarded drains APPEND each other's rows; a drain refused the lock does nothing, and the holder sweeps again to file what it left.
 Accounts whose server files its own Sent copy (Gmail, Graph, Proton) skip the APPEND entirely.
 A fully sent draft with a durable record behind it is removed from `drafts/`; anything less keeps its file.
 
@@ -208,7 +210,7 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
-| `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash |
+| `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain and by the outbox drain (#0116) |
 | `src/graph.rs` | Microsoft Graph REST client: folders, fetch, sync, send, move, delete, read flags, search |
 | `src/calendar.rs` + `src/invite.rs` | iCalendar receive-side parsing and send-side building |
 | `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. |

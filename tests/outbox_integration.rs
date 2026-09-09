@@ -10,6 +10,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use mailypoppins::config::{
     appends_to_sent, server_saves_to_sent, AccountConfig, AuthMethod, ImapSettings, SaveToSent,
@@ -21,6 +23,7 @@ use mailypoppins::outbox::{
 use mailypoppins::send::RecipientRole;
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
+use tokio::sync::Notify;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -67,6 +70,151 @@ impl Account {
             Store::open(&self.path).unwrap(),
             BlobStore::new(&self.blobs_root),
         )
+    }
+
+    /// The engine lock file, where the real account directory keeps it.
+    fn lock_path(&self) -> PathBuf {
+        self._dir.path().join("store.lock")
+    }
+}
+
+/// The account's Sent mailbox as the *server* holds it: one ledger, however
+/// many client sessions are appending into it.
+///
+/// [`FakeSent`] is one drain's view and cannot answer "how many copies does
+/// this account have" when two drains are running, which is the whole question
+/// #0116 asks.
+#[derive(Default)]
+struct Ledger {
+    /// mailbox -> appended (uid, message_id)
+    appended: Mutex<HashMap<String, Vec<(u32, String)>>>,
+    next_uid: Mutex<u32>,
+    appends: AtomicUsize,
+    searches: AtomicUsize,
+}
+
+impl Ledger {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            next_uid: Mutex::new(200),
+            ..Default::default()
+        })
+    }
+
+    /// One drain's session onto this mailbox.
+    fn session(self: &Arc<Self>) -> SharedSent {
+        SharedSent {
+            ledger: Arc::clone(self),
+            hold: None,
+        }
+    }
+
+    fn copies(&self, message_id: &str) -> usize {
+        self.appended
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .filter(|(_, mid)| mid == message_id)
+            .count()
+    }
+
+    fn appends(&self) -> usize {
+        self.appends.load(Ordering::SeqCst)
+    }
+
+    fn searches(&self) -> usize {
+        self.searches.load(Ordering::SeqCst)
+    }
+
+    fn file(&self, mailbox: &str, message_id: &str) -> u32 {
+        let mut next = self.next_uid.lock().unwrap();
+        let uid = *next;
+        *next += 1;
+        self.appended
+            .lock()
+            .unwrap()
+            .entry(mailbox.to_string())
+            .or_default()
+            .push((uid, message_id.to_string()));
+        uid
+    }
+
+    fn uids_of(&self, mailbox: &str, message_id: &str) -> Vec<u32> {
+        self.appended
+            .lock()
+            .unwrap()
+            .get(mailbox)
+            .map(|rows| {
+                rows.iter()
+                    .filter(|(_, mid)| mid == message_id)
+                    .map(|(uid, _)| *uid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// What a session does inside its first APPEND, after the server has filed the
+/// copy and before the acknowledgement comes back. The window a second drain
+/// slips into, and the window a `kill -9` lands in.
+enum Hold {
+    /// Park until released: a slow APPEND, the 19.7 MB message that took 5.8 s.
+    Until {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    },
+    /// Never come back: the process died holding the request.
+    Forever { started: Arc<Notify> },
+}
+
+/// One drain's session onto a [`Ledger`], as the live path gives every drain
+/// its own `ImapSentMailbox` onto one server mailbox.
+struct SharedSent {
+    ledger: Arc<Ledger>,
+    hold: Option<Hold>,
+}
+
+impl SharedSent {
+    fn held_until(mut self, started: Arc<Notify>, release: Arc<Notify>) -> Self {
+        self.hold = Some(Hold::Until { started, release });
+        self
+    }
+
+    fn held_forever(mut self, started: Arc<Notify>) -> Self {
+        self.hold = Some(Hold::Forever { started });
+        self
+    }
+}
+
+impl SentMailbox for SharedSent {
+    async fn search_message_id(
+        &mut self,
+        mailbox: &str,
+        message_id: &str,
+    ) -> anyhow::Result<Vec<u32>> {
+        self.ledger.searches.fetch_add(1, Ordering::SeqCst);
+        Ok(self.ledger.uids_of(mailbox, message_id))
+    }
+
+    async fn append(&mut self, mailbox: &str, raw: &[u8]) -> anyhow::Result<Option<u32>> {
+        self.ledger.appends.fetch_add(1, Ordering::SeqCst);
+        let message_id = mailypoppins::send::message_id_of(raw);
+        let uid = self.ledger.file(mailbox, &message_id);
+        // The hold is one-shot: the same session goes on to serve the rest of
+        // the drain at full speed, exactly as one IMAP session does.
+        match self.hold.take() {
+            Some(Hold::Until { started, release }) => {
+                started.notify_one();
+                release.notified().await;
+            }
+            Some(Hold::Forever { started }) => {
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            None => {}
+        }
+        Ok(Some(uid))
     }
 }
 
@@ -476,6 +624,173 @@ async fn the_appended_uid_is_stored_on_the_row() {
     let row = outbox::load(&store, id).unwrap().unwrap();
     assert_eq!(row.state, OutboxState::Done);
     assert_eq!(row.appended_uid, Some(100), "APPENDUID must land on the row");
+}
+
+// ---------------------------------------------------------------------------
+// One drain per account (#0116)
+// ---------------------------------------------------------------------------
+
+/// The reported bug, in miniature.
+///
+/// Every send drains the account's outbox to file its own Sent copy, so on the
+/// live TUM account six sends inside six seconds ran six overlapping drains,
+/// each of which read the open rows the others had not finished and APPENDed
+/// them again: 6, 5, 4, 3, 2 and 1 copies of six messages. The guarded drain
+/// is the fix, and this is the race it has to lose.
+#[tokio::test]
+async fn two_racing_drains_append_each_row_exactly_once() {
+    let account = Account::new();
+    let first_mid = "<race-first@example.com>";
+    let first_id = enqueue(&account, first_mid, Some(SENT));
+    let (store, blobs) = account.open();
+    outbox::record_submission(&store, &blobs, first_id, &SubmitOutcome::Accepted).unwrap();
+
+    let ledger = Ledger::new();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut slow = ledger
+        .session()
+        .held_until(Arc::clone(&started), Arc::clone(&release));
+    let mut quick = ledger.session();
+    let lock = account.lock_path();
+    // Ahead of every row's `updated`, so nothing sits in a backoff it was
+    // never put into.
+    let now = outbox::unix_now() + 5;
+
+    let holder = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut slow, now);
+    let second_mid = "<race-second@example.com>";
+    let racer = async {
+        // The first drain is inside its APPEND now, which is where the 5.8 s
+        // one was when the next five started.
+        started.notified().await;
+
+        // A second send lands, commits its own row and drains for it.
+        let second_id = enqueue(&account, second_mid, Some(SENT));
+        let (store, blobs) = account.open();
+        outbox::record_submission(&store, &blobs, second_id, &SubmitOutcome::Accepted).unwrap();
+        let refused = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut quick, now)
+            .await
+            .unwrap();
+
+        release.notify_one();
+        (second_id, refused)
+    };
+    let (holder, (second_id, refused)) = tokio::join!(holder, racer);
+
+    assert_eq!(
+        ledger.copies(first_mid),
+        1,
+        "the row the first drain was appending must not be appended twice"
+    );
+    assert_eq!(ledger.appends(), 2, "two rows, two APPENDs, no more");
+    assert!(
+        refused.is_none(),
+        "a second drain must not run beside the first"
+    );
+
+    // And nothing is stranded by the refusal: the lock holder sweeps again and
+    // files the row its refused peer left behind.
+    let holder = holder.unwrap().expect("the first drain holds the lock");
+    assert_eq!(holder.completed, 2);
+    assert_eq!(ledger.copies(second_mid), 1);
+    assert_eq!(state_of(&account, first_id), OutboxState::Done);
+    assert_eq!(state_of(&account, second_id), OutboxState::Done);
+}
+
+/// A drain killed inside its APPEND must not park the row forever, and must
+/// not let the next drain file a second copy of a message the server may
+/// already hold.
+///
+/// The lock needs no reaping: `flock` dies with the fd. What the dead drain
+/// leaves behind is an attempt counter it committed *before* the request went
+/// out, which is what arms the dedup search on the reclaim.
+#[tokio::test]
+async fn a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped() {
+    let account = Account::new();
+    let mid = "<killed-mid-append@example.com>";
+    let id = enqueue(&account, mid, Some(SENT));
+    let (store, blobs) = account.open();
+    outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+
+    let ledger = Ledger::new();
+    let started = Arc::new(Notify::new());
+    let mut dying = ledger.session().held_forever(Arc::clone(&started));
+    let lock = account.lock_path();
+    let now = outbox::unix_now() + 5;
+
+    {
+        let mut drain =
+            Box::pin(outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut dying, now));
+        tokio::select! {
+            _ = &mut drain => panic!("the drain should still be inside its APPEND"),
+            _ = started.notified() => {}
+        }
+        // ---- kill -9 here: the APPEND never returns and nothing is recorded. ----
+    }
+
+    // The server filed the copy. The store knows only that an attempt was
+    // opened, which is exactly the ambiguity the counter exists to carry.
+    assert_eq!(ledger.copies(mid), 1);
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    assert_eq!(row.state, OutboxState::SentPendingAppend);
+    assert_eq!(
+        row.attempts, 1,
+        "the attempt is committed before the request goes out"
+    );
+
+    // The lock is free the moment the holder is gone, so the next drain runs;
+    // the row itself waits out the dead attempt, which may still be in flight.
+    let mut next = ledger.session();
+    let immediate = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut next, now)
+        .await
+        .unwrap()
+        .expect("a killed drain cannot still hold the lock");
+    assert_eq!(immediate.still_open, 1);
+    assert_eq!(ledger.appends(), 1, "no APPEND while the claim can be live");
+
+    // Past that, the row is reclaimed rather than stuck, and the search the
+    // counter armed is what keeps the copy count at one.
+    let later = now + outbox::backoff_secs(1) + 1;
+    let reclaimed = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut next, later)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.deduped, 1, "the reclaim must look before it appends");
+    assert_eq!(ledger.searches(), 1);
+    assert_eq!(ledger.appends(), 1);
+    assert_eq!(ledger.copies(mid), 1, "exactly one copy in Sent");
+    assert_eq!(state_of(&account, id), OutboxState::Done);
+}
+
+/// The first APPEND of a row pays for no dedup search: the Message-ID is minted
+/// per build and the outbox admits one row per draft, so nothing can be there
+/// yet. Keeping the round trip off the common path is why the search is armed
+/// by the attempt counter rather than run unconditionally.
+#[tokio::test]
+async fn a_first_attempt_costs_no_dedup_search() {
+    let account = Account::new();
+    let mid = "<first-attempt@example.com>";
+    let id = enqueue(&account, mid, Some(SENT));
+    let (store, blobs) = account.open();
+    outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+
+    let ledger = Ledger::new();
+    let mut sent = ledger.session();
+    outbox::drain_guarded_at(
+        &account.lock_path(),
+        &store,
+        &blobs,
+        ACCOUNT,
+        &mut sent,
+        outbox::unix_now() + 5,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(ledger.searches(), 0, "no search before the first APPEND");
+    assert_eq!(ledger.appends(), 1);
+    assert_eq!(state_of(&account, id), OutboxState::Done);
 }
 
 // ---------------------------------------------------------------------------
