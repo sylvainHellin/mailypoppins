@@ -3241,6 +3241,37 @@ mod tests {
         assert_eq!(app.preview_body.text(), "body of older");
     }
 
+    /// The preview query carries its own timing span, entered once per body
+    /// build and never on a memo hit, so `[TIMING] tui_preview_query` in the
+    /// log counts store reads rather than frames (#0118 P0-U5).
+    ///
+    /// This host has no configured account, so the span cannot be observed in
+    /// a real run; the counter the span constructor bumps stands in for the
+    /// log line.
+    #[test]
+    fn the_preview_query_span_is_entered_once_per_body_build() {
+        let _data = DataDir::new();
+        ingest_fixture("inbox", 1, &fixture_email("newest", "Mon, 01 Jan 2024 12:00:00 +0000", false));
+        ingest_fixture("inbox", 2, &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false));
+
+        let spans = || crate::tui::app::PREVIEW_QUERY_SPANS.with(|n| n.get());
+        let mut app = app_on_inbox();
+        let before = spans();
+
+        app.refresh_preview_body();
+        assert_eq!(app.preview_body.text(), "body of newest");
+        assert_eq!(spans() - before, 1, "the first paint on a row is one query");
+
+        app.refresh_preview_body();
+        app.refresh_preview_body();
+        assert_eq!(spans() - before, 1, "a memo hit reads nothing and times nothing");
+
+        app.list_index = 1;
+        app.refresh_preview_body();
+        assert_eq!(app.preview_body.text(), "body of older");
+        assert_eq!(spans() - before, 2, "one cursor move, one span");
+    }
+
     /// A re-ingest that rewrites the body reaches the preview, because the
     /// reload that publishes the new rows bumps the generation the memo is
     /// keyed by. This is the case a body parked in `EmailEntry` could only

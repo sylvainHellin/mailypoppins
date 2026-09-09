@@ -61,6 +61,40 @@ The second command is the ANO-1 guard: `website/src/data/tui-keys.json` is gener
 `KEYMAP` by `scripts/regen-website-keys.sh`, so a difference means the published key reference has
 drifted from the binary. At capture time the two were byte-identical, so the website was not stale.
 
+## Instrumentation added for the baseline
+
+### `[TIMING] tui_preview_query`
+
+The preview cost has to be separable from the rest of the paint before the daemon puts a round trip
+in the middle of it, so `App::refresh_preview_body` (`src/tui/app/mod.rs`) opens a
+`TimingSpan::with_context("tui_preview_query", "<mailbox>/<entry>")` around the store read that
+materialises the body: the `open_store` plus the one blob read for a message, or the one draft-file
+read for a draft.
+
+```
+[TIMING] tui_preview_query [inbox/message #412] start
+[TIMING] store_open [<data_dir>/accounts/alice/store.sqlite3] start
+[TIMING] store_open [<data_dir>/accounts/alice/store.sqlite3] done: 0 ms
+[TIMING] tui_preview_query [inbox/message #412] done: 3 ms
+```
+
+The span sits below the memo check, not around the whole refresh, so it counts store reads rather
+than frames: a cursor move produces exactly one start/done pair, and the frames that follow while
+the cursor stays put produce none. `[TIMING] tui_draw` (one pair per paint, `src/tui/mod.rs`) and
+`[TIMING] store_open` (one pair per store handle, `src/store/mod.rs`) bracket it, so subtracting the
+preview query from the draw gives the paint cost without the read.
+
+```sh
+rg '\[TIMING\] tui_preview_query' <data_dir>/logs/mailypoppins-YYYY-MM-DD.log
+```
+
+No run of the real TUI was possible when this landed: the host has no configured account, so the
+contract is pinned by a unit test instead
+(`the_preview_query_span_is_entered_once_per_body_build` in `src/tui/app/types.rs`), which ingests
+two fixture messages, paints, repaints, moves the cursor, and asserts the span was opened once per
+body build and not at all on a memo hit. The owner takes the log measurement on a machine with an
+account, against the workloads P0-U6 records in `workloads.md`.
+
 ## What is deliberately absent
 
 No latency or timing numbers. Those arrive with the measurement units later in phase 0 and phase 1a

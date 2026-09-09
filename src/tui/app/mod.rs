@@ -204,6 +204,33 @@ impl Default for App {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many preview-query spans this thread has opened, for the unit test
+    /// that pins "one span per cursor move".
+    ///
+    /// Thread-local because the store fixtures are
+    /// ([`crate::config::test_env::TestDataDir`], #0077): a process-wide
+    /// counter would be bumped by whichever other test happened to paint a
+    /// preview at the same moment, and the assertion would flake.
+    pub(crate) static PREVIEW_QUERY_SPANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Open the preview-query timing span, the one place that names it.
+///
+/// The log prefix is exactly `[TIMING] tui_preview_query`, beside the existing
+/// `[TIMING] tui_draw` (one per paint) and `[TIMING] store_open` (one per store
+/// handle), so `rg '\[TIMING\] tui_preview_query'` over the log file separates
+/// the preview read from the rest of the paint (#0118 P0-U5).
+///
+/// The test counter lives here rather than at the call site so it cannot drift
+/// away from the span it is supposed to count.
+fn preview_query_span(context: String) -> crate::timing::TimingSpan {
+    #[cfg(test)]
+    PREVIEW_QUERY_SPANS.with(|n| n.set(n.get() + 1));
+    crate::timing::TimingSpan::with_context("tui_preview_query", context)
+}
+
 impl App {
     pub fn new() -> Self {
         let global_config = crate::config::load_global_config().unwrap_or_default();
@@ -1308,8 +1335,27 @@ impl App {
             return;
         }
         let text = match &key {
-            Some((_, EntryKey::Msg(msg), _)) => self.load_message_body(*msg).unwrap_or_default(),
-            Some((_, EntryKey::Draft(id), _)) => self.load_draft_body(id).unwrap_or_default(),
+            // Everything below the memo check is the preview query itself: one
+            // store open plus one blob (or one draft file) read. The span sits
+            // here rather than around the whole refresh so that the log counts
+            // reads, not frames -- a memo hit returns above and emits nothing,
+            // so a cursor move produces exactly one `[TIMING]
+            // tui_preview_query` start/done pair (#0118 P0-U5).
+            Some((_, entry, _)) => {
+                let _span = preview_query_span(format!(
+                    "{}/{}",
+                    self.current_local_mailbox_key()
+                        .unwrap_or_else(|| self.active_server_mailbox()),
+                    match entry {
+                        EntryKey::Msg(msg) => msg.to_string(),
+                        EntryKey::Draft(id) => format!("draft {id}"),
+                    }
+                ));
+                match entry {
+                    EntryKey::Msg(msg) => self.load_message_body(*msg).unwrap_or_default(),
+                    EntryKey::Draft(id) => self.load_draft_body(id).unwrap_or_default(),
+                }
+            }
             None => String::new(),
         };
         self.preview_body.fill(key, text);
