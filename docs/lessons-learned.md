@@ -1449,6 +1449,7 @@ What blocks reusing it is the shape of the queue, not the fan-out: `EventQueue::
 
 Each endpoint therefore carries a second `VecDeque<(Revision, Event)>` that `CanonicalState::publish` writes and `EventQueue::drain_lifecycle` empties, sharing the endpoint's one `Notify` and its `attached` flag, so "only a bootstrapped connection is a subscriber" holds for both without a second rule.
 The connection loop merges the two drains by revision before offering them to `Outbound`, because `push` is documented to be offered its items in non-decreasing revision order and two independently drained queues are not.
+Merging is necessary and not sufficient: the merge has to happen under both locks at once, which is the lesson below.
 
 ## An operation registry stamps no revision, and its fan-out runs synchronously
 
@@ -1467,3 +1468,21 @@ The contradiction only shows when the two documents are read side by side, which
 
 The general form: a contract split across units needs a reader at the end whose job is the seams, not the units.
 Cross-check the invariants a later unit weakened against the ones an earlier unit pinned, and when they disagree, write down which one the wire actually guarantees rather than quietly picking the stricter one.
+
+## Draining two queues under two locks reorders what the merge then cannot fix
+
+The connection loop merged the domain and lifecycle queues by revision, but it took each queue's lock in turn: `drain()`, then `drain_lifecycle()`.
+Between the two acquisitions a change can commit at revision N and a lifecycle event publish at N+1, and only the second one is in that drain.
+The client is then offered N+1 and, on the next round, N, which sits at or below its watermark, so `StateTracker` drops it as a duplicate and the change is lost for good: no snapshot brings it back and no resync is asked for.
+
+Sorting after the fact cannot help, because the two drains never saw the same instant.
+`EventQueue::drain_all` takes both locks before it empties either, which makes the pair atomic against a fan-out that takes one lock at a time, and `Outbound::push` now debug-asserts that the revisions it is offered are non-decreasing, so a future caller that reintroduces the split fails in the test suite instead of on a socket.
+The lock order is fixed (events, then lifecycle) and nothing takes them the other way round, which is what keeps the two-lock hold deadlock-free.
+
+## A subscription that a teardown path has to remember is a subscription that leaks
+
+`CanonicalState::subscribe` handed back a queue and left `unsubscribe` to the caller, so every way a connection can end - a clean close, a framing error, a panic in the task - was a path that had to remember to call it, and none of them was tested.
+Making the queue own its registration (an `Arc<Subscription>` inside `EventQueue` whose `Drop` removes the endpoint) keeps the pinned `subscribe(&self, conn) -> EventQueue` signature the contract tests use and makes the removal unforgettable.
+
+The ordering that used to be a comment is now a `drop`: the connection task keeps its own handle past `serve_connection` so the cancellations a disconnect publishes still fan out while it is a subscriber, and the endpoint goes when that handle does.
+`Weak` rather than `Arc` to the state's `Inner`, so the queue cannot keep the whole state alive, and a state that is already gone has no map to clean up.

@@ -965,7 +965,7 @@ fn the_queue_never_exceeds_its_byte_cap_under_any_push_sequence() {
         let size = (step(&mut seed) % 9_000) as usize;
         let resource = format!("mailbox:alpha/mb{}", step(&mut seed) % 24);
         let event = match step(&mut seed) % 8 {
-            0 | 1 | 2 => heavy(&resource, size),
+            0..=2 => heavy(&resource, size),
             3 | 4 => Event::Replace {
                 kind: KIND_ACCOUNT_STATE_CHANGED,
                 payload: json!({"account": "alpha", "state": "ready", "blob": "y".repeat(size)}),
@@ -988,10 +988,10 @@ fn the_queue_never_exceeds_its_byte_cap_under_any_push_sequence() {
             queue.len()
         );
 
-        if step(&mut seed) % 5 == 0 {
+        if step(&mut seed).is_multiple_of(5) {
             queue.pop();
         }
-        if step(&mut seed) % 97 == 0 {
+        if step(&mut seed).is_multiple_of(97) {
             queue.rebootstrap();
             assert_eq!(
                 queue.bytes(),
@@ -1454,13 +1454,11 @@ async fn drain_until_resync(conn: &mut Connection, bootstrap: u64, instance: &st
 /// Assert that nothing arrives on this connection for `window`. Bounded by
 /// construction: it waits exactly that long and never longer.
 async fn assert_no_event_within(conn: &mut Connection, window: Duration, label: &str) {
-    if let Ok(notification) = tokio::time::timeout(window, conn.next_notification()).await {
-        if let Some(notification) = notification {
-            assert_ne!(
-                notification.method, METHOD_STATE_EVENT,
-                "{label}: a domain event arrived after the resync: {notification:?}"
-            );
-        }
+    if let Ok(Some(notification)) = tokio::time::timeout(window, conn.next_notification()).await {
+        assert_ne!(
+            notification.method, METHOD_STATE_EVENT,
+            "{label}: a domain event arrived after the resync: {notification:?}"
+        );
     }
 }
 

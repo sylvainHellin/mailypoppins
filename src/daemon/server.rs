@@ -274,12 +274,15 @@ async fn handle_connection(
     // and a connection that never bootstraps is fed nothing.
     let conn = ConnectionId(connection_id);
     let queue = state.canonical.subscribe(conn);
-    let result = serve_connection(stream, connection_id, &state, shutdown, queue).await;
-    // Before the unsubscribe, so the cancellations a disconnect causes are
-    // published while this connection is still a subscriber and therefore reach
-    // every other one in the same fan-out.
+    // The queue owns the subscription and unsubscribes when its last handle
+    // drops, so the connection task cannot leak an endpoint however it ends.
+    // This one is kept past `serve_connection` on purpose: the cancellations a
+    // disconnect causes are published while this connection is still a
+    // subscriber, exactly as before, and therefore reach every other one in the
+    // same fan-out.
+    let result = serve_connection(stream, connection_id, &state, shutdown, queue.clone()).await;
     state.operations.on_disconnect(conn);
-    state.canonical.unsubscribe(conn);
+    drop(queue);
     result
 }
 
@@ -438,16 +441,12 @@ fn rebootstrap(outbound: &mut Outbound, queue: &mut EventQueue, reply: &Value) {
 ///
 /// Two queues feed it - committed changes and lifecycle events - and
 /// [`Outbound::push`] is offered its items in non-decreasing revision order, so
-/// the two drains are merged rather than concatenated.
+/// [`EventQueue::drain_all`] empties both under both locks at once and merges
+/// them by revision. Two separate drains would not do: a change committed
+/// between the two acquisitions arrives behind a lifecycle event published
+/// after it, and the client drops it as a duplicate.
 fn drain_queue(queue: &mut EventQueue) -> Vec<(Revision, Event)> {
-    let mut items: Vec<(Revision, Event)> = queue
-        .drain()
-        .iter()
-        .map(|(revision, change)| (*revision, Event::from_change(change)))
-        .collect();
-    items.extend(queue.drain_lifecycle());
-    items.sort_by_key(|(revision, _)| *revision);
-    items
+    queue.drain_all()
 }
 
 /// One outbound item as the frame it travels in: a `state.event` notification

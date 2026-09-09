@@ -1475,7 +1475,7 @@ async fn disconnecting_the_owner_leaves_a_durable_operation_running() {
 
     let id = {
         let mut owner = connect_subscribed(&sandbox).await;
-        let id = start_operation(&mut owner, 8, 60, CancelScope::Durable, None).await;
+        let id = start_operation(&mut owner, 40, 50, CancelScope::Durable, None).await;
         // Evidence of work before the socket goes, so the disconnect really
         // lands mid-run rather than before the first step.
         let first = next_operation_event(&mut observer).await;
@@ -1488,7 +1488,7 @@ async fn disconnecting_the_owner_leaves_a_durable_operation_running() {
     let finished = wait_for_state(&mut observer, &id, OperationState::Succeeded).await;
     assert_eq!(
         finished["result"],
-        json!({"steps": 8}),
+        json!({"steps": 40}),
         "the whole operation ran, every step of it, after its client went away"
     );
 }
@@ -1503,7 +1503,13 @@ async fn disconnecting_the_owner_cancels_a_client_scoped_operation() {
 
     let id = {
         let mut owner = connect_subscribed(&sandbox).await;
-        let id = start_operation(&mut owner, 200, 25, CancelScope::ClientScoped, None).await;
+        // Twenty seconds of work rather than five: a loaded machine can take a
+        // while to notice the closed socket, and an operation that finished
+        // first would settle on `succeeded` and fail this assertion for the
+        // wrong reason. The wait below is still bounded by `DEADLINE`, so a
+        // cancellation that never comes fails the test rather than the suite's
+        // patience.
+        let id = start_operation(&mut owner, 400, 50, CancelScope::ClientScoped, None).await;
         let first = next_operation_event(&mut observer).await;
         assert_eq!(first.kind, KIND_OPERATION_PROGRESS);
         assert_eq!(first.payload["operation_id"], json!(id));

@@ -31,6 +31,10 @@ use mp_protocol::{
 // ---------------------------------------------------------------------------
 
 /// Phase 2 advertises `{min: 1, max: 1}` (plan section 3.0).
+// The range assertion is constant while both ends are 1, which is exactly what
+// the two assertions above pin; it stays because it is the one that still holds
+// when a later phase raises `PROTOCOL_MAX`.
+#[allow(clippy::assertions_on_constants)]
 #[test]
 fn protocol_version_range_is_one_to_one() {
     assert_eq!(PROTOCOL_MIN, 1, "PROTOCOL_MIN must be 1 in Phase 2");

@@ -311,6 +311,11 @@ pub struct Outbound {
     /// rather than on the marker that empties the queue.
     events: usize,
     poisoned: bool,
+    /// The last revision offered, for the debug assertion in
+    /// [`Outbound::push`] that the caller's order really is non-decreasing.
+    /// Not cleared by [`Outbound::rebootstrap`]: the counter it comes from
+    /// never goes backwards either.
+    last_offered: Option<Revision>,
 }
 
 impl Outbound {
@@ -322,15 +327,27 @@ impl Outbound {
             bytes: 0,
             events: 0,
             poisoned: false,
+            last_offered: None,
         }
     }
 
     /// Offer one event, in non-decreasing revision order.
     ///
     /// The caller pushes in that order by construction, because a revision is
-    /// taken under the same lock that fans the change out; this does not police
-    /// it.
+    /// taken under the same lock that fans the change out and
+    /// [`EventQueue::drain_all`](super::EventQueue::drain_all) merges the two
+    /// queues under both locks at once. A release build does not police it -
+    /// there is nothing useful to do about it on a live socket - but a debug
+    /// build fails loudly, because an out-of-order offer is a lost event: the
+    /// client watermarks at the highest revision it has seen and drops the
+    /// straggler as a duplicate.
     pub fn push(&mut self, revision: Revision, event: Event) -> Push {
+        debug_assert!(
+            self.last_offered.is_none_or(|last| revision >= last),
+            "revisions must arrive non-decreasing: {revision:?} after {:?}",
+            self.last_offered
+        );
+        self.last_offered = Some(revision);
         let lifecycle = event.is_lifecycle();
         if self.poisoned && !lifecycle {
             return Push::Overflowed;

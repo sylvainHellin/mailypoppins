@@ -10,11 +10,12 @@
 //!
 //! The three counts, and where each comes from:
 //!
-//! - `total` is [`count_all_emails`]'s, the grouped store query the TUI sidebar
-//!   runs, with the Drafts row counted from the draft index instead: drafts are
-//!   not `messages` rows, so a grouped query cannot see them.
-//! - `unread` is the rows of that mailbox without `\Seen`. Drafts have no read
-//!   state and report `0`.
+//! - `total` is the grouped store query's, one open and one
+//!   [`read::mailbox_read_counts`] for the whole account, with the Drafts row
+//!   counted from the draft index instead: drafts are not `messages` rows, so a
+//!   grouped query cannot see them.
+//! - `unread` is the rows of that mailbox without `\Seen`, from the same
+//!   grouped query. Drafts have no read state and report `0`.
 //! - `badge` is what the sidebar prints beside the label, which is `total`
 //!   today. It is a separate member because the snapshot's mailbox view already
 //!   carries all three and the two shapes may not diverge.
@@ -35,7 +36,7 @@ use crate::config::AccountConfig;
 use crate::daemon::state::seeds_from_config;
 use crate::store::read;
 use crate::store::Store;
-use crate::tui::app::{build_mailboxes, count_all_emails};
+use crate::tui::app::draft_count;
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,
@@ -72,28 +73,34 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?;
 
-    // Index-aligned by construction: `seeds_from_config` maps `build_mailboxes`
-    // one to one, and `count_all_emails` is documented to keep a slot for a
-    // mailbox the store has no rows for.
+    // The hierarchy `seeds_from_config` derives from `build_mailboxes`, which
+    // is the sidebar's own; the counts are looked up by slug, and a mailbox the
+    // store has no rows for keeps its slot at zero.
     let seeds = seeds_from_config(std::slice::from_ref(account))
         .into_iter()
         .next()
         .map(|seed| seed.mailboxes)
         .unwrap_or_default();
-    let totals = count_all_emails(&name, &build_mailboxes(account));
-    let unread = unread_counts(&name)?;
+    let counts = counts_by_mailbox(&name)?;
 
     let mailboxes: Vec<Value> = seeds
         .iter()
-        .enumerate()
-        .map(|(index, seed)| {
-            let total = totals.get(index).copied().unwrap_or(0) as u64;
+        .map(|seed| {
+            // Drafts are local files and not `messages` rows, so the grouped
+            // query cannot see them: their total is the draft index's, the same
+            // one the TUI sidebar prints, and they have no read state.
+            let (total, unread) = if seed.slug == crate::selector::DRAFTS_MAILBOX {
+                (draft_count(&name) as u64, 0)
+            } else {
+                let grouped = counts.get(&seed.slug).copied().unwrap_or_default();
+                (grouped.total as u64, grouped.unread as u64)
+            };
             json!({
                 "role": seed.role,
                 "slug": seed.slug,
                 "label": seed.label,
                 "total": total,
-                "unread": unread.get(&seed.slug).copied().unwrap_or(0),
+                "unread": unread,
                 "badge": total,
             })
         })
@@ -101,20 +108,17 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
     Ok(json!({"account": name, "mailboxes": mailboxes}))
 }
 
-/// How many messages of each mailbox the server has not flagged `\Seen`.
+/// Both counts of every mailbox of one account, from one open and one grouped
+/// query.
 ///
-/// One pass over the account rather than one query per mailbox, and through the
-/// same [`read`] path every other listing takes, so an unread count and a
-/// listing cannot disagree about which rows a mailbox holds.
-fn unread_counts(account: &str) -> Result<HashMap<String, u64>, RpcError> {
+/// The listing itself is never materialised: counting the unread rows by
+/// listing the whole account is the same answer at the cost of every envelope
+/// in it, and `SUM` over the flag column is the same predicate
+/// [`read::MessageRow::is_read`] applies row by row.
+fn counts_by_mailbox(account: &str) -> Result<HashMap<String, read::MailboxReadCounts>, RpcError> {
     let path = crate::config::store_path(account);
     let store = Store::open(&path)
         .map_err(|e| internal(format!("opening the store of {account}: {e:#}")))?;
-    let rows = read::list_account(&store, account)
-        .map_err(|e| internal(format!("listing the messages of {account}: {e:#}")))?;
-    let mut counts: HashMap<String, u64> = HashMap::new();
-    for row in rows.iter().filter(|row| !row.is_read()) {
-        *counts.entry(row.mailbox.clone()).or_default() += 1;
-    }
-    Ok(counts)
+    read::mailbox_read_counts(&store, account)
+        .map_err(|e| internal(format!("counting the mailboxes of {account}: {e:#}")))
 }

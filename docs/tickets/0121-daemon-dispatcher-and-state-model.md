@@ -51,6 +51,7 @@ The bootstrap gate is reentrant and thread-owned rather than a plain `Mutex`, be
 
 Seven, all decided inside the units and recorded here rather than left to a reader's diff.
 Three are budget overruns and four are behaviour.
+One of the four, the double store open in `mailbox.list`, was closed by the review-fix commit that followed the sweep and is kept here with its resolution.
 
 ### Three modules over their line budgets
 
@@ -89,11 +90,14 @@ A second `state.bootstrap` clears the whole queue, lifecycle events included, so
 Nothing in Phase 3a can observe it: a re-bootstrap follows a resync, and a client that resyncs re-reads `operation.status`, whose newest report survives the finish.
 It is still the two rules disagreeing, and it is a follow-up in `BACKLOG.md`.
 
-### `mailbox.list` opens the account's store twice
+### `mailbox.list` opened the account's store twice (fixed after the sweep)
 
-`count_all_emails` opens the store for the grouped totals and `unread_counts` opens it again to list the account's rows and count the ones without `\Seen`.
-One open and one grouped query would do both, but the grouped count that exists is the TUI sidebar's and it does not carry the read flag, so using it meant either a second query or a new one.
-A read-only method that opens a SQLite file twice is a cost and not a contract; the wire shape is unaffected and the fix is a follow-up.
+`count_all_emails` opened the store for the grouped totals and `unread_counts` opened it again to list the account's rows and count the ones without `\Seen`.
+One open and one grouped query does both, but the grouped count that existed is the TUI sidebar's and it does not carry the read flag, so using it meant either a second query or a new one.
+
+The new one landed in the review-fix commit: `read::mailbox_read_counts` groups `COUNT(*)` and the unread sum in one statement, with the same token-wise `\Seen` test `MessageRow::is_read` applies row by row, and `mailbox.list` opens the store once and reads no envelope at all.
+The Drafts row is unchanged, counted from the draft index (`tui::app::draft_count`, extracted from the closure inside `count_all_emails`) with unread `0`, because drafts are not `messages` rows.
+The wire shape did not move: `badge` is still `total`.
 
 ### The revision stream is dense on the daemon's side and not on the wire
 
@@ -108,18 +112,18 @@ The protocol document now states the delivery guarantee (strictly increasing, no
 `docs/baselines/phase3a-gate-evidence.md` maps each of the four Phase 3a exit-gate lines to the test or command that proves it, with the commands as run and their results, plus the four T-unit compile-failure proofs.
 
 All four pass as written.
-1601 tests pass under the feature and 1354 without it, `mp --help` is byte-identical to the pre-daemon baseline in both builds, and clippy reports nothing in `src/daemon/` or `crates/`.
+1605 tests pass under the feature and 1355 without it after the review fixes (1601 and 1354 at the sweep), `mp --help` is byte-identical to the pre-daemon baseline in both builds, and clippy reports nothing in `src/daemon/`, in `crates/` or in `tests/`.
 
 ## Acceptance criteria
 
 - Two clients observe ordered authoritative state. Met, 28 tests in `daemon_bootstrap` and 29 in `daemon_events`, including the five forced race boundaries and the stalled-reader case.
 - Event overflow produces bounded recovery. Met, the overflow and `state.resync_required` cases in `daemon_events`, with the queue's byte cap asserted directly rather than inferred.
 - A bootstrap taken before any account is ready converges by event without a second bootstrap. Met, the `opening`-account cases in `daemon_bootstrap`, driven by `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS`.
-- Nothing in this half changes the behaviour of a client that never sets the debug flag. Met, the plain suite is 1354 with every addition in a new file, and the help capture diffs empty in both builds.
+- Nothing in this half changes the behaviour of a client that never sets the debug flag. Met, the plain suite is 1355 with every addition a new test, and the help capture diffs empty in both builds.
 
 ## Files
 
-- `src/daemon/{dispatch.rs,operations.rs}`, `src/daemon/state/{mod.rs,snapshot.rs,revision.rs,events.rs}`, `src/daemon/methods/{state.rs,mailbox.rs,mod.rs,account.rs,message.rs}`, `src/daemon/{server.rs,session.rs,lifecycle.rs,mod.rs}`
+- `src/daemon/{dispatch.rs,operations.rs}`, `src/daemon/state/{mod.rs,snapshot.rs,revision.rs,events.rs}`, `src/daemon/methods/{state.rs,mailbox.rs,mod.rs,account.rs,message.rs}`, `src/daemon/{server.rs,session.rs,lifecycle.rs,mod.rs}`, and `src/store/read.rs` plus `src/tui/app/types.rs` for the grouped count the review fix moved into SQL
 - `crates/mp-client/src/{state.rs,connection.rs,lib.rs}`, twelve new fixtures under `crates/mp-protocol/fixtures/`
 - `tests/{daemon_dispatcher,daemon_bootstrap,daemon_events,daemon_operations}.rs`
 - `docs/daemon-protocol.md`, `docs/daemon-operations.md`, `docs/baselines/phase3a-gate-evidence.md`, `docs/lessons-learned.md`

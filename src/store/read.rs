@@ -263,6 +263,57 @@ pub fn mailbox_counts(store: &Store, account: &str) -> Result<HashMap<String, us
     Ok(out)
 }
 
+/// One mailbox's two counts, as [`mailbox_read_counts`] groups them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MailboxReadCounts {
+    /// Every row of the mailbox.
+    pub total: usize,
+    /// The rows the server has not flagged `\Seen`.
+    pub unread: usize,
+}
+
+/// Message and unread counts per mailbox for one account, as one grouped query.
+///
+/// [`mailbox_counts`] with the read flag beside the total, for the caller that
+/// needs both and would otherwise either run two queries or list every row of
+/// the account to count the unread ones. Mailboxes with no rows are absent,
+/// exactly as there.
+///
+/// The unread test is SQL's half of [`MessageRow::is_read`]: `flags` is a
+/// whitespace-separated token list, so the column is padded and matched against
+/// `% \Seen %` rather than searched for a substring, which keeps a
+/// hypothetical `$NotSeen` from reading as `\Seen`. `LIKE` is
+/// case-insensitive over ASCII in SQLite and [`MessageFlags::parse`] compares
+/// case-insensitively too, so the two agree on `\seen`.
+pub fn mailbox_read_counts(
+    store: &Store,
+    account: &str,
+) -> Result<HashMap<String, MailboxReadCounts>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT mailbox, COUNT(*), \
+                SUM(CASE WHEN ' ' || IFNULL(flags, '') || ' ' LIKE '% \\Seen %' THEN 0 ELSE 1 END) \
+         FROM messages WHERE account = ?1 GROUP BY mailbox",
+    )?;
+    let rows = stmt.query_map([account], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (mailbox, total, unread) = row.context("reading a mailbox read count")?;
+        out.insert(
+            mailbox,
+            MailboxReadCounts {
+                total: total.max(0) as usize,
+                unread: unread.max(0) as usize,
+            },
+        );
+    }
+    Ok(out)
+}
 /// The normalized `Message-ID`s an account has synced that carry an attachment.
 ///
 /// This is the store side of the plain-IMAP `has:attachment` post-filter
@@ -871,6 +922,74 @@ mod tests {
         assert!(mailbox_counts(&fx.store, "nobody").unwrap().is_empty());
     }
 
+
+    /// The grouped counts with the read flag: one query answers both numbers,
+    /// and its unread test is `MessageRow::is_read`'s, token by token, so a
+    /// flag string that merely contains the letters of `\Seen` does not count
+    /// as read.
+    #[test]
+    fn read_counts_group_totals_and_unread_together() {
+        let fx = fixture();
+        let mut seen = email("a", "Mon, 01 Jan 2024 09:00:00 +0000");
+        seen.flags = MessageFlags::seen(true);
+        ingest(&fx, "inbox", 1, &seen);
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("b", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            3,
+            &email("c", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        let mut flagged = email("d", "Mon, 01 Jan 2024 09:00:00 +0000");
+        flagged.flags = MessageFlags {
+            seen: true,
+            flagged: true,
+            ..Default::default()
+        };
+        ingest(&fx, "archive", 1, &flagged);
+
+        let counts = mailbox_read_counts(&fx.store, "alice").unwrap();
+        assert_eq!(
+            counts.get("inbox"),
+            Some(&MailboxReadCounts {
+                total: 3,
+                unread: 2
+            })
+        );
+        assert_eq!(
+            counts.get("archive"),
+            Some(&MailboxReadCounts {
+                total: 1,
+                unread: 0
+            }),
+            "`\\Seen` beside another flag is still read"
+        );
+        assert_eq!(counts.get("sent"), None, "an empty mailbox has no row");
+        assert!(mailbox_read_counts(&fx.store, "nobody").unwrap().is_empty());
+
+        // The totals are `mailbox_counts`', which is what lets one query stand
+        // in for both, and the unread half agrees with the row-by-row answer
+        // the daemon used to compute.
+        let totals = mailbox_counts(&fx.store, "alice").unwrap();
+        for (mailbox, count) in &totals {
+            assert_eq!(counts.get(mailbox).map(|c| c.total), Some(*count));
+        }
+        let rows = list_account(&fx.store, "alice").unwrap();
+        for (mailbox, count) in &counts {
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| &row.mailbox == mailbox && !row.is_read())
+                    .count(),
+                count.unread,
+                "{mailbox}: the grouped unread count differs from the listed one"
+            );
+        }
+    }
     /// The cross-mailbox lookup the deleted `build_message_id_index` startup
     /// walk used to answer. The same message in two mailboxes is two rows, and
     /// both come back.

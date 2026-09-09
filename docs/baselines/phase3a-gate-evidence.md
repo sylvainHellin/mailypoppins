@@ -4,6 +4,7 @@ The four gate lines of Phase 3a of the daemon migration (`.agents/workflow/nativ
 
 Ticket [#0121](../tickets/0121-daemon-dispatcher-and-state-model.md).
 Evidence taken on 2026-09-09 at `a493229` on branch `daemon`, eight commits past the Phase 2 exit `b80f3bd`, all eight of them Phase 3a's own.
+Re-taken after the review fixes commit that follows `fda9718`, which is where the counts below come from.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0.
 
 All four pass as written.
@@ -17,17 +18,19 @@ timeout 900 cargo test --workspace --features daemon --offline
 timeout 600 cargo test --workspace --offline
 ```
 
-1601 tests pass under the feature, 0 failed, 4 ignored (3 in the doc-tests, 1 for want of root in `daemon_runtime_paths`), across 30 result lines.
-1354 pass without it, 0 failed, 3 ignored, across 20 result lines.
+1605 tests pass under the feature, 0 failed, 4 ignored (3 in the doc-tests, 1 for want of root in `daemon_runtime_paths`), across 30 result lines.
+1355 pass without it, 0 failed, 3 ignored, across 20 result lines.
 
-The 247 difference is the daemon's own: 199 in the ten gated `[[test]]` targets and 48 in the inline `#[cfg(test)]` modules inside `src/daemon/`, which is `cargo test --lib` at 1193 under the feature against 1145 without it.
+The 250 difference is the daemon's own: 199 in the ten gated `[[test]]` targets and 51 in the inline `#[cfg(test)]` modules inside `src/daemon/`, which is `cargo test --lib` at 1197 under the feature against 1146 without it.
+
+Both figures moved by the review fixes and not by the phase: three unit tests in `src/daemon/state/mod.rs` (the merged drain's ordering, twice, and the RAII unsubscribe) and one in `src/store/read.rs` (the grouped unread count), the last of which counts in both runs.
 
 The ten gated targets, Phase 3a's four in bold: `daemon_operations` **30**, `daemon_events` **29**, `daemon_framing` 29, `daemon_bootstrap` **28**, `daemon_dispatcher` **18**, `daemon_protocol_fixtures` 17, `daemon_runtime_paths` 17, `daemon_handshake` 12, `daemon_lifecycle` 10, `daemon_read_only_methods` 9.
 Phase 2 left the featured figure at 1477 and Phase 3a adds 124: 105 in the four new suites, 17 inline in `src/daemon/`, and the 2 `mp-client` unit tests that count in both runs.
 
-The plain figure is 1354 against Phase 2's 1352.
-The two additions are `mp-client`'s `StateTracker` unit tests, which live in a new file (`crates/mp-client/src/state.rs`) and are the only thing Phase 3a added to the unfeatured build.
-No pre-existing test changed, which is the whole of the fourth gate line below.
+The plain figure is 1355 against Phase 2's 1352.
+The additions are `mp-client`'s two `StateTracker` unit tests, which live in a new file (`crates/mp-client/src/state.rs`), and the review fixes' grouped-count test in `src/store/read.rs`.
+No pre-existing test changed its assertions, which is the whole of the fourth gate line below.
 
 ## The four T-unit proofs
 
@@ -108,7 +111,7 @@ touch src/main.rs && timeout 900 cargo build --offline --features daemon \
 Both diffs are empty, exit 0, so the whole 50-screen help surface is byte-identical to the pre-daemon baseline in the unfeatured and the featured build alike.
 `the_help_surface_still_matches_the_pre_daemon_baseline` in `daemon_read_only_methods` asserts the same property inside the suite.
 
-The plain test count is 1354 against Phase 2's 1352, with both additions in a new file and no pre-existing test modified.
+The plain test count is 1355 against Phase 2's 1352, with every addition in a new test and no pre-existing assertion modified.
 The golden frames and the TUI counts are untouched: `test_selection_guard` holds its floors of 368 TUI tests, 20 golden-frame tests and 18 snapshot files, and no Phase 3a commit touches `src/tui/`.
 
 Passes.
@@ -120,9 +123,10 @@ timeout 300 cargo clippy --workspace --features daemon --offline --all-targets
 ```
 
 Exit 0.
-No warning names a file under `src/daemon/` or under `crates/`.
-The warnings the run does report are pre-existing ones elsewhere in the tree (`src/imap_client/search.rs` 10, `src/draft.rs` 4, `examples/mkfixture.rs` 4, `src/oauth2.rs` 3, `src/config.rs` 2, and one each in six other files) plus five in `tests/daemon_events.rs` and one each in `tests/daemon_framing.rs` and `tests/daemon_read_only_methods.rs`.
-Those eight are in T-unit files, which an implementer may not edit outside an approved contract fix, so they are recorded here and in `BACKLOG.md` rather than silenced.
+No warning names a file under `src/daemon/`, under `crates/`, or under `tests/`.
+The warnings that used to sit in the four test files were cleared by the review fixes: seven of them at this toolchain (`tests/daemon_events.rs` 4, and one each in `tests/daemon_framing.rs`, `tests/daemon_read_only_methods.rs` and `tests/cli_help_snapshot.rs`), where the phase's own note counted eight because the `collapsible_match` warning spans two reported lines.
+Every fix is a mechanical lint change that left the assertion alone: `0..=2` for an or-pattern, `is_multiple_of` twice, one collapsed `if let`, two redundant `trim_start()` calls before `split_whitespace()`, and an `#[allow(clippy::assertions_on_constants)]` on the protocol-range assertion that is constant only while `PROTOCOL_MIN` and `PROTOCOL_MAX` are both 1.
+The warnings the run still reports are pre-existing ones elsewhere in the tree (`src/imap_client/search.rs` 10, `src/draft.rs` 4, `examples/mkfixture.rs` 4, `src/oauth2.rs` 3, `src/config.rs` 2, and one each in six other files).
 
 ## Housekeeping
 

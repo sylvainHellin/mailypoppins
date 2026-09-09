@@ -32,7 +32,7 @@ pub mod revision;
 pub mod snapshot;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -106,6 +106,10 @@ pub struct EventQueue {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
     lifecycle: Arc<Mutex<VecDeque<(Revision, events::Event)>>>,
     ready: Arc<Notify>,
+    /// The RAII half of the subscription: the endpoint stays in the fan-out
+    /// until the last handle of this queue drops. Never read, which is the
+    /// point of an owner.
+    _subscription: Arc<Subscription>,
 }
 
 impl EventQueue {
@@ -123,10 +127,36 @@ impl EventQueue {
     ///
     /// A second queue rather than a second [`Change`] variant: a lifecycle
     /// event is about the daemon and not about the state, it reduces to
-    /// nothing, and no snapshot carries it. The connection loop merges the two
-    /// drains by revision before it offers them to its outbound queue.
+    /// nothing, and no snapshot carries it. [`EventQueue::drain_all`] is what
+    /// the connection loop takes; this is the half of it the contract pins.
     pub fn drain_lifecycle(&mut self) -> Vec<(Revision, events::Event)> {
         lock(&self.lifecycle).drain(..).collect()
+    }
+
+    /// Everything this connection is owed, as [`events::Event`]s, oldest
+    /// first, leaving both queues empty.
+    ///
+    /// Both locks are taken before either queue is emptied, and that is the
+    /// whole point of the method. Draining the two queues under two separate
+    /// acquisitions lets a change committed between them (revision N) be
+    /// handed over *after* a lifecycle event that was published later (N+1):
+    /// the client's `StateTracker` then sees N below its watermark and drops
+    /// it as a duplicate, losing a change no snapshot will bring back.
+    ///
+    /// The lock order is events then lifecycle, and nothing takes them the
+    /// other way round: [`CanonicalState::apply`] takes the events lock and
+    /// [`CanonicalState::publish`] the lifecycle one, each one at a time and
+    /// each behind the gate.
+    pub fn drain_all(&mut self) -> Vec<(Revision, events::Event)> {
+        let mut events = lock(&self.events);
+        let mut lifecycle = lock(&self.lifecycle);
+        let mut items: Vec<(Revision, events::Event)> = events
+            .drain(..)
+            .map(|(revision, change)| (revision, events::Event::from_change(&change)))
+            .chain(lifecycle.drain(..))
+            .collect();
+        items.sort_by_key(|(revision, _)| *revision);
+        items
     }
 
     /// How many changes are queued. The lifecycle queue is counted separately,
@@ -172,6 +202,27 @@ struct Endpoint {
     attached: bool,
 }
 
+/// One connection's place in the fan-out, owned by its [`EventQueue`].
+///
+/// Dropping the last handle of that queue removes the endpoint, so a
+/// connection that ends any way at all - a clean close, a framing error, a
+/// panic in its task - stops accumulating events without anyone remembering to
+/// say so. [`Weak`] rather than [`Arc`]: a state that is already gone has no
+/// map to clean up, and the queue must not keep the whole state alive.
+#[derive(Debug)]
+struct Subscription {
+    conn: ConnectionId,
+    inner: Weak<Mutex<Inner>>,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            lock(&inner).subscribers.remove(&self.conn);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The state
 // ---------------------------------------------------------------------------
@@ -180,7 +231,9 @@ struct Endpoint {
 pub struct CanonicalState {
     instance: InstanceId,
     gate: Gate,
-    inner: Mutex<Inner>,
+    /// Behind an [`Arc`] so a subscription guard can hold a [`Weak`] to it and
+    /// unregister its endpoint when the connection's queue drops.
+    inner: Arc<Mutex<Inner>>,
     hook: Mutex<Option<RaceHook>>,
     operations: Mutex<Option<Arc<crate::daemon::operations::OperationRegistry>>>,
 }
@@ -235,7 +288,7 @@ impl CanonicalState {
         CanonicalState {
             instance: instance_id,
             gate: Gate::default(),
-            inner: Mutex::new(inner),
+            inner: Arc::new(Mutex::new(inner)),
             hook: Mutex::new(None),
             operations: Mutex::new(None),
         }
@@ -308,6 +361,10 @@ impl CanonicalState {
 
     /// Create this connection's queue endpoint, which nothing writes to until
     /// [`CanonicalState::bootstrap`] attaches it.
+    ///
+    /// The returned queue *owns* the subscription: dropping it (or its last
+    /// clone) removes the endpoint again, so no caller has to pair this with an
+    /// unsubscribe and no teardown path can forget to.
     pub fn subscribe(&self, conn: ConnectionId) -> EventQueue {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let lifecycle = Arc::new(Mutex::new(VecDeque::new()));
@@ -325,13 +382,20 @@ impl CanonicalState {
             events,
             lifecycle,
             ready,
+            _subscription: Arc::new(Subscription {
+                conn,
+                inner: Arc::downgrade(&self.inner),
+            }),
         }
     }
 
-    /// Forget this connection's queue. Called when its socket closes, so a
-    /// departed client's events do not accumulate forever.
-    pub fn unsubscribe(&self, conn: ConnectionId) {
-        lock(&self.inner).subscribers.remove(&conn);
+    /// How many connections the fan-out writes to, attached or not.
+    ///
+    /// The observable half of the RAII subscription: a departed client's
+    /// endpoint is gone from here, which is what "its events do not accumulate
+    /// forever" means in a test.
+    pub fn subscriber_count(&self) -> usize {
+        lock(&self.inner).subscribers.len()
     }
 
     /// Attach `conn`'s queue to the fan-out and capture the state, as one
@@ -600,6 +664,125 @@ mod tests {
         let inner = gate.enter();
         drop(inner);
         drop(outer);
+    }
+
+    /// The merged drain is revision-ordered *across* calls, which is what one
+    /// lock per queue could not promise: a change committed while the domain
+    /// queue had already been emptied used to be handed over behind a
+    /// lifecycle event published after it, and the client dropped it as a
+    /// duplicate.
+    #[test]
+    fn the_merged_drain_is_revision_ordered_across_calls() {
+        const ROUNDS: u64 = 200;
+
+        let state = Arc::new(state());
+        let conn = ConnectionId(1);
+        let mut queue = state.subscribe(conn);
+        state.bootstrap(conn);
+
+        let producer = Arc::clone(&state);
+        let handle = std::thread::spawn(move || {
+            for round in 0..ROUNDS {
+                producer.apply(Change::MailboxCounts {
+                    account: "alpha".to_string(),
+                    mailbox: "inbox".to_string(),
+                    total: round,
+                    unread: 0,
+                    badge: round,
+                });
+                producer.publish(events::Event::Lifecycle {
+                    kind: "operation.progress",
+                    payload: serde_json::json!({ "round": round }),
+                });
+            }
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut seen: Vec<Revision> = Vec::new();
+        while seen.len() < (2 * ROUNDS) as usize {
+            for (revision, _) in queue.drain_all() {
+                if let Some(last) = seen.last() {
+                    assert!(
+                        revision > *last,
+                        "revision {revision:?} was handed over after {last:?}"
+                    );
+                }
+                seen.push(revision);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {} of {} items were drained",
+                seen.len(),
+                2 * ROUNDS
+            );
+            std::thread::yield_now();
+        }
+        handle.join().expect("the producer thread finished");
+        assert!(
+            queue.drain_all().is_empty(),
+            "the drain leaves both queues empty"
+        );
+    }
+
+    /// One drain of two queues filled in a known interleaving, without a
+    /// thread: the merge is by revision and not by queue.
+    #[test]
+    fn one_merged_drain_interleaves_the_two_queues() {
+        let state = state();
+        let conn = ConnectionId(1);
+        let mut queue = state.subscribe(conn);
+        state.bootstrap(conn);
+
+        state.apply(Change::AccountReady {
+            account: "alpha".to_string(),
+        });
+        state.publish(events::Event::Lifecycle {
+            kind: "daemon.shutting_down",
+            payload: serde_json::json!({"in_seconds": 5}),
+        });
+        state.apply(Change::MailboxCounts {
+            account: "alpha".to_string(),
+            mailbox: "inbox".to_string(),
+            total: 3,
+            unread: 1,
+            badge: 3,
+        });
+
+        let drained = queue.drain_all();
+        let revisions: Vec<u64> = drained.iter().map(|(rev, _)| rev.get()).collect();
+        assert_eq!(revisions, vec![2, 3, 4]);
+        assert!(
+            !drained[0].1.is_lifecycle()
+                && drained[1].1.is_lifecycle()
+                && !drained[2].1.is_lifecycle(),
+            "the lifecycle event sits between the two changes it was published between"
+        );
+    }
+
+    /// The subscription is the queue's: dropping it unregisters the endpoint,
+    /// so no teardown path has to remember to.
+    #[test]
+    fn dropping_the_queue_unsubscribes_the_connection() {
+        let state = state();
+        assert_eq!(state.subscriber_count(), 0);
+
+        let queue = state.subscribe(ConnectionId(1));
+        state.bootstrap(ConnectionId(1));
+        assert_eq!(state.subscriber_count(), 1);
+
+        // A clone keeps it alive: the endpoint goes when the *last* handle does.
+        let clone = queue.clone();
+        drop(queue);
+        assert_eq!(state.subscriber_count(), 1, "a clone still holds it");
+        drop(clone);
+        assert_eq!(state.subscriber_count(), 0);
+
+        // And the fan-out no longer writes to it, which is what the removal is
+        // for: a departed client's events must not accumulate.
+        state.apply(Change::AccountReady {
+            account: "alpha".to_string(),
+        });
+        assert_eq!(state.subscriber_count(), 0);
     }
 
     /// An unset variable is no hook at all, and a value that is not a number

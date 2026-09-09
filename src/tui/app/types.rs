@@ -334,28 +334,29 @@ pub fn count_all_emails(account: &str, mailboxes: &[MailboxInfo]) -> Vec<usize> 
             }
         })
         .unwrap_or_default();
-    // The count is the length of the list, from the same [`indexed_drafts`]
-    // call the mailbox load makes, so the sidebar cannot disagree with the
-    // mailbox it labels.
-    // The count is the length of the Drafts list, which now includes the
-    // parse-skipped error rows, so the sidebar badge matches the list even
-    // when some files would not parse (#0080).
-    let draft_count = || {
-        let (rows, skipped) = indexed_drafts(account);
-        rows.len() + skipped.len()
-    };
-
     mailboxes
         .iter()
         .map(|mb| {
             let key = mailbox_key(mb);
             if key == crate::selector::DRAFTS_MAILBOX {
-                draft_count()
+                draft_count(account)
             } else {
                 counts.get(&key).copied().unwrap_or(0)
             }
         })
         .collect()
+}
+
+/// How many rows the Drafts mailbox holds, for whoever labels it.
+///
+/// The count is the length of the list, from the same [`indexed_drafts`] call
+/// the mailbox load makes, so the sidebar cannot disagree with the mailbox it
+/// labels. It includes the parse-skipped error rows, so the badge matches the
+/// list even when some files would not parse (#0080). Public because the
+/// daemon's `mailbox.list` labels the same mailbox from the same index.
+pub fn draft_count(account: &str) -> usize {
+    let (rows, skipped) = indexed_drafts(account);
+    rows.len() + skipped.len()
 }
 
 /// The `messages.mailbox` value for a sidebar mailbox.

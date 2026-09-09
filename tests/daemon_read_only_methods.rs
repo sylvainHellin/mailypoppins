@@ -1178,7 +1178,7 @@ fn subcommand_names(help: &str) -> Vec<String> {
         if !line.starts_with("  ") || line.starts_with("   ") {
             continue;
         }
-        let name = line.trim_start().split_whitespace().next().unwrap_or("");
+        let name = line.split_whitespace().next().unwrap_or("");
         if !name.is_empty() && name != "help" {
             names.push(name.to_string());
         }
