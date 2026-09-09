@@ -134,3 +134,8 @@ required-features = ["daemon"]
 name = "daemon_dispatcher"
 path = "tests/daemon_dispatcher.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_bootstrap"
+path = "tests/daemon_bootstrap.rs"
+required-features = ["daemon"]
