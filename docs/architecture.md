@@ -22,14 +22,74 @@ No native-Windows code paths (registry, Credential Manager).
 
 ## Crate shape
 
-Single crate, library plus binary.
-All logic lives in `src/lib.rs` modules so the TUI can call them directly without subprocess spawning.
+A Cargo workspace: the root package is the library plus the binary, and `crates/mp-protocol` and `crates/mp-client` are the two daemon crates beside it (see "Daemon and crate boundaries" below).
+All product logic lives in `src/lib.rs` modules so the TUI can call them directly without subprocess spawning.
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).
 The Cargo package and library are `mailypoppins` (#0022), so imports read `use mailypoppins::...` and `insta` snapshot files are prefixed `mailypoppins__`.
 The user-facing name and version string is `mailypoppins X.Y.Z`, set via clap `#[command(name = "mailypoppins")]` and `#[command(version)]` in `src/main.rs`; the Homebrew formula test asserts against that string.
 The one place the old spelling survives is the keyring service fallback below.
+
+## Daemon and crate boundaries
+
+mp is being restructured around a local daemon that owns every store read, every network call and every durable operation, with the CLI, the TUI and a later GUI as clients of it (`.agents/workflow/native-gui-daemon/plan.md`).
+The wire contract is [daemon-protocol.md](daemon-protocol.md) and the operator's half is [daemon-operations.md](daemon-operations.md).
+What follows is the shape that migration imposes on the tree today, which is all that is built.
+
+### The two client-side crates
+
+`crates/mp-protocol` owns the wire: the JSON-RPC message structs, the numeric error table, the newline framing codec and the event envelope.
+It knows nothing about sockets, accounts or the store, and `crates/mp-protocol/fixtures/*.json` pins one committed example of every public shape.
+
+`crates/mp-client` owns the transport: one `Connection` is one Unix-socket connection, and the crate carries the `initialize` handshake and the typed errors a caller branches on.
+It owns no policy, no paths and no configuration.
+
+Neither crate depends on `mailypoppins`, and that is the boundary that matters: a GUI links `mp-client` alone and cannot reach the engine by accident.
+The daemon itself is not a crate; it is `src/daemon/` inside the root package, because it drives the engine that already lives there.
+
+### The `daemon` feature
+
+`src/daemon/` is behind `#[cfg(feature = "daemon")]` for the whole migration.
+`cargo install --path .` ships an `mp` with not a byte of it, so the daemon cannot change what a user runs until P4-U1 removes the gate and makes the daemon the default.
+
+Two test commands follow from that, and CI runs both:
+
+```sh
+cargo test --workspace                     # the product tree
+cargo test --workspace --features daemon   # the daemon and its contract tests
+```
+
+Every daemon contract test gets an explicit `[[test]]` target in `Cargo.toml` with `required-features = ["daemon"]`.
+Cargo skips building a target whose required features are unmet, so a test file may reference `mailypoppins::daemon::…` or `mp_protocol::…` before either exists and the plain `cargo test` still compiles and passes.
+An explicit `[[test]]` block does not disable autodiscovery of the other test files, so nothing else had to move.
+
+The convention is what lets a contract test land in one commit and its implementation in the next: the test commit's proof is that `cargo test` is green and unchanged while `cargo test --features daemon` fails to compile with unresolved imports naming exactly the contract items.
+
+`tests/test_selection_guard.rs` defends the arrangement from the other side.
+It counts `#[test]` attributes by scanning `src/tui/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
+The three floors are 368 TUI tests, 20 golden-frame tests and 18 snapshot files.
+
+### The engine-import allow-list
+
+`tests/architecture_boundaries.rs` walks `src/tui/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
+The file holds 12 pairs over 7 files today, and that 12 is the number Phase 5 has to drive to zero as the TUI stops calling the engine and starts calling the daemon.
+
+It is a record, not a ceiling: a removed import fails the test as loudly as a new one, because the count is the migration's progress bar.
+Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.
+The test is not feature-gated and passes on the pre-daemon tree, and `engine_imports` takes the client source root as an argument so Phase 5 can re-point it at a `crates/mp-tui/` without a rewrite.
+
+### The hidden CLI surfaces
+
+Three surfaces exist under the feature and carry `hide = true` on top of it, so `mp --help` is byte-identical to `docs/baselines/pre-daemon/cli-help.txt` in both builds.
+
+- `mp daemon run | start | status | stop | restart`, the lifecycle commands.
+- `mp --daemon`, a global flag that routes a command through the daemon instead of answering it in process. It never falls back; a routed command that cannot reach a daemon exits 4.
+- `mp account list`, which lands with the daemon work because it is the oracle `mp --daemon account list` must match.
+
+The double gate is deliberate.
+`tests/cli_help_snapshot.rs` holds one snapshot shared by the featured and the unfeatured build, so a subcommand visible under the feature would fail one of the two `cargo test` runs against a snapshot it cannot satisfy.
+P4-U1 drops both the `cfg` and the `hide` and moves the snapshot once.
 
 ## The store
 
@@ -374,8 +434,8 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 
 ## Testing
 
-- **1307 tests**, run by `cargo test`.
-All of them run offline in under a second.
+- **1352 tests**, run by `cargo test --workspace`, and **1470** with `--features daemon`.
+All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`src/tui/ui/golden_frames.rs`).
 `cargo insta review` approves changes; a diff there is a decision, not an approval reflex.
