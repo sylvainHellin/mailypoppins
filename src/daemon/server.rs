@@ -62,6 +62,12 @@ pub struct DaemonState {
     /// Accounts the daemon knows about, empty unless account runtimes were
     /// opted into with `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`.
     pub accounts: Vec<AccountStatus>,
+    /// The accounts `config.toml` declared when this daemon started, in the
+    /// file's order. This is what `account.list` reports and what
+    /// `message.list` resolves an account name against: a runtime table would
+    /// be empty in Phase 2, and a client still has to be able to ask which
+    /// accounts exist.
+    pub configured: Vec<crate::config::AccountConfig>,
     /// How the configuration looked when this daemon started, reported by the
     /// handshake as `config_status`.
     pub config: ConfigReport,
@@ -268,15 +274,27 @@ fn dispatch_request(
         },
         "daemon.status" => (result_value(request.id, state.status_result()), false),
         "daemon.stop" => (result_value(request.id, json!({"stopping": true})), true),
-        other => (
-            Some(error_value(
-                request.id,
-                METHOD_NOT_FOUND,
-                format!("unknown method {other}"),
-                None,
-            )),
-            false,
-        ),
+        other => match super::methods::dispatch(other, &request.params, state) {
+            Some(Ok(result)) => (result_value(request.id, result), false),
+            Some(Err(refusal)) => (
+                Some(error_value(
+                    request.id,
+                    refusal.code,
+                    refusal.message,
+                    refusal.data,
+                )),
+                false,
+            ),
+            None => (
+                Some(error_value(
+                    request.id,
+                    METHOD_NOT_FOUND,
+                    format!("unknown method {other}"),
+                    None,
+                )),
+                false,
+            ),
+        },
     }
 }
 
@@ -342,6 +360,7 @@ mod tests {
                 config_dir: PathBuf::from("/tmp/config"),
             },
             accounts: Vec::new(),
+            configured: Vec::new(),
             config: ConfigReport::Absent {
                 path: PathBuf::from("/tmp/config/config.toml"),
             },
@@ -394,8 +413,7 @@ mod tests {
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32000));
     }
 
-    /// After the handshake, an unknown method is `-32601` again, until the
-    /// domain families land.
+    /// After the handshake, a method no family serves is `-32601` again.
     #[test]
     fn an_unknown_method_after_initialize_is_method_not_found() {
         let state = state_fixture();
@@ -418,7 +436,7 @@ mod tests {
         );
 
         let (reply, stop) =
-            dispatch_request(request("account.list", Some(2)), &state, &mut session);
+            dispatch_request(request("no.such.method", Some(2)), &state, &mut session);
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32601));
     }

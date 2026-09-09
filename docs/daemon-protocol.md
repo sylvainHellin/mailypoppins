@@ -74,7 +74,7 @@ The directory pair is compared canonically, so a symlinked path is not a mismatc
 An application-version difference alone is diagnostic and does not refuse the connection.
 
 A capability identifier names a method family or a behaviour the daemon will serve, and a client requires only what it cannot work without.
-This build advertises `daemon.status` and `daemon.stop`, which are exactly the methods it serves; the domain families join the list in the unit that starts serving them, so requiring `account.list` from this build is a `capability_missing` at the handshake rather than a `-32601` at the first call.
+This build advertises `daemon.status`, `daemon.stop`, `account.list` and `message.list`, which are exactly the methods it serves; a family joins the list in the unit that starts serving it, so requiring one this build does not have is a `capability_missing` at the handshake rather than a `-32601` at the first call.
 
 The handshake happens once per connection, and a second `initialize` on the same connection is `-32600`.
 The session state dies with the connection: it is never expired, reused, or transferred.
@@ -132,6 +132,53 @@ The fields are the daemon's own `daemon.json` metadata plus the live account lis
 The response is written and flushed before the shutdown starts, so the caller always learns the daemon accepted the request.
 Open connections are not drained: the daemon unlinks its runtime files and exits, and a client that loses the socket mid-call reconnects.
 
+### Read-only methods
+
+`account.list` and `message.list` are the first domain methods, and they only read.
+Both take the store path the CLI takes (`store::read`) and neither acquires the account's `EngineLock`: the daemon does not become an account's engine before Phase 5, so a running TUI or `mp sync` keeps the lock while the daemon answers listings beside it.
+
+`account.list` takes `{}` and returns:
+
+```json
+{"accounts": [{"name": "work", "default": true, "backend": "imap", "state": "ready"}]}
+```
+
+It reports the configuration, not the runtimes: every `[[accounts]]` entry of `config.toml`, in the file's order, which is the order an `-A`-less command already treats as authoritative.
+`default` is true for the first configured account and no other, because the CLI has no other notion of a default.
+`backend` follows `auth_method` alone, `graph` for Graph and `imap` for everything else, and is independent of `state`.
+`state` is decided on disk: an account whose store exists and opens is `ready`, and one with no store yet is `blocked`, since it cannot serve a read until `mp sync` writes one.
+This build never reports `opening`: nothing here is asynchronous, so no account is ever between states.
+
+`message.list` takes `{"account": str, "mailbox": str, "limit": u32|null}` and returns:
+
+```json
+{
+  "account": "work",
+  "mailbox": "inbox",
+  "total": 2,
+  "messages": [{
+    "uid": 1,
+    "message_id": "<Bericht@example.com>",
+    "from": "Ivana <ivana@example.com>",
+    "subject": "Bericht",
+    "date_sort": "2026-07-02T11:57:30",
+    "flags": {"seen": true, "answered": true, "forwarded": true},
+    "has_attachments": true
+  }]
+}
+```
+
+`mailbox` accepts a role, a slug or a sidebar label, exactly as `mp list-messages --mailbox` does, and the answer echoes the resolved id rather than the spelling that was sent.
+The order is the store's, `date_sort DESC, id DESC`, the same rows `mp list-messages` and the TUI list show.
+`message_id` is verbatim as ingest stored it, angle brackets included; `from` and `subject` travel as `""` when the header was absent, because the shape says `str`; `date_sort` is `tui::app::resolve_date`'s sort key, so every stack derives it the same way.
+`flags` carries the three axes named above and not the store's fourth, `\Flagged`.
+`total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
+An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
+An empty mailbox of a ready account is an empty listing, not an error.
+
+What the shape does not carry yet is a display date: `date_sort` is derived from the `Date:` header and cannot be turned back into it.
+`mp --daemon list-messages` therefore takes everything but that one printed column from the daemon and reads the header from the same store, which a later revision of this shape removes the need for.
+
 ## Error codes
 
 JSON-RPC's own codes keep their meanings: `-32700` parse error, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, and `-32603` internal error.
@@ -153,6 +200,11 @@ The daemon's conditions occupy `-32009` to `-32000`.
 `identity_mismatch` names both directories on both sides so the client can print all four and tell the user which override to drop.
 `frame_too_large` reports the cap that was breached and the byte count that breached it, the same pair the decoder produces.
 `message` is a human-readable line for the log and the CLI, and clients match on the code, never on the message text.
+
+The read-only methods use four of these.
+An account no configuration names is `account_unknown`, carrying the name that was asked for; a configured account with no readable store is `account_not_ready`, carrying the same `state` `account.list` reports for it, so two answers about one account cannot contradict each other.
+A mailbox the account does not have is `-32602` naming the ones it does, because the caller asked for something that does not exist rather than for something the daemon refuses.
+A store that exists and then fails to open or to read is `-32603`.
 
 The CLI maps two of these onto stable exit codes: `3` for an incompatible daemon, which prints the `mp daemon restart` command, and `4` for a daemon that is unavailable or failed to start, which prints the daemon log path and the `mp daemon run` command.
 
@@ -194,3 +246,4 @@ The `initialize` handshake with the client, protocol, capabilities, and identity
 The `daemon.status` and `daemon.stop` methods, reachable before the handshake, and the `not_initialized` gate on everything else.
 The error table above, codes `-32000` to `-32009`.
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
+The read-only methods `account.list` and `message.list`, both behind the handshake, with the account states `ready` and `blocked`, `null` as the spelling of an unlimited `message.list`, and `-32602` for a mailbox the account does not have.

@@ -8,6 +8,7 @@
 //! byte of this module.
 
 pub mod lifecycle;
+pub mod methods;
 pub mod runtime;
 pub mod server;
 pub mod session;

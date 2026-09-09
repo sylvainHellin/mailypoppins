@@ -1397,3 +1397,9 @@ P4-U1 drops the `cfg` and the `hide` together and moves the snapshot once, with 
 `mp daemon start` must hold `daemon.start.lock` across the spawn *and* the readiness wait, because releasing it at spawn time lets a second starter probe a socket the first daemon has not bound yet and spawn a second daemon.
 The child it spawns therefore cannot take the same lock (`flock` is per open file description and the child's fd is closed by `CLOEXEC`), so `start` passes `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` and the child skips the acquisition; a hand-typed `mp daemon run` takes the lock itself and drops it once the socket is bound and the runtime files are written.
 Readiness is a real `daemon.status` round trip rather than the socket file existing, because the inode appears before `accept` does.
+
+## A wire shape that carries only a derived date cannot render the CLI listing
+
+`message.list` (P2-U11) carries `date_sort`, the UTC sort key `tui::app::resolve_date` derives, while `read_cmd::render_list` prints `messages.date_display`, the `Date:` header verbatim with the sender's offset.
+The derivation is lossy, so `mp --daemon list-messages` cannot reproduce `mp list-messages` byte for byte from the wire alone, and it fills that one column from the local store while taking everything else printed (which messages, in which order, how many the mailbox holds) from the daemon.
+Any later shape that a client renders has to carry the display form of a field beside the sortable one, or own the rendering itself.

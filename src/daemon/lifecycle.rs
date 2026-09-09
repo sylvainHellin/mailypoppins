@@ -75,8 +75,10 @@ const START_LOCK_HELD_ENV: &str = "MAILYPOPPINS_DAEMON_START_LOCK_HELD";
 const EXIT_OK: i32 = 0;
 /// Generic failure, and `status` when no daemon runs.
 const EXIT_ERROR: i32 = 1;
-/// Daemon unavailable or failed to start (plan section 3.0).
-const EXIT_UNAVAILABLE: i32 = 4;
+/// Daemon unavailable or failed to start (plan section 3.0). Public because a
+/// routed client command (`mp --daemon …`) exits with it too, and the two must
+/// not drift apart.
+pub const EXIT_UNAVAILABLE: i32 = 4;
 
 /// How often a bounded wait re-checks its condition.
 const POLL: Duration = Duration::from_millis(25);
@@ -187,9 +189,10 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // handshake reports which of the three cases this daemon is in, so a client
     // can tell "no accounts yet" from "your config does not parse".
     let config_path = crate::config::config_path();
-    let (accounts, config) = if !config_path.exists() {
+    let (accounts, configured, config) = if !config_path.exists() {
         echo(&format!("no config at {}", config_path.display()));
         (
+            Vec::new(),
             Vec::new(),
             ConfigReport::Absent {
                 path: config_path.clone(),
@@ -206,7 +209,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
                     path: config_path.clone(),
                     accounts: config.accounts.len(),
                 };
-                (account_statuses(&config), report)
+                (account_statuses(&config), config.accounts.clone(), report)
             }
             Err(e) => {
                 warn!("[daemon] no usable config, serving zero accounts: {e:#}");
@@ -214,6 +217,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
                     eprintln!("no usable config, serving zero accounts: {e:#}");
                 }
                 (
+                    Vec::new(),
                     Vec::new(),
                     ConfigReport::Invalid {
                         path: config_path.clone(),
@@ -258,6 +262,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
     let state = Arc::new(DaemonState {
         meta,
         accounts,
+        configured,
         config,
     });
     let (shutdown, _) = watch::channel(false);

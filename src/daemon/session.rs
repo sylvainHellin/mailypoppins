@@ -23,13 +23,17 @@ use super::server::DaemonState;
 
 /// The capabilities this build advertises, in the order clients see them.
 ///
-/// Deliberately short and honest: Phase 2 serves exactly these two methods, so
-/// these are the only identifiers a client can require and get. The domain
-/// families (`account.list`, `message.list`, `state.events`) join the list in
-/// the unit that starts serving them, and a client requiring one of those from
-/// a Phase 2 daemon gets `capability_missing` rather than a method that fails
-/// at the first call.
-pub const CAPABILITIES: &[&str] = &["daemon.status", "daemon.stop"];
+/// Deliberately short and honest: these are exactly the methods this build
+/// serves, lifecycle first and the read-only family after it. A family joins
+/// the list in the unit that starts serving it, so a client requiring one this
+/// build does not have gets `capability_missing` at the handshake rather than a
+/// method that fails at the first call.
+pub const CAPABILITIES: &[&str] = &[
+    "daemon.status",
+    "daemon.stop",
+    "account.list",
+    "message.list",
+];
 
 /// Whether `method` is lifecycle surface, reachable before a handshake.
 pub fn is_lifecycle_method(method: &str) -> bool {
@@ -346,6 +350,7 @@ mod tests {
                 config_dir: PathBuf::from("/tmp/mp-test-config"),
             },
             accounts: Vec::new(),
+            configured: Vec::new(),
             config: ConfigReport::Absent {
                 path: PathBuf::from("/tmp/mp-test-config/config.toml"),
             },

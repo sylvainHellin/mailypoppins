@@ -43,6 +43,18 @@ struct Cli {
     /// Account to use (default: first in config)
     #[arg(short = 'A', long, global = true)]
     account: Option<String>,
+
+    /// Answer this command from the local daemon instead of in process.
+    ///
+    /// Debug reach while the daemon is behind the `daemon` feature (P2-U11):
+    /// `mp account list` and `mp list-messages` are routed, everything else
+    /// still runs in process. Hidden, because `mp --help` may not move before
+    /// P4-U1 makes the daemon the default. It never falls back: a routed
+    /// command that cannot reach a daemon exits 4 rather than answering from
+    /// this process.
+    #[cfg(feature = "daemon")]
+    #[arg(long, global = true, hide = true)]
+    daemon: bool,
 }
 
 /// The long help for `mp search`: one grammar, every backend, with examples.
@@ -457,6 +469,17 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<Vec<String>>,
     },
+    /// Inspect the configured accounts.
+    ///
+    /// Hidden and behind the `daemon` cargo feature for the same reason as
+    /// `mp daemon` below: it is the oracle `mp --daemon account list` must
+    /// match, so it lands with the daemon work and becomes visible with it.
+    #[cfg(feature = "daemon")]
+    #[command(hide = true)]
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Manage the local mailypoppins daemon (run, start, status, stop, restart).
     ///
     /// Hidden and behind the `daemon` cargo feature until P4-U1 makes the
@@ -471,6 +494,14 @@ enum Commands {
         #[command(subcommand)]
         action: mailypoppins::daemon::lifecycle::DaemonAction,
     },
+}
+
+/// `mp account <action>`: what a client may ask about the accounts themselves.
+#[cfg(feature = "daemon")]
+#[derive(Clone, Debug, Subcommand)]
+enum AccountAction {
+    /// List the configured accounts, their backend and their state
+    List,
 }
 
 /// Operator commands for the durable outbox (#0037).
@@ -1173,11 +1204,33 @@ fn list_message_groups(
     mailbox: Option<&str>,
     limit: usize,
 ) -> Result<Vec<(String, usize, Vec<mailypoppins::store::read::MessageRow>)>> {
+    let selected = select_mailboxes(account, mailbox)?;
+
+    let mut groups = Vec::new();
+    for info in selected {
+        let mut rows = mailypoppins::store::read::list_mailbox(store, &account.name, &info.id)?;
+        let total = rows.len();
+        rows.truncate(limit);
+        groups.push((info.label.clone(), total, rows));
+    }
+    Ok(groups)
+}
+
+/// The mailboxes a listing covers: the one `--mailbox` names, or every mailbox
+/// of the account but drafts.
+///
+/// Split out of [`list_message_groups`] so the in-process listing and the one
+/// routed through the daemon resolve a mailbox name, and refuse an unknown one,
+/// through the same code and with the same message.
+fn select_mailboxes(
+    account: &AccountConfig,
+    mailbox: Option<&str>,
+) -> Result<Vec<mailypoppins::tui::app::MailboxInfo>> {
     let mailboxes: Vec<_> = mailypoppins::tui::app::build_mailboxes(account)
         .into_iter()
         .filter(|m| m.id != mailypoppins::selector::DRAFTS_MAILBOX)
         .collect();
-    let selected: Vec<_> = match mailbox {
+    match mailbox {
         Some(want) => {
             let hit: Vec<_> = mailboxes
                 .iter()
@@ -1195,19 +1248,246 @@ fn list_message_groups(
                     account.name
                 ));
             }
-            hit
+            Ok(hit)
         }
-        None => mailboxes,
-    };
+        None => Ok(mailboxes),
+    }
+}
 
+/// How long a routed command waits for the daemon, per call.
+#[cfg(feature = "daemon")]
+const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Connect to the local daemon and complete the handshake, or end the run.
+///
+/// `--daemon` never falls back: a command that asked for the daemon and cannot
+/// have it exits 4 with the reason, rather than quietly answering from this
+/// process and letting the user believe the daemon did the work.
+#[cfg(feature = "daemon")]
+async fn daemon_connection() -> mp_client::Connection {
+    use mp_client::{ClientInfo, ClientKind, Connection, Identity};
+    let handshake = async {
+        let mut connection =
+            Connection::connect(&mailypoppins::daemon::runtime::socket_path()).await?;
+        connection
+            .initialize(
+                ClientInfo {
+                    kind: ClientKind::Cli,
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                Identity {
+                    data_dir: mailypoppins::config::mailypoppins_data_dir(),
+                    config_dir: mailypoppins::config::config_dir(),
+                },
+                &[],
+                &[],
+            )
+            .await?;
+        Ok::<Connection, mp_client::ClientError>(connection)
+    };
+    match tokio::time::timeout(DAEMON_TIMEOUT, handshake).await {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(e)) => daemon_unavailable(&format!("{e}")),
+        Err(_) => daemon_unavailable(&format!(
+            "it did not answer within {}s",
+            DAEMON_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// One call on a routed command's connection.
+///
+/// A refusal the daemon spelled out (an unknown account, a mailbox that is not
+/// one) is an ordinary command failure and exits 1; a daemon that stops
+/// answering is exit 4, the same code as one that was never there.
+#[cfg(feature = "daemon")]
+async fn daemon_call(
+    connection: &mut mp_client::Connection,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    match tokio::time::timeout(DAEMON_TIMEOUT, connection.call(method, params)).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(mp_client::ClientError::Rpc(error))) => {
+            eprintln!("{} {}", "\u{2717}".red(), error.message);
+            std::process::exit(1);
+        }
+        Ok(Err(e)) => daemon_unavailable(&format!("{method}: {e}")),
+        Err(_) => daemon_unavailable(&format!(
+            "{method} went unanswered for {}s",
+            DAEMON_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// The exit-4 diagnostic of a routed command: why, where, and how to fix it.
+#[cfg(feature = "daemon")]
+fn daemon_unavailable(why: &str) -> ! {
+    eprintln!(
+        "{} --daemon was asked for and no daemon could serve it: {why}",
+        "\u{2717}".red()
+    );
+    eprintln!(
+        "  socket:    {}",
+        mailypoppins::daemon::runtime::socket_path().display()
+    );
+    eprintln!("  start one: mp daemon start");
+    std::process::exit(mailypoppins::daemon::lifecycle::EXIT_UNAVAILABLE);
+}
+
+/// `mp account list`, printed identically whether the entries were built here
+/// or came off the wire.
+#[cfg(feature = "daemon")]
+fn render_accounts(entries: &[mailypoppins::daemon::methods::account::AccountEntry]) -> String {
+    if entries.is_empty() {
+        return "No accounts configured\n".to_string();
+    }
+    let width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for entry in entries {
+        out.push_str(&format!(
+            "{:width$}  {:5}  {}{}\n",
+            entry.name,
+            entry.backend,
+            entry.state,
+            if entry.default { "  (default)" } else { "" },
+        ));
+    }
+    out
+}
+
+/// `mp --daemon account list`: the daemon's answer, rendered locally.
+#[cfg(feature = "daemon")]
+async fn routed_account_list() -> Vec<mailypoppins::daemon::methods::account::AccountEntry> {
+    let mut connection = daemon_connection().await;
+    let result = daemon_call(&mut connection, "account.list", serde_json::json!({})).await;
+    result["accounts"]
+        .as_array()
+        .map(|accounts| {
+            accounts
+                .iter()
+                .filter_map(mailypoppins::daemon::methods::account::from_json)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `mp --daemon list-messages`: which messages, in which order, and how many
+/// the mailbox holds all come from the daemon.
+///
+/// One `message.list` per listed mailbox, because the method answers about one
+/// mailbox and the grouping is the client's presentation.
+#[cfg(feature = "daemon")]
+async fn routed_list_messages(
+    account: &AccountConfig,
+    mailbox: Option<&str>,
+    limit: usize,
+) -> Result<()> {
+    let mut connection = daemon_connection().await;
     let mut groups = Vec::new();
-    for info in selected {
-        let mut rows = mailypoppins::store::read::list_mailbox(store, &account.name, &info.id)?;
-        let total = rows.len();
-        rows.truncate(limit);
+    for info in select_mailboxes(account, mailbox)? {
+        let result = daemon_call(
+            &mut connection,
+            "message.list",
+            serde_json::json!({
+                "account": account.name,
+                "mailbox": info.id,
+                "limit": limit,
+            }),
+        )
+        .await;
+        let total = result["total"].as_u64().unwrap_or_default() as usize;
+        let dates = date_headers(&account.name, &info.id);
+        let rows = result["messages"]
+            .as_array()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| row_from_wire(message, &info.id, &dates))
+                    .collect()
+            })
+            .unwrap_or_default();
         groups.push((info.label.clone(), total, rows));
     }
-    Ok(groups)
+    print!(
+        "{}",
+        mailypoppins::read_cmd::render_list(&account.name, &groups)
+    );
+    Ok(())
+}
+
+/// The `Date:` headers of one mailbox, by uid.
+///
+/// The one field the routed listing does not get from the daemon: the Phase 2
+/// `message.list` shape carries `date_sort`, the derived sort key, and not the
+/// header `read_cmd::render_list` prints, and a sort key cannot be turned back
+/// into the header it came from. Until the shape carries a display date (see
+/// `docs/daemon-protocol.md`), the routed path fills that column from the same
+/// store the daemon read, which takes no engine lock like every other read. A
+/// store it cannot open costs the date column, not the listing.
+#[cfg(feature = "daemon")]
+fn date_headers(account: &str, mailbox: &str) -> std::collections::HashMap<i64, String> {
+    let Ok(store) = received_store(account) else {
+        return std::collections::HashMap::new();
+    };
+    match mailypoppins::store::read::list_mailbox(&store, account, mailbox) {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|row| row.date_display.map(|date| (row.uid, date)))
+            .collect(),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+/// One `message.list` entry as the row the renderer takes.
+///
+/// The fields the wire does not carry are the ones nothing in a listing reads:
+/// the store id, the other recipients, the body blob, the thread. `flags` is
+/// rebuilt as the token string the store holds, so `MessageRow::flags` parses
+/// it back into the same three bits.
+#[cfg(feature = "daemon")]
+fn row_from_wire(
+    message: &serde_json::Value,
+    mailbox: &str,
+    dates: &std::collections::HashMap<i64, String>,
+) -> mailypoppins::store::read::MessageRow {
+    let uid = message["uid"].as_i64().unwrap_or_default();
+    let text = |key: &str| {
+        message[key]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let flag = |key: &str| message["flags"][key].as_bool().unwrap_or(false);
+    mailypoppins::store::read::MessageRow {
+        id: 0,
+        mailbox: mailbox.to_string(),
+        uid,
+        message_id: message["message_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        from: text("from"),
+        to: None,
+        cc: None,
+        reply_to: None,
+        bcc: None,
+        subject: text("subject"),
+        date_display: dates.get(&uid).cloned(),
+        flags: Some(
+            MessageFlags {
+                seen: flag("seen"),
+                answered: flag("answered"),
+                forwarded: flag("forwarded"),
+                flagged: false,
+            }
+            .to_flag_string(),
+        ),
+        has_attachments: message["has_attachments"].as_bool().unwrap_or(false),
+        body_blob: None,
+        thread_id: None,
+        is_invite: false,
+    }
 }
 
 fn resolve_received_arg(
@@ -2766,6 +3046,11 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::ListMessages { mailbox, limit }) => {
+            #[cfg(feature = "daemon")]
+            if cli.daemon {
+                routed_list_messages(&account_config, mailbox.as_deref(), limit).await?;
+                return Ok(());
+            }
             let store = received_store(&account_config.name)?;
             let groups = list_message_groups(
                 &store,
@@ -3086,6 +3371,18 @@ async fn main() -> Result<()> {
                 mailypoppins::tui::run()?;
             }
         }
+        #[cfg(feature = "daemon")]
+        Some(Commands::Account { action }) => match action {
+            AccountAction::List => {
+                let entries = if cli.daemon {
+                    routed_account_list().await
+                } else {
+                    mailypoppins::daemon::methods::account::entries(&global_config.accounts)
+                };
+                print!("{}", render_accounts(&entries));
+            }
+        },
+
         // Dispatched and exited before the client preamble above, so control
         // never arrives here.
         #[cfg(feature = "daemon")]
