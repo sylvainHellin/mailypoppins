@@ -94,3 +94,18 @@ daemon = []
 [dev-dependencies]
 tempfile = "3"
 insta = "1.39"
+
+# Daemon contract tests. Cargo skips a target whose `required-features` are
+# unmet, so plain `cargo test` compiles and passes unchanged while these files
+# reference `mp_protocol` items that do not exist yet
+# (.agents/workflow/native-gui-daemon/plan.md section 3.0). Declaring targets
+# explicitly does not disable autodiscovery of the other `tests/*.rs` files.
+[[test]]
+name = "daemon_protocol_fixtures"
+path = "tests/daemon_protocol_fixtures.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "daemon_framing"
+path = "tests/daemon_framing.rs"
+required-features = ["daemon"]
