@@ -80,8 +80,9 @@
 //! per account exists at a time, in this process or any other, and a drain
 //! that is refused the lock does nothing at all rather than duplicating work
 //! the holder is already doing. The holder sweeps again while a pass completed
-//! something, so a row a refused peer left behind is filed by the holder
-//! instead of waiting for the next tick.
+//! something, and every sweep reads the clock afresh, so a row a refused peer
+//! left behind, stamped while the holder was inside its APPEND, is filed by
+//! the holder instead of waiting for the next tick.
 //!
 //! `flock` is what makes the lock safe to hold across a slow APPEND: the
 //! kernel releases it when the holding fd closes, however the holder went
@@ -1382,6 +1383,12 @@ pub struct DrainResult {
 /// that an account being sent from continuously cannot hold the lock forever;
 /// what it leaves behind waits for the next tick, which is where it would have
 /// waited anyway.
+///
+/// Every sweep takes a fresh timestamp, and that is load-bearing rather than
+/// tidy. The row a re-sweep exists to pick up was committed *after* the caller
+/// captured its `now`, so it is only eligible against a clock read after it
+/// was stamped; reusing the captured value puts it in a backoff it was never
+/// in and the loop breaks on a sweep that completed nothing.
 const MAX_SWEEPS: usize = 4;
 
 /// [`drain`] under the per-account engine lock: the entry point the live path
@@ -1423,7 +1430,11 @@ pub async fn drain_guarded_at<M: SentMailbox>(
     // before it existed.
     let mut total = DrainResult::default();
     for _ in 0..MAX_SWEEPS {
-        let pass = drain(store, blobs, account, mailbox, now).await?;
+        // A fresh clock per sweep, see [`MAX_SWEEPS`]: `now` was captured
+        // before the lock was taken, and the rows this loop is here for were
+        // stamped after that. `max` keeps an injected `now` authoritative, so
+        // a test that hands this a future timestamp still gets it.
+        let pass = drain(store, blobs, account, mailbox, now.max(unix_now())).await?;
         total.completed += pass.completed;
         total.deduped += pass.deduped;
         total.still_open = pass.still_open;

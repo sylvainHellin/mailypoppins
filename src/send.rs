@@ -2188,7 +2188,9 @@ async fn mark_source_after_send(draft: &EmailDraft, ctx: &SendContext) {
 /// is why it drains under the engine lock: three callers on one account is a
 /// normal Tuesday, and unguarded drains APPEND the same rows once each
 /// (#0116). A drain that is refused the lock reports nothing done, and the
-/// holder files its rows.
+/// holder files its rows: it sweeps again against a clock it re-reads each
+/// time, which is what lets it see a row committed after this timestamp was
+/// taken.
 ///
 /// Never returns an error: a Sent copy that has to wait for the next tick is
 /// not a reason to fail whatever the caller was doing.
@@ -2223,6 +2225,9 @@ pub async fn drain_account(
     // The session is opened on first use, so a drain that is refused the lock
     // costs no server traffic.
     let mut mailbox = crate::imap_client::ImapSentMailbox::new(imap_config);
+    // Captured before the lock, so it is already stale by the time the first
+    // APPEND goes out; the guarded drain re-reads the clock per sweep and only
+    // treats this as a floor.
     let result = crate::outbox::drain_guarded(
         store,
         blobs,

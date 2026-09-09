@@ -53,6 +53,25 @@ The kernel releases it when the holding fd closes, on exit or on a `kill -9`, so
 The refused drain would otherwise leave its row for the next tick, so the holder sweeps again while the last pass completed something, up to `MAX_SWEEPS` (4).
 A row a refused peer left behind, and a row enqueued while the holder was inside a slow APPEND, are both picked up by the holder instead of waiting.
 
+#### Correction, 2026-09-09: the re-sweep was inert as shipped
+
+The lock serialisation above is correct and unchanged.
+The re-sweep was not.
+
+`drain_guarded_at` captured `now` once, from `crate::outbox::unix_now()` evaluated in `send::drain_account` before the lock was taken, and handed that same value to all four sweeps.
+`drain` skips a row whose `row.updated + backoff_secs(row.attempts) > now`, and a fresh row has `attempts = 0` and therefore no backoff, so the test reduces to `row.updated > now`.
+The row a re-sweep exists to file is stamped by `record_submission` while the holder is inside its APPEND, which is after the holder read the clock, so every re-sweep skipped exactly the row it was added for and the loop broke on `pass.completed == 0`.
+The peer's Sent copy waited for the next tick, which is the outcome the loop was written to prevent.
+Nothing was lost or stranded, because a later `resume_outbox` files the row.
+
+Each sweep now reads the clock again, `now.max(unix_now())`.
+The `max` keeps an injected timestamp authoritative, which is what the tests that hand this a future `now` rely on, and it cannot shorten a retry ladder: the ladder is wall-clock (`updated + backoff_secs(attempts)`) and a sweep that runs seconds later is entitled to the seconds that actually passed.
+A row this drain has just attempted carries a fresh `updated` and at least `BACKOFF_BASE_SECS`, so no sweep can retry it inside its own loop.
+
+The test that certified the shipped behaviour was wrong in the same direction.
+`two_racing_drains_append_each_row_exactly_once` drained at `unix_now() + 5`, which put the peer's `updated` five seconds *behind* the holder's `now`, a state the live path cannot reach.
+It now backdates the holder's `now` instead, so the peer's row is stamped after it exactly as in production, and the assertion `holder.completed == 2` fails on the shipped code with `two rows, two APPENDs, no more left: 1 right: 2`.
+
 ### The attempt is committed before it goes out
 
 `begin_append_attempt` increments `attempts` and moves `updated` immediately before the APPEND, in one statement, and the row is skipped when it is no longer in `sent_pending_append`.
@@ -104,6 +123,6 @@ An `mp` command to do it is deliberately not built: deleting mail on a server is
 
 ## Files
 
-- `src/outbox.rs`: `drain_guarded`, `drain_guarded_at`, `MAX_SWEEPS`, `begin_append_attempt`, the `attempted_before` argument to `append_once`, and `record_append` no longer incrementing.
+- `src/outbox.rs`: `drain_guarded`, `drain_guarded_at`, `MAX_SWEEPS`, `begin_append_attempt`, the `attempted_before` argument to `append_once`, and `record_append` no longer incrementing; the per-sweep clock read is the 2026-09-09 correction.
 - `src/send.rs`: `drain_account` goes through `drain_guarded`.
 - `tests/outbox_integration.rs`: `Ledger` and `SharedSent`, the shared Sent mailbox two racing drains append into, and the three tests above.

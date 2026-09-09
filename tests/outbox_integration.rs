@@ -342,6 +342,18 @@ fn state_of(account: &Account, id: i64) -> OutboxState {
     outbox::load(&store, id).unwrap().unwrap().state
 }
 
+/// Move a row's `updated` back, as a row committed before the drain that is
+/// about to pick it up carries it.
+fn backdate(store: &Store, id: i64, updated: i64) {
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET updated = ?2 WHERE id = ?1",
+            rusqlite::params![id, updated],
+        )
+        .unwrap();
+}
+
 fn imap_account(host: &str) -> AccountConfig {
     AccountConfig {
         name: ACCOUNT.to_string(),
@@ -637,6 +649,15 @@ async fn the_appended_uid_is_stored_on_the_row() {
 /// each of which read the open rows the others had not finished and APPENDed
 /// them again: 6, 5, 4, 3, 2 and 1 copies of six messages. The guarded drain
 /// is the fix, and this is the race it has to lose.
+///
+/// The clock here is the live one. `send::drain_account` reads `unix_now()`
+/// before it takes the lock and then spends seconds inside an APPEND, so the
+/// peer's row is stamped *after* the value the holder captured. That is
+/// modelled by putting the holder's `now` five seconds behind real time, with
+/// the row it drains for stamped no later than that, and letting the peer's
+/// row take the live clock. A sweep that reuses the captured value sees the
+/// peer's row as backed off and skips it, so this test only passes while the
+/// sweep reads the clock again.
 #[tokio::test]
 async fn two_racing_drains_append_each_row_exactly_once() {
     let account = Account::new();
@@ -653,9 +674,10 @@ async fn two_racing_drains_append_each_row_exactly_once() {
         .held_until(Arc::clone(&started), Arc::clone(&release));
     let mut quick = ledger.session();
     let lock = account.lock_path();
-    // Ahead of every row's `updated`, so nothing sits in a backoff it was
-    // never put into.
-    let now = outbox::unix_now() + 5;
+    // What the live caller captured, before the lock and before the slow
+    // APPEND. The row it drains for was committed no later than that.
+    let now = outbox::unix_now() - 5;
+    backdate(&store, first_id, now);
 
     let holder = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut slow, now);
     let second_mid = "<race-second@example.com>";
@@ -664,10 +686,16 @@ async fn two_racing_drains_append_each_row_exactly_once() {
         // one was when the next five started.
         started.notified().await;
 
-        // A second send lands, commits its own row and drains for it.
+        // A second send lands, commits its own row and drains for it. Nothing
+        // backdates this one: `record_submission` stamps `updated` with the
+        // live clock, which is ahead of the holder's captured `now`.
         let second_id = enqueue(&account, second_mid, Some(SENT));
         let (store, blobs) = account.open();
         outbox::record_submission(&store, &blobs, second_id, &SubmitOutcome::Accepted).unwrap();
+        assert!(
+            outbox::load(&store, second_id).unwrap().unwrap().updated > now,
+            "the peer's row must be stamped after the holder read the clock"
+        );
         let refused = outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut quick, now)
             .await
             .unwrap();
@@ -688,10 +716,14 @@ async fn two_racing_drains_append_each_row_exactly_once() {
         "a second drain must not run beside the first"
     );
 
-    // And nothing is stranded by the refusal: the lock holder sweeps again and
-    // files the row its refused peer left behind.
+    // And nothing is stranded by the refusal: the lock holder sweeps again,
+    // against a clock it re-reads, and files the row its refused peer left
+    // behind. A sweep on the captured `now` files one row and stops.
     let holder = holder.unwrap().expect("the first drain holds the lock");
-    assert_eq!(holder.completed, 2);
+    assert_eq!(
+        holder.completed, 2,
+        "the holder must file the peer's row in this drain, not at the next tick"
+    );
     assert_eq!(ledger.copies(second_mid), 1);
     assert_eq!(state_of(&account, first_id), OutboxState::Done);
     assert_eq!(state_of(&account, second_id), OutboxState::Done);

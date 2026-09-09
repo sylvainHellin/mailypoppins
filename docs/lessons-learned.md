@@ -1300,3 +1300,35 @@ pass with it deleted. A fix that makes an existing guard unobservable has remove
 the guard, whatever the diff says. Run the guard's own tests against each half
 deleted before and after, and if a half stops biting, the fix is in the wrong
 place.
+
+## A timestamp captured before a loop cannot see what the loop is for
+
+#0116's guarded drain sweeps again while the last pass completed something, so
+the lock holder files the row its refused peer left behind rather than leaving
+it for the next tick. It captured `now` once, in `send::drain_account` before
+the lock was taken, and handed that same value to all four sweeps. `drain`
+skips a row whose `updated + backoff_secs(attempts) > now`, and a fresh row has
+`attempts = 0` and so no backoff, which reduces the test to `updated > now`.
+The row a re-sweep exists to pick up is stamped by `record_submission` while
+the holder is inside its APPEND, after the holder read the clock, so every
+re-sweep skipped exactly the row it was added for and the loop broke on
+`pass.completed == 0`. The primary lock worked, the tests passed, and the
+secondary mechanism was dead for two commits. When a loop re-reads state to
+catch work that arrived after it started, re-read the clock it filters that
+state with too; `now.max(unix_now())` keeps an injected timestamp authoritative
+without freezing time.
+
+## A test that holds on a wall-clock margin is a flake with a fuse
+
+The race test made its rows eligible by draining at `unix_now() + 5`, with a
+comment saying it kept them out of a backoff they were never in. The margin also
+put the peer's `updated` five seconds *behind* the holder's `now`, which the
+live path cannot produce, and that is what hid the inert sweep: `holder
+.completed == 2` certified a timeline production never runs. It was the test's
+only nondeterminism as well. Five seconds of real time is a budget, and a loaded
+run spends it: under 48 concurrent copies of the test binary at 16 threads, one
+of the five seconds was consumed in 10% of runs, and a long enough stall between
+the capture and the peer's commit inverts the assertion. Backdating the holder's
+`now` instead costs nothing and removes the budget: the peer's row is stamped
+after it, as in production, and the drain's own clock read strictly follows that
+stamp, so no stall can flip it.
