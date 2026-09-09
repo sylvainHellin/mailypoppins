@@ -1,0 +1,23 @@
+# Phase 1a risk spike (ticket #0119), deleted at the phase exit gate. Its own
+# workspace root and its own lockfile: `spikes/` is never a member of the root
+# package, so `cargo test` at the repo root neither builds nor sees it.
+[workspace]
+
+[package]
+name = "ipc-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The store the workloads read, by path: the spike measures the real read path
+# rather than a mock, so the rows are the rows a sync writes.
+mailypoppins = { path = "../.." }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# `raw_value` lets the server serialise the result payload once, time that
+# serialisation on its own, and splice it into the envelope without a re-encode.
+serde_json = { version = "1", features = ["raw_value"] }
+memchr = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
