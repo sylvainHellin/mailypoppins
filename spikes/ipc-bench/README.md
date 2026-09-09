@@ -1,7 +1,8 @@
 # ipc-bench
 
-Phase 1a risk spike (ticket #0119, unit P1a-U1): what a JSON-RPC round trip over a Unix socket costs
-against the same work done as a direct library call.
+Phase 1a risk spike (ticket #0119): what a JSON-RPC round trip over a Unix socket costs against the
+same work done as a direct library call (P1a-U1, P1a-U2), and what a 5000-row list costs whole
+against paged (P1a-U3).
 
 Standalone Cargo package with its own `Cargo.lock` and an empty `[workspace]` table, so it is never a
 member of the root package: `cargo test` at the repo root neither builds it nor counts its tests.
@@ -21,8 +22,13 @@ The fixture is the one `docs/baselines/pre-daemon/workloads.md` defines. `--fixt
 another one; when the directory holds no store the harness builds it with exactly the command above
 (`--rows 5000`), so a first run on a clean machine works with no arguments.
 
-Flags: `--workload w1|w2|w3|w4`, `--samples N` (default 2000), `--warmup N` (default 20, untimed),
-`--fixture <dir>` (default `/tmp/mp-ipc-fixture`), `--json`.
+Flags: `--workload <id>`, `--samples N` (default 2000), `--warmup N` (default 20, untimed),
+`--fixture <dir>` (default `/tmp/mp-ipc-fixture`), `--json`, `--direct-thread`, `--direct-first`.
+
+`--direct-thread` runs the direct half of the A/B on a dedicated OS thread outside the tokio runtime
+instead of inline on the runtime, and `--direct-first` takes it before the round trip rather than
+after. Both exist for one question, why the server's `dispatch` stage runs above the direct call on
+w2; the answer is in `docs/baselines/decisions/transport.md`.
 
 `--release` matters: a debug round trip is roughly five times a release one, and the ratio between
 the stages is not the same either.
@@ -35,6 +41,23 @@ the stages is not the same either.
 | `w2` | `list_mailbox(alpha, Bulk)`, 5000 rows | ~1.9 MB, 1 frame |
 | `w3` | `list_account(alpha)`, 5501 rows, streamed in 200-row chunks | ~2.1 MB, 28 frames |
 | `w4` | the 10 MiB body, `<big-body@fixture.invalid>` | ~10.2 MB, 1 frame |
+| `whole` | `list_mailbox(alpha, Bulk)`, 5000 rows, compact positional encoding | ~1.23 MB, 1 frame |
+| `page` | 200 rows of the same listing, `LIMIT`/`OFFSET`, compact | ~50 kB, 1 frame |
+| `count` | the mailbox total the paged client cannot compute itself | 39 B, 1 frame |
+| `jump` | `message.jump_to_date`: the index, plus the page it lands in | ~50 kB, 1 frame |
+| `filter` | `message.filter`: the unread count, plus the first page of matches | ~49 kB, 1 frame |
+| `select_all` | `message.select_all`: 5000 row ids | ~24 kB, 1 frame |
+
+Two composites run several round trips as one sample and sum their stages: `paged-sync` is
+`page` + `count`, what every sync event costs under paging, and `paged` adds `jump`, `filter` and
+`select_all`, what a sync event plus one of each interaction costs. A composite run prints a
+per-step table and carries a `steps` array in its JSON.
+
+The P1a-U3 workloads encode a row as a positional JSON array rather than an object (`CompactEnvelope`
+in `src/proto.rs`), same fifteen fields in the same order, which is the "compact encoding" the unit
+asks for. The paged ones run the `list_mailbox` SQL with a `LIMIT`/`OFFSET` added, because the
+product read path has no paged variant and the spike may not add one to `src/`; that gives paging
+credit for the smaller read it really makes.
 
 `w2`, `w3` and `w4` all answer over the plan's 1 MiB frame cap. The cap is enforced on requests only:
 what to do about the responses is P1a-U4's decision, and a harness that refused to send them could
@@ -50,7 +73,9 @@ not measure the thing that decision needs.
            "server_serialize":{...},"deserialize":{...},"direct":{...}},
  "framing":{"delimiter_scan_us_p50":0.02,"delimiter_scan_us_max":1.46,
             "scanned_bytes":1291,"share_of_p50_pct":0.05},
- "bytes":1197,"frames":1}
+ "bytes":1197,"frames":1,
+ "steps":[{"method":"w1","bytes":1197,"frames":1,"p50_us":38.41,"p95_us":62.01}],
+ "direct_mode":"inline","order":"rpc-first"}
 ```
 
 Top-level `p50_us` / `p95_us` / `max_us` are the client-observed round trip: everything from the

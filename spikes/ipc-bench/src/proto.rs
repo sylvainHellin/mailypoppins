@@ -14,6 +14,12 @@ pub const MAX_REQUEST_FRAME: usize = 1024 * 1024;
 /// stays under the 1 MiB frame cap (a row serialises to roughly 400 bytes).
 pub const CHUNK_ROWS: usize = 200;
 
+/// Rows in one page of the paging option (P1a-U3). One screenful is 40 rows at
+/// most, so 200 is five screens of scroll headroom, and it is the same number
+/// `CHUNK_ROWS` uses so the two options are not compared at different
+/// granularities.
+pub const PAGE_ROWS: usize = 200;
+
 /// The one method the spike server answers.
 pub const METHOD_RUN: &str = "bench.run";
 
@@ -93,14 +99,72 @@ impl From<&mailypoppins::store::read::MessageRow> for Envelope {
     }
 }
 
+/// The same fifteen fields as [`Envelope`], encoded positionally.
+///
+/// This is the "compact encoding" P1a-U3 measures the whole-list option under:
+/// a JSON array per row instead of an object, which drops the key names
+/// (roughly 150 bytes a row) and nothing else. The field set, the order and the
+/// null handling are identical to `Envelope`, so the difference between the two
+/// encodings is the encoding and not the payload.
+///
+/// A tuple struct with more than one field serialises as a JSON array, which is
+/// why this is a tuple struct and not a rename-annotated record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactEnvelope(
+    pub i64,
+    pub String,
+    pub i64,
+    pub String,
+    pub Option<String>,
+    pub Option<String>,
+    pub Option<String>,
+    pub Option<String>,
+    pub Option<String>,
+    pub Option<String>,
+    pub Option<String>,
+    pub Option<String>,
+    pub bool,
+    pub Option<String>,
+    pub bool,
+);
+
+impl From<&mailypoppins::store::read::MessageRow> for CompactEnvelope {
+    fn from(r: &mailypoppins::store::read::MessageRow) -> Self {
+        Self(
+            r.id,
+            r.mailbox.clone(),
+            r.uid,
+            r.message_id.clone(),
+            r.from.clone(),
+            r.to.clone(),
+            r.cc.clone(),
+            r.reply_to.clone(),
+            r.bcc.clone(),
+            r.subject.clone(),
+            r.date_display.clone(),
+            r.flags.clone(),
+            r.has_attachments,
+            r.thread_id.clone(),
+            r.is_invite,
+        )
+    }
+}
+
 /// One shape for every workload's answer, so the client deserialises into a
 /// concrete type (the realistic cost) without knowing which workload it asked
 /// for at the type level.
+///
+/// Absent members are skipped on the wire: an answer that carries ids must not
+/// pay for an empty `rows` key, or the byte comparison the list-transfer
+/// decision rests on would charge each option for the other one's fields.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct WorkResult {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<Envelope>,
-    #[serde(default)]
+    /// Rows in the positional encoding, used by the P1a-U3 workloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compact: Vec<CompactEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// Number of `bench.chunk` frames that carried `rows`, 0 when unstreamed.
     #[serde(default)]
@@ -108,6 +172,15 @@ pub struct WorkResult {
     /// Rows the server produced, whether or not they travelled in the response.
     #[serde(default)]
     pub row_count: u32,
+    /// `message.select_all`: every row id of the current view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<i64>,
+    /// `message.jump_to_date`: the position the cursor lands on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    /// A total the client cannot compute because it does not hold every row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
 }
 
 /// Server-side stage timings, carried back on every response.

@@ -98,7 +98,9 @@ impl Client {
             } else {
                 let decoded: Response =
                     serde_json::from_str(text).context("decoding the response")?;
-                rows += decoded.result.rows.len();
+                rows += decoded.result.rows.len()
+                    + decoded.result.compact.len()
+                    + decoded.result.ids.len();
                 response = Some(decoded);
             }
         }
