@@ -53,17 +53,21 @@
 //! lock is already held for longer than the call, which is strictly stronger.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::future::{BoxFuture, FutureExt};
 use log::{debug, info, warn};
+use mp_protocol::events::SyncCompleted;
 use tokio::sync::watch;
 
 use crate::config::AccountConfig;
+use crate::daemon::sync_outcome::from_sync_result;
 use crate::engine_lock::EngineLock;
 use crate::sync::tick::run_tick_with_drains;
+use crate::sync::SyncResult;
 
 use super::pool::{PooledRead, ReadPool};
 
@@ -131,6 +135,14 @@ pub struct TickOutcome {
     /// The body's error, rendered with `{:#}`. A failing body is reported here,
     /// never propagated: the tail has already run by the time it is known.
     pub error: Option<String>,
+    /// The tick's typed outcome, ready to be committed as a
+    /// [`Change::SyncCompleted`](crate::daemon::state::Change).
+    ///
+    /// `None` on a blocked tick, which entered no phase and has nothing to
+    /// report, and `None` on a joiner, because the tick it attached to reports
+    /// its own outcome once and two commits for one tick would be two facts
+    /// where there was one.
+    pub sync: Option<SyncCompleted>,
 }
 
 /// What a hook is told about the slot it is filling.
@@ -167,6 +179,40 @@ pub struct TickHooks {
     pub body: BodyHook,
 }
 
+/// Where the production hooks leave what only they can know.
+///
+/// The tick's seam is [`TickHooks`], whose three callbacks return a status
+/// string and a bare `Result<()>`: that is the shape
+/// `tests/daemon_account_runtime.rs` pins, and widening it would rewrite a
+/// contract this unit does not own. The engine's [`SyncResult`] and the
+/// mutation drain's failure count therefore arrive here, in a slot the runtime
+/// and its production hooks share, and [`AccountRuntime::run_tick`] empties it
+/// once per tick.
+#[derive(Clone, Debug, Default)]
+struct TickReport {
+    /// What the body's sync returned, `None` for a tick whose body is injected
+    /// or failed before the engine ran.
+    sync: Arc<Mutex<Option<SyncResult>>>,
+    /// Mutations rolled back across both of the tick's drains.
+    failed_mutations: Arc<AtomicU64>,
+}
+
+impl TickReport {
+    /// Forget the previous tick's facts, so nothing leaks into this one.
+    fn reset(&self) {
+        *lock(&self.sync) = None;
+        self.failed_mutations.store(0, Ordering::SeqCst);
+    }
+
+    /// Everything this tick recorded, leaving the slot empty.
+    fn take(&self) -> (SyncResult, u64) {
+        (
+            lock(&self.sync).take().unwrap_or_default(),
+            self.failed_mutations.swap(0, Ordering::SeqCst),
+        )
+    }
+}
+
 /// One account's engine: the lock, the pool, and the tick.
 pub struct AccountRuntime {
     /// The configured account name.
@@ -185,6 +231,9 @@ pub struct AccountRuntime {
     /// `Some` while a tick is running: its receiver resolves to that tick's
     /// outcome, which is what a joiner returns.
     running: Mutex<Option<watch::Receiver<Option<TickOutcome>>>>,
+    /// Where the production hooks leave the engine's result. Empty for a
+    /// runtime built with injected hooks, which report zeros.
+    report: TickReport,
 }
 
 /// Which side of the join a [`AccountRuntime::tick`] call is on, decided under
@@ -217,8 +266,11 @@ impl AccountRuntime {
     /// The mechanism, split out so a test can point it at a tempdir, exactly as
     /// [`EngineLock::try_acquire_at`] is.
     pub fn start_at(dir: &Path, cfg: AccountConfig, pool_size: usize) -> Result<Self> {
-        let hooks = production_hooks(Arc::new(cfg.clone()));
-        Self::start_at_with_hooks(dir, cfg, pool_size, hooks)
+        let report = TickReport::default();
+        let hooks = production_hooks(Arc::new(cfg.clone()), report.clone());
+        let mut runtime = Self::start_at_with_hooks(dir, cfg, pool_size, hooks)?;
+        runtime.report = report;
+        Ok(runtime)
     }
 
     /// The same, with the tick's three halves replaced.
@@ -262,6 +314,7 @@ impl AccountRuntime {
             body_deadline: (cfg.imap.body_fetch_deadline_secs > 0)
                 .then(|| Duration::from_secs(cfg.imap.body_fetch_deadline_secs)),
             running: Mutex::new(None),
+            report: TickReport::default(),
         })
     }
 
@@ -293,6 +346,7 @@ impl AccountRuntime {
                 body_deadline: self.body_deadline,
                 status: String::new(),
                 error: None,
+                sync: None,
             };
         }
 
@@ -318,6 +372,9 @@ impl AccountRuntime {
                     let published = receiver.borrow_and_update().clone();
                     if let Some(mut outcome) = published {
                         outcome.joined = true;
+                        // The runner commits the tick's outcome; a joiner
+                        // reports the same tick and must not commit it twice.
+                        outcome.sync = None;
                         return outcome;
                     }
                     if receiver.changed().await.is_err() {
@@ -335,6 +392,7 @@ impl AccountRuntime {
                             error: Some(
                                 "the tick this call joined ended without an outcome".to_string(),
                             ),
+                            sync: None,
                         };
                     }
                 }
@@ -352,6 +410,7 @@ impl AccountRuntime {
 
     /// The tick itself: [`run_tick_with_drains`] over the installed hooks.
     async fn run_tick(&self, kind: TickKind) -> TickOutcome {
+        self.report.reset();
         let phases = Mutex::new(Vec::with_capacity(5));
         let context = |phase: Phase| {
             lock(&phases).push(phase);
@@ -380,6 +439,8 @@ impl AccountRuntime {
             run_tick_with_drains(head, || (self.hooks.body)(context(Phase::Body)), tail).await;
 
         let entered = lock(&phases).clone();
+        let error = result.err().map(|e| format!("{e:#}"));
+        let (sync_result, failed_mutations) = self.report.take();
         TickOutcome {
             kind,
             phases: entered,
@@ -387,7 +448,13 @@ impl AccountRuntime {
             blocked: false,
             body_deadline: self.body_deadline,
             status,
-            error: result.err().map(|e| format!("{e:#}")),
+            sync: Some(from_sync_result(
+                &self.account,
+                &sync_result,
+                failed_mutations,
+                error.clone(),
+            )),
+            error,
         }
     }
 }
@@ -409,11 +476,11 @@ impl std::fmt::Debug for AccountRuntime {
 
 /// The real drains and the real sync, which is what [`AccountRuntime::start`]
 /// and [`AccountRuntime::start_at`] install.
-fn production_hooks(cfg: Arc<AccountConfig>) -> TickHooks {
+fn production_hooks(cfg: Arc<AccountConfig>, report: TickReport) -> TickHooks {
     TickHooks {
         outbox: outbox_hook(Arc::clone(&cfg)),
-        mutations: mutations_hook(Arc::clone(&cfg)),
-        body: body_hook(cfg),
+        mutations: mutations_hook(Arc::clone(&cfg), report.clone()),
+        body: body_hook(cfg, report),
     }
 }
 
@@ -448,9 +515,10 @@ fn outbox_hook(cfg: Arc<AccountConfig>) -> DrainHook {
 /// A drained op is silent; a failed one has already been rolled back, so the
 /// suffix points at the log rather than repeating the per-op error. The wording
 /// is the TUI's, so the same tick reads the same way in both clients.
-fn mutations_hook(cfg: Arc<AccountConfig>) -> DrainHook {
+fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport) -> DrainHook {
     Arc::new(move |ctx: TickContext| {
         let cfg = Arc::clone(&cfg);
+        let report = report.clone();
         async move {
             let drained = off_thread("the mutation-queue drain", move || async move {
                 crate::pending_ops::resume_account(&cfg).await
@@ -458,10 +526,17 @@ fn mutations_hook(cfg: Arc<AccountConfig>) -> DrainHook {
             .await
             .and_then(|inner| inner);
             match drained {
-                Ok(Some(drained)) if drained.failed > 0 => format!(
-                    "; {} mutation(s) failed and were rolled back (see the log)",
-                    drained.failed
-                ),
+                Ok(Some(drained)) if drained.failed > 0 => {
+                    // Added rather than stored: a tick drains twice, and the
+                    // outcome reports what the whole tick rolled back.
+                    report
+                        .failed_mutations
+                        .fetch_add(drained.failed as u64, Ordering::SeqCst);
+                    format!(
+                        "; {} mutation(s) failed and were rolled back (see the log)",
+                        drained.failed
+                    )
+                }
                 Ok(_) => String::new(),
                 Err(e) => {
                     warn!(
@@ -483,15 +558,18 @@ fn mutations_hook(cfg: Arc<AccountConfig>) -> DrainHook {
 /// whose credentials are missing must still be a runtime that serves reads and
 /// drains queues. A failed load is the body's `Err`, which the tail drain runs
 /// after and the outcome carries.
-fn body_hook(cfg: Arc<AccountConfig>) -> BodyHook {
+fn body_hook(cfg: Arc<AccountConfig>, report: TickReport) -> BodyHook {
     Arc::new(move |ctx: TickContext| {
         let cfg = Arc::clone(&cfg);
+        let report = report.clone();
         async move {
-            off_thread("the sync body", move || async move {
+            let result = off_thread("the sync body", move || async move {
                 sync_once(&cfg, &ctx).await
             })
             .await
-            .and_then(|inner| inner)
+            .and_then(|inner| inner)?;
+            *lock(&report.sync) = Some(result);
+            Ok(())
         }
         .boxed()
     })
@@ -534,7 +612,7 @@ where
 }
 
 /// One sync pass over every configured mailbox of `cfg`.
-async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<()> {
+async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult> {
     use crate::config::ImapConfig;
     use crate::store::{BlobStore, Store};
     use crate::sync::engine::{run_sync, SyncRun};
@@ -566,7 +644,7 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<()> {
 
     // Unguarded on purpose: this runtime is holding `store.lock` already. See
     // the module docs.
-    run_sync(
+    let result = run_sync(
         &mut backend,
         &SyncRun {
             store: &store,
@@ -582,7 +660,7 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<()> {
         &mut span,
     )
     .await?;
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]

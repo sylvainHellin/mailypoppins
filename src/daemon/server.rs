@@ -37,12 +37,12 @@ use mp_protocol::{
 
 use super::dispatch::Dispatcher;
 use super::operations::OperationRegistry;
-use super::runtime::account::{AccountRuntime, Readiness};
+use super::runtime::account::{AccountRuntime, Readiness, TickKind, TickOutcome};
 use super::runtime::InstanceMeta;
 use super::session::{ConfigReport, Session};
 use super::state::events::{Event, Outbound, Outgoing, Subscriber};
 use super::state::{
-    seeds_from_config, CanonicalState, ConnectionId, EventQueue, InstanceId, Revision,
+    seeds_from_config, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, Revision,
 };
 
 /// JSON-RPC standard codes this unit emits. The daemon range lives in
@@ -266,6 +266,32 @@ impl DaemonState {
             operations,
             runtimes: RuntimeTable::default(),
         }
+    }
+
+    /// Run one tick on `account`'s runtime and commit what it did.
+    ///
+    /// The one place a real `sync.completed` is published. A tick that ran
+    /// carries a [`SyncCompleted`](mp_protocol::events::SyncCompleted) built
+    /// from the engine's own `SyncResult` and the mutation drains' failure
+    /// count, and it is committed through
+    /// [`CanonicalState::apply`](super::state::CanonicalState::apply), which
+    /// stamps it with a fresh revision and fans it out to every bootstrapped
+    /// connection without reducing anything into the snapshot.
+    ///
+    /// `None` for an account with no live runtime. A blocked tick and a joined
+    /// one carry no outcome and commit nothing: the first ran no engine, and
+    /// the second is reporting a tick whose runner commits it once.
+    ///
+    /// Nothing calls this on a schedule yet. Phase 3b starts runtimes and holds
+    /// their engine locks; the periodic tick is the Phase 5/6 scheduler's, and
+    /// this is the seam it will call.
+    pub async fn tick_account(&self, account: &str, kind: TickKind) -> Option<TickOutcome> {
+        let runtime = self.runtimes.get(account)?;
+        let outcome = runtime.tick(kind).await;
+        if let Some(sync) = outcome.sync.clone() {
+            self.canonical.apply(Change::SyncCompleted(sync));
+        }
+        Some(outcome)
     }
 
     /// The `result` of `daemon.status`.
@@ -768,6 +794,103 @@ mod tests {
                 path: PathBuf::from("/tmp/config/config.toml"),
             },
         )
+    }
+
+    /// The same, with one configured account, so the canonical state has a
+    /// seed a change can be addressed to.
+    fn state_with_one_account(name: &str) -> DaemonState {
+        use std::path::PathBuf;
+        let account = crate::config::AccountConfig {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        DaemonState::new(
+            InstanceMeta {
+                app_version: "0.0.0-test".to_string(),
+                protocol_min: mp_protocol::PROTOCOL_MIN,
+                protocol_max: mp_protocol::PROTOCOL_MAX,
+                instance_id: "abcd".to_string(),
+                pid: 42,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                data_dir: PathBuf::from("/tmp/data"),
+                config_dir: PathBuf::from("/tmp/config"),
+            },
+            vec![AccountStatus {
+                name: name.to_string(),
+                state: "opening".to_string(),
+            }],
+            vec![account],
+            ConfigReport::Loaded {
+                path: PathBuf::from("/tmp/config/config.toml"),
+                accounts: 1,
+            },
+        )
+    }
+
+    /// A tick whose body fails, so the commit path is exercised without an
+    /// IMAP server: the hooks are injected, and the failure is what makes the
+    /// committed severity distinguishable from a default.
+    #[tokio::test]
+    async fn a_tick_commits_its_outcome_as_one_sync_completed_event() {
+        use super::super::runtime::account::{BodyHook, DrainHook, TickContext, TickHooks};
+        use futures::future::FutureExt;
+        use mp_protocol::events::{Severity, SyncCompleted, KIND_SYNC_COMPLETED};
+
+        let state = state_with_one_account("alpha");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let quiet: DrainHook = Arc::new(|_ctx: TickContext| async { String::new() }.boxed());
+        let body: BodyHook =
+            Arc::new(|_ctx: TickContext| async { Err(anyhow::anyhow!("login refused")) }.boxed());
+        let runtime = AccountRuntime::start_at_with_hooks(
+            dir.path(),
+            crate::config::AccountConfig {
+                name: "alpha".to_string(),
+                ..Default::default()
+            },
+            1,
+            TickHooks {
+                outbox: Arc::clone(&quiet),
+                mutations: quiet,
+                body,
+            },
+        )
+        .expect("a runtime starts against a free lock");
+        state.runtimes.insert(Arc::new(runtime));
+
+        let conn = ConnectionId(9);
+        let mut queue = state.canonical.subscribe(conn);
+        let (_, bootstrap, _) = state.canonical.bootstrap(conn);
+
+        let outcome = state
+            .tick_account("alpha", TickKind::Quick)
+            .await
+            .expect("a live runtime ticks");
+        assert_eq!(outcome.error.as_deref(), Some("login refused"));
+
+        let drained = queue.drain_all();
+        assert_eq!(drained.len(), 1, "one tick is one event: {drained:?}");
+        let (revision, event) = &drained[0];
+        assert!(revision.get() > bootstrap.get());
+        assert_eq!(event.kind(), KIND_SYNC_COMPLETED);
+        assert!(
+            event.is_lifecycle(),
+            "an outcome merges with nothing and survives an overflow"
+        );
+        let payload: SyncCompleted =
+            serde_json::from_value(event.payload()).expect("a typed outcome");
+        assert_eq!(payload.account, "alpha");
+        assert_eq!(payload.severity, Severity::Error);
+        assert_eq!(payload.error.as_deref(), Some("login refused"));
+    }
+
+    /// An account with no runtime has no tick, and therefore nothing to
+    /// commit: a fabricated clean outcome would be a sync that never ran.
+    #[tokio::test]
+    async fn an_account_without_a_runtime_ticks_nothing_and_commits_nothing() {
+        let state = state_with_one_account("alpha");
+        let before = state.canonical.revision();
+        assert!(state.tick_account("alpha", TickKind::Quick).await.is_none());
+        assert_eq!(state.canonical.revision(), before);
     }
 
     fn request(method: &str, id: Option<i64>) -> Value {

@@ -24,6 +24,8 @@ use serde_json::{json, Value};
 
 use crate::daemon::state::events::fake_event_burst;
 use crate::daemon::state::{CanonicalState, Change, ConnectionId};
+use crate::daemon::sync_outcome::fake_sync_outcomes;
+use mp_protocol::events::SyncCompleted;
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,
@@ -44,6 +46,10 @@ pub struct StateBootstrap {
     /// [`FAKE_EVENT_BURST_ENV`](crate::daemon::state::events::FAKE_EVENT_BURST_ENV).
     /// `None` in every real daemon.
     fake_burst: Option<u64>,
+    /// The test-only sync outcomes, read once at startup from
+    /// [`FAKE_SYNC_OUTCOME_ENV`](crate::daemon::sync_outcome::FAKE_SYNC_OUTCOME_ENV).
+    /// Empty in every real daemon.
+    fake_outcomes: Vec<SyncCompleted>,
 }
 
 /// The next mailbox slug the burst hook will use, for the life of the process.
@@ -60,6 +66,7 @@ impl StateBootstrap {
             fake_ready,
             armed: AtomicBool::new(false),
             fake_burst: fake_event_burst(),
+            fake_outcomes: fake_sync_outcomes(),
         }
     }
 
@@ -121,6 +128,39 @@ impl StateBootstrap {
             }
         });
     }
+
+    /// Commit the test-only sync outcomes, once per bootstrap.
+    ///
+    /// Off the bootstrap's own path and after its revision was captured, so
+    /// every outcome lands above the revision the bootstrap reported and a
+    /// client that watermarked at it applies all of them in order. Each one is
+    /// addressed to the first configured account, whatever `account` the JSON
+    /// carried: the hook exists to exercise the wire, not to invent accounts
+    /// the daemon does not have, and a change naming an unknown account would
+    /// be dropped by [`CanonicalState::apply`]'s reducer.
+    ///
+    /// On the blocking pool for the burst's reason: these are synchronous
+    /// commits with no await in them.
+    fn arm_fake_outcomes(&self) {
+        if self.fake_outcomes.is_empty() {
+            return;
+        }
+        let Some(account) = self.state.account_names().into_iter().next() else {
+            return;
+        };
+        let outcomes = self.fake_outcomes.clone();
+        let state = Arc::clone(&self.state);
+        info!(
+            "[daemon] fake sync outcomes armed, {} after this bootstrap",
+            outcomes.len()
+        );
+        tokio::task::spawn_blocking(move || {
+            for mut outcome in outcomes {
+                outcome.account = account.clone();
+                state.apply(Change::SyncCompleted(outcome));
+            }
+        });
+    }
 }
 
 impl Method for StateBootstrap {
@@ -139,6 +179,7 @@ impl Method for StateBootstrap {
                 self.state.bootstrap(ConnectionId(ctx.connection_id));
             self.arm_fake_readiness();
             self.arm_fake_burst();
+            self.arm_fake_outcomes();
             Ok(Outcome::query(json!({
                 "instance_id": instance.as_str(),
                 "revision": revision.get(),

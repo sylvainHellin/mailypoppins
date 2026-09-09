@@ -195,6 +195,15 @@ The changes are committed off the bootstrap's own path and after its revision wa
 With no configured account there is nothing to commit against and the hook does nothing.
 It is what pins the backpressure cases in `tests/daemon_events.rs`, and its name is `mailypoppins::daemon::state::events::FAKE_EVENT_BURST_ENV`.
 
+`MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME=<json>` commits one `sync.completed` outcome per element of a JSON array after **every** `state.bootstrap`, in array order, against the first configured account.
+A bare object is read as an array of one.
+Phase 3b schedules no tick, so nothing would otherwise publish an outcome and every assertion about one arriving over the socket would be vacuous.
+Each element's `account` is ignored and replaced by the configured name, and every other field travels verbatim, `severity` included, so a test can pin a severity no fake sync could produce.
+The outcomes are committed off the bootstrap's own path and after its revision was captured, so every one of them lands above the revision the bootstrap reported.
+It is inert unless `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` is set too: without a runtime there is no tick, and a hook that fired anyway would report on an engine that is not running.
+Unset, empty, unparseable, or with no configured account it does nothing.
+It is what pins the socket cases in `tests/daemon_sync_outcome.rs`, and its name is `mailypoppins::daemon::sync_outcome::FAKE_SYNC_OUTCOME_ENV`.
+
 `MAILYPOPPINS_DAEMON_FAKE_OPERATIONS=1` registers one extra method, `test.operation`, so a client can start, watch and cancel a long-running operation.
 Its params are `{"steps": u64, "step_ms": u64, "scope": "durable"|"client_scoped", "fail_at": u64|null}`; it answers immediately with `{"operation_id": str}` and reports `steps` times, `step_ms` apart, before succeeding with `{"steps": steps}`.
 A non-null `fail_at` of `k` fails with `-32603` and `{"failed_at": k}` after the `k`-th report instead of continuing, and a cancelled operation's worker stops before its next report.
@@ -206,7 +215,7 @@ It is what pins the wire cases in `tests/daemon_operations.rs`, and its name is 
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
 
-The four flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number.
+The four flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number, and the sync-outcome hook unless its value parses as a payload.
 A test that runs `mp` as a subprocess should `env_remove` every hook it does not want, or an exported one in the developer's shell will change what the test observes.
 
 ## Login mode

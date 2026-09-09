@@ -39,7 +39,7 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - `schemars` is not adopted now. Phase 2 pins the protocol with checked-in JSON fixtures, and the JSON Schema question reopens at Phase 7, the first consumer.
 - `notify` is not adopted. The daemon's draft, signature and config watcher uses the 1-second fingerprint poll the TUI already runs, moved into the daemon, and a filesystem-notification crate is revisited only if that poll proves inadequate under test.
 - `uuid` stays transitive. Ids are minted from `rand` plus a hex format, so no RFC-4122 shape and no new direct dependency.
-- `SyncResult.bodies_truncated` stays a count. Widening it to the list of deadline-stopped mailbox names is a behaviour change to the wording contracts of #0113 and #0115 and gets its own ticket rather than riding along with the daemon's sync event.
+- `SyncResult.bodies_truncated` stays a count, and so does the `bodies_truncated` field of the daemon's `sync.completed` payload, which P3b-U6 shipped carrying the data that exists. Widening either to the list of deadline-stopped mailbox names is a behaviour change to the engine and to the wording contracts of #0113 and #0115, it moves a wire field from `u64` to an array and therefore needs a protocol-changelog entry, and it gets its own ticket rather than riding along with the daemon's sync event.
 - The capabilities #0109, #0110 and #0111 retired (inline images, auto-mark-read, the rich HTML preview) are not restored by the GUI. Their identifiers stay reserved in the matrix so a later document cannot rebind them.
 
 ## Next

@@ -510,6 +510,11 @@ impl Inner {
                     outbox.failed = *failed;
                 }
             }
+            // A command outcome reduces to nothing: no snapshot carries a last
+            // sync, so a client that bootstraps between two ticks learns about
+            // neither, which is what a command outcome is. It still takes a
+            // revision and still fans out.
+            Change::SyncCompleted(_) => {}
         }
     }
 

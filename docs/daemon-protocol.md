@@ -373,6 +373,7 @@ An instance change poisons it the same way: a client that kept applying past eit
 
 `mp-client`'s `StateTracker` is stricter than that today and treats any jump above `watermark + 1` as a gap, which is exact only on a stream that coalesced nothing.
 The two agree in this build, because Phase 3a registers no method that commits a change and the only producer is the burst hook, whose events name distinct resources on purpose.
+Phase 3b's `sync.completed` does not change that: it is a lifecycle event, it takes its revision from the same counter under the same gate as every committed change, and it merges with nothing, so a run of outcomes reaches a client dense and `StateTracker` applies every one of them.
 Reconciling them, by having the daemon carry the highest revision a merged entry superseded or by dropping the arithmetic in favour of the daemon's own control message, is a Phase 3b item and is in `BACKLOG.md`.
 
 ### Event kinds
@@ -391,7 +392,42 @@ Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbo
 A removal is a fact about a moment and is never merged with anything, in either direction, including another removal of the same resource.
 
 `operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
-The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.removed` and `outbox.counts_changed`, which are not wire kinds: those changes travel as `state.invalidate` and `state.remove`, and the six kinds listed here are the whole of what a client sees.
+`sync.completed` is the third lifecycle kind, described below.
+The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.removed` and `outbox.counts_changed`, which are not wire kinds: those changes travel as `state.invalidate` and `state.remove`, and the seven kinds listed here are the whole of what a client sees.
+
+### `sync.completed`
+
+One sync tick finished, and the payload is everything it did.
+A tick is a command outcome rather than a resource's state, so the event names no resource, reduces into no snapshot, and a client that bootstraps between two ticks learns about neither.
+
+| field | type | meaning |
+|---|---|---|
+| `account` | string | the account the tick belongs to |
+| `severity` | `"ok"` \| `"warning"` \| `"error"` | how a client presents it |
+| `saved` | u64 | messages ingested as new rows |
+| `skipped` | u64 | messages the store already held |
+| `flags_updated` | u64 | rows whose flags were updated from the server |
+| `pruned` | u64 | rows deleted because the server no longer lists their UID |
+| `prunes_deferred` | u64 | rows found vanished and not deleted, because the pass came back short |
+| `uid_rebound` | u64 | rows rebound to a new UID after a UIDVALIDITY reset |
+| `uidvalidity_resets` | u64 | mailboxes refetched in full after a UIDVALIDITY mismatch |
+| `bodies_truncated` | u64 | mailboxes stopped at the body-fetch deadline with mail still to download |
+| `non_converging` | array of string | mailboxes that downloaded the same UIDs again, sorted and deduplicated |
+| `failed_mutations` | u64 | queued mutations that failed and were rolled back |
+| `error` | string or null | the engine's error rendered with `{:#}`, `null` on a tick that ran |
+
+Every key is present on every payload, so a client never branches on an absent one, and a tick that did not fail carries `"error": null` rather than an empty string.
+
+The severity is decided in this order: an `error` that is not null is `error` whatever else the tick did; otherwise a non-empty `non_converging` **or** a `failed_mutations` above zero is `warning`; otherwise the tick is `ok`.
+`bodies_truncated` and `prunes_deferred` never raise it: a deadline stop is progress, because the mailbox has more mail on the server and the next tick resumes from the same cursor, and a deferred prune is a suspended deletion rather than a failure.
+The daemon decides the severity and the wire carries it; a client applies what it was sent rather than deriving its own, because a client that recomputed could disagree with the daemon after a rule change and present a warning tick as clean.
+
+The payload carries no formatted string.
+The TUI's status line and `mp sync`'s lines are derived from it by `mp_client::format::sync_status_line` and `mp_client::format::sync_cli_lines`, which are pure functions over the payload and hold every wording in one place.
+
+`sync.completed` is a lifecycle event and coalesces with nothing.
+Two ticks are two facts about two moments: merging an earlier warning into a later clean tick would present that tick as clean, which is exactly what the severity exists to prevent.
+A queued outcome therefore also survives a queue overflow's discard, because no re-bootstrap would bring it back.
 
 ### Delivery, coalescing and caps
 

@@ -96,6 +96,15 @@ pub use super::state::events::FAKE_EVENT_BURST_ENV;
 /// hooks. Documented in `docs/daemon-operations.md` beside them.
 pub use super::operations::FAKE_OPERATIONS_ENV;
 
+/// Test-only hook: commit one `sync.completed` outcome per element of a JSON
+/// array after **every** `state.bootstrap`, so a client can watch a tick's
+/// typed outcome arrive while Phase 3b still schedules no tick.
+///
+/// Declared in [`super::sync_outcome`], where the daemon reads it and where
+/// `tests/daemon_sync_outcome.rs` imports it, and re-exported here with the
+/// other hooks. Documented in `docs/daemon-operations.md` beside them.
+pub use super::sync_outcome::FAKE_SYNC_OUTCOME_ENV;
+
 /// Internal handshake between `start` and the `run` it spawns: the parent holds
 /// the start lock, so the child must not block on it.
 const START_LOCK_HELD_ENV: &str = "MAILYPOPPINS_DAEMON_START_LOCK_HELD";

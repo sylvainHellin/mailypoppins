@@ -361,6 +361,9 @@ fn reduce(snapshot: &mut Value, change: &Change) {
         } => {
             snapshot["outbox"][account] = json!({"queued": queued, "failed": failed});
         }
+        // A sync outcome reduces nothing into the snapshot, matching the
+        // daemon's own reducer in `src/daemon/state/mod.rs`.
+        Change::SyncCompleted(_) => {}
     }
 }
 

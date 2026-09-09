@@ -37,6 +37,7 @@
 
 use std::collections::VecDeque;
 
+use mp_protocol::events::KIND_SYNC_COMPLETED;
 use serde_json::{json, Value};
 
 use crate::daemon::dispatch::ResourceId;
@@ -147,6 +148,17 @@ impl Event {
             },
             Change::DraftRemoved { account, id } => Event::Remove {
                 resource: ResourceId::new(format!("draft:{account}/{id}")),
+            },
+            // Lifecycle, so it merges with nothing and survives an overflow
+            // discard. Two ticks are two facts about two moments: merging a
+            // warning into a later clean tick would present that tick as
+            // clean, which is what the detectors behind the severity exist to
+            // prevent. A `Replace` could not express it, because every
+            // `Replace` is keyed by `(kind, resource)` and coalesces by
+            // construction.
+            Change::SyncCompleted(_) => Event::Lifecycle {
+                kind: KIND_SYNC_COMPLETED,
+                payload: change.payload(),
             },
         }
     }

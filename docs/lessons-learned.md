@@ -1514,3 +1514,12 @@ A daemon whose sync body silently does nothing is not a failure any test would h
 
 The rule is that the guard belongs to whoever does not already hold the lock.
 Inside the runtime the body calls `run_sync` directly, under a lock held for longer than the call, which is strictly stronger than what the guard provides.
+
+## Adding a `Change` variant recompiles every earlier contract test that matched on it
+
+`src/daemon/state/snapshot.rs`'s `Change` is a plain enum, and `tests/daemon_bootstrap.rs` (P3a-U3) reduces a snapshot with an exhaustive `match change { … }` and no wildcard arm.
+That was the right way to write it: the reducer is deliberately the test's own code rather than the daemon's, so a new kind of change must be a compile error somebody looks at instead of a silently ignored arm.
+The price is that every later unit adding a variant breaks a test file it is not allowed to edit, and the break is a `E0004` in a *different* T unit's file than the one it is implementing.
+
+The variant is still the right shape, so the fix is a one-arm edit to the older file, and the unit that adds a variant should budget for it and get it approved rather than discover it at validation time.
+A `#[non_exhaustive]` enum would not help: it forces a wildcard on downstream crates, and a file that has none stops compiling either way.

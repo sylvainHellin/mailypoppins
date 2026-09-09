@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use mp_protocol::events::{SyncCompleted, KIND_SYNC_COMPLETED};
 use serde_json::{json, Value};
 
 use crate::config::AccountConfig;
@@ -106,6 +107,13 @@ pub enum Change {
         queued: u64,
         failed: u64,
     },
+    /// One sync tick finished, with everything it did.
+    ///
+    /// The odd one out, and deliberately: it is the outcome of a command
+    /// rather than a fact about a resource, so it reduces into no snapshot,
+    /// travels as a non-coalescing [`Event::Lifecycle`](super::events::Event)
+    /// and carries a payload the protocol crate owns.
+    SyncCompleted(SyncCompleted),
 }
 
 impl Change {
@@ -118,6 +126,7 @@ impl Change {
             | Change::DraftUpsert { account, .. }
             | Change::DraftRemoved { account, .. }
             | Change::OutboxCounts { account, .. } => account,
+            Change::SyncCompleted(outcome) => &outcome.account,
         }
     }
 
@@ -129,6 +138,7 @@ impl Change {
             Change::DraftUpsert { .. } => "draft.changed",
             Change::DraftRemoved { .. } => "draft.removed",
             Change::OutboxCounts { .. } => "outbox.counts_changed",
+            Change::SyncCompleted(_) => KIND_SYNC_COMPLETED,
         }
     }
 
@@ -165,6 +175,13 @@ impl Change {
                 queued,
                 failed,
             } => json!({"account": account, "queued": queued, "failed": failed}),
+            // Infallible in practice: every field is a string, a `u64`, a list
+            // of strings or an `Option<String>`, none of which can fail to
+            // serialise. An empty object rather than a panic if that ever
+            // changes, because a daemon must not die inside a fan-out.
+            Change::SyncCompleted(outcome) => {
+                serde_json::to_value(outcome).unwrap_or_else(|_| json!({}))
+            }
         }
     }
 }

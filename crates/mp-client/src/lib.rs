@@ -18,6 +18,8 @@
 //! # }
 //! ```
 
+pub mod format;
+
 mod connection;
 mod state;
 mod types;
