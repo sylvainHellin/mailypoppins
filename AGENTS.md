@@ -1,19 +1,21 @@
 # mailypoppins
 
-Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Single crate, library + binary; the TUI calls the library directly, no subprocess spawning.
+Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Cargo workspace: the root crate (library + binary) plus `crates/mp-protocol` and `crates/mp-client`; the TUI calls the library directly, no subprocess spawning.
 
 ## Repo layout
 
-- Rust crate at the root (`src/`, `Cargo.toml`, `tests/`). All build / test commands run from here.
+- Rust crate at the root (`src/`, `Cargo.toml`, `tests/`), workspace members under `crates/`. All build / test commands run from the root.
+- `spikes/` and `desktop/` are excluded from the workspace (the spike carries its own `Cargo.lock`).
 - Marketing + docs site under [website/](website/) (Astro + Svelte, pnpm). Deployed to <https://mailypoppins.dev> by [scripts/deploy-website.sh](scripts/deploy-website.sh) (rsync to OVH). Colocated so CLI changes and the docs that describe them ship in one commit.
 - `.gitignore` files are kept local-only by convention (the root `.gitignore` self-ignores). Edit them as needed but do not `git add -f` them.
 
 ## Build and test
 
 ```sh
-cargo install --path .   # install / reinstall, run after every code change
-cargo test               # offline, ~7s
-cargo insta review       # approve markdown_to_html snapshot diffs
+cargo install --path .                     # install / reinstall, run after every code change
+cargo test --workspace                     # offline, ~7s
+cargo test --workspace --features daemon   # daemon code and its contract tests
+cargo insta review                         # approve markdown_to_html snapshot diffs
 ```
 
 Skipping `cargo install --path .` after a code change is the single most common footgun.

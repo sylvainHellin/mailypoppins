@@ -1,0 +1,18 @@
+[package]
+name = "mp-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Wire types and framing for the mailypoppins daemon protocol"
+authors = ["Sylvain Hellin"]
+
+[lib]
+name = "mp_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+# Typed protocol errors that carry a stable numeric code across the crate
+# boundary (docs/plans/daemon-dependencies.md). Already in the lock file via
+# `async-imap` / `dialoguer` / `html2text`, so this downloads nothing.
+thiserror = "2"

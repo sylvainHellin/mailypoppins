@@ -2003,6 +2003,8 @@ dependencies = [
  "machine-uid",
  "mailparse",
  "mime_guess",
+ "mp-client",
+ "mp-protocol",
  "nucleo-matcher",
  "openssl",
  "percent-encoding",
@@ -2107,6 +2109,26 @@ checksum = "ac9557c559cd6fc9867e122e20d2cbefc9ca29d80d027a8e39310920ed2f0a97"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "mp-client"
+version = "0.1.0"
+dependencies = [
+ "mp-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
+name = "mp-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[package]
+name = "mp-client"
+version = "0.1.0"
+edition = "2021"
+description = "Client transport for the mailypoppins daemon protocol"
+authors = ["Sylvain Hellin"]
+
+[lib]
+name = "mp_client"
+path = "src/lib.rs"
+
+[dependencies]
+mp-protocol = { path = "../mp-protocol" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
