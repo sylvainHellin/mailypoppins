@@ -1430,3 +1430,14 @@ The daemon's per-connection writer is a `tokio::select!` over `reader.read` and 
 A queue wake-up implemented as a bare `notified().await` loses every `notify_waiters` that fires while the read arm is being polled, and the events sit in the queue until the *next* unrelated frame arrives.
 The fix is the register-then-check pattern `CancelToken::cancelled` already uses: create the `notified()` future, check the queue, and only then await.
 A push that races the check has already registered, and one that lands before it is seen by the check.
+
+## A stalled reader is bounded by draining eagerly, not by writing less
+
+P3a-U6 had to keep one client that never reads from growing the daemon's memory or delaying anybody else.
+The instinct is to slow the producer down; the answer is the opposite.
+`CanonicalState::apply` pushes into an unbounded per-connection `EventQueue` under the state lock, so the connection task drains that queue into its bounded `Outbound` on every wake-up, whether or not the socket will take a byte.
+The `Outbound` coalesces, then overflows, then poisons itself and asks for a re-bootstrap; the unbounded queue behind it never holds more than one hand-off.
+
+That only works because the write arm cannot starve the drain arm.
+`AsyncWriteExt::write` is cancellation-safe and returns how much the kernel took, so the loop keeps a partially written frame plus an offset and re-offers the remainder next time round; `write_all` in a `select!` arm would lose a partial write.
+A blocked write is then simply a pending arm, and the drain and the reader keep running beside it.

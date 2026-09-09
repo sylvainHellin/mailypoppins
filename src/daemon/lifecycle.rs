@@ -77,6 +77,16 @@ pub const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
 /// `docs/daemon-operations.md` beside them.
 pub use super::state::FAKE_READY_ENV;
 
+/// Test-only hook: commit this many `MailboxCounts` changes against the first
+/// configured account after **every** `state.bootstrap`, so a connection's
+/// outbound queue can be filled while Phase 3a still commits nothing of its
+/// own.
+///
+/// Declared in [`super::state::events`], where the daemon reads it and where
+/// `tests/daemon_events.rs` imports it, and re-exported here with the other
+/// hooks. Documented in `docs/daemon-operations.md` beside them.
+pub use super::state::events::FAKE_EVENT_BURST_ENV;
+
 /// Internal handshake between `start` and the `run` it spawns: the parent holds
 /// the start lock, so the child must not block on it.
 const START_LOCK_HELD_ENV: &str = "MAILYPOPPINS_DAEMON_START_LOCK_HELD";

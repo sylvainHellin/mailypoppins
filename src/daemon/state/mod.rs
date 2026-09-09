@@ -27,6 +27,7 @@
 //! held across that call deadlocks on itself. [`Gate`] therefore records the
 //! thread that holds it: a reentrant entry proceeds, another thread blocks.
 
+pub mod events;
 pub mod revision;
 pub mod snapshot;
 
@@ -97,8 +98,9 @@ pub type RaceHook = Arc<dyn Fn(Boundary, &CanonicalState) + Send + Sync>;
 
 /// One connection's queue of committed changes, in revision order.
 ///
-/// Unbounded here: coalescing, the `max_events` / `max_bytes` bounds and the
-/// `state.resync_required` overflow path are P3a-U5's and P3a-U6's to pin.
+/// Unbounded here and a hand-off rather than a backlog: the connection task
+/// drains it eagerly into its [`Outbound`](events::Outbound), which is the one
+/// buffer a stalled client can grow and the one the two caps bound.
 #[derive(Clone, Debug)]
 pub struct EventQueue {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
@@ -144,8 +146,12 @@ impl EventQueue {
 }
 
 /// The state's end of one connection's queue.
+///
+/// Named for the endpoint rather than for the subscriber, because
+/// [`events::Subscriber`] is the *limits* a connection's outbound queue is held
+/// to and the two would otherwise read as one thing.
 #[derive(Debug)]
-struct Subscriber {
+struct Endpoint {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
     ready: Arc<Notify>,
     /// False between `subscribe` and `bootstrap`: the endpoint exists, but the
@@ -172,7 +178,7 @@ struct Inner {
     mailboxes: BTreeMap<String, Vec<MailboxView>>,
     drafts: BTreeMap<String, Vec<DraftView>>,
     outbox: BTreeMap<String, OutboxView>,
-    subscribers: BTreeMap<ConnectionId, Subscriber>,
+    subscribers: BTreeMap<ConnectionId, Endpoint>,
 }
 
 impl CanonicalState {
@@ -263,7 +269,7 @@ impl CanonicalState {
         let ready = Arc::new(Notify::new());
         lock(&self.inner).subscribers.insert(
             conn,
-            Subscriber {
+            Endpoint {
                 events: Arc::clone(&events),
                 ready: Arc::clone(&ready),
                 attached: false,

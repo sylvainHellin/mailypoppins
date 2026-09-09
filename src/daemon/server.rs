@@ -17,6 +17,7 @@
 //! on it, a `daemon.stop` handler sends on it after its response is flushed,
 //! and the signal task sends on it from outside any connection.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -31,11 +32,13 @@ use mp_protocol::frame::{self, Decoder, FrameError};
 use mp_protocol::{
     ErrorCode, ErrorResponse, EventEnvelope, Notification, Request, RequestId, Response, RpcError,
     JSONRPC_VERSION, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, METHOD_STATE_EVENT,
+    METHOD_STATE_RESYNC_REQUIRED,
 };
 
 use super::dispatch::Dispatcher;
 use super::runtime::InstanceMeta;
 use super::session::{ConfigReport, Session};
+use super::state::events::{Event, Outbound, Outgoing, Subscriber};
 use super::state::{seeds_from_config, CanonicalState, ConnectionId, EventQueue, InstanceId};
 
 /// JSON-RPC standard codes this unit emits. The daemon range lives in
@@ -52,6 +55,24 @@ static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 /// How much one read may pull off a connection at a time. The frame cap is
 /// enforced by the [`Decoder`], not by this buffer.
 const READ_CHUNK: usize = 8 * 1024;
+
+/// How many answered requests may wait for the wire before a connection stops
+/// reading.
+///
+/// The reader's own backpressure: a client that pipelines requests without
+/// reading the answers waits on its own socket instead of making the daemon
+/// hold an unbounded pile of them. Events are bounded separately, by the
+/// [`Outbound`] queue's two caps.
+const MAX_PENDING_REPLIES: usize = 32;
+
+/// What a connection does once everything it has queued has been written.
+#[derive(Clone, Copy, Debug)]
+enum AfterFlush {
+    /// Close this connection and nothing else.
+    Close,
+    /// Close it and take the daemon down: `daemon.stop` has been answered.
+    Shutdown,
+}
 
 /// One account as `daemon.status` reports it.
 ///
@@ -229,7 +250,24 @@ async fn handle_connection(
     result
 }
 
-/// The read/write loop of one connection, with its subscription already made.
+/// The read/write loop of one connection, with its subscription already made
+/// (P3a-U6).
+///
+/// Three things share this task and no other connection's: the reader, the
+/// drain of this connection's [`EventQueue`] into its bounded [`Outbound`], and
+/// the writer. They are three arms of one `select!` rather than three tasks
+/// because they share the socket and the queue, and every arm is
+/// cancellation-safe: `read` and `write` return only what they actually moved,
+/// and [`EventQueue::ready`] re-checks the queue before it waits, so a change
+/// committed while another arm ran is never missed.
+///
+/// The order of the three is what makes a stalled reader harmless. A blocked
+/// write leaves its arm pending, so the drain keeps running and keeps the
+/// unbounded [`EventQueue`] empty; what grows instead is the `Outbound`, which
+/// coalesces, then overflows, then asks the client to bootstrap again. The
+/// daemon's memory for a client that never reads is therefore
+/// [`Subscriber::max_bytes`] and no more, and every other connection has its
+/// own task and is untouched.
 async fn serve_connection(
     stream: tokio::net::UnixStream,
     connection_id: u64,
@@ -244,98 +282,148 @@ async fn serve_connection(
     // nothing has to expire it.
     let mut session = Session::new(connection_id);
 
-    loop {
-        // One socket carries both directions. Both arms are cancellation-safe:
-        // `read` keeps whatever it has not returned, and `ready` re-checks the
-        // queue before it waits, so a change committed while the reader was
-        // selected is not lost.
-        //
-        // P3a-U6 replaces this writer with coalescing and backpressure; until
-        // then a queue nobody drains grows without a bound.
-        let read = tokio::select! {
-            read = reader.read(&mut buf) => read.context("reading a frame")?,
-            _ = queue.ready() => {
-                write_events(&mut writer, &mut queue, &state.meta.instance_id).await?;
-                continue;
-            }
-        };
-        if read == 0 {
-            return Ok(());
-        }
-        let frames = match decoder.push(&buf[..read]) {
-            Ok(frames) => frames,
-            Err(e) => {
-                let response = ErrorResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: None,
-                    error: frame_error(&e),
-                };
-                let bytes = frame::encode(&response)?;
-                let _ = writer.write_all(&bytes).await;
-                let _ = writer.flush().await;
-                return Ok(());
-            }
-        };
+    // The one buffer between the fan-out and this socket, at the caps the plan
+    // fixes.
+    let mut outbound = Outbound::new(Subscriber::default());
+    // Answered requests waiting for the wire, encoded, in the order they were
+    // answered.
+    let mut replies: VecDeque<Vec<u8>> = VecDeque::new();
+    // The frame being written, and how much of it the kernel has taken.
+    let mut frame_out: Vec<u8> = Vec::new();
+    let mut written = 0usize;
+    let mut after_flush: Option<AfterFlush> = None;
 
-        for value in frames {
-            let (reply, stop) = dispatch_request(value, state, &mut session).await;
-            if let Some(reply) = reply {
-                writer
-                    .write_all(&encode_capped(&reply, MAX_RESPONSE_BYTES)?)
-                    .await
-                    .context("writing a response")?;
-                writer.flush().await.context("flushing a response")?;
+    loop {
+        if written == frame_out.len() {
+            if !frame_out.is_empty() {
+                writer.flush().await.context("flushing a frame")?;
+                frame_out.clear();
+                written = 0;
             }
-            if stop {
-                // Only now, with the response on the wire, does the client
-                // learn the daemon is going away.
-                info!("[daemon] shutdown requested over the socket");
-                let _ = shutdown.send(true);
-                return Ok(());
+            // One whole frame at a time, an answer before an event: a response
+            // frame and an event frame may not interleave on the wire.
+            if let Some(reply) = replies.pop_front() {
+                frame_out = reply;
+            } else {
+                match after_flush {
+                    // Only now, with the response on the wire, does the client
+                    // learn the daemon is going away.
+                    Some(AfterFlush::Shutdown) => {
+                        info!("[daemon] shutdown requested over the socket");
+                        let _ = shutdown.send(true);
+                        return Ok(());
+                    }
+                    Some(AfterFlush::Close) => return Ok(()),
+                    None => {
+                        if let Some(item) = outbound.pop() {
+                            frame_out = encode_outgoing(&item, &state.meta.instance_id)?;
+                        }
+                    }
+                }
             }
         }
-        // Between requests, never inside one: a response frame and an event
-        // frame may not interleave on the wire.
-        if !queue.is_empty() {
-            write_events(&mut writer, &mut queue, &state.meta.instance_id).await?;
+
+        let writing = written < frame_out.len();
+        let reading = after_flush.is_none() && replies.len() < MAX_PENDING_REPLIES;
+        tokio::select! {
+            written_now = writer.write(&frame_out[written..]), if writing => {
+                let n = written_now.context("writing a frame")?;
+                if n == 0 {
+                    // The peer will take nothing more, so neither the event nor
+                    // the `state.resync_required` behind it can be delivered:
+                    // this connection is over.
+                    return Ok(());
+                }
+                written += n;
+            }
+            _ = queue.ready() => {
+                for (revision, change) in queue.drain() {
+                    outbound.push(revision, Event::from_change(&change));
+                }
+            }
+            read = reader.read(&mut buf), if reading => {
+                let read = read.context("reading a frame")?;
+                if read == 0 {
+                    return Ok(());
+                }
+                let frames = match decoder.push(&buf[..read]) {
+                    Ok(frames) => frames,
+                    Err(e) => {
+                        let response = ErrorResponse {
+                            jsonrpc: JSONRPC_VERSION.to_string(),
+                            id: None,
+                            error: frame_error(&e),
+                        };
+                        replies.push_back(frame::encode(&response)?);
+                        after_flush = Some(AfterFlush::Close);
+                        continue;
+                    }
+                };
+                for value in frames {
+                    let method = value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let (reply, stop) = dispatch_request(value, state, &mut session).await;
+                    if let Some(reply) = reply {
+                        if method.as_deref() == Some("state.bootstrap") {
+                            rebootstrap(&mut outbound, &mut queue, &reply);
+                        }
+                        replies.push_back(encode_capped(&reply, MAX_RESPONSE_BYTES)?);
+                    }
+                    if stop {
+                        after_flush = Some(AfterFlush::Shutdown);
+                        break;
+                    }
+                }
+            }
         }
     }
 }
 
-/// Drain one connection's queue into `state.event` notifications.
+/// Start this connection's event stream again behind the snapshot it has just
+/// been given.
 ///
-/// One notification per committed change, in revision order, each carrying the
-/// [`EventEnvelope`] `docs/daemon-protocol.md` fixes. Deliberately minimal:
-/// P3a-U6 owns coalescing, the queue bounds and the `state.resync_required`
-/// overflow path, and this is the seam it replaces.
-async fn write_events<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    queue: &mut EventQueue,
-    instance_id: &str,
-) -> Result<()> {
-    let drained = queue.drain();
-    if drained.is_empty() {
-        return Ok(());
+/// Everything queued at this moment predates that snapshot, so it goes: the
+/// poison clears with it, and a client that was told to resync is served again.
+/// Called between the dispatch and the response frame, where no drain can run,
+/// so the only changes that survive are those the fan-out committed after the
+/// capture, which are exactly the ones the snapshot does not carry.
+fn rebootstrap(outbound: &mut Outbound, queue: &mut EventQueue, reply: &Value) {
+    let Some(captured) = reply.pointer("/result/revision").and_then(Value::as_u64) else {
+        return;
+    };
+    outbound.rebootstrap();
+    for (revision, change) in queue.drain() {
+        if revision.get() > captured {
+            outbound.push(revision, Event::from_change(&change));
+        }
     }
-    for (revision, change) in drained {
-        let notification = Notification {
+}
+
+/// One outbound item as the frame it travels in: a `state.event` notification
+/// carrying the [`EventEnvelope`] `docs/daemon-protocol.md` fixes, or the
+/// `state.resync_required` control notification.
+fn encode_outgoing(item: &Outgoing, instance_id: &str) -> Result<Vec<u8>> {
+    let notification = match item {
+        Outgoing::Event(revision, event) => Notification {
             jsonrpc: JSONRPC_VERSION.to_string(),
             method: METHOD_STATE_EVENT.to_string(),
             params: serde_json::to_value(EventEnvelope {
                 instance_id: instance_id.to_string(),
                 revision: revision.get(),
-                kind: change.kind().to_string(),
-                payload: change.payload(),
+                kind: event.kind().to_string(),
+                payload: event.payload(),
             })
             .context("serialising an event envelope")?,
-        };
-        writer
-            .write_all(&frame::encode(&notification)?)
-            .await
-            .context("writing an event")?;
-    }
-    writer.flush().await.context("flushing an event")?;
-    Ok(())
+        },
+        Outgoing::ResyncRequired { reason } => Notification {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: METHOD_STATE_RESYNC_REQUIRED.to_string(),
+            params: json!({"instance_id": instance_id, "reason": reason}),
+        },
+    };
+    Ok(frame::encode(&notification)?)
 }
 
 /// Answer one frame.
@@ -421,9 +509,10 @@ async fn dispatch_request(
                 );
             };
             match state.dispatcher.dispatch(&ctx, request).await {
-                // `revision` and `affected` are dropped here until P3a-U5
-                // turns them into the events a client resyncs from; a query,
-                // which is all this build serves, carries neither.
+                // `revision` and `affected` are dropped here until the first
+                // Command method exists (P3a-U8, then Phase 3b) and they become
+                // the events its caller and every other client receive; a
+                // query, which is all this build serves, carries neither.
                 Ok(outcome) => (result_value(id, outcome.result), false),
                 Err(error) => {
                     let refusal = RpcError::from(error);

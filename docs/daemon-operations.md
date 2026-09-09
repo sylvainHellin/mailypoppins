@@ -134,7 +134,7 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Four environment variables exist for the contract tests and for the migration.
+Five environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.
@@ -151,10 +151,17 @@ Phase 3a starts no account runtimes, so nothing else would ever report readiness
 The countdown starts at the bootstrap rather than at daemon startup, so a client that bootstraps cannot lose the race against it and no test has to sleep to win it.
 It is what pins the readiness event in `tests/daemon_bootstrap.rs`, and its name is `mailypoppins::daemon::state::FAKE_READY_ENV` so the test and the daemon cannot drift apart.
 
+`MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST=<n>` commits `n` mailbox-count changes against the first configured account after **every** `state.bootstrap`, with mailbox slugs `burst-<i>` from a counter that starts at `0` and never restarts for the life of the process.
+Phase 3a commits no change on its own, so nothing would otherwise fill a connection's outbound queue and the coalescing, cap and resync paths would be untestable.
+The slugs are distinct on purpose, so no two of the changes coalesce, and they name mailboxes no account has, so a burst fills queues without moving the snapshot a second client takes.
+The changes are committed off the bootstrap's own path and after its revision was captured, so no bootstrap's latency includes them and every burst revision is above the one it reported.
+With no configured account there is nothing to commit against and the hook does nothing.
+It is what pins the backpressure cases in `tests/daemon_events.rs`, and its name is `mailypoppins::daemon::state::events::FAKE_EVENT_BURST_ENV`.
+
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
 
-The three flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness hook reads as absent unless its value parses as a number of milliseconds.
+The three flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number.
 A test that runs `mp` as a subprocess should `env_remove` the first three, or an exported hook in the developer's shell will change what the test observes.
 
 ## Login mode

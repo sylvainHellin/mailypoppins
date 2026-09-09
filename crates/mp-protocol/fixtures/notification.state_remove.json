@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "state.remove",
+    "payload": {
+      "resource": "draft:tum/01J8Z71C2P8QK4V5"
+    },
+    "revision": 4219
+  }
+}

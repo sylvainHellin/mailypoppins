@@ -284,15 +284,42 @@ Revisions are strictly increasing and dense within an instance, and every commit
 A client compares each event against its watermark and does one of four things: an event exactly one above it is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one more than one above it is a gap; and one from an unfamiliar instance is refused whatever its number, because revisions are only comparable within the daemon process that issued them.
 A gap and an instance change both poison the stream, so nothing further is applied until a fresh `state.bootstrap` clears it: a client that kept applying past a gap would build a state nothing on the daemon's side corresponds to.
 
+### Event kinds
+
+An event either replaces a small resource whole or names one whose cached answer went stale, and the kind says which.
+
 `account.state_changed` is the kind an account's readiness travels as, with a payload of `{account, state}` where `state` is the `opening`/`ready`/`blocked` the snapshot uses, plus a `reason` when it is `blocked`.
 It is what converges a snapshot taken while an account was still `opening`, and it needs no second bootstrap.
+`draft.changed` replaces one draft whole, with a payload of `{account, id, subject, status, valid}`.
+Both are replacements because they are small and a client that re-queried them would learn nothing the payload did not already carry.
+
+`state.invalidate` says that a cached query went stale, with a payload of `{resource, scope}`: `resource` is what to re-read, as the `family:path` a method's `affected` list uses, and `scope` is the identity of the query whose answer is now wrong.
+Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbox:<account>/<slug>` and `outbox:<account>`, because that is what makes them coalescible: a hundred count changes for one mailbox are one thing to re-read.
+
+`state.remove` says that a resource is gone, with a payload of `{resource}`.
+A removal is a fact about a moment and is never merged with anything, in either direction, including another removal of the same resource.
+
+### Delivery, coalescing and caps
 
 `state.bootstrap` returns a snapshot and the revision it was taken at, as one serialised operation.
 Events with a higher revision are queued during that operation and released in revision order after the response frame, so a client applies every change exactly once.
-An event frame and a response frame never interleave: a connection's queued events are written between requests.
+An event frame and a response frame never interleave: a connection writes one whole frame at a time and answers a request before it sends an event.
+A second `state.bootstrap` on one connection empties that connection's queue: everything in it predates the snapshot the client is about to apply.
 
-When the daemon cannot preserve that guarantee, for example after an event queue overflow, it sends the `state.resync_required` notification with `params` of `{instance_id, reason}`.
-A client that receives it discards its state and calls `state.bootstrap`.
+Each connection has its own outbound queue, and equivalent events coalesce in it while they wait.
+A `state.invalidate` merges with a queued one for the same resource and the same scope; a replacement merges with a queued one of the same kind for the same resource, or, for a kind that names no resource, with any other of that kind.
+The merged entry takes the newer payload and the newer revision and moves to the tail, so what a client receives is still in revision order.
+A `state.remove` and a lifecycle event merge with nothing.
+
+The queue holds at most **512 events** or **4 MiB** of payload, whichever binds first.
+A client that stops reading therefore costs the daemon a bounded amount of memory and delays nobody: connections are served independently, and a blocked write never holds up the state or another client.
+
+When a push would exceed either cap the queue overflows: every queued domain event is discarded, the queue is poisoned, and one `state.resync_required` notification is sent with `params` of `{instance_id, reason}`, where the reason is `event_queue_overflow`.
+A poisoned queue accepts no further domain event until the client calls `state.bootstrap` again, which clears the poison: sending more would build a state nothing on the daemon's side corresponds to.
+Lifecycle events are the exception and survive both the discard and the poison, because no snapshot carries them and a re-bootstrap would not bring them back.
+If the control notification itself cannot be written, the daemon closes that connection and keeps serving every other one.
+
+A client that receives `state.resync_required` discards its state and calls `state.bootstrap`.
 
 ## Fixtures
 
@@ -316,6 +343,7 @@ The `initialize` handshake with the client, protocol, capabilities, and identity
 The `daemon.status` and `daemon.stop` methods, reachable before the handshake, and the `not_initialized` gate on everything else.
 The error table above, codes `-32000` to `-32009`.
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
+The `state.invalidate` and `state.remove` event kinds, with the payloads `{resource, scope}` and `{resource}`, the coalescing rules above, the 512-event and 4 MiB per-connection caps, and `event_queue_overflow` as the reason an exceeded cap resyncs a client.
 The read-only methods `account.list` and `message.list`, both behind the handshake, with the account states `ready` and `blocked`, `null` as the spelling of an unlimited `message.list`, and `-32602` for a mailbox the account does not have.
 A `message.list` row carries both dates, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
 A `client.type` outside `cli`, `tui` and `gui` is `-32602`, because a method that branches on the caller may not be handed a fourth kind.

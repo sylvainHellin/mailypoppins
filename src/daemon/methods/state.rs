@@ -14,7 +14,7 @@
 //! *result* is the capture point the client watermarks from, which is a
 //! different fact from "this call moved the daemon to N".
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +22,7 @@ use futures::future::BoxFuture;
 use log::info;
 use serde_json::{json, Value};
 
+use crate::daemon::state::events::fake_event_burst;
 use crate::daemon::state::{CanonicalState, Change, ConnectionId};
 
 use super::super::dispatch::{
@@ -39,7 +40,17 @@ pub struct StateBootstrap {
     /// Whether the readiness countdown has already been armed, so a second
     /// bootstrap does not flip the accounts twice.
     armed: AtomicBool,
+    /// The test-only event burst, read once at startup from
+    /// [`FAKE_EVENT_BURST_ENV`](crate::daemon::state::events::FAKE_EVENT_BURST_ENV).
+    /// `None` in every real daemon.
+    fake_burst: Option<u64>,
 }
+
+/// The next mailbox slug the burst hook will use, for the life of the process.
+///
+/// Process-global and never reset, so two bursts never name one mailbox twice
+/// and nothing a burst commits can coalesce with anything an earlier one did.
+static NEXT_BURST_SLUG: AtomicU64 = AtomicU64::new(0);
 
 impl StateBootstrap {
     /// Build the method around one state and one readiness delay.
@@ -48,6 +59,7 @@ impl StateBootstrap {
             state,
             fake_ready,
             armed: AtomicBool::new(false),
+            fake_burst: fake_event_burst(),
         }
     }
 
@@ -73,6 +85,42 @@ impl StateBootstrap {
             }
         });
     }
+
+    /// Commit the test-only event burst, once per bootstrap.
+    ///
+    /// Off the bootstrap's own path and after its revision was captured, so no
+    /// bootstrap's latency includes the burst and every burst revision is above
+    /// the one the bootstrap reported. The slugs name mailboxes no account has,
+    /// which [`CanonicalState::apply`] reduces to nothing while still fanning
+    /// the change out: a burst therefore fills queues without touching the
+    /// snapshot a second client takes.
+    ///
+    /// On the blocking pool rather than as an async task: a burst is thousands
+    /// of synchronous commits with no await in them, and a worker thread it
+    /// owned for that long would be a worker thread no other connection could
+    /// use, which is exactly what the slow-client tests measure.
+    fn arm_fake_burst(&self) {
+        let Some(count) = self.fake_burst else {
+            return;
+        };
+        let Some(account) = self.state.account_names().into_iter().next() else {
+            return;
+        };
+        let first = NEXT_BURST_SLUG.fetch_add(count, Ordering::SeqCst);
+        let state = Arc::clone(&self.state);
+        info!("[daemon] fake event burst armed, {count} changes after this bootstrap");
+        tokio::task::spawn_blocking(move || {
+            for index in first..first + count {
+                state.apply(Change::MailboxCounts {
+                    account: account.clone(),
+                    mailbox: format!("burst-{index}"),
+                    total: index,
+                    unread: 0,
+                    badge: 0,
+                });
+            }
+        });
+    }
 }
 
 impl Method for StateBootstrap {
@@ -94,6 +142,7 @@ impl Method for StateBootstrap {
             let (snapshot, revision, instance) =
                 self.state.bootstrap(ConnectionId(ctx.connection_id));
             self.arm_fake_readiness();
+            self.arm_fake_burst();
             Ok(Outcome::query(json!({
                 "instance_id": instance.as_str(),
                 "revision": revision.get(),
