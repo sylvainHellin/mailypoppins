@@ -99,8 +99,8 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mailypoppins::daemon::dispatch::{
-    CancelToken, ClientCtx, ClientKind, Dispatcher, DomainError, Method, MethodKind, MethodSpec,
-    Outcome, ResourceId,
+    CancelScope, CancelToken, ClientCtx, ClientKind, Dispatcher, DomainError, Method, MethodKind,
+    MethodSpec, Outcome, ResourceId,
 };
 use mp_protocol::{ErrorCode, Request, RequestId, RpcError, JSONRPC_VERSION};
 
@@ -174,6 +174,7 @@ impl Method for RecordingQuery {
             name: self.name,
             kind: MethodKind::Query,
             since: 1,
+            cancel_scope: CancelScope::Durable,
         }
     }
 
@@ -210,6 +211,7 @@ impl Method for TouchCommand {
             name: "test.command",
             kind: MethodKind::Command,
             since: 1,
+            cancel_scope: CancelScope::Durable,
         }
     }
 
@@ -247,6 +249,7 @@ impl Method for CancellableOperation {
             name: "test.operation",
             kind: MethodKind::Operation,
             since: 1,
+            cancel_scope: CancelScope::Durable,
         }
     }
 
@@ -281,6 +284,7 @@ impl Method for OpenInBrowser {
             name: "test.integration",
             kind: MethodKind::ClientIntegration,
             since: 1,
+            cancel_scope: CancelScope::Durable,
         }
     }
 

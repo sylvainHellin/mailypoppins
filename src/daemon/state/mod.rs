@@ -104,6 +104,7 @@ pub type RaceHook = Arc<dyn Fn(Boundary, &CanonicalState) + Send + Sync>;
 #[derive(Clone, Debug)]
 pub struct EventQueue {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
+    lifecycle: Arc<Mutex<VecDeque<(Revision, events::Event)>>>,
     ready: Arc<Notify>,
 }
 
@@ -118,7 +119,18 @@ impl EventQueue {
         lock(&self.events).drain(..).collect()
     }
 
-    /// How many changes are queued.
+    /// Every queued lifecycle event, oldest first, leaving that queue empty.
+    ///
+    /// A second queue rather than a second [`Change`] variant: a lifecycle
+    /// event is about the daemon and not about the state, it reduces to
+    /// nothing, and no snapshot carries it. The connection loop merges the two
+    /// drains by revision before it offers them to its outbound queue.
+    pub fn drain_lifecycle(&mut self) -> Vec<(Revision, events::Event)> {
+        lock(&self.lifecycle).drain(..).collect()
+    }
+
+    /// How many changes are queued. The lifecycle queue is counted separately,
+    /// because every caller of this reasons about committed changes.
     pub fn len(&self) -> usize {
         lock(&self.events).len()
     }
@@ -137,7 +149,7 @@ impl EventQueue {
     pub async fn ready(&self) {
         loop {
             let waiting = self.ready.notified();
-            if !self.is_empty() {
+            if !self.is_empty() || !lock(&self.lifecycle).is_empty() {
                 return;
             }
             waiting.await;
@@ -153,6 +165,7 @@ impl EventQueue {
 #[derive(Debug)]
 struct Endpoint {
     events: Arc<Mutex<VecDeque<(Revision, Change)>>>,
+    lifecycle: Arc<Mutex<VecDeque<(Revision, events::Event)>>>,
     ready: Arc<Notify>,
     /// False between `subscribe` and `bootstrap`: the endpoint exists, but the
     /// fan-out does not write to it yet.
@@ -169,6 +182,7 @@ pub struct CanonicalState {
     gate: Gate,
     inner: Mutex<Inner>,
     hook: Mutex<Option<RaceHook>>,
+    operations: Mutex<Option<Arc<crate::daemon::operations::OperationRegistry>>>,
 }
 
 #[derive(Debug)]
@@ -223,7 +237,17 @@ impl CanonicalState {
             gate: Gate::default(),
             inner: Mutex::new(inner),
             hook: Mutex::new(None),
+            operations: Mutex::new(None),
         }
+    }
+
+    /// Point the snapshot's `operations` array at the daemon's registry.
+    ///
+    /// Not a constructor parameter: the registry is the daemon's, not the
+    /// state's, and every in-process caller of [`CanonicalState::new`] builds a
+    /// state that has none.
+    pub fn attach_operations(&self, registry: Arc<crate::daemon::operations::OperationRegistry>) {
+        *lock(&self.operations) = Some(registry);
     }
 
     /// The daemon process this state belongs to.
@@ -262,20 +286,46 @@ impl CanonicalState {
         revision
     }
 
+    /// Stamp one lifecycle event with the next revision and queue it for every
+    /// bootstrapped connection.
+    ///
+    /// The revision comes from the same counter and the same gate a committed
+    /// change takes one from, so an operation event and a state change are
+    /// comparable on one client's watermark. Nothing is reduced: a lifecycle
+    /// event is about the daemon rather than about the state, and no snapshot
+    /// brings it back.
+    pub fn publish(&self, event: events::Event) -> Revision {
+        let _gate = self.gate.enter();
+        let mut inner = lock(&self.inner);
+        inner.revision += 1;
+        let revision = Revision(inner.revision);
+        for subscriber in inner.subscribers.values().filter(|s| s.attached) {
+            lock(&subscriber.lifecycle).push_back((revision, event.clone()));
+            subscriber.ready.notify_waiters();
+        }
+        revision
+    }
+
     /// Create this connection's queue endpoint, which nothing writes to until
     /// [`CanonicalState::bootstrap`] attaches it.
     pub fn subscribe(&self, conn: ConnectionId) -> EventQueue {
         let events = Arc::new(Mutex::new(VecDeque::new()));
+        let lifecycle = Arc::new(Mutex::new(VecDeque::new()));
         let ready = Arc::new(Notify::new());
         lock(&self.inner).subscribers.insert(
             conn,
             Endpoint {
                 events: Arc::clone(&events),
+                lifecycle: Arc::clone(&lifecycle),
                 ready: Arc::clone(&ready),
                 attached: false,
             },
         );
-        EventQueue { events, ready }
+        EventQueue {
+            events,
+            lifecycle,
+            ready,
+        }
     }
 
     /// Forget this connection's queue. Called when its socket closes, so a
@@ -298,10 +348,22 @@ impl CanonicalState {
         }
         self.fire(Boundary::AfterRegister);
 
-        let (snapshot, revision) = {
+        let (mut snapshot, revision) = {
             let inner = lock(&self.inner);
             (inner.capture(), Revision(inner.revision))
         };
+        // The registry is not part of the state a client mirrors, so its
+        // projection is taken here rather than reduced into `Inner`.
+        snapshot.operations = lock(&self.operations)
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .live()
+                    .iter()
+                    .map(crate::daemon::operations::OperationStatus::to_json)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.fire(Boundary::AfterCapture);
         self.fire(Boundary::AfterQueueStart);
 
@@ -401,6 +463,7 @@ impl Inner {
             mailboxes: self.mailboxes.clone(),
             drafts: self.drafts.clone(),
             outbox: self.outbox.clone(),
+            operations: Vec::new(),
         }
     }
 }

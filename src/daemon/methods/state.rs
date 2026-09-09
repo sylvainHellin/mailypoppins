@@ -125,11 +125,7 @@ impl StateBootstrap {
 
 impl Method for StateBootstrap {
     fn spec(&self) -> MethodSpec {
-        MethodSpec {
-            name: "state.bootstrap",
-            kind: MethodKind::Query,
-            since: 1,
-        }
+        MethodSpec::new("state.bootstrap", MethodKind::Query, 1)
     }
 
     fn call<'a>(

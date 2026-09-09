@@ -1441,3 +1441,20 @@ The `Outbound` coalesces, then overflows, then poisons itself and asks for a re-
 That only works because the write arm cannot starve the drain arm.
 `AsyncWriteExt::write` is cancellation-safe and returns how much the kernel took, so the loop keeps a partially written frame plus an offset and re-offers the remainder next time round; `write_all` in a `select!` arm would lose a partial write.
 A blocked write is then simply a pending arm, and the drain and the reader keep running beside it.
+
+## A lifecycle event needs its own queue when the change queue is a pinned shape
+
+Operation progress and finished events are `Event::Lifecycle`, they take a state revision, and they reach every bootstrapped connection: the fan-out `CanonicalState::apply` already runs.
+What blocks reusing it is the shape of the queue, not the fan-out: `EventQueue::{try_recv,drain}` hand back `(Revision, Change)` and `tests/daemon_bootstrap.rs` pins that pair, so a `Change::Lifecycle` variant would have to answer `Change::account()` and be reducible into the state, which is exactly what a lifecycle event is not.
+
+Each endpoint therefore carries a second `VecDeque<(Revision, Event)>` that `CanonicalState::publish` writes and `EventQueue::drain_lifecycle` empties, sharing the endpoint's one `Notify` and its `attached` flag, so "only a bootstrapped connection is a subscriber" holds for both without a second rule.
+The connection loop merges the two drains by revision before offering them to `Outbound`, because `push` is documented to be offered its items in non-decreasing revision order and two independently drained queues are not.
+
+## An operation registry stamps no revision, and its fan-out runs synchronously
+
+The registry emits events and never numbers them: revisions belong to the canonical state, and an operation that took one per progress report would burn thousands.
+It queues them for `drain_events` and calls a fan-out installed once at startup, which drains and publishes each one at the next canonical revision.
+
+Synchronous, on the thread that emitted, is what makes `operation.cancel` an honest `Command`: by the time `OperationRegistry::cancel` returns, the finished event is published, so `CanonicalState::revision()` is the number that event travelled at.
+A publisher task draining in the background would make the outcome's revision a guess below the event's.
+The lock discipline that allows it is that every mutation collects its events under the registry lock, releases it, and only then calls the fan-out, so nothing the canonical state does can re-enter the operation table.

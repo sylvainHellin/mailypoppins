@@ -20,6 +20,7 @@
 //! with the state that owns it.
 
 pub mod account;
+pub mod mailbox;
 pub mod message;
 pub mod state;
 
@@ -32,6 +33,9 @@ use mp_protocol::RpcError;
 use crate::config::AccountConfig;
 
 use super::dispatch::Dispatcher;
+use super::operations::{
+    fake_operations, OperationCancelMethod, OperationRegistry, OperationStatusMethod, TestOperation,
+};
 use super::state::{fake_ready_delay, CanonicalState};
 
 /// JSON-RPC's own "invalid params".
@@ -40,19 +44,41 @@ const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 
 /// Register every domain method this build serves.
+///
+/// The single place that says which methods exist: the handshake derives its
+/// capability list from the same table, so a method cannot be served without
+/// being advertised. `test.operation` is the one exception a build can add, and
+/// only behind
+/// [`FAKE_OPERATIONS_ENV`](super::operations::FAKE_OPERATIONS_ENV).
 pub fn register(
     dispatcher: &mut Dispatcher,
     accounts: Arc<Vec<AccountConfig>>,
     canonical: Arc<CanonicalState>,
+    operations: Arc<OperationRegistry>,
 ) {
     dispatcher.register(Arc::new(account::AccountList {
         accounts: Arc::clone(&accounts),
     }));
+    dispatcher.register(Arc::new(mailbox::MailboxList {
+        accounts: Arc::clone(&accounts),
+    }));
     dispatcher.register(Arc::new(message::MessageList { accounts }));
     dispatcher.register(Arc::new(self::state::StateBootstrap::new(
-        canonical,
+        Arc::clone(&canonical),
         fake_ready_delay(),
     )));
+    dispatcher.register(Arc::new(OperationStatusMethod {
+        registry: Arc::clone(&operations),
+    }));
+    dispatcher.register(Arc::new(OperationCancelMethod {
+        registry: Arc::clone(&operations),
+        canonical,
+    }));
+    if fake_operations() {
+        dispatcher.register(Arc::new(TestOperation {
+            registry: operations,
+        }));
+    }
 }
 
 /// A required string parameter, or `-32602` naming it.

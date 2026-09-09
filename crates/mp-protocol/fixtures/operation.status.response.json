@@ -1,0 +1,18 @@
+{
+  "id": 7,
+  "jsonrpc": "2.0",
+  "result": {
+    "error": null,
+    "method": "sync.run",
+    "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc",
+    "progress": {
+      "done": 42,
+      "message": "inbox",
+      "phase": "fetching",
+      "total": 214
+    },
+    "result": null,
+    "scope": "durable",
+    "state": "running"
+  }
+}

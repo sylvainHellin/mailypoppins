@@ -1,0 +1,49 @@
+{
+  "id": 6,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "work",
+    "mailboxes": [
+      {
+        "badge": 214,
+        "label": "Inbox",
+        "role": "inbox",
+        "slug": "inbox",
+        "total": 214,
+        "unread": 7
+      },
+      {
+        "badge": 2,
+        "label": "Drafts",
+        "role": "drafts",
+        "slug": "drafts",
+        "total": 2,
+        "unread": 0
+      },
+      {
+        "badge": 96,
+        "label": "Sent",
+        "role": "sent",
+        "slug": "sent",
+        "total": 96,
+        "unread": 0
+      },
+      {
+        "badge": 1408,
+        "label": "Archive",
+        "role": "archive",
+        "slug": "archive",
+        "total": 1408,
+        "unread": 0
+      },
+      {
+        "badge": 33,
+        "label": "Newsletters",
+        "role": "other",
+        "slug": "Newsletters",
+        "total": 33,
+        "unread": 12
+      }
+    ]
+  }
+}

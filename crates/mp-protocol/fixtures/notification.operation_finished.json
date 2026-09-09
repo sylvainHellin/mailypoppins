@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "operation.finished",
+    "payload": {
+      "error": {
+        "code": -32008,
+        "data": {
+          "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc"
+        },
+        "message": "operation 8f2c41d6b0e94a7fa3c5d81e6b0947fc was cancelled"
+      },
+      "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc",
+      "state": "cancelled"
+    },
+    "revision": 4221
+  }
+}

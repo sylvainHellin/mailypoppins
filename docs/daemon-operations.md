@@ -134,7 +134,7 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Five environment variables exist for the contract tests and for the migration.
+Six environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.
@@ -158,11 +158,19 @@ The changes are committed off the bootstrap's own path and after its revision wa
 With no configured account there is nothing to commit against and the hook does nothing.
 It is what pins the backpressure cases in `tests/daemon_events.rs`, and its name is `mailypoppins::daemon::state::events::FAKE_EVENT_BURST_ENV`.
 
+`MAILYPOPPINS_DAEMON_FAKE_OPERATIONS=1` registers one extra method, `test.operation`, so a client can start, watch and cancel a long-running operation.
+Its params are `{"steps": u64, "step_ms": u64, "scope": "durable"|"client_scoped", "fail_at": u64|null}`; it answers immediately with `{"operation_id": str}` and reports `steps` times, `step_ms` apart, before succeeding with `{"steps": steps}`.
+A non-null `fail_at` of `k` fails with `-32603` and `{"failed_at": k}` after the `k`-th report instead of continuing, and a cancelled operation's worker stops before its next report.
+Phase 3a has no real long-running method - sync, auth and the rebuilds all arrive in Phase 5 - so without the hook the whole wire half of the operation contract would be untestable until then.
+`scope` is the one parameter a real method would not take: a real one passes its own `MethodSpec`'s `cancel_scope`, and one test method has to cover both halves of the disconnect contract.
+The method is registered only when the hook is set, so a daemon nobody armed it on neither serves nor advertises it.
+It is what pins the wire cases in `tests/daemon_operations.rs`, and its name is `mailypoppins::daemon::operations::FAKE_OPERATIONS_ENV`.
+
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
 
-The three flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number.
-A test that runs `mp` as a subprocess should `env_remove` the first three, or an exported hook in the developer's shell will change what the test observes.
+The four flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number.
+A test that runs `mp` as a subprocess should `env_remove` every hook it does not want, or an exported one in the developer's shell will change what the test observes.
 
 ## Login mode
 

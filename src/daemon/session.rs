@@ -479,7 +479,10 @@ mod tests {
                 "daemon.status".to_string(),
                 "daemon.stop".to_string(),
                 "account.list".to_string(),
+                "mailbox.list".to_string(),
                 "message.list".to_string(),
+                "operation.cancel".to_string(),
+                "operation.status".to_string(),
                 "state.bootstrap".to_string(),
             ]
         );

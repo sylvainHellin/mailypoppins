@@ -129,8 +129,41 @@ impl MethodKind {
     }
 }
 
-/// A method's declaration: its name, its kind, and the first protocol version
-/// that served it.
+/// What a client's disconnect does to work that client started (P3a-U8).
+///
+/// The declaration the plan means by "a client disconnect does not cancel
+/// durable work unless the method's `MethodSpec` declares client-scoped
+/// cancellation": a field a caller reads, not a behaviour it discovers by
+/// calling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CancelScope {
+    /// The work outlives the connection that asked for it.
+    Durable,
+    /// The work is cancelled when its connection closes.
+    ClientScoped,
+}
+
+impl CancelScope {
+    /// The string this scope travels as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CancelScope::Durable => "durable",
+            CancelScope::ClientScoped => "client_scoped",
+        }
+    }
+
+    /// The scope a wire string names, or `None` for anything else.
+    pub fn from_wire(value: &str) -> Option<CancelScope> {
+        match value {
+            "durable" => Some(CancelScope::Durable),
+            "client_scoped" => Some(CancelScope::ClientScoped),
+            _ => None,
+        }
+    }
+}
+
+/// A method's declaration: its name, its kind, the first protocol version that
+/// served it, and what a disconnect does to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MethodSpec {
     /// The wire name, `family.verb`.
@@ -139,6 +172,32 @@ pub struct MethodSpec {
     pub kind: MethodKind,
     /// The first protocol version offering it; never below 1.
     pub since: u32,
+    /// What a client's disconnect does to work this method started.
+    pub cancel_scope: CancelScope,
+}
+
+impl MethodSpec {
+    /// A declaration whose work outlives its client, which is what a method
+    /// that never thought about cancellation means.
+    pub const fn new(name: &'static str, kind: MethodKind, since: u32) -> MethodSpec {
+        MethodSpec {
+            name,
+            kind,
+            since,
+            cancel_scope: CancelScope::Durable,
+        }
+    }
+
+    /// The same declaration, with work that dies with the client that asked
+    /// for it.
+    pub const fn client_scoped(self) -> MethodSpec {
+        MethodSpec {
+            name: self.name,
+            kind: self.kind,
+            since: self.since,
+            cancel_scope: CancelScope::ClientScoped,
+        }
+    }
 }
 
 /// One served method.
@@ -330,6 +389,18 @@ impl DomainError {
     /// The structured payload, when the code fixes one.
     pub fn data(&self) -> Option<Value> {
         self.data.clone()
+    }
+
+    /// The same error carrying `data`.
+    ///
+    /// The JSON-RPC standard codes above take no payload from their
+    /// constructors, because most callers have none; the operation family has
+    /// one for every refusal it makes (`{operation_id}`, `{operation_id,
+    /// state}`, `{failed_at}`) and attaches it here rather than through four
+    /// more constructors.
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
     }
 
     /// A JSON-RPC standard code, which [`ErrorCode`] deliberately does not

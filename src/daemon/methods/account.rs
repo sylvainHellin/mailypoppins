@@ -65,11 +65,7 @@ pub struct AccountList {
 
 impl Method for AccountList {
     fn spec(&self) -> MethodSpec {
-        MethodSpec {
-            name: "account.list",
-            kind: MethodKind::Query,
-            since: 1,
-        }
+        MethodSpec::new("account.list", MethodKind::Query, 1)
     }
 
     fn call<'a>(

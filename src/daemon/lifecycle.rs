@@ -87,6 +87,15 @@ pub use super::state::FAKE_READY_ENV;
 /// hooks. Documented in `docs/daemon-operations.md` beside them.
 pub use super::state::events::FAKE_EVENT_BURST_ENV;
 
+/// Test-only hook: register the fake `test.operation` method, so a client can
+/// start, watch and cancel a long-running operation while Phase 3a still has no
+/// real one to start.
+///
+/// Declared in [`super::operations`], where the daemon reads it and where
+/// `tests/daemon_operations.rs` imports it, and re-exported here with the other
+/// hooks. Documented in `docs/daemon-operations.md` beside them.
+pub use super::operations::FAKE_OPERATIONS_ENV;
+
 /// Internal handshake between `start` and the `run` it spawns: the parent holds
 /// the start lock, so the child must not block on it.
 const START_LOCK_HELD_ENV: &str = "MAILYPOPPINS_DAEMON_START_LOCK_HELD";
@@ -724,7 +733,10 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 /// A `1`/`true`-style environment opt-in.
-fn env_flag(name: &str) -> bool {
+///
+/// `pub(crate)` so [`super::operations::fake_operations`] reads its own hook by
+/// the same rule rather than by a second copy of it.
+pub(crate) fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| flag_value(&value))
 }
 

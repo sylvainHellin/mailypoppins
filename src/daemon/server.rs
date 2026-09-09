@@ -36,10 +36,13 @@ use mp_protocol::{
 };
 
 use super::dispatch::Dispatcher;
+use super::operations::OperationRegistry;
 use super::runtime::InstanceMeta;
 use super::session::{ConfigReport, Session};
 use super::state::events::{Event, Outbound, Outgoing, Subscriber};
-use super::state::{seeds_from_config, CanonicalState, ConnectionId, EventQueue, InstanceId};
+use super::state::{
+    seeds_from_config, CanonicalState, ConnectionId, EventQueue, InstanceId, Revision,
+};
 
 /// JSON-RPC standard codes this unit emits. The daemon range lives in
 /// [`mp_protocol::ErrorCode`] and is not reachable until P2-U9.
@@ -115,6 +118,11 @@ pub struct DaemonState {
     /// `state.bootstrap` method through its own `Arc` rather than a reference
     /// back to the state that owns the dispatcher.
     pub canonical: Arc<CanonicalState>,
+    /// Every long-running operation this daemon has started (P3a-U8). Held
+    /// here because two things outside the dispatcher reach it: the connection
+    /// loop, which tells it about a disconnect, and the bootstrap snapshot,
+    /// which projects its live entries.
+    pub operations: Arc<OperationRegistry>,
 }
 
 impl DaemonState {
@@ -133,11 +141,31 @@ impl DaemonState {
             InstanceId::new(meta.instance_id.clone()),
             seeds_from_config(&configured),
         ));
+        let operations = Arc::new(OperationRegistry::new());
+        canonical.attach_operations(Arc::clone(&operations));
+        // The registry emits events and stamps none: a revision belongs to the
+        // canonical state. This is the fan-out that gives each one the next
+        // revision and queues it for every bootstrapped connection. Both ends
+        // are held weakly, so the closure the registry owns does not keep the
+        // state and the registry alive through each other.
+        let fanout_state = Arc::downgrade(&canonical);
+        let fanout_operations = Arc::downgrade(&operations);
+        operations.set_fanout(Arc::new(move || {
+            let (Some(canonical), Some(operations)) =
+                (fanout_state.upgrade(), fanout_operations.upgrade())
+            else {
+                return;
+            };
+            for event in operations.drain_events() {
+                canonical.publish(event);
+            }
+        }));
         let mut dispatcher = Dispatcher::new();
         super::methods::register(
             &mut dispatcher,
             Arc::clone(&configured),
             Arc::clone(&canonical),
+            Arc::clone(&operations),
         );
         DaemonState {
             meta,
@@ -146,6 +174,7 @@ impl DaemonState {
             config,
             dispatcher,
             canonical,
+            operations,
         }
     }
 
@@ -246,6 +275,10 @@ async fn handle_connection(
     let conn = ConnectionId(connection_id);
     let queue = state.canonical.subscribe(conn);
     let result = serve_connection(stream, connection_id, &state, shutdown, queue).await;
+    // Before the unsubscribe, so the cancellations a disconnect causes are
+    // published while this connection is still a subscriber and therefore reach
+    // every other one in the same fan-out.
+    state.operations.on_disconnect(conn);
     state.canonical.unsubscribe(conn);
     result
 }
@@ -337,8 +370,8 @@ async fn serve_connection(
                 written += n;
             }
             _ = queue.ready() => {
-                for (revision, change) in queue.drain() {
-                    outbound.push(revision, Event::from_change(&change));
+                for (revision, event) in drain_queue(&mut queue) {
+                    outbound.push(revision, event);
                 }
             }
             read = reader.read(&mut buf), if reading => {
@@ -394,11 +427,27 @@ fn rebootstrap(outbound: &mut Outbound, queue: &mut EventQueue, reply: &Value) {
         return;
     };
     outbound.rebootstrap();
-    for (revision, change) in queue.drain() {
+    for (revision, event) in drain_queue(queue) {
         if revision.get() > captured {
-            outbound.push(revision, Event::from_change(&change));
+            outbound.push(revision, event);
         }
     }
+}
+
+/// Everything this connection is owed, as events, in revision order.
+///
+/// Two queues feed it - committed changes and lifecycle events - and
+/// [`Outbound::push`] is offered its items in non-decreasing revision order, so
+/// the two drains are merged rather than concatenated.
+fn drain_queue(queue: &mut EventQueue) -> Vec<(Revision, Event)> {
+    let mut items: Vec<(Revision, Event)> = queue
+        .drain()
+        .iter()
+        .map(|(revision, change)| (*revision, Event::from_change(change)))
+        .collect();
+    items.extend(queue.drain_lifecycle());
+    items.sort_by_key(|(revision, _)| *revision);
+    items
 }
 
 /// One outbound item as the frame it travels in: a `state.event` notification

@@ -40,11 +40,7 @@ pub struct MessageList {
 
 impl Method for MessageList {
     fn spec(&self) -> MethodSpec {
-        MethodSpec {
-            name: "message.list",
-            kind: MethodKind::Query,
-            since: 1,
-        }
+        MethodSpec::new("message.list", MethodKind::Query, 1)
     }
 
     fn call<'a>(

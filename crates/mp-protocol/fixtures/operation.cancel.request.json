@@ -1,0 +1,8 @@
+{
+  "id": 8,
+  "jsonrpc": "2.0",
+  "method": "operation.cancel",
+  "params": {
+    "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc"
+  }
+}

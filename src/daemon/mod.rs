@@ -10,6 +10,7 @@
 pub mod dispatch;
 pub mod lifecycle;
 pub mod methods;
+pub mod operations;
 pub mod runtime;
 pub mod server;
 pub mod session;

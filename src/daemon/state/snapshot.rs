@@ -242,14 +242,21 @@ pub struct Snapshot {
     pub(super) mailboxes: BTreeMap<String, Vec<MailboxView>>,
     pub(super) drafts: BTreeMap<String, Vec<DraftView>>,
     pub(super) outbox: BTreeMap<String, OutboxView>,
+    /// The daemon's non-terminal operations, as
+    /// [`OperationStatus::to_json`](crate::daemon::operations::OperationStatus::to_json)
+    /// renders them. Filled by
+    /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from the
+    /// registry, which is not part of the state a client mirrors.
+    pub(super) operations: Vec<Value>,
 }
 
 impl Snapshot {
     /// The `snapshot` member of a `state.bootstrap` result.
     ///
-    /// `holds`, `operations` and `diagnostics` are empty arrays rather than
-    /// absent keys: nothing in this build produces one, and a client that
-    /// iterates them must not have to check first.
+    /// `holds` and `diagnostics` are empty arrays rather than absent keys:
+    /// nothing in this build produces one, and a client that iterates them must
+    /// not have to check first. `operations` lists whatever the registry has
+    /// not settled, so a client that bootstraps mid-operation learns about it.
     pub fn to_json(&self) -> Value {
         // `sync_health` is an object rather than a bare string so the reason
         // and the timestamp can join it without a version bump.
@@ -304,7 +311,7 @@ impl Snapshot {
             "drafts": drafts,
             "outbox": outbox,
             "holds": [],
-            "operations": [],
+            "operations": self.operations,
             "diagnostics": [],
         })
     }

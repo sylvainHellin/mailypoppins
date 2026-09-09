@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "operation.progress",
+    "payload": {
+      "done": 42,
+      "message": "inbox",
+      "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc",
+      "phase": "fetching",
+      "total": 214
+    },
+    "revision": 4220
+  }
+}
