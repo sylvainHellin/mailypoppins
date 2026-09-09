@@ -17,9 +17,9 @@
 //! on it, a `daemon.stop` handler sends on it after its response is flushed,
 //! and the signal task sends on it from outside any connection.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
@@ -37,6 +37,7 @@ use mp_protocol::{
 
 use super::dispatch::Dispatcher;
 use super::operations::OperationRegistry;
+use super::runtime::account::{AccountRuntime, Readiness};
 use super::runtime::InstanceMeta;
 use super::session::{ConfigReport, Session};
 use super::state::events::{Event, Outbound, Outgoing, Subscriber};
@@ -79,14 +80,99 @@ enum AfterFlush {
 
 /// One account as `daemon.status` reports it.
 ///
-/// Phase 2 never opens a store, so the only state a real runtime could be in is
-/// `opening`; `ready` and `blocked` arrive with the account runtimes in Phase 5.
+/// The `state` here is the seed the daemon starts from, which is `opening` for
+/// every configured account: what a runtime reports once it has come up lives
+/// in [`RuntimeTable`] and overrides this.
 #[derive(Clone, Debug)]
 pub struct AccountStatus {
     /// The configured account name.
     pub name: String,
     /// One of `opening`, `ready`, `blocked`.
     pub state: String,
+}
+
+/// The live per-account runtimes, keyed by account name (P3b-U4).
+///
+/// Empty unless `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`, and empty for an
+/// account whose `start` is still in flight: `daemon.status` reports `opening`
+/// for exactly the accounts this table has nothing for, which is why an absent
+/// entry is a state rather than a missing one.
+///
+/// It owns the runtimes, so it owns the engine locks they hold: the table lives
+/// as long as the [`DaemonState`] does, and the locks come free when the daemon
+/// exits.
+#[derive(Debug, Default)]
+pub struct RuntimeTable {
+    entries: Mutex<BTreeMap<String, RuntimeEntry>>,
+}
+
+/// What a start attempt left behind.
+#[derive(Debug)]
+enum RuntimeEntry {
+    /// The runtime came up. Whether it holds the engine lock is its own
+    /// [`Readiness`], since a contended lock is a successful start.
+    Live(Arc<AccountRuntime>),
+    /// The runtime could not be started at all: the account directory or the
+    /// store is unusable. Reported as `blocked` with the reason on the event,
+    /// because nothing about that account can be served.
+    Failed(String),
+}
+
+/// Take a lock whose holder may have panicked; the map behind it is whole
+/// either way.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl RuntimeTable {
+    /// Record a runtime that came up, ready or blocked.
+    pub fn insert(&self, runtime: Arc<AccountRuntime>) {
+        lock(&self.entries).insert(runtime.account().to_string(), RuntimeEntry::Live(runtime));
+    }
+
+    /// Record a start that failed outright.
+    pub fn insert_failure(&self, account: &str, reason: String) {
+        lock(&self.entries).insert(account.to_string(), RuntimeEntry::Failed(reason));
+    }
+
+    /// The state `daemon.status` reports for `account`, or `None` when no start
+    /// has come back yet, which reads as `opening`.
+    pub fn state_of(&self, account: &str) -> Option<&'static str> {
+        Some(match lock(&self.entries).get(account)? {
+            RuntimeEntry::Live(runtime) => match runtime.readiness() {
+                Readiness::Opening => "opening",
+                Readiness::Ready => "ready",
+                Readiness::Blocked { .. } => "blocked",
+            },
+            RuntimeEntry::Failed(_) => "blocked",
+        })
+    }
+
+    /// Why `account` is not serving, whether its runtime came up blocked or
+    /// never came up at all. `None` for an account that is ready or still
+    /// opening. `daemon.status` carries only the state; the reason travels on
+    /// the `account.state_changed` event and is kept here for the diagnostics
+    /// that will ask for it.
+    pub fn blocked_reason(&self, account: &str) -> Option<String> {
+        match lock(&self.entries).get(account)? {
+            RuntimeEntry::Live(runtime) => match runtime.readiness() {
+                Readiness::Blocked { reason } => Some(reason),
+                Readiness::Opening | Readiness::Ready => None,
+            },
+            RuntimeEntry::Failed(reason) => Some(reason.clone()),
+        }
+    }
+
+    /// The runtime serving `account`, for a caller that wants to tick it or
+    /// read through its pool.
+    pub fn get(&self, account: &str) -> Option<Arc<AccountRuntime>> {
+        match lock(&self.entries).get(account)? {
+            RuntimeEntry::Live(runtime) => Some(Arc::clone(runtime)),
+            RuntimeEntry::Failed(_) => None,
+        }
+    }
 }
 
 /// Everything a served method may read. Immutable for the daemon's lifetime in
@@ -123,6 +209,9 @@ pub struct DaemonState {
     /// loop, which tells it about a disconnect, and the bootstrap snapshot,
     /// which projects its live entries.
     pub operations: Arc<OperationRegistry>,
+    /// The account runtimes, filled in as each `start` comes back and empty
+    /// without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` (P3b-U4).
+    pub runtimes: RuntimeTable,
 }
 
 impl DaemonState {
@@ -175,6 +264,7 @@ impl DaemonState {
             dispatcher,
             canonical,
             operations,
+            runtimes: RuntimeTable::default(),
         }
     }
 
@@ -191,10 +281,16 @@ impl DaemonState {
             "started_at": self.meta.started_at,
             "data_dir": self.meta.data_dir.display().to_string(),
             "config_dir": self.meta.config_dir.display().to_string(),
+            // The runtime table is the truth for an account whose start has
+            // come back; the seed below it is `opening`, which is what an
+            // account still starting - or one the daemon never started - is.
             "accounts": self
                 .accounts
                 .iter()
-                .map(|a| json!({"name": a.name, "state": a.state}))
+                .map(|a| {
+                    let state = self.runtimes.state_of(&a.name).unwrap_or(a.state.as_str());
+                    json!({"name": a.name, "state": state})
+                })
                 .collect::<Vec<_>>(),
         })
     }

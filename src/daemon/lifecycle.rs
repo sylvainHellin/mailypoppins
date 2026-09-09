@@ -289,6 +289,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
     drop(start_lock);
 
     let state = Arc::new(DaemonState::new(meta, accounts, configured, config));
+    if env_flag(ACCOUNT_RUNTIMES_ENV) {
+        spawn_account_runtimes(Arc::clone(&state));
+    }
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(shutdown.clone())?;
 
@@ -374,11 +377,14 @@ fn spawn_signal_watch(shutdown: watch::Sender<bool>) -> Result<()> {
     Ok(())
 }
 
-/// The accounts `daemon.status` reports.
+/// The accounts `daemon.status` reports, as the daemon starts.
 ///
-/// Empty unless [`ACCOUNT_RUNTIMES_ENV`] is set, and even then a placeholder:
-/// nothing opens a store or takes an engine lock before Phase 5, so every
-/// configured account is reported as `opening` and stays there.
+/// Empty unless [`ACCOUNT_RUNTIMES_ENV`] is set, because without it no runtime
+/// is created and there is nothing to report on. With it, every configured
+/// account starts at `opening` and stays there until its runtime comes back:
+/// [`DaemonState::status_result`] reads
+/// [`RuntimeTable`](super::server::RuntimeTable) over this seed, and
+/// [`spawn_account_runtimes`] is what fills it.
 fn account_statuses(config: &crate::config::GlobalConfig) -> Vec<AccountStatus> {
     if !env_flag(ACCOUNT_RUNTIMES_ENV) {
         return Vec::new();
@@ -391,6 +397,81 @@ fn account_statuses(config: &crate::config::GlobalConfig) -> Vec<AccountStatus> 
             state: "opening".to_string(),
         })
         .collect()
+}
+
+/// Start one [`AccountRuntime`] per configured account, off the startup path
+/// (P3b-U4).
+///
+/// Off it on purpose: `start` takes the account's engine lock and opens SQLite,
+/// so it runs on `spawn_blocking` and the socket is accepting connections
+/// while the stores open. Until a start comes back its account is `opening`,
+/// which is exactly what an empty [`RuntimeTable`](super::server::RuntimeTable)
+/// entry reports, so a client that connects during the window sees a state
+/// rather than a gap.
+///
+/// Each result is committed through [`CanonicalState::apply`], so a
+/// bootstrapped client learns about it as an `account.state_changed` event
+/// rather than by polling. The table is filled *before* the change is applied,
+/// so a client that reacts to the event and immediately asks `daemon.status`
+/// cannot be told the account is still opening.
+///
+/// No tick is scheduled here. A periodic tick is the Phase 5/6 scheduler's; a
+/// runtime this phase holds the engine lock, drains nothing on its own and
+/// serves reads.
+fn spawn_account_runtimes(state: Arc<DaemonState>) {
+    use super::runtime::account::{AccountRuntime, Readiness};
+    use super::runtime::pool::DEFAULT_READ_POOL_SIZE;
+    use super::state::Change;
+
+    for account_config in state.configured.iter().cloned() {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let account = account_config.name.clone();
+            let started = tokio::task::spawn_blocking(move || {
+                AccountRuntime::start(account_config, DEFAULT_READ_POOL_SIZE)
+            })
+            .await;
+
+            let change = match started {
+                Ok(Ok(runtime)) => {
+                    let change = match runtime.readiness() {
+                        Readiness::Blocked { reason } => {
+                            info!("[daemon] {account} is blocked: {reason}");
+                            Change::AccountBlocked {
+                                account: account.clone(),
+                                reason,
+                            }
+                        }
+                        _ => {
+                            info!("[daemon] {account} is ready");
+                            Change::AccountReady {
+                                account: account.clone(),
+                            }
+                        }
+                    };
+                    state.runtimes.insert(Arc::new(runtime));
+                    change
+                }
+                // A start that failed and a start whose thread died read the
+                // same way to a client: nothing about the account can be
+                // served, and the reason says which it was.
+                Ok(Err(e)) => blocked_by_failure(&state, &account, format!("{e:#}")),
+                Err(e) => blocked_by_failure(&state, &account, format!("the start task {e}")),
+            };
+            state.canonical.apply(change);
+        });
+    }
+}
+
+/// Record a start that never produced a runtime and build the change that says
+/// so.
+fn blocked_by_failure(state: &DaemonState, account: &str, reason: String) -> super::state::Change {
+    warn!("[daemon] could not start the runtime for {account}: {reason}");
+    state.runtimes.insert_failure(account, reason.clone());
+    super::state::Change::AccountBlocked {
+        account: account.to_string(),
+        reason,
+    }
 }
 
 // ---------------------------------------------------------------------------

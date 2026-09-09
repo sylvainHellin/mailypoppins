@@ -22,6 +22,13 @@
 //! two starters that each locked a different inode under the same name would
 //! both win.
 //!
+//! ## What else lives here
+//!
+//! [`account`] is one account's runtime - the engine lock it holds for its
+//! lifetime, the tick it runs - and [`pool`] is the read pool that runtime
+//! serves from. Both arrived in P3b-U4; this module was a single file until
+//! then, and the paths and the start lock below are unchanged by the move.
+//!
 //! ## Why a probe classifies instead of deciding
 //!
 //! [`probe_socket`] never touches the filesystem beyond reading metadata and
@@ -41,6 +48,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use log::debug;
 use serde::{Deserialize, Serialize};
+
+pub mod account;
+pub mod pool;
 
 /// Mode of the runtime directory: nobody but the owner may even list it.
 const RUNTIME_DIR_MODE: u32 = 0o700;

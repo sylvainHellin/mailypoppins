@@ -145,7 +145,8 @@ Every other method, known or unknown, is gated.
 ```
 
 The fields are the daemon's own `daemon.json` metadata plus the live account list, so a client comparing them against its own paths learns whether it is talking to the daemon it meant to.
-`accounts` is empty until account runtimes exist, and an account state is one of `opening`, `ready`, `blocked`.
+`accounts` is empty unless the daemon was started with `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`, and an account state is one of `opening`, `ready`, `blocked`: `opening` while its runtime is still starting, then whichever the runtime reported.
+The shape does not change with the opt-in, only which states appear in it.
 `mp daemon status --json` prints this object with a leading `"running": true`, or the same keys with null values and `"running": false` when nothing answers.
 
 `daemon.stop` takes `{}` and returns `{"stopping": true}`.
@@ -182,7 +183,8 @@ A daemon with no configured account answers an empty `accounts` array and three 
 `operations` lists every long-running operation the daemon has not settled, in start order, each entry being an `operation.status` result, so a client that bootstraps while work is in flight learns about it without having been there when it started.
 
 An account's `state` is one of `opening`, `ready` or `blocked`, and it reports the runtime rather than the store: it answers "has this account's runtime come up", where `account.list`'s `state` answers "can I read this account's store on disk".
-The two are deliberately different questions, and this build has no account runtimes, so every account is `opening` at a bootstrap.
+The two are deliberately different questions.
+Without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` no runtime is ever started, so every account stays `opening`; with it, an account is `opening` in a snapshot taken before its runtime came back and converges by event afterwards.
 For an `opening` account all counts are `0` and the draft list is empty, exactly as the TUI presents an account it has not opened yet; readiness arrives afterwards as an ordinary event.
 `sync_health` is an object whose `state` is `unknown`, `ok` or `failed`, and a fresh bootstrap reports `unknown`.
 

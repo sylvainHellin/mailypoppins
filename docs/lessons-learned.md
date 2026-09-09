@@ -1498,3 +1498,19 @@ The implementer discovers them one at a time, in a file they are not allowed to 
 
 Type-check the test against a throwaway stub before committing it: a scratch crate in `/tmp` with a `path` dependency on this one, the pinned API as `todo!()` bodies with the real field types (so `Send`/`Sync` bounds are exercised for real), and a copy of the test whose two `use` lines point at the stub.
 `cargo test --no-run` there proves the body compiles; the repository still sees only the `E0432` pair.
+
+## The store's futures are not `Send`, so a boxed hook has to leave the runtime
+
+`futures::future::BoxFuture` is `Send`, and every path that touches a `Store` produces a future that is not: `run_sync`, `send::resume_outbox` and `pending_ops::resume_account` all hold a `&Store` across an `await`, `rusqlite::Connection` is not `Sync`, so `&Store` is not `Send`.
+Nothing about the account runtime's `TickHooks` (three boxed async callbacks, P3b-U4) is negotiable there: the seam has to be boxed because `SyncBackend` returns `impl Future` and is not object safe, and a boxed future has to be `Send`.
+
+The production hooks therefore run their `!Send` future on a plain `std::thread` that `block_on`s a shared runtime, and await a `oneshot` for the result, which is the same shape the TUI's background actions already use (`src/tui/runtime.rs`, #0095).
+`block_on` from a plain thread and never from a tokio worker is what keeps it from nesting one runtime inside another; one lazily-built shared runtime rather than one per call is what keeps it from spawning a worker per core on every tick.
+
+## A runtime that holds the engine lock must not call the guarded entry point
+
+`run_sync_guarded_at` takes `<account_dir>/store.lock` for the length of the call, which is right for `mp sync` and the TUI, and wrong inside an `AccountRuntime`: the runtime already holds that lock for its whole lifetime, `flock` is per open file description, and the guard would open a second description of the same file, contend with its own holder and return `Ok(None)` on every tick the daemon ever ran.
+A daemon whose sync body silently does nothing is not a failure any test would have caught, because the refusal is a documented success.
+
+The rule is that the guard belongs to whoever does not already hold the lock.
+Inside the runtime the body calls `run_sync` directly, under a lock held for longer than the call, which is strictly stronger than what the guard provides.

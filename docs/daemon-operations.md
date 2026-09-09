@@ -104,6 +104,43 @@ Every other classification is an error, `Absent` included: deleting nothing is c
 A clean shutdown unlinks the socket, and unlinks `daemon.json` and `daemon.pid` only while they still name this instance, so a daemon that started after us does not have its metadata deleted by our exit.
 `SIGTERM` and `SIGINT` both run the same path, so a foreground daemon killed with Ctrl-C leaves no socket behind.
 
+## Account runtimes
+
+With `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` the daemon starts one `AccountRuntime` per configured account (`src/daemon/runtime/account.rs`), and without it there is no runtime, no engine lock and no store to open.
+The starts run off the startup path, on `spawn_blocking`, because each one takes an advisory lock and opens SQLite; the socket is already accepting connections while they happen.
+
+An account is `opening` from the moment the daemon lists it until its start comes back, then `ready` or `blocked`.
+That is what `mp daemon status --json` prints and what a bootstrapped client receives as an `account.state_changed` event, and the two cannot disagree: the runtime table is filled before the change is committed.
+A start that fails outright, an unusable account directory or an unopenable store, reads as `blocked` with the failure as its reason.
+
+### The engine lock
+
+A ready runtime holds `<account_dir>/store.lock` for its whole lifetime, not for the length of one operation, which is what makes the daemon *the* engine for that account.
+While it lives, `mp sync` in a terminal and an open TUI both refuse the ingest and the queue drains and leave them to the daemon (`Sync skipped: another engine is syncing '<account>'`), exactly as a second `mp sync` already did.
+The lock is released when the daemon exits, by `close(2)`, so a crash leaves nothing to reap.
+
+A runtime that cannot take the lock, because a `mp sync` or a TUI is holding it, still starts and reports `blocked`.
+It opens the store and serves reads from it and runs no engine at all: no tick, no drain, no IMAP session.
+This is the read-only degrade `src/engine_lock.rs` describes, and it is why starting a daemon while another client is mid-sync is safe rather than fatal.
+
+### The read pool
+
+Each runtime opens two read connections over the account's store, the size `docs/baselines/decisions/read-pool.md` measured, plus the writer connection a sync uses, which is not one of the two.
+A read checks a connection out and returns it on drop; when both are out, the next read waits rather than failing, since exhaustion resolves in microseconds and a retry loop in every caller would not.
+Every pooled connection is opened through `Store::open`, so it carries the store's pragmas, `busy_timeout` included, and the first one created the store file if the account had never synced.
+
+A runtime's store therefore exists from the moment it comes up ready, which is a change from Phase 3a: an account nobody has synced now has a `store.sqlite3` as soon as a daemon with the opt-in has started.
+
+### Ticks
+
+A tick is `run_tick_with_drains` (#0114) and nothing else: drain, sync, drain, with the tail drain running after a body that failed, and the outbox before the mutation queue in each drain.
+The body's error is carried on the outcome rather than propagated, because the tail has already run by the time anyone hears about it.
+A second tick arriving while one runs joins it and reports the running tick's outcome rather than starting a second engine pass.
+Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailbox body budget, with `0` meaning unbounded; `mp sync`, the explicit recovery path, stays unbounded whatever the config says.
+
+Nothing schedules a tick yet.
+The periodic scheduler is Phase 5/6 of the plan, so in this build a runtime holds its lock, serves reads, and ticks only when something in the process asks it to.
+
 ## Logs
 
 `mp daemon start` points the detached child's stdout and stderr at `<data_dir>/logs/daemon.log`, opened in append mode, and that is the path the exit-4 diagnostic prints.
@@ -141,10 +178,9 @@ None of them has a flag, and none appears in `mp --help`.
 The hook sits at that exact point on purpose: a forced failure leaves nothing on disk to clean up.
 It is what pins the exit-4 diagnostic in `tests/daemon_lifecycle.rs`.
 
-`MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` opts into account runtimes before Phase 5.
+`MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` opts into account runtimes before Phase 5, and it is the one hook here that is not test-only: it turns on real behaviour, described under [Account runtimes](#account-runtimes) above.
 Absent, the daemon creates no runtime and takes no engine lock, and `daemon.status` reports an empty account list.
 What that lock covers grew in #0122: besides the outbox and mutation-queue drains it now guards the IMAP sync ingest, so once a runtime holds it for its lifetime a concurrent `mp sync` prints `Sync skipped: another engine is syncing '<account>'; leaving the ingest to it` and exits 0 instead of ingesting the same window twice.
-Present, it reports every configured account as `opening` and leaves it there, since nothing opens a store or takes a lock before Phase 5 either.
 It is an environment variable rather than a flag so it cannot leak into `mp --help` or into anyone's muscle memory.
 
 `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS=<n>` flips every configured account to `ready` `n` milliseconds after the **first** `state.bootstrap`, committing one change per account in `config.toml` order.
