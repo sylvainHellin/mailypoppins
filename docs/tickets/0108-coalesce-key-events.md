@@ -53,8 +53,11 @@ Ticket C retired auto-mark-read outright, so from #0110 onward the drain has no 
 
 ## Measurement
 
+Not taken.
+After #0109, #0110 and #0111 shipped, the installed build was judged by feel to navigate without a visible delay, and the plan's cache-and-prefetch contingency was closed as unnecessary (2026-09-08).
+The protocol below stays as the recipe should the question reopen; the instrument (`[TIMING] tui_draw`) is in every build.
+
 Manual, and out of scope for the implementation: a held-`j` wall-clock on a real account is the honest signal, and a synthetic benchmark over a fixture store is not.
-Sylvain fills the fields below, once before Ticket B (baseline, with this ticket's two commits installed) and again after each of B, C and D.
 
 ### Run conditions (pin these, or the number is not reproducible)
 
@@ -110,7 +113,7 @@ Coalescing should cut the frame count well below twenty while leaving the twenty
 
 ## Acceptance
 
-- The baseline is recorded above under the pinned run conditions.
+- The baseline is recorded above under the pinned run conditions (waived, see Measurement).
 - A held `j` across twenty rows paints once per drained batch rather than once per key, and still lands on the twentieth row.
 - A key typed while an action suspends the terminal into `$EDITOR` reaches the editor, not the app.
 - `Action::suspends_terminal()` is true for every action whose handler reaches `edit_file`.
@@ -125,7 +128,7 @@ Install either commit on its own to take the before and after of the coalescing;
 Actions classified as terminal-suspending: `EditCurrent`, `Reply`, `NewDraft`, `OpenLogFile`, `OpenConfigFile`, `OpenEventSource`, `SendContactVcard`, `ComposeEditSignature`, `EditSignatureFile`, `ComposeWizardSubmit`, `SearchResultOpen`, `SearchResultReply`, `SearchResultForward`.
 The ten `edit_file` call sites the plan lists are all reachable from exactly those thirteen, and `suspend_terminal` has no caller that is not paired with one of them, so there is no external viewer or pager to cover.
 
-The measurement fields above are still `TBD`: taking them is manual and was left to Sylvain.
+The measurement fields above stay `TBD`: after all four tickets shipped the result was judged good enough by use, and the contingency was closed without numbers.
 
 ## Links
 
