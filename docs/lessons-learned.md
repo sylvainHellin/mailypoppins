@@ -1261,3 +1261,42 @@ stored value *inside* the set: here a listing of `[10, 11]` over rows parked on
 numbering low over a store that still holds those numbers. Assert on the row ids
 as well as the UIDs, since the broken path reaches the same UID list by inserting
 a new row and overwriting another through the identity lookup.
+
+## A per-pass degradation dies with the pass that earned it
+
+The #0112 rebind gate degrades on a UIDVALIDITY reset, which is right, and the
+degradation lasted exactly one pass, which is not: `record_mailbox_cursor`
+writes the new UIDVALIDITY at the end of the detecting pass, so `known.resolve`
+reports no reset from the next pass onward, while that pass had refetched only
+its window (100 UIDs on a TUI tick, 50 on `mp sync`). Every row below the window
+went into the next pass carrying a number from a numbering that no longer
+existed, and met the gate the reset was supposed to switch off (#0117). Whenever
+a condition switches behaviour off for "the pass that noticed", check what the
+noticing pass covered: if it can be a window rather than the whole thing, the
+switch is off again while the work is still half done.
+
+## A stale UID is not a duplicate row, it is a message that cannot arrive
+
+The #0117 straggler looks like a cosmetic duplicate and is not. `known_uids` is
+`SELECT uid FROM messages`, so a row parked on a recycled UID puts that UID in
+the skip list and pass 2 of the fetch never asks for it; the server still lists
+the UID, so `vanished_uids` never prunes the row either. The message the server
+actually holds there is then undownloadable for good, `apply_flags` keeps
+applying its flags to the wrong row, and no pass converges it, `mp sync` and a
+full TUI sync alike, because the window is not what is wrong. Any store keyed on
+a server-assigned number needs the same question asked of it: what happens when
+a row's claim to a number outlives the numbering, and is there a path that
+notices.
+
+## Unbind after the ingest loop, not before it
+
+The fix takes every row still sitting on a listed UID the reset pass did not
+ingest off that UID. Doing it before the loop is tempting, and it also repairs
+the older hazard where a recycled UID inside the pass's own window overwrites the
+row parked on it through the identity lookup. It cannot be done there: with every
+row already off its listed UID, the #0112 seeding guard has nothing left to
+decline, its reset half becomes dead code, and the two tests that pin that half
+pass with it deleted. A fix that makes an existing guard unobservable has removed
+the guard, whatever the diff says. Run the guard's own tests against each half
+deleted before and after, and if a half stops biting, the fix is in the wrong
+place.

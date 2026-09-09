@@ -278,6 +278,39 @@ pub async fn run_sync(
                 }
             }
         }
+
+        // The degradation above is granted to the pass that detects the reset,
+        // and until #0117 it died with it: the cursor records the new
+        // UIDVALIDITY at the end of this pass, so no later pass reports a
+        // reset, while the refetch was capped at the window (100 UIDs on a
+        // quick tick, 50 on `mp sync`). Every row below that window kept its
+        // old-validity UID into passes that trust their listing, where the gate
+        // declined its rebind and the message was inserted a second time.
+        //
+        // The severe half is not the duplicate: the stale row keeps the
+        // recycled UID in the skip list, so the message the server holds there
+        // is never downloaded, and the server still lists that UID so no prune
+        // clears the row either. Nothing converges it, a full sync included.
+        //
+        // So the pass says what it verified before it leaves: every UID it
+        // ingested is a row the server vouched for, and every other listed UID
+        // is a claim made under a numbering that no longer exists. The rows
+        // holding those claims are unbound, which frees the UID for the message
+        // that now wears it and leaves the row rebindable, so its own message
+        // takes it back when a later pass downloads it.
+        //
+        // Rows on UIDs the server does not list are left alone: they block
+        // nothing, and the prune is the path that answers for them.
+        if fetched.uidvalidity_reset {
+            let unverified: Vec<u32> = fetched
+                .listed
+                .iter()
+                .copied()
+                .filter(|&uid| !server_uids.contains(&(uid as i64)))
+                .collect();
+            ingest::unbind_rows_on_uids(store, account, target.role.as_str(), &unverified);
+        }
+
         coverage.push((
             fetched.enumeration_complete,
             fetched.download_incomplete || !unmet.is_empty(),
@@ -394,6 +427,18 @@ mod tests {
         /// Every `(target, limit, skip-list size)` the engine asked for, in
         /// call order: what the engine handed the transport.
         seen: Vec<(String, usize, usize)>,
+        /// Opt-in fidelity: drop the scripted messages whose UID the store's
+        /// skip list already holds, resolved against the scripted UIDVALIDITY
+        /// exactly as [`crate::ingest::KnownUids::resolve`] does it.
+        ///
+        /// That is what the real backend's pass 2 does
+        /// ([`crate::imap_client::fetch_new_raw_on_session`]): it downloads a
+        /// UID only when the store does not hold it. Off by default, because
+        /// the scripts here mostly say "this is what came back" rather than
+        /// "this is what the mailbox holds", and a test that wants to state
+        /// what a *stale skip-list entry* costs has to be handed the mailbox
+        /// instead (#0117).
+        honour_skip_list: bool,
     }
 
     impl FakeBackend {
@@ -412,7 +457,7 @@ mod tests {
             let mut out = Vec::with_capacity(targets.len());
             for (target, known) in targets.iter().zip(knowns) {
                 self.seen.push((target.server_name.clone(), limit, known.uids.len()));
-                let next = self
+                let mut next = self
                     .passes
                     .get_mut(&target.server_name)
                     .and_then(|queue| {
@@ -423,6 +468,12 @@ mod tests {
                         }
                     })
                     .unwrap_or_else(|| Err(anyhow::anyhow!("nothing scripted")));
+                if self.honour_skip_list {
+                    if let Ok(fetch) = next.as_mut() {
+                        let (skip, _) = known.resolve(fetch.state.uid_validity);
+                        fetch.messages.retain(|m| !skip.contains(&(m.uid as i64)));
+                    }
+                }
                 out.push(next);
             }
             out
@@ -556,6 +607,26 @@ mod tests {
                 .unwrap();
             let out = stmt
                 .query_map([mailbox], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            out
+        }
+
+        /// `(row id, uid)` of every row in the mailbox carrying `message_id`,
+        /// which is what says whether a message ended on one row and which row
+        /// that is: `rows` alone cannot tell a message that followed its row
+        /// from one written into a fresh one beside it.
+        fn rows_for(&self, mailbox: &str, message_id: &str) -> Vec<(i64, i64)> {
+            let conn = self.store.conn();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, uid FROM messages WHERE account = 'acct' AND mailbox = ?1 \
+                     AND message_id = ?2 ORDER BY uid",
+                )
+                .unwrap();
+            let out = stmt
+                .query_map((mailbox, message_id), |row| Ok((row.get(0)?, row.get(1)?)))
                 .unwrap()
                 .map(|r| r.unwrap())
                 .collect();
@@ -1141,27 +1212,35 @@ mod tests {
         );
     }
 
-    /// Witness for #0117, which this test documents rather than pins: the
-    /// assertions below state what the engine does today, and the fix is what
-    /// changes them.
+    /// #0117: a UIDVALIDITY reset whose detecting pass covered only part of the
+    /// listing still converges, one row per message and nobody parked on a
+    /// recycled UID.
     ///
     /// The guard above degrades the gate on the pass that *detects* the reset,
-    /// and that pass is the only one that sees it. `record_mailbox_cursor`
+    /// and that pass is the only one that sees it: `record_mailbox_cursor`
     /// writes the new UIDVALIDITY at the end of it, so `known.resolve` reports
-    /// no reset from the next pass onward, while the reset refetch covered only
-    /// the last `limit` UIDs of the listing. Every row below that window keeps
-    /// its old-validity UID and is rebound later, with the full listing active
-    /// and no degradation: the case the guard exists for, running without it.
+    /// no reset from the next pass onward, while the refetch was capped at the
+    /// window (100 UIDs on a quick tick, 50 on `mp sync`). Every row below that
+    /// window used to keep its old-validity UID into a pass with the full
+    /// listing trusted and no degradation, which is the case the guard exists
+    /// for running without the guard.
     ///
     /// Here the recreated mailbox holds `three` on 11, `one` on 12 and `two` on
     /// 13, over a store holding `one` on 11 and `two` on 12. The reset pass has
-    /// a window of one UID, so it rebinds `two` and leaves `one` parked on 11.
-    /// The next pass downloads `one` on 12, finds its row parked on 11, which
-    /// that pass lists, and declines. `one` ends up in the store twice, and
-    /// `three`, which is what the server actually holds on 11, is in the skip
-    /// list behind the stale row and is never downloaded at all.
+    /// a window of one UID, so it can only rebind `two`. What it must not leave
+    /// behind is `one` still claiming 11, which the new numbering has given to
+    /// `three`: the claim goes into the next pass's skip list and hides
+    /// `three` for good. The row is unbound instead, and the pass that
+    /// downloads `one` on 12 gives it back the row it always had.
+    ///
+    /// The window is modelled by hand, as everywhere else here
+    /// (`FakeBackend::fetch_targets` records `limit` and does not apply it),
+    /// and so is pass 3's download set. What that set *would* be under a stale
+    /// skip list is the other half, and
+    /// `the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset`
+    /// derives it from the store rather than scripting it.
     #[test]
-    fn a_reset_wider_than_the_window_leaves_a_straggler_the_next_pass_duplicates() {
+    fn a_reset_wider_than_the_window_converges_on_the_next_pass() {
         let fx = Fixture::new();
         let targets =
             vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
@@ -1174,64 +1253,161 @@ mod tests {
         renumbered.listed = vec![11, 12, 13];
         renumbered.uidvalidity_reset = true;
         renumbered.state.uid_validity = Some(8);
-        // Pass 3: no reset left to report, the whole listing trusted, and the
-        // straggler's new UID is the only thing the store does not hold.
-        let mut straggler = fetch(vec![(12, raw("one"))]);
-        straggler.listed = vec![11, 12, 13];
-        straggler.state.uid_validity = Some(8);
+        // Pass 3: no reset left to report and the whole listing trusted. Both
+        // remaining UIDs are downloaded, because neither is claimed by a row
+        // any more.
+        let mut rest = fetch(vec![(11, raw("three")), (12, raw("one"))]);
+        rest.listed = vec![11, 12, 13];
+        rest.state.uid_validity = Some(8);
         backend.script(
             "Sent Items",
             vec![
                 Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])),
                 Ok(renumbered),
-                Ok(straggler),
+                Ok(rest),
             ],
         );
 
         fx.run(&mut backend, &targets);
         assert_eq!(fx.rows("sent"), vec![11, 12]);
+        let before = fx.row_ids("sent");
+        let (one_row, two_row) = (before[0].0, before[1].0);
 
         let reset = fx.run_with(&mut backend, &targets, 1, false);
 
         assert_eq!(reset.uidvalidity_resets, 1);
         assert_eq!(reset.uid_rebound, 1, "the window covered one of the two rows");
-        assert_eq!(fx.rows("sent"), vec![11, 13], "and `one` is still on its old-validity UID");
+        assert_eq!(
+            fx.row_ids("sent"),
+            vec![(one_row, -one_row), (two_row, 13)],
+            "`two` follows its message, and `one`, which the window did not reach, is unbound \
+             rather than left claiming a UID the new numbering gave to another message"
+        );
         assert_eq!(
             ingest::known_uids_with_cursor(&fx.store, "acct", "sent").unwrap().uidvalidity,
             Some(8),
-            "the detecting pass records the new UIDVALIDITY, so no later pass reports a reset"
+            "the detecting pass still records the new UIDVALIDITY, so no later pass reports a \
+             reset and the fix may not depend on one"
+        );
+        let known = ingest::known_uids_with_cursor(&fx.store, "acct", "sent").unwrap();
+        assert!(
+            !known.uids.contains(&11),
+            "and 11 is out of the skip list, so the next pass downloads what the server \
+             actually holds there"
         );
 
         let after = fx.run(&mut backend, &targets);
 
+        assert_eq!(after.uid_rebound, 1, "`one` follows its own row onto its new UID");
+        assert_eq!(after.saved, 1, "and only `three`, which is genuinely new, is inserted");
+        assert_eq!(fx.rows("sent"), vec![11, 12, 13]);
         assert_eq!(
-            after.uid_rebound, 0,
-            "#0117: the gate declines the straggler's rebind, because 11 is listed"
+            fx.rows_for("sent", "<one@example.com>"),
+            vec![(one_row, 12)],
+            "one message, one row, and the row it started on: the thread assignment and the \
+             blob references ride on that id"
         );
-        assert_eq!(after.saved, 1, "#0117: so `one` is inserted a second time");
+        assert_eq!(fx.rows_for("sent", "<two@example.com>"), vec![(two_row, 13)]);
+        let three = fx.rows_for("sent", "<three@example.com>");
+        assert_eq!(three.len(), 1, "and the message on the recycled UID has a row of its own");
+        assert_eq!(three[0].1, 11);
+    }
+
+    /// The severe half of #0117, pinned where it actually bites: not the
+    /// duplicate row, but the message that becomes undownloadable behind it.
+    ///
+    /// `known_uids` is `SELECT uid FROM messages`, so a row still claiming a
+    /// recycled UID puts that UID in the skip list, pass 2 of the fetch never
+    /// asks for it, and the server keeps listing it so `vanished_uids` never
+    /// prunes the row either. The message the server holds there is then
+    /// permanently missing, and a full sync does not clear it: the window is
+    /// not what is wrong, the skip list is.
+    ///
+    /// This is the one test that hands the backend the *mailbox* and lets it
+    /// derive its download set from the store's skip list, which is what makes
+    /// "`three` was never asked for" observable rather than scripted away.
+    #[test]
+    fn the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset() {
+        let fx = Fixture::new();
+        let targets =
+            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let mut backend = FakeBackend { honour_skip_list: true, ..Default::default() };
+
+        let mut renumbered = fetch(vec![(13, raw("two"))]);
+        renumbered.listed = vec![11, 12, 13];
+        renumbered.uidvalidity_reset = true;
+        renumbered.state.uid_validity = Some(8);
+        // The whole recreated mailbox, offered to every later pass: what comes
+        // back is what the skip list does not already hold.
+        let mut whole = fetch(vec![(11, raw("three")), (12, raw("one")), (13, raw("two"))]);
+        whole.listed = vec![11, 12, 13];
+        whole.state.uid_validity = Some(8);
+        backend.script(
+            "Sent Items",
+            vec![
+                Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])),
+                Ok(renumbered),
+                Ok(whole),
+            ],
+        );
+
+        fx.run(&mut backend, &targets);
+        fx.run_with(&mut backend, &targets, 1, false);
+        fx.run(&mut backend, &targets);
+
+        let three = fx.rows_for("sent", "<three@example.com>");
         assert_eq!(
-            fx.rows("sent"),
-            vec![11, 12, 13],
-            "#0117: three rows for a three-message mailbox, but 11 holds `one` and not `three`"
+            three.len(),
+            1,
+            "the message the new numbering put on the recycled UID is downloaded, not left \
+             behind a stale skip-list entry"
         );
+        assert_eq!(three[0].1, 11);
         assert_eq!(
-            fx.store
-                .conn()
-                .query_row(
-                    "SELECT COUNT(*) FROM messages WHERE account = 'acct' AND mailbox = 'sent' \
-                     AND message_id = '<one@example.com>'",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            2,
-            "#0117: one message, two rows"
+            fx.rows_for("sent", "<one@example.com>").len(),
+            1,
+            "and the message that was parked on that UID is not duplicated"
         );
-        let known = ingest::known_uids_with_cursor(&fx.store, "acct", "sent").unwrap();
-        assert!(
-            known.uids.contains(&11),
-            "#0117: and the stale row keeps 11 in the skip list, so `three`, which is what the \
-             server holds there, is never downloaded"
+        assert_eq!(fx.rows("sent"), vec![11, 12, 13], "three messages, three rows");
+    }
+
+    /// The other edge of the same unbinding: a row is taken off its UID only
+    /// when the new listing holds that UID, because that is the only case where
+    /// the claim hides a message.
+    ///
+    /// A row whose UID the server does not list blocks nothing, and unbinding
+    /// it would park it on the move sentinel that no prune touches
+    /// (`vanished_uids` skips `uid <= 0`), stranding a row whose message the
+    /// recreated mailbox simply no longer holds.
+    #[test]
+    fn a_reset_leaves_a_row_alone_when_the_new_listing_has_no_uid_for_it() {
+        let fx = Fixture::new();
+        let targets =
+            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let mut backend = FakeBackend::default();
+
+        // The recreated mailbox lists 12 and 13 only: 11, which `one` sits on,
+        // is below its numbering.
+        let mut renumbered = fetch(vec![(13, raw("two"))]);
+        renumbered.listed = vec![12, 13];
+        renumbered.uidvalidity_reset = true;
+        renumbered.state.uid_validity = Some(8);
+        backend.script(
+            "Sent Items",
+            vec![Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])), Ok(renumbered)],
+        );
+
+        fx.run(&mut backend, &targets);
+        let before = fx.row_ids("sent");
+        let (one_row, two_row) = (before[0].0, before[1].0);
+
+        fx.run_with(&mut backend, &targets, 1, false);
+
+        assert_eq!(
+            fx.row_ids("sent"),
+            vec![(one_row, 11), (two_row, 13)],
+            "`two` was unbound off 12, which the listing holds, and rebound onto 13; `one` \
+             keeps 11, which the listing does not hold, so the prune can still reach it"
         );
     }
 

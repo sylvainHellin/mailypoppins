@@ -2,13 +2,18 @@
 id: 0117
 title: The rebind gate runs undegraded on the passes that finish a windowed UIDVALIDITY reset
 type: bug
-priority: next
-status: open
+priority: now
+status: done
 created: 2026-09-09
 ---
 
 Found while pinning the seeding guard of [#0112](0112-gate-message-id-rebind.md), not by that ticket's own work.
-No fix here: the witness is `a_reset_wider_than_the_window_leaves_a_straggler_the_next_pass_duplicates` in `src/sync/engine.rs`, which documents the current behaviour and is what the fix changes.
+
+Filed at `priority: next` and raised to `now` when it was fixed.
+The duplicate row is cosmetic; the message that becomes permanently undownloadable behind the stale skip-list entry is silent mail loss on a mirror whose whole contract is that the server is truth, and no pass, `mp sync` or full TUI sync, converges it.
+That belongs in the same band as #0112 itself.
+
+See the Resolution section at the end for what shipped.
 
 ## Problem
 
@@ -30,7 +35,7 @@ The store ends up with one message twice and another missing, and it stays that 
 
 ## Reproduction
 
-The witness test drives the real engine over three passes.
+The witness test drove the real engine over three passes, and the fix rewrote it into `a_reset_wider_than_the_window_converges_on_the_next_pass`.
 The store holds `one` on 11 and `two` on 12; the mailbox is recreated holding `three` on 11, `one` on 12 and `two` on 13.
 The detecting pass has a window of one UID, rebinds `two` onto 13 and leaves `one` parked on 11.
 The next pass downloads `one` on 12, finds its row on 11, which that pass lists, declines the rebind, and inserts.
@@ -58,3 +63,38 @@ Options, in rough order of appetite:
 - A reset whose detecting pass covers only part of the listing converges: each message ends on one row, no row is stranded on a recycled UID, and no message is left undownloadable behind a stale skip-list entry.
 - The #0112 guarantee is untouched: N server-side copies of one `Message-ID` still get N rows, and a second pass over an unchanged mailbox still moves no row.
 - The witness test above is rewritten as an assertion of the fixed behaviour.
+
+## Resolution
+
+The detecting pass now says what it verified before it leaves.
+At the tail of a pass that reported a reset, `ingest::unbind_rows_on_uids` takes every row still parked on a listed UID the pass did not ingest off that UID and onto the `-id` sentinel `store::write::move_row` already uses for a row holding no server UID.
+The UID is then free, so the message the new numbering put there is downloaded on the next pass, and the row is rebindable by construction, so its own message takes it back when that pass downloads it.
+
+Rows on UIDs the server does not list are left where they are.
+They block nothing, and unbinding them would park a row whose message the recreated mailbox no longer holds on a sentinel no prune touches (`vanished_uids` skips `uid <= 0`).
+
+The unbinding runs after the ingest loop rather than before it, which is load-bearing in two directions.
+Before the loop it would take every row off its listed UID, the #0112 seeding guard would have nothing left to decline, and its reset half would become dead code that could be deleted with the suite green.
+After the loop the guard still decides every rebind the pass takes, and the unbinding sees only what the pass could not verify, which is exactly the straggler set.
+
+The options that were weighed and dropped:
+
+- Carry the reset across passes by withholding the new UIDVALIDITY from the cursor until a pass covers the listing.
+  It does not converge: the straggler is below the window by construction, so no later windowed pass ever revisits it, and meanwhile `KnownUids::resolve` empties the skip list on every pass and the window is re-downloaded each tick.
+- Lift the window cap on the detecting pass.
+  It converges, at the cost of one tick that downloads an entire mailbox, and every byte of it is a body the store already holds: after a renumbering the store is missing numbers, not messages.
+- Give each row the UIDVALIDITY it was written under.
+  The cleanest statement of the invariant, and it needs a column on `messages`, which under the drop-and-rebuild contract makes every user re-download every mailbox to fix a bug that costs one message per recycled UID.
+
+The neighbouring hazard named above is unchanged and still open: when a recycled UID falls inside the reset pass's *own* window, the identity lookup finds the row parked on it and overwrites that row's message with the different one the server now holds there.
+The mailbox still converges, because the overwritten message is downloaded again on a later pass and inserted, but it loses its row and therefore its thread assignment and its blob references.
+The unbinding cannot reach it: the UID is one the pass ingested, which is the strongest verification there is, and it is the identity lookup rather than the rebind gate that does the damage.
+
+Tests in `src/sync/engine.rs`:
+
+- `a_reset_wider_than_the_window_converges_on_the_next_pass`, the rewritten witness: each message on one row, `one` back on the row id it started with, and 11 out of the skip list at the end of the detecting pass.
+- `the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset`, the severe half.
+  It is the one test that lets the fake backend derive its download set from the store's skip list (`FakeBackend::honour_skip_list`), so "`three` was never asked for" is observable rather than scripted away.
+- `a_reset_leaves_a_row_alone_when_the_new_listing_has_no_uid_for_it`, the other edge.
+
+Both halves of the #0112 seeding guard still bite: deleted in turn, `a_reset_rebinds_a_row_parked_on_a_uid_its_own_listing_still_holds` and `a_short_enumeration_rebinds_a_row_parked_on_a_uid_its_listing_holds` each report `uid_rebound` 0 against the 2 they ask for.

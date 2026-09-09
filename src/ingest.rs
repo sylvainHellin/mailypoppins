@@ -770,6 +770,108 @@ pub fn clear_mailbox_modseq(store: &Store, account: &str, mailbox: &str) {
     }
 }
 
+/// Take every row in `mailbox` that is parked on one of `uids` off it, parking
+/// it on the `-id` sentinel [`crate::store::write::move_row`] already uses for
+/// a row that holds no server UID right now (#0117).
+///
+/// Called on exactly one branch: the tail of a pass that detected a UIDVALIDITY
+/// reset, with the UIDs the server listed and the pass did *not* re-ingest. The
+/// server has renumbered, so a stored UID is a number the row was given under a
+/// numbering that no longer exists, and a row still sitting on one the new
+/// numbering hands out is claiming a place nothing has verified. That claim is
+/// what makes the defect severe rather than cosmetic: [`known_uids`] is `SELECT
+/// uid FROM messages`, so the stale claim puts the recycled UID in the next
+/// pass's skip list, the message the server actually holds there is never
+/// downloaded, and the server keeps listing the UID so no prune ever clears it
+/// either.
+///
+/// What the caller must leave out of `uids`, and why the set is the caller's to
+/// build rather than this function's:
+///
+/// - a UID the pass ingested. The row on it was written from the message the
+///   server holds there, which is the strongest verification there is.
+/// - a UID the server does not list. Such a row blocks nothing, and unbinding
+///   it would park a row whose message the recreated mailbox no longer holds on
+///   a sentinel no prune touches (`vanished_uids` skips `uid <= 0`).
+///
+/// Unbinding is not a rebind and does not touch the #0112 gate: no message is
+/// moved onto another message's row, the row count is unchanged, and it runs
+/// after the pass's own ingest has decided every rebind. What it leaves behind
+/// is a row that is rebindable again, which is the degradation a renumbering is
+/// entitled to and which #0112 already grants the detecting pass; it just did
+/// not survive that pass, because the cursor records the new UIDVALIDITY at the
+/// end of it and no later pass reports a reset.
+///
+/// The UIDs are intersected in Rust rather than pushed into the SQL as an `IN`,
+/// for the reason [`rebindable_row`] gives: on a large mailbox this is most of
+/// the server's listing, well past what a bound-parameter list may carry.
+///
+/// Best-effort like [`prune_vanished`]: a row that refuses to update is logged
+/// and the rest still go, because the alternative is failing a sync over
+/// bookkeeping the next pass would redo anyway.
+pub fn unbind_rows_on_uids(store: &Store, account: &str, mailbox: &str, uids: &[u32]) -> usize {
+    if uids.is_empty() {
+        return 0;
+    }
+    let listed: std::collections::HashSet<i64> = uids.iter().map(|&uid| uid as i64).collect();
+    let conn = store.conn();
+    let squatters: Vec<i64> = {
+        let mut stmt = match conn.prepare(
+            "SELECT id, uid FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid > 0",
+        ) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                warn!("Failed to read the rows of '{mailbox}' to unbind: {e:#}");
+                return 0;
+            }
+        };
+        let rows = match stmt.query_map((account, mailbox), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!("Failed to read the rows of '{mailbox}' to unbind: {e:#}");
+                return 0;
+            }
+        };
+        rows.filter_map(|row| row.ok())
+            .filter(|(_, uid)| listed.contains(uid))
+            .map(|(id, _)| id)
+            .collect()
+    };
+    if squatters.is_empty() {
+        return 0;
+    }
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            warn!("Failed to open the unbind transaction for '{mailbox}': {e:#}");
+            return 0;
+        }
+    };
+    let mut unbound = 0;
+    for id in squatters {
+        // `-id` is unique per row by construction, so no UPDATE here can
+        // collide with another row's UID under `UNIQUE (account, mailbox, uid)`.
+        match tx.execute("UPDATE messages SET uid = ?2 WHERE id = ?1", (id, -id)) {
+            Ok(n) => unbound += n,
+            Err(e) => warn!("Failed to unbind row {id} in '{mailbox}': {e:#}"),
+        }
+    }
+    if let Err(e) = tx.commit() {
+        warn!("Failed to commit the unbind for '{mailbox}': {e:#}");
+        return 0;
+    }
+    if unbound > 0 {
+        warn!(
+            "UIDVALIDITY reset in '{account}/{mailbox}': {unbound} row(s) were parked on a UID \
+             the new numbering hands to some other message; they are unbound and follow their \
+             own message as it is refetched"
+        );
+    }
+    unbound
+}
+
 /// Record a Graph delta resume point and the folder identity it is bound to,
 /// and touch nothing else (#0042).
 ///
