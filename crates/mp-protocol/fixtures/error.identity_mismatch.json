@@ -1,0 +1,18 @@
+{
+  "error": {
+    "code": -32001,
+    "data": {
+      "client": {
+        "config_dir": "/home/alice/.config/mailypoppins-staging",
+        "data_dir": "/home/alice/.local/share/mailypoppins"
+      },
+      "daemon": {
+        "config_dir": "/home/alice/.config/mailypoppins",
+        "data_dir": "/home/alice/.local/share/mailypoppins"
+      }
+    },
+    "message": "the client's data and config directories differ from the daemon's"
+  },
+  "id": 1,
+  "jsonrpc": "2.0"
+}

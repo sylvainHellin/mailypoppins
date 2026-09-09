@@ -1,0 +1,29 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "params": {
+    "capabilities": {
+      "optional": [
+        "message.browser_open",
+        "calendar.rsvp"
+      ],
+      "required": [
+        "state.bootstrap",
+        "state.events"
+      ]
+    },
+    "client": {
+      "type": "tui",
+      "version": "0.9.0"
+    },
+    "identity": {
+      "config_dir": "/home/alice/.config/mailypoppins",
+      "data_dir": "/home/alice/.local/share/mailypoppins"
+    },
+    "protocol": {
+      "max": 1,
+      "min": 1
+    }
+  }
+}

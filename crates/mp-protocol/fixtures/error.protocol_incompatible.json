@@ -1,0 +1,18 @@
+{
+  "error": {
+    "code": -32002,
+    "data": {
+      "client": {
+        "max": 3,
+        "min": 2
+      },
+      "daemon": {
+        "max": 1,
+        "min": 1
+      }
+    },
+    "message": "no protocol version is supported by both sides"
+  },
+  "id": 1,
+  "jsonrpc": "2.0"
+}

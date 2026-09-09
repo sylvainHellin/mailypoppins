@@ -1,0 +1,30 @@
+{
+  "id": 4,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "tum",
+    "mailbox": "INBOX",
+    "messages": [
+      {
+        "date": "2025-11-18T06:58:11Z",
+        "flags": [
+          "\\Seen"
+        ],
+        "from": "anna.mueller@tum.de",
+        "has_attachments": false,
+        "subject": "Re: Obermeyer Center steering meeting",
+        "uid": 1846
+      },
+      {
+        "date": "2025-11-17T21:03:47Z",
+        "flags": [],
+        "from": "billing@example.com",
+        "has_attachments": true,
+        "subject": "Invoice 2025-114",
+        "uid": 1845
+      }
+    ],
+    "revision": 4217,
+    "total": 5127
+  }
+}

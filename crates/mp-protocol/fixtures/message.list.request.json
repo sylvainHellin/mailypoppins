@@ -1,0 +1,12 @@
+{
+  "id": 4,
+  "jsonrpc": "2.0",
+  "method": "message.list",
+  "params": {
+    "account": "tum",
+    "limit": 2,
+    "mailbox": "INBOX",
+    "offset": 0,
+    "since_revision": 4210
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.resync_required",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "reason": "event_queue_overflow"
+  }
+}

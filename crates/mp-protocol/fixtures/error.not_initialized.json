@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": -32000,
+    "data": {},
+    "message": "the connection has not completed initialize"
+  },
+  "id": 2,
+  "jsonrpc": "2.0"
+}

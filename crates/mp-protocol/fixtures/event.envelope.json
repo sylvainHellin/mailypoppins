@@ -1,0 +1,20 @@
+{
+  "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+  "kind": "message.flags_changed",
+  "payload": {
+    "account": "tum",
+    "flags": {
+      "added": [
+        "\\Seen"
+      ],
+      "removed": []
+    },
+    "mailbox": "INBOX",
+    "uids": [
+      1841,
+      1842,
+      1846
+    ]
+  },
+  "revision": 4217
+}

@@ -1,0 +1,23 @@
+{
+  "id": 3,
+  "jsonrpc": "2.0",
+  "result": {
+    "accounts": [
+      {
+        "address": "sylvain.hellin@tum.de",
+        "default": true,
+        "last_sync_at": "2025-11-18T07:41:02Z",
+        "name": "tum",
+        "state": "ready"
+      },
+      {
+        "address": "sylvain@example.org",
+        "default": false,
+        "last_sync_at": "2025-11-18T07:39:55Z",
+        "name": "proton",
+        "state": "syncing"
+      }
+    ],
+    "revision": 4217
+  }
+}

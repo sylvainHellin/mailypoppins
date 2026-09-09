@@ -1,0 +1,6 @@
+{
+  "id": 3,
+  "jsonrpc": "2.0",
+  "method": "account.list",
+  "params": {}
+}
