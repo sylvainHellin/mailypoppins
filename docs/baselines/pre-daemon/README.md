@@ -61,6 +61,20 @@ The second command is the ANO-1 guard: `website/src/data/tui-keys.json` is gener
 `KEYMAP` by `scripts/regen-website-keys.sh`, so a difference means the published key reference has
 drifted from the binary. At capture time the two were byte-identical, so the website was not stale.
 
+### `workloads.md` and `measurements.md`
+
+The eight benchmark workloads (W1 to W8) with their exact commands, metrics and acceptance rules,
+and the record of which of them this host could take.
+They read the deterministic fixture `examples/mkfixture.rs` generates, so the offline ones need no
+account and no network.
+
+```sh
+cargo run --release --example mkfixture -- --out /tmp/mp-fixture --rows 5000
+```
+
+Five measurement rows are `NOT TAKEN` and are owner action; `measurements.md` lists them together
+at the end for escalation.
+
 ## Instrumentation added for the baseline
 
 ### `[TIMING] tui_preview_query`
@@ -97,5 +111,7 @@ account, against the workloads P0-U6 records in `workloads.md`.
 
 ## What is deliberately absent
 
-No latency or timing numbers. Those arrive with the measurement units later in phase 0 and phase 1a
-and are committed beside these files.
+No interactive TUI numbers: preview latency, cold first paint, mutation propagation and the frame
+pacing of a 5000-row refetch all need a terminal and a configured account, and are recorded as
+`NOT TAKEN` in `measurements.md` rather than approximated.
+The phase 1a spike numbers are committed separately, under `docs/baselines/decisions/`.
