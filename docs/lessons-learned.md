@@ -1247,3 +1247,17 @@ many copies does this account have". Both new tests were run against the
 unguarded code before being run against the fixed code: the race test reports two
 copies of the first message, and the kill test reports zero dedup searches on the
 reclaim.
+
+## A membership guard is only observable when the two sets overlap
+
+The #0112 seeding guard, which empties the rebind gate on a UIDVALIDITY reset or
+a short enumeration, was covered by tests that passed with either half of it
+deleted. Both fixtures renumbered onto UIDs the store did not hold (11 and 12
+over rows on 6540 and 6542, or a listing of `[6542]` against a candidate row on
+6540), so `listed.contains(candidate_uid)` was false either way and the branch
+never changed an outcome. A test that pins a set-membership test has to put the
+stored value *inside* the set: here a listing of `[10, 11]` over rows parked on
+11 and 12, which is also the realistic reset, a recreated mailbox restarting its
+numbering low over a store that still holds those numbers. Assert on the row ids
+as well as the UIDs, since the broken path reaches the same UID list by inserting
+a new row and overwriting another through the identity lookup.
