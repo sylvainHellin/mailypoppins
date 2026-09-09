@@ -129,3 +129,8 @@ required-features = ["daemon"]
 name = "daemon_read_only_methods"
 path = "tests/daemon_read_only_methods.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_dispatcher"
+path = "tests/daemon_dispatcher.rs"
+required-features = ["daemon"]
