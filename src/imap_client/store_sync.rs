@@ -27,7 +27,7 @@ use super::pool;
 use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::store::{BlobStore, Store};
-use crate::sync::engine::{run_sync, SyncRun};
+use crate::sync::engine::{run_sync_guarded, SyncRun};
 use crate::sync::{MailboxFetch, SyncBackend, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
 
@@ -113,7 +113,7 @@ impl SyncBackend for ImapBackend<'_> {
 /// Fetch every target mailbox and ingest what comes back.
 ///
 /// Since #0059 this is the wiring only: it opens the store, builds the IMAP
-/// backend and hands both to [`crate::sync::run_sync`], which owns the
+/// backend and hands both to [`run_sync_guarded`], which owns the
 /// orchestration (ingest, arrival marks, flags, cursors, the deferred prune
 /// pass) and is tested offline against a fake backend.
 ///
@@ -124,6 +124,11 @@ impl SyncBackend for ImapBackend<'_> {
 /// the account's configured deadline so one slow mailbox cannot hold the tick,
 /// and `mp sync` passes `None`, because it is the explicit recovery path and a
 /// full sync must not be cut short.
+///
+/// Since #0122 the pass runs under the per-account engine lock, so `Ok(None)`
+/// means another process is this account's engine and this call did nothing:
+/// no session, no ingest, no error. Every caller reads that as a success and
+/// says it skipped, the same way a refused outbox drain is read (#0116).
 pub async fn sync_mailboxes(
     imap_config: &ImapConfig,
     account_name: &str,
@@ -131,7 +136,7 @@ pub async fn sync_mailboxes(
     limit: usize,
     dry_run: bool,
     body_budget: Option<Duration>,
-) -> Result<SyncResult> {
+) -> Result<Option<SyncResult>> {
     info!(
         "sync_mailboxes: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
         targets.len(),
@@ -147,7 +152,7 @@ pub async fn sync_mailboxes(
     let blobs = BlobStore::for_account(account_name);
     let mut backend = ImapBackend::new(imap_config).with_body_budget(body_budget);
 
-    run_sync(
+    run_sync_guarded(
         &mut backend,
         &SyncRun {
             store: &store,

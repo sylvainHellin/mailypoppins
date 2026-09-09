@@ -190,8 +190,61 @@ pub(crate) fn mark_below_unmet(pending: Option<u32>, unmet: &[u32]) -> Option<u3
     Some(pending.map_or(owed, |mark| mark.min(owed)))
 }
 
+/// [`run_sync`] under the per-account engine lock: the entry point every live
+/// caller uses (#0122).
+///
+/// `Ok(None)` means another process is this account's engine and this call did
+/// nothing at all: no IMAP session, no ingest, no error. That is a success, the
+/// same reading [`crate::outbox::drain_guarded`]'s `Ok(None)` gets (#0116): the
+/// window this pass would have downloaded is downloaded by the holder, or on
+/// the next tick once the holder is gone.
+///
+/// The refusal is decided before the transport is touched, because the engine's
+/// only call into it is [`SyncBackend::fetch_targets`] below and the lock is
+/// taken before this function delegates. A refused sync therefore costs no
+/// login and no server traffic.
+///
+/// The account is already in [`SyncRun`], so this is a drop-in for [`run_sync`]
+/// at every call site.
+pub async fn run_sync_guarded(
+    backend: &mut impl SyncBackend,
+    run: &SyncRun<'_>,
+    span: &mut TimingSpan,
+) -> Result<Option<SyncResult>> {
+    let lock_path = crate::config::account_dir(run.account).join("store.lock");
+    run_sync_guarded_at(&lock_path, backend, run, span).await
+}
+
+/// The mechanism, split out so a test can point it at a tempdir, exactly as
+/// [`crate::engine_lock::EngineLock::try_acquire_at`] and
+/// [`crate::outbox::drain_guarded_at`] are.
+///
+/// The lock is scoped to the call rather than to the process: it is released
+/// when the pass returns, so the next process is the engine without waiting for
+/// this one to exit.
+pub async fn run_sync_guarded_at(
+    lock_path: &std::path::Path,
+    backend: &mut impl SyncBackend,
+    run: &SyncRun<'_>,
+    span: &mut TimingSpan,
+) -> Result<Option<SyncResult>> {
+    let Some(_lock) = crate::engine_lock::EngineLock::try_acquire_at(lock_path, run.account)?
+    else {
+        info!(
+            "[sync] another engine is syncing {}; leaving the ingest to it",
+            run.account
+        );
+        return Ok(None);
+    };
+    run_sync(backend, run, span).await.map(Some)
+}
+
 /// Drive one sync pass: read the skip lists, hand them to the backend, ingest
 /// what comes back in target order, then apply the prunes.
+///
+/// Lock-free: the guard lives in [`run_sync_guarded`], which wraps this rather
+/// than changing it, so the fake-backend tests below drive the mechanism
+/// without a lock file.
 ///
 /// The phases and their order are load-bearing and unchanged from the
 /// pre-#0059 IMAP orchestrator:

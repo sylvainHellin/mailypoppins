@@ -310,6 +310,21 @@ pub(super) async fn lib_do_sync(
     .await;
     let result = result
         .inspect_err(|e| log::error!("[sync] account '{}' failed: {e:#}", account_config.name))?;
+    // Another process holds the account's engine lock, so this tick ingested
+    // nothing and opened no session (#0122). It is a status line, not an error:
+    // the holder is doing the work, exactly as a refused outbox drain leaves
+    // the APPENDs to it. The drains at both ends were refused for the same
+    // reason and added nothing to `ops_suffix`, but it is carried anyway so a
+    // rollback the tail did manage is not swallowed.
+    let Some(result) = result else {
+        return Ok((
+            format!(
+                "{SYNC_SKIPPED_MARKER} '{}'; leaving the ingest to it{ops_suffix}",
+                account_config.name
+            ),
+            SyncResultMeta { new_inbox_mail: Vec::new() },
+        ));
+    };
     Ok((format!("{}{ops_suffix}", finish_sync(account_config, &result)), SyncResultMeta {
         new_inbox_mail: result.new_inbox_mail.clone(),
     }))
@@ -324,6 +339,13 @@ pub(crate) const FAILED_OPS_MARKER: &str = "mutation(s) failed and were rolled b
 /// line: a fetch that keeps downloading the same mail (#0115). Read by
 /// `tui::bg::drained_sync_level` like [`FAILED_OPS_MARKER`].
 pub(crate) const NON_CONVERGING_MARKER: &str = "fetch not converging";
+
+/// The status line a tick refused the engine lock reports (#0122), and the
+/// substring `tui::bg::drained_sync_level` reads to show it at
+/// [`crate::tui::app::StatusLevel::Info`] rather than as a green sync that
+/// happened or a red one that failed. The wording is the CLI's, so a user who
+/// meets the refusal in both places reads the same sentence.
+pub(crate) const SYNC_SKIPPED_MARKER: &str = "Sync skipped: another engine is syncing";
 
 /// One end of a sync tick on the IMAP path: the outbox, then the mutation
 /// queue, in that order at the head and at the tail (#0114).

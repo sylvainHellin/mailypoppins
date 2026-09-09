@@ -143,6 +143,7 @@ It is what pins the exit-4 diagnostic in `tests/daemon_lifecycle.rs`.
 
 `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` opts into account runtimes before Phase 5.
 Absent, the daemon creates no runtime and takes no engine lock, and `daemon.status` reports an empty account list.
+What that lock covers grew in #0122: besides the outbox and mutation-queue drains it now guards the IMAP sync ingest, so once a runtime holds it for its lifetime a concurrent `mp sync` prints `Sync skipped: another engine is syncing '<account>'; leaving the ingest to it` and exits 0 instead of ingesting the same window twice.
 Present, it reports every configured account as `opening` and leaves it there, since nothing opens a store or takes a lock before Phase 5 either.
 It is an environment variable rather than a flag so it cannot leak into `mp --help` or into anyone's muscle memory.
 

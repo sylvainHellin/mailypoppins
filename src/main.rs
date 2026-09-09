@@ -1678,6 +1678,8 @@ async fn sync_one_account(
         || async {
             if account_config.auth_method == AuthMethod::Graph {
                 let graph_config = GraphConfig::load(account_config)?;
+                // The Graph path is not guarded yet (#0122 covers the IMAP
+                // ingest), so it always reports a pass that ran.
                 graph::sync_mailboxes_graph(
                     &graph_config,
                     &account_config.name,
@@ -1686,6 +1688,7 @@ async fn sync_one_account(
                     dry_run,
                 )
                 .await
+                .map(Some)
             } else {
                 let imap_config = ImapConfig::load(account_config)?;
                 // No body deadline (#0113): `mp sync` is the explicit recovery
@@ -1705,7 +1708,18 @@ async fn sync_one_account(
         || drain_queues_cli(account_config, dry_run, " (after sync)"),
     )
     .await;
-    let result = result?;
+    // Another process is this account's engine, so this run ingested nothing
+    // and opened no session (#0122). That is a success, not a failure: the
+    // holder is doing the work. Say so instead of printing a summary of a pass
+    // that never ran.
+    let Some(result) = result? else {
+        println!(
+            "{} Sync skipped: another engine is syncing '{}'; leaving the ingest to it",
+            "ℹ".blue(),
+            account_config.name,
+        );
+        return Ok(());
+    };
 
     if !dry_run {
         // Incremental contacts-index update (best-effort).

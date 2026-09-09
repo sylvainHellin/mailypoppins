@@ -1486,3 +1486,7 @@ Making the queue own its registration (an `Arc<Subscription>` inside `EventQueue
 
 The ordering that used to be a comment is now a `drop`: the connection task keeps its own handle past `serve_connection` so the cancellations a disconnect publishes still fan out while it is a subscriber, and the endpoint goes when that handle does.
 `Weak` rather than `Arc` to the state's `Inner`, so the queue cannot keep the whole state alive, and a state that is already gone has no map to clean up.
+
+## `flock` refuses a second acquire from the same process, so a lock test needs no spawned holder
+
+`flock(2)` is scoped to the open file description, not to the process: opening `store.lock` twice in one process gives two descriptions, and the second `LOCK_EX | LOCK_NB` is refused with `EWOULDBLOCK` exactly as it would be from another process (`fcntl(2)` locks are the opposite, which is where the intuition comes from). A test for the engine lock (#0061, extended to the sync ingest in #0122) therefore holds it with a plain `EngineLock::try_acquire_at` on the test thread and drives the guarded call right after; `tests/engine_lock_ingest.rs` is nine tests and one spawned process, and that one is spawned to pin `mp sync`'s stdout and exit code rather than to hold anything.

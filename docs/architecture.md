@@ -206,6 +206,8 @@ Two transports, one ingest path and one `SyncResult` shape: IMAP/SMTP for passwo
 TUI actions branch on `app.is_graph()`.
 
 The shared half is `src/sync/` (#0059): the sync types (`SyncTarget`, `SyncResult`, `FreshObservation`, `MailboxFetch`), the `SyncBackend` trait, and `sync::engine::run_sync`, which is the orchestration itself: skip lists, ingest, arrival marks, the #0074 ingest-failure bound, flags, cursors and the deferred prune pass.
+Since #0122 the live callers reach it through `sync::engine::run_sync_guarded`, which runs the pass under the per-account engine lock: a process that cannot take the lock returns `Ok(None)` before the transport is touched, so a second `mp sync` or an open TUI no longer downloads and ingests the same window into the same store.
+`run_sync` itself stays lock-free, so the fake-backend engine tests drive the mechanism without a lock file, and the refusal is a success everywhere (`mp sync` prints `Sync skipped: another engine is syncing '<account>'; leaving the ingest to it` and exits 0, the TUI shows the same sentence as an info status line).
 `SyncBackend` has one method, `fetch_targets`, and takes `&mut self`, which is where a backend keeps what outlives a mailbox (a persistent session and its `HIGHESTMODSEQ`, #0041; a `deltaLink`, #0042).
 The seam's first payoff is that the engine is driven by a fake backend in `src/sync/engine.rs`'s tests, offline, over the properties that used to be verifiable only against a live server.
 `SyncBackend::fetch_targets` is a native async fn in the trait, so its future is not `Send`; callers await it in place, and spawning a sync onto another task would need a `Send` bound first (noted in #0041).
@@ -213,7 +215,8 @@ The parity half of #0059 is parked with the Graph backend: `graph.rs` still runs
 
 ### IMAP
 
-The backend is `ImapBackend` in `src/imap_client/store_sync.rs`, and `sync_mailboxes()` is now the wiring that hands it and the store to `sync::engine::run_sync`.
+The backend is `ImapBackend` in `src/imap_client/store_sync.rs`, and `sync_mailboxes()` is now the wiring that hands it and the store to `sync::engine::run_sync_guarded`; it returns `Option<SyncResult>`, `None` being the refused lock (#0122).
+The Graph loop (`graph::sync_mailboxes_graph`) is still unguarded, as it is still outside the engine.
 
 IMAP sessions are persistent and shared, not one per operation (#0041, owner-approved rewrite of the old invariant).
 `src/imap_client/pool.rs` keeps authenticated sessions for the life of the process, keyed by `host:port/username`; every IMAP path borrows one with `pool::checkout()` and returns it by dropping the guard, so a sync, a queued archive and a post-send flag write no longer each pay TCP + TLS + LOGIN.
@@ -272,7 +275,7 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
-| `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain and by the outbox drain (#0116) |
+| `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain, by the outbox drain (#0116) and by the IMAP sync ingest (#0122) |
 | `src/graph.rs` | Microsoft Graph REST client: folders, fetch, sync, send, move, delete, read flags, search |
 | `src/calendar.rs` + `src/invite.rs` | iCalendar receive-side parsing and send-side building |
 | `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. |
@@ -283,7 +286,7 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 | `src/timing.rs` | `TimingSpan`, which emits `[TIMING]` log lines with millisecond precision. Filter logs with `rg '\[TIMING\]'`. |
 | **`src/sync/`** | |
 | `mod.rs` | The transport-independent sync types and the `SyncBackend` trait (#0059) |
-| `engine.rs` | `run_sync`: the orchestration every backend is driven through, plus `mark_below_unmet` (#0074) and the fake-backend engine tests |
+| `engine.rs` | `run_sync`: the orchestration every backend is driven through, plus `run_sync_guarded`/`run_sync_guarded_at` (the engine lock on the ingest path, #0122), `mark_below_unmet` (#0074) and the fake-backend engine tests |
 | **`src/store/`** | |
 | `mod.rs` | `Store`: the file, the pragmas, the drop-and-rebuild contract |
 | `schema.rs` | Schema v6 SQL, version stamping, required-table validation, and the identity notes |

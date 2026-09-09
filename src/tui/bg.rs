@@ -8,6 +8,11 @@ use super::app::{
 /// suffix says a fetch is not converging (#0115). Neither may ride a green
 /// line.
 fn drained_sync_level(text: &str) -> StatusLevel {
+    // A tick that was refused the engine lock did nothing at all (#0122): not a
+    // green sync that happened, not a red one that failed.
+    if text.contains(super::helpers::SYNC_SKIPPED_MARKER) {
+        return StatusLevel::Info;
+    }
     if text.contains(super::helpers::FAILED_OPS_MARKER)
         || text.contains(super::helpers::NON_CONVERGING_MARKER)
     {
@@ -455,6 +460,18 @@ mod tests {
         assert!(matches!(
             drained_sync_level("Synced: 16 new, 84 existing"),
             StatusLevel::Success
+        ));
+    }
+
+    /// #0122: a tick refused the engine lock is neither a success nor a
+    /// failure, so it is shown as information.
+    #[test]
+    fn a_refused_engine_lock_reports_the_skipped_sync_as_information() {
+        assert!(matches!(
+            drained_sync_level(
+                "Sync skipped: another engine is syncing 'work'; leaving the ingest to it"
+            ),
+            StatusLevel::Info
         ));
     }
 

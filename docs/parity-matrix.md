@@ -864,13 +864,14 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SYN-09 Per-account engine lock
 
 - Classification: daemon administration
-- Source anchor: `src/engine_lock.rs`, acquired by `drain_account` (`src/pending_ops.rs:567`) for the mutation queue and by `drain_guarded_at` (`src/outbox.rs:1422`) for the outbox
+- Source anchor: `src/engine_lock.rs`, acquired by `drain_account` (`src/pending_ops.rs:567`) for the mutation queue, by `drain_guarded_at` (`src/outbox.rs:1422`) for the outbox and by `run_sync_guarded_at` (`src/sync/engine.rs`) for the IMAP sync ingest
 - Daemon surface: daemon-internal; the account runtime holds it for its lifetime
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`, unit tests in `src/engine_lock.rs`
+- Validation: `tests/outbox_integration.rs`, `tests/engine_lock_ingest.rs`, unit tests in `src/engine_lock.rs`
 - Status: not started
 - Note: the outbox acquisition is #0116, where a refused drain reports nothing done and opens no session and the holder re-sweeps against a re-read clock.
-  `run_and_settle` (`src/pending_ops.rs:614`), the sync body, and ingest still take no lock, so the lock excludes concurrent drains and not concurrent ingest (`ANO-13`); it becomes full exclusion only once Phase 3b extends it to the sync ingest path with non-holders refusing.
+  Phase 3b (#0122) extended it to the ingest half: `sync::engine::run_sync_guarded` is what `mp sync` and the TUI tick call, a non-holder returns `Ok(None)` before the transport is touched, and both callers report the refusal as information and succeed.
+  `run_and_settle` (`src/pending_ops.rs:614`), `run_sync` itself and the Graph loop still take no lock, so `ANO-13` is closed for the IMAP ingest only.
 
 ### SYN-10 Microsoft Graph backend for sync and send
 
