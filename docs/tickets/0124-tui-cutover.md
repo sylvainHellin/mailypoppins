@@ -8,6 +8,7 @@ created: 2026-09-10
 ---
 
 Status: in-progress. P5-U1 to P5-U9 have landed; P5-U10 landed its first third (the three invitation reads) and split the rest into P5-U10a/b/c, recorded in its section below.
+A review of Phase 5 as landed at `691c5ea` produced six findings, all applied, in the "Phase 5 review" section at the end.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -1034,8 +1035,10 @@ It is a roll-up rather than eight new comparisons because the six Phase 4 slice 
 `sync -A alpha` is byte-identical because every account of that fixture is local-only, so both binaries skip before a lock is reached, which means the row says nothing about the property `tests/engine_lock_ingest_cli.rs` is actually about.
 `the_engine_the_legacy_lock_suite_assumes_is_the_daemon` says it instead, over `sync_fixture`'s server account: the lock is free before the daemon starts, the daemon takes it (P5-U8 turned runtimes on by default), and it is free again after `daemon stop`.
 
-The roll-up **skips with a message** when no `pre-daemon` binary is present rather than building one: `support::parity::oracle_bin` builds the tag when the cache is cold, which is right for a slice suite and wrong inside a gate run, where a 30-minute build is indistinguishable from a hang.
-The message names `MP_ORACLE_BIN`, the cache path and `docs/baselines/pre-daemon/README.md`.
+The roll-up does not build a `pre-daemon` binary when none is present: `support::parity::oracle_bin` builds the tag when the cache is cold, which is right for a slice suite and wrong inside a gate run, where a 30-minute build is indistinguishable from a hang.
+It **fails** with a message that names `MP_ORACLE_BIN`, the cache path and `docs/baselines/pre-daemon/README.md`.
+It skipped silently as first committed, which the Phase 5 review below turned into that failure: a gate row that returns green because it found nothing to compare against reports a passing parity gate on the summary line.
+`MP_PARITY_ALLOW_NO_ORACLE=1` turns the failure back into a skip, for a machine that genuinely cannot host an oracle; a gate run does not set it.
 
 **(b) The daemon-backed golden frames.**
 Three rows, over the module source and `src/tui/ui/snapshots/`, because a library test module is not reachable as tests from `tests/`.
@@ -1191,3 +1194,76 @@ Three units where the plan wrote one, each of which leaves `cargo test --workspa
 `cargo clippy --workspace --offline --all-targets` -> **34 distinct warnings**, the P5-U8 baseline, none of them on a line this unit wrote.
 
 `rustfmt --edition 2021` on `crates/mp-protocol/src/calendar.rs`, `src/tui/app/invites_tests.rs`, `src/daemon/methods/calendar.rs`, `src/daemon/methods/message.rs`, `src/daemon/session.rs` and `src/tui/queries.rs`, all clean; `crates/mp-protocol/src/lib.rs`, `src/types.rs`, `src/reconcile.rs`, `src/daemon/methods/mod.rs`, `src/tui/app/mod.rs` and `src/tui/app/types.rs` were not rustfmt-clean at `9f6757b` and were left alone.
+
+## Phase 5 review
+
+Six findings from a review of Phase 5 as landed at `691c5ea`, each verified against the tree before it was acted on.
+Two are behaviour (a recovered client showing pre-overflow state, a gate row that passes on no evidence), one is a guard whose floors had stopped defending anything, and three are documentation that P5-U8 made false.
+
+### 1. A resync left an opened account showing pre-overflow state
+
+`apply_bootstrap` skips any account whose `opening` is clear, which is the startup rule that keeps the frames byte-identical (P5-U2).
+The same call is the only place the event watermark is set, and `events::rebootstrap` used it for both recovery entries: a `state.resync_required` and a reconnect to a new instance.
+So a client that recovered from a queue overflow moved its watermark past every event that would have corrected an already opened account, while keeping that account's `mailboxes`, `mailbox_counts` and `email_cache` from before the gap - permanently, since nothing else recomputes them.
+
+`App::apply_resync_bootstrap` (`src/tui/app/bootstrap.rs`) is the second entry, and it skips nothing: every account the snapshot names takes the snapshot's mailboxes and counts, every per-account listing cache is dropped, and the open mailbox is reloaded through `App::reload_current_mailbox`, which is the existing off-thread `Action::LoadMailbox` path and therefore daemon-backed since P5-U4.
+Both entries share one body; `apply_bootstrap` is the startup entry and is unchanged.
+The comment justifying the skip *"until P5-U4 moves the row loading onto the daemon"* was stale and is gone, in `bootstrap.rs` and in `src/tui/mod.rs`'s bootstrap drain.
+
+`src/tui/events_resync_tests.rs` (one row) is the guard: an `App` whose account opened with counts of its own and a cached listing, one `Incoming::Resync` through `events::drain` against a door that answers `state.bootstrap`, and the counts, the caches and the queued reload are the new snapshot's.
+It is a sibling module rather than an edit to `src/tui/events_tests.rs`, which is P5-U7's contract module.
+Against the old wiring it fails on the counts (`[9, 9, 9, 9]` where `[7, 0, 0, 0]` is owed), which is the finding in one assertion.
+
+### 2. The parity gate's absent oracle passed silently
+
+`the_eight_legacy_suites_answer_through_a_live_daemon` printed a skip message and returned `ok` when no `pre-daemon` binary was present.
+A gate row that returns green because it found nothing to compare against is worse than no row: the summary line then says the parity gate passed.
+It panics with the same message now, which names `MP_ORACLE_BIN`, the cache path and `docs/baselines/pre-daemon/README.md`, unless `MP_PARITY_ALLOW_NO_ORACLE=1` is set, which turns it back into a skip for a machine that cannot host an oracle.
+It still does not build one: a 30-minute build inside a gate run is indistinguishable from a hang, which was the right half of the original decision.
+Recorded in the file header and in the P5-U9 section above.
+
+### 3. The test-selection guard's floors had fallen far behind the tree
+
+`tests/test_selection_guard.rs` defends against a workspace layout that silently deselects tests, and its own header says the floors are raised as the tree grows.
+They had not been: `MIN_TUI_TESTS` was 368 against 464 actual attributes under `src/tui/`, and `MIN_SNAPSHOT_FILES` was 18 against 20 files.
+A floor a hundred tests below the tree lets `events_tests.rs`, `actions_tests.rs` and `queries_tests.rs` vanish together without failing.
+Both are at the actual count now (464 including the row above; 20 since P5-U1 minted the two `…_daemon.snap` scenes with no hand-built pair), and the header says the floors track the tree rather than the pre-workspace commit.
+
+### 4. `docs/daemon-operations.md` still described the poll
+
+*"An operation is polled, not awaited"* with a worker thread reading `operation.status` every 100 ms, which P5-U8 replaced with the `operation.finished` subscription.
+The block now describes what the tree does: the arm calls, records the id against what it is awaiting, and returns; the event lands through `commands::settled` as the `BgResult` the arm always posted; `bg_count` is the spinner and a bootstrap against a new instance drops the operations that died with the old daemon.
+The weak-sender rule stays, restated in terms of the worker threads that are left (the mailbox load and the startup count) and their session call, because that is what it was always about.
+
+### 5. `docs/parity-matrix.md` SYN-01 still promised the poll
+
+Its note said the arm *"keeps its worker thread and polls `operation.status` every 100 ms"*, where SYN-04 four rows below already carried P5-U8's wording.
+SYN-01 carries SYN-04's sentence now.
+Its Validation line also named `an_operation_is_polled_to_the_state_it_settled_in`, a test P5-U8 removed; it names `the_finished_operation_lands_where_the_poll_landed` instead.
+
+### 6. `new_inbox_mail`'s doc comment claimed the list travels in one place
+
+`src/daemon/methods/sync.rs` still said the arrival list *"travels only in the answer to the client that asked for the pass"*.
+Since P5-U8 the same list also rides the published `SyncCompleted` (`src/daemon/sync_outcome.rs`), because an account runtime's tick has no caller to answer.
+The comment now says the sibling shape is about this answer and not about where the list goes, names the event, and records why a subscribed client does not notify twice: `App::apply_tick` ignores a published tick for an account whose pass it is awaiting.
+
+### Follow-ups
+
+- `Session::handle`'s doc comment (`src/tui/session.rs`) still justifies the weak sender with *"a sync arm polling `operation.status` to a terminal state"*. The rule is right and the example is P5-U8-stale; it was left alone because finding 4 was scoped to the operations doc.
+- Nothing here changes a protocol shape, a snapshot or a fixture.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline --no-fail-fast` -> **2 203 passed, 1 failed, 5 ignored** over 49 result lines; `pgrep -af '[m]p daemon'` empty afterwards.
+That is P5-U10's 2 202 plus the one row of finding 1, with the one failure still the intended P5-U9 red row, `the_phase_five_manual_checklist_is_complete_and_carries_no_failure`.
+
+`--lib events_tests` -> 20 unchanged, `--lib events_resync_tests` -> 1, `--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22 with no snapshot re-approved, `--test test_selection_guard` -> 5 at the raised floors, `--test architecture_boundaries` -> 6, `--test tui_daemon_recovery` -> 3, `--test phase5_parity_gate` -> 10 passed, 1 failed (that row).
+
+The panic of finding 2 was exercised both ways against a home directory with no oracle cache and `MP_ORACLE_BIN` unset: the row fails with the message, and fails only until `MP_PARITY_ALLOW_NO_ORACLE=1` turns it back into a skip.
+The row of finding 1 was exercised against the old wiring, where it fails on the counts.
+
+`timeout 600 cargo clippy --workspace --offline --all-targets` -> **34 distinct warnings**, the P5-U8 baseline, none of them on a line this review wrote.
+
+`rustfmt --edition 2021` on `src/tui/app/bootstrap.rs`, `src/tui/events.rs`, `src/tui/events_resync_tests.rs`, `src/daemon/methods/sync.rs`, `tests/phase5_parity_gate.rs` and `tests/test_selection_guard.rs`, all clean; `src/tui/mod.rs` was not rustfmt-clean at `691c5ea` and was left alone.
+
+`timeout 900 cargo install --path . --offline` -> replaced.
