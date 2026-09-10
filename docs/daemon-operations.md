@@ -112,6 +112,13 @@ The table is what routes and through what:
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 | `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
 | `mp`'s mailbox list, sidebar counts and preview body | `message.list` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
+| `mp`'s five message mutations (`a`, `d`, `u`, `*`, the quick move) | `message.archive`, `message.delete`, `message.set_read`, `message.set_flag`, `message.move`, all with `settle: false` | P5-U6 |
+| `mp`'s draft keys (`cA`, `cD`, `d` on a drafts row, `e`, `ce`) | `draft.approve`, `draft.demote`, `draft.discard`, `draft.path` | P5-U6 |
+| `mp`'s two sync keys and the startup auto-fetch | `sync.quick` / `sync.full`, then `operation.status` polled to a terminal state | P5-U6 |
+| `mp`'s `cX` and its RSVP key | `send.approved`, `calendar.rsvp`, the same wait | P5-U6 |
+| `mp`'s search overlay, local pass | `message.search` with `body: true` | P5-U6 |
+| `mp`'s reply, forward and compose-wizard forward | `draft.reply` / `draft.forward` by `row_id` | P5-U6 |
+| `mp`'s attachment key and browser key | `message.get`, then `message.materialise_attachment` per part; `message.materialise_html` | P5-U6 |
 
 The TUI's row is a session rather than a call: `mp` with no arguments connects through the same `client_session` every command above goes through, before it takes over the terminal, and holds the connection until the user quits.
 It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal.
@@ -122,6 +129,18 @@ The two that can wait keep the thread they always had and block on a call rather
 The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `docs/plans/preview-latency.md` budgets.
 The listing is transferred whole, once per mailbox open, as `docs/baselines/decisions/list-transfer.md` decided; the row deltas that keep it current decode here already and are applied by nothing until P5-U8 drains the event stream.
 An `App` with no session at all falls back to the store-backed readers of `src/tui/app/store_rows.rs`, which is the shape every TUI unit test runs in and, in a real run, only a `Session::connect` that wedged.
+
+Since P5-U6 the actions go the same way, through `crate::tui::commands` and the same session.
+Eight call sites are left on the direct path and `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) is the record of them: three surfaces are not built (`RD-06`'s Markdown rendition, `LST-09`'s `message.fetch`, `RD-07`'s selector) and one is held back by the plan (`SND-04`'s undo-send hold, Phase 6).
+
+**An operation is polled, not awaited.**
+`sync.quick`, `sync.full`, `send.approved` and `calendar.rsvp` answer `{operation_id}` and finish later, and the finish is a `state.event` the TUI's session thread does not read yet.
+Each arm therefore keeps the worker thread it always had, and that thread reads `operation.status` every 100 ms until the state is terminal before posting the `BgResult` its arm has always posted.
+That is a stopgap with a date on it: **P5-U8 replaces the poll with the `operation.finished` subscription** `mp sync` already uses (`await_operation`, `src/main.rs`).
+Nothing else in the tree waits on an operation without events.
+
+A worker's door onto the session is a **weak** sender, so quitting closes the channel under it: `Session::close` drops the strong sender and joins the session thread, and a poll loop holding a strong clone would have made `q` wait for the sync to finish.
+The worker's next call then fails with the closed-session error and the thread ends within one poll interval.
 
 `mp config path` is the one domain command that never contacts a daemon: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
 
@@ -276,6 +295,10 @@ Every handle call first drops the entries that expired since the last one and un
 The pin is already false the instant a handle expires - the table answers "is this blob spoken for *now*", not "was the last tick recent enough" - so a reaper would buy nothing a sweep needs, and its interval would be one more thing to get wrong.
 What that costs is a daemon nobody calls keeping expired scratch on disk until the next call; it sits inside the 0700 runtime directory, and the next materialisation clears it.
 A daemon that exits leaves `handles/` behind, which is why the directory is under `runtime/`: it is scratch, and removing the whole tree is safe with no daemon running.
+
+Since P5-U6 the TUI's attachment key and browser key mint handles too, and neither releases: what the key just launched is a file opener or a browser, and releasing under it would unlink the file it is reading (the rule `ATT-01` already stated for `mp open`).
+That changes one thing the TUI never had: a lifetime. A materialised attachment used to sit in `parse::materialisation_dir(<row id>)` until the temp directory was swept; it now vanishes ten minutes after the key was pressed.
+Ten minutes is longer than the gap between opening a picker and saving from it, and `MAILYPOPPINS_DAEMON_HANDLE_TTL_MS` moves it, but a client that wants a permanent artifact copies the file, which is what `ATT-02`'s save already does.
 
 ## Account runtimes
 

@@ -1874,3 +1874,15 @@ A test fixture that writes a draft by hand and then asks the daemon for it by id
 `tests/daemon_mutation_slice.rs` holds `const _: () = assert!(MESSAGE_MUTATION_METHOD_SPECS.len() == MUTATION_METHODS.len());` over its own two-name list, and `tests/daemon_draft_slice.rs` does the same for ten. Adding a method to such a family fails to *compile* the test, naming the constant, which is the assertion working.
 
 Do not grow the pinned array and do not edit the list. Declare the new slice in an array of its own and register both: `MESSAGE_SERVER_METHOD_SPECS` (P4-U10) and `MESSAGE_QUEUE_METHOD_SPECS` (P5-U6) are both that, and both say so in their doc comment. One method type can serve every array, the dispatcher sees one family, and the wire cannot tell there were ever two arrays. What the pinned test keeps saying is what its own slice declared, which is what it was written to say.
+
+## A `tokio::spawn`ed operation never finishes on a current-thread runtime nobody is blocked on
+
+An in-process daemon fixture built on `Builder::new_current_thread()` serves every query and every command, and then hangs the first time a test drives an **operation**. `sync.*`, `send.*`, `calendar.*` and `contact.rebuild` all answer `{operation_id}` from the method body and do the work on a `tokio::spawn`ed task. A current-thread runtime only drives its tasks while something is inside `block_on`, and a fixture's `block_on` returns the moment the method body is done, so the spawned task is polled once at most. A caller then polls `operation.status` for ever and the operation sits in `running`.
+
+`Builder::new_multi_thread().worker_threads(2)` fixes it: the spawned task gets a worker of its own and settles while the poller is between calls. Keep `on_thread_start` (the entry above) - it covers the worker threads as well as the blocking pool. `src/tui/test_daemon.rs` is the fixture; the symptom is a test that runs for over sixty seconds rather than one that fails.
+
+## A worker thread's `QueryHandle` must not keep the TUI's session thread alive
+
+`Session::close` drops its sender and then **joins** the session thread, whose loop ends when the last sender goes. `Session::handle()` used to hand out a strong clone, so any worker still holding one made `q` block until that worker was done. With a mailbox load that is milliseconds; with P5-U6's sync arm, which polls `operation.status` until the pass finishes, it is however long the mailbox takes, and the symptom is a TUI that paints the quit and then never exits.
+
+`QueryHandle` holds a `WeakUnboundedSender` and upgrades it per call. Quitting closes the channel under every worker, their next call fails with the closed-session error the door already had, and they end. The rule generalises: a handle onto a shared resource that something *joins* on shutdown has to be weak, or the join is a lock on the slowest holder.

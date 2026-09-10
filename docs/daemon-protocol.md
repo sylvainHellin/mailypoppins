@@ -548,11 +548,11 @@ The family is the ten methods below, all served from protocol 1 and all durable:
 | `draft.create` | command | `{account, name, no_signature?, signature?}` | `DraftCreated` |
 | `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
 | `draft.discard` | command | `{account, id\|selector, force?}` or `{account, sent: true}` | `{account, id, selector, status}` or `{account, cleared, kept}` |
-| `draft.forward` | command | `{account, source, no_signature?, signature?}` | `DraftCreated` |
+| `draft.forward` | command | `{account, source, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.list` | query | `{account, status?}` | `DraftListing` |
 | `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
 | `draft.preview` | query | `{account, id\|selector}` | `DraftPreview` |
-| `draft.reply` | command | `{account, source, all?, no_signature?, signature?}` | `DraftCreated` |
+| `draft.reply` | command | `{account, source, all?, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.validate` | query | `{account, id?\|selector?}` | `DraftValidation` |
 
 The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
@@ -562,6 +562,14 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 `mp list` reads neither.
 `DraftValidation` is `{account, reports}`, whose reports are `{id, selector, valid, error, warnings}`.
 `DraftLocation` is `{account, id, selector, path, status}` and `DraftPreview` is the dry run's record, whose body is cut at 500 characters while `body_truncated` is decided on 500 bytes and whose `signature` is `null` for the CLI, because the body already carries it (#0099).
+
+**A reply or a forward addresses its source three ways and may override its headers.**
+`source` is `{id}`, `{row_id}` or `{selector, mailbox?}`, exactly one of the three: `id` is the store's `"<mailbox>/<uid>"` key, `row_id` is the `messages.id` a `message.list` row carries, and `selector` is the grammar `mp reply` takes from a user.
+`row_id` joined them in P5-U6 for the reason P5-U4 added it to `message.get`: a client holding a listed row has that id and nothing else, and re-deriving a `"<mailbox>/<uid>"` for it would make it carry a second identity per row.
+
+`headers` is `{to, cc, bcc, subject}`, all four required once it is present and an empty string clearing the field, and it rewrites the built draft's frontmatter in place.
+It exists for a compose wizard that collects the recipients and the subject *before* the draft is written and keeps them over the ones the builder derived; without it such a client would have to build the draft through the daemon and then rewrite the file behind its back.
+A partial object is `-32602`: which fields the override covers is not a thing to leave ambiguous.
 
 **`draft.path` is the family's resolver.**
 It takes what the user typed (`<id>`, `drafts/<id>`, `mp://<account>/drafts/<id>`) and answers the canonical selector, the canonical path and the current status; which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
@@ -619,6 +627,9 @@ The refusal arrives before anything opens a socket, and before either drain runs
 
 A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
 A pass that ran answers `{blocked: false, outcome: <sync.completed payload>}` and publishes the same payload as a `sync.completed` event, unless it was a dry run, whose counts describe mail that was not ingested and would read to every other client as mail that arrived.
+
+Both answers also carry `new_inbox_mail`, `[{from, subject}]` for every message the pass ingested into the inbox and `[]` for a pass that ingested none, was blocked, or ran through an account runtime's tick (which keeps no arrival list).
+It is a sibling of `outcome` rather than a member of it, and deliberately: the outcome is the `sync.completed` payload published to *every* client, and a per-message list belongs only in the answer to the client that asked for the pass, which is what a desktop notification is scoped to (#0009).
 
 Each of the five slots of a tick is one `operation.progress` report whose `phase` is one of `head_outbox`, `head_mutations`, `body`, `tail_outbox`, `tail_mutations`, in that order (#0114).
 For the four drain phases, `done` is what the drain completed and `total` what it left behind - still-pending sends, or rolled-back mutations - and both are `null` when the drain had nothing a user would want told.
@@ -890,7 +901,7 @@ None of the three sends takes a `hold`, a `hold_secs` or a `countdown`, and a ca
 `send.outbox_retry` accepts a `failed` row, which it re-arms, and a `sent_pending_append` row whose APPEND has already been attempted, which it re-drives behind the Message-ID dedup search; anything else is `-32602`, except while another retry for the same account is running, when the row's state is that retry's to decide and the second call is admitted and settles on what it finds.
 The admin slice (P4-U14) added three families' worth of methods and three to `config.*`, every one of them since 1 and `durable`, and every one taking a required `account` with no `all_accounts`: the loops and the "default account" are the client's, over `config.get`'s list in configuration order.
 `contact.search` `{account, query, limit}` -> `{account, query, contacts}` and `contact.stats` `{account}` -> `{account, total, sent_to, sent_cc, received, built_at, cache_path, top}` are queries over the frecency index, `top` holding at most ten rows; `contact.rebuild` `{account}` is an operation reporting `{phase: "contacts", message: "<account>"}` and settling `{account, contacts, kept, saved, cache_path}`, where `saved` is `written`, `refused_empty` or `refused_shrunk` (#0067).
-`calendar.rebuild` `{account}` settles `{account, resolved, invites_seen, replies_seen, cancelled}` and writes nothing; `calendar.rsvp` `{account, selector, mailbox?, response}` settles `{account, selector, response, subject, organizer, message_id, delivered}`, `response` being exactly `accept`, `tentative` or `decline`, and refuses a Graph account with the `ANO-4` sentence and `{account}` before it examines the selector.
+`calendar.rebuild` `{account}` settles `{account, resolved, invites_seen, replies_seen, cancelled}` and writes nothing; `calendar.rsvp` `{account, selector|row_id, mailbox?, response}` settles `{account, selector, response, subject, organizer, message_id, delivered}`, `response` being exactly `accept`, `tentative` or `decline`, and refuses a Graph account with the `ANO-4` sentence and `{account}` before it examines the selector.
 `diagnostic.store_gc` `{account, dry_run, force}` settles `{account, dry_run, cap_bytes, before_bytes, after_bytes, evicted_bytes, evicted, decision}`, the decision being `{kind: "under_cap", cleared_marker}`, `{kind: "warned_first_breach"}`, `{kind: "refused_too_much", would_evict_bytes}` or `{kind: "evicted"}`.
 `config.cutover` `{account, dry_run}` settles `{account, dry_run, drafts: {imported, already_indexed, skipped, collisions}, remnants: [{path, md_files, bytes}]}`, with `skipped` and `collisions` already rendered as the sentences the report prints; `config.oauth2_login` `{account}` reports `{phase: "device_code", done: 0, total: null, message: "<verification_uri> <user_code>"}` and settles `{stored, account, kind, key}`, the browser launch staying client-side (`INT-04`); `config.reset_secrets` `{}` -> `{removed: [path]}` is a command naming the secrets file first and then the token caches, in path order.
 Four of these results carry a path deliberately, because the command prints one and a client cannot compute it: `contact.stats.cache_path` and `contact.rebuild`'s settled `cache_path`, `config.cutover`'s `remnants[].path` and `drafts.imported[]`, and `config.reset_secrets`'s `removed[]`, beside `config.get`'s `path`.
@@ -908,3 +919,11 @@ P5-U6 added three methods and one parameter, additively; no field was renamed, n
 They are declared in a spec array of their own (`MESSAGE_QUEUE_METHOD_SPECS`) rather than in `MESSAGE_MUTATION_METHOD_SPECS`, whose length is pinned at two by `tests/daemon_mutation_slice.rs`; `MESSAGE_SERVER_METHOD_SPECS` is the precedent, and the split is a Rust-side fact that changes nothing on the wire.
 All five mutations gained `settle`, defaulting to `true`, so every existing caller is byte-identical and the three shapes the CLI prints did not move.
 The capability list a handshake advertises grew by those three names, which is the derivation working rather than a change to it.
+
+P5-U6's second half added four more, all additive, for the ten action sites the TUI still reached the library through; no field was renamed, none was dropped, and no command's output moved.
+`draft.reply` and `draft.forward` gained `row_id` on `source`, a third address beside `id` and `selector` and still exactly one of the three, in the shape P5-U4 gave `message.get`.
+The same two gained `headers` `{to, cc, bcc, subject}`, an all-four-fields override of the built draft's recipients and subject, for a compose wizard that collects them before the draft exists.
+`calendar.rsvp` gained `row_id` beside `selector`, for the same reason: an agenda row carries a `messages.id` and not a selector.
+`sync.quick` and `sync.full` answer with `new_inbox_mail` beside `blocked` and `outcome`, the inbox arrivals a desktop notification reads (#0009); it is a sibling of the outcome and not a member, because the outcome is the payload published to every client.
+No fixture and no pinned key list moved for any of the four: each is a new optional parameter or a new key of an operation result that nothing pins exhaustively.
+`message.search`'s local pass gained nothing at all, which is what `search::to_query_string` exists for: a client holding a parsed query renders it back into the grammar the method reads rather than putting an engine enum on the wire.

@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U5 have landed; P5-U6 is half landed (the mutations; the ten residue sites below are open).
+Status: in-progress. P5-U1 to P5-U6 have landed; P5-U7 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -24,7 +24,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U3 | T | this commit | the query layer contract | done (tests) |
 | P5-U4 | I | this commit | the query layer | done |
 | P5-U5 | T | this commit | actions to commands, the contract | done (tests) |
-| P5-U6 | I | `d0c0049` | actions to commands | part 1 of 2: the mutations |
+| P5-U6 | I | `d0c0049`, `b51b3fa`, `723ba60`, `e3055e7` | actions to commands | done |
 | P5-U7 | T | | events replace watcher threads, the contract | open |
 | P5-U8 | I | | events replace watcher threads | open |
 | P5-U9 | T | | the parity-gate oracle suite | open |
@@ -546,8 +546,192 @@ Two things part 2 has to settle that part 1 did not have to:
 `cargo test --offline --lib actions_tests` -> 21 passed, 1 failed, three times over, the same row each time.
 `--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, unmoved, no snapshot re-approved. `--lib queries_tests` -> 18.
 
-`cargo clippy --workspace --offline --all-targets` -> 33 warnings, none of them in `src/tui/commands.rs`, `src/mutations.rs` or any line this unit wrote. (The 39-warning baseline the earlier units quote is not comparable while the lib test target does not compile: at `17b1b65` clippy stops before it lints the test code and reports 23.)
+`cargo clippy --workspace --offline --all-targets` -> 33 warnings, none of them in `src/tui/commands.rs`, `src/mutations.rs` or any line this unit wrote. (The 39-warning baseline the earlier units quote is not comparable while the lib test target does not compile: at `17b1b65` clippy stops before it lints the test code and reports 23. **Closed in part 2**: with the lib test target compiling again the count is back to **39**, the baseline every unit before this one quoted, and the 33 was never a real reduction.)
 
 `rustfmt --edition 2021` on `src/tui/commands.rs`, `src/daemon/methods/message.rs`, `src/daemon/session.rs` and `src/tui/session.rs`, all four rustfmt-clean at `17b1b65`; `src/lib.rs`, `src/tui/mod.rs`, `src/tui/actions.rs` and `src/mutations.rs` were not and were left alone.
 
 Not run, because they gate the finished unit rather than this half: the help walk, `mp dump-keys --json`, the pty smoke and `cargo install --path .`.
+
+## P5-U6: actions to commands (part 2, the ten residue sites)
+
+`the_actions_that_could_be_routed_were` passes: eighteen call sites became eight, which are the eight rows of `TUI_ACTION_ENGINE_RESIDUE` and nothing else.
+`cargo test --offline --lib actions_tests` is **22/22**.
+
+Three commits.
+`b51b3fa` is the four additive surfaces the sites needed; `723ba60` is the ten sites; `e3055e7` is the weak session handle a pty smoke found, and three tests over the machinery.
+
+`src/tui/actions.rs` lost 468 lines and gained 309 (4 114 now).
+`src/tui/commands.rs` gained 468 (1 573, 700 before its tests).
+`src/tui/helpers.rs` lost 227: the store-backed sync path had no caller left.
+`src/search.rs` gained 143, `src/tui/test_daemon.rs` is new at 150, and the three daemon families gained 178 between them.
+
+### The four additive surfaces, and the one that was not needed
+
+**`search::to_query_string`, the inverse of `search::parse`.**
+The overlay holds a parsed `Query` and `message.search` takes what a user typed, so something had to bridge them.
+Rendering the AST back into the grammar is the option that puts nothing new on the wire at all; the alternative was `#[derive(Serialize)]` on `Term`, `Clause` and `Query` and a second address on the method, which would have put an engine enum into the protocol that `docs/daemon-protocol.md` says a client must be able to speak without linking the engine.
+Every value is rendered quoted, which is always safe (a token that begins with a quote is a literal phrase, and `field:"value"` is the field form the tokenizer reads), and the round trip is pinned over every shape the grammar can express plus a flag-built query.
+The two shapes it cannot carry are the two `parse` cannot produce and are dropped rather than mangled: a field term with an empty value, which `parse` refuses outright, and a value containing a `"`, which the tokenizer consumes as a delimiter.
+
+**`row_id` on `draft.reply` / `draft.forward`'s `source`,** in the shape P5-U4 gave `message.get`, and **`row_id` on `calendar.rsvp`** beside its selector.
+Both for the same reason (#0050): the list row and the agenda row carry a `messages.id` and nothing else, and re-deriving a `"<mailbox>/<uid>"` or a selector for each would make the client hold a second identity per row.
+`tests/daemon_draft_slice.rs` pins the *result* key sets and the ten method names; it pins no param set, and `draft.*` runs no `only_params`, so the addition cost no test edit.
+`calendar.rsvp` does run `only_params` and its allow-list grew by one name, which is the check working.
+
+**`headers` on `draft.reply` / `draft.forward`.**
+The compose wizard's forward collects the recipients and the subject *before* the draft is written and keeps them over the ones the builder derived (`create_draft_from_source`'s `headers` argument, which the daemon was passing `None`).
+Without it that one flow would have had to build the draft through the daemon and then rewrite the file behind its back, with the index refreshed twice and the daemon's answer already stale.
+All four fields are required once the object is present and an empty string clears one, which is `DraftRecipientEdit`'s own contract; a partial object is `-32602`, because which fields an override covers is not a thing to leave ambiguous.
+
+**`new_inbox_mail` on the two sync passes' result.**
+`BgResult::Fetch` carries the inbox arrivals the desktop notification reads (#0009) and `SyncCompleted` does not, so without this the notification would have died silently.
+It is a sibling of `outcome` rather than a member: the outcome is the payload published to *every* client as a `sync.completed` event, and a per-message list of who wrote to you belongs only in the answer to the client that asked for the pass.
+A blocked pass and a pass through an account runtime's tick both report `[]`, the runtime's tick because it keeps no arrival list; that is P5-U8's to fix when the notification moves onto the event stream.
+
+No new method was needed, so the `MESSAGE_QUEUE_METHOD_SPECS` pattern part 1 approved was not used a second time.
+
+### The two decisions the unit was given, and what they cost
+
+**An operation is polled.**
+`sync.quick`, `sync.full`, `send.approved` and `calendar.rsvp` answer `{operation_id}` and finish later; the finish is a `state.event` the session thread does not read (P5-U2 left the stream connected and drained by nobody).
+Each arm keeps the `std::thread::spawn` and the `BgResult` channel it already had, and the thread reads `operation.status` every 100 ms until the state is terminal, then posts the result its arm posted before.
+100 ms is a tenth of the TUI's own idle tick, so a fast operation is reported within a frame and a minute-long sync costs six hundred round trips over a Unix socket, which is nothing beside the pass.
+The wait is unbounded, because the wait the arm replaced was unbounded: `rt.block_on(lib_do_sync(…))` took as long as the mailbox did, and there was no timeout on it to inherit.
+Each individual call is bounded by `Session`'s own 30 s `CALL_TIMEOUT`, which is ample for a method that answers an id at once and for a status read.
+**P5-U8 replaces the poll with the `operation.finished` subscription** `mp sync` already uses.
+
+**`draft.reply` / `draft.forward` gained `row_id` additively** and `tests/daemon_draft_slice.rs` did not have to move, so the stop-and-report condition never fired.
+
+### The status lines, word for word
+
+`mp_client::format::sync_status_line` is `tui::helpers::finish_sync` plus its mutation-drain suffix, clause for clause and in the same order; its doc comment has said "the TUI's one-line status message for a finished tick" since P4-U10, and this is the caller it was written for.
+A blocked pass is the `SYNC_SKIPPED_MARKER` sentence the same helper returned (#0122).
+`send.approved` renders `{sent} sent, {failed} failed` off the settled `ApprovedOutcome`, and an account with neither is the "No approved emails found" the empty scan printed.
+`calendar.rsvp` renders `{subject} — replied to {organizer}`, and a reply that reached nobody is `Failed to send RSVP to {organizer}`, which is the `any_succeeded` check the arm made on the outcome it had in hand.
+
+Three client-side checks stayed ahead of their call, each because its sentence belongs to the key and not to `mp`:
+"IMAP not configured" on the two sync keys, "RSVP is not supported for Graph accounts yet (#0036)" and "SMTP not configured" on the RSVP key (the daemon's Graph refusal is worded for `mp invite`), and `resolve_send_transport`'s missing-transport line on `cX`, which also decides whether the progress line says "via Graph".
+The RSVP's fourth check, "That message carries no invitation to reply to", is `App::load_message_ics`, which is one of the three reads `TUI_APP_STORE_RESIDUE` keeps in `app/mod.rs`; it now reads the payload and throws it away, because the daemon loads its own.
+
+### Decisions this unit had to take
+
+**The client-side transport fork is gone from the sync arms.**
+The daemon's pass body loads the Graph or the IMAP configuration itself, so `sync.quick` covers both transports and the three arms lost their `if app.is_graph()` halves.
+What is left of the fork is the progress line, which still says "(Graph)" because that is what the user reads while it runs.
+`tui::helpers`' `lib_do_sync`, `lib_do_sync_graph`, `finish_sync`, `drain_queues`, `drain_pending_ops` and `SyncResultMeta` then had no caller and were deleted rather than kept as an oracle: unlike the store-backed readers of `app/store_rows.rs`, nothing compares against them.
+
+**A sync failure reads slightly differently.**
+`BgResult::Fetch`'s `Err` was `lib_do_sync`'s error rendered with `to_string()`; it is now the daemon's, rendered with `{e:#}`, so a failure whose cause chain has more than one link prints the whole chain where it printed the head.
+`bg.rs` prefixes it identically (`Fetch failed{name}: {e}`) and no green line moved.
+
+**`lookup_draft_path`'s two outcomes became one.**
+The store-backed helper distinguished "not in the index" (`Ok(None)`) from "the index could not be read" (`Err`), and the TUI printed a different line for each.
+`draft.path` answers `-32602` for both, so the second line is gone and its reason is in the log.
+The first line is the one a user can act on; the second named a failure mode (an unreadable drafts index) that a daemon serving the same directory would have reported through every other draft method first.
+
+**Attachments and the browser rendition land in the daemon's handle directory.**
+`message.materialise_attachment` writes one directory per handle under `<data>/runtime/handles/`, where the store-backed helper wrote every part of a row into `parse::materialisation_dir(<row id>)`.
+Both are 0700 and both hand the picker a file; what changed is a lifetime, ten minutes by default, where a materialised copy lived until the temp directory was swept.
+Neither is released, for the reason `ATT-01` already gave for `mp open`: the viewer that was just launched is holding the file.
+
+**A search hit that resolved to no local row is the one draft the daemon cannot build.**
+`draft.reply` and `draft.forward` read a store row, and the hit has none; its content is the fetch the overlay is rendering.
+`write_fetched_draft_and_edit` is that branch, and it is the only remaining caller of `create_draft_from_source` in the TUI.
+It reaches no engine module, so the residue gate does not name it, and `LST-09`'s `message.fetch` is what would delete it.
+
+**`DFT-11`'s recipient rewrite stayed client-side.**
+`ce` resolves its file through `draft.path` now and then writes the frontmatter itself, because `draft.set_recipients` is not built and building it was not this unit's brief.
+It reaches no engine module either; what it costs is a second drafts-index refresh the daemon could have done in one.
+
+### The weak session handle
+
+The pty smoke found it: `q` painted and the process never left.
+`Session::close` drops its sender and then **joins** the session thread, whose loop ends when the last sender goes, and `Session::handle()` handed out a strong clone.
+A mailbox load holds one for milliseconds; a sync arm polling `operation.status` holds one for as long as the pass takes, so quitting waited for the sync.
+`QueryHandle` holds a `WeakUnboundedSender` now and upgrades it per call, so quitting closes the channel under every worker and their next call fails with the closed-session error the door already had.
+It is also what the method's own doc has claimed since P5-U4: *"it keeps no session alive (a call on a handle whose session has closed fails like any other)"*.
+
+### The in-process daemon fixture, and the ten tests carried onto it
+
+`src/tui/test_daemon.rs` (150 lines) is the fixture P5-U1 established, extracted the moment a second module needed it, and `Session::serving` puts it behind a **real session**: a thread of its own answering over the same call channel, so an `App` reaches it through `app.session` and a `QueryHandle` exactly as it reaches a daemon over a socket.
+That is what let ten `actions.rs` tests be carried rather than rewritten: the routed helpers read their door off `app.session`, so a fixture that hands them one tests the whole path, status lines included, instead of testing the layer function underneath.
+
+Its runtime is **multi-threaded**, which part 1's was not: an operation's work is a `tokio::spawn`ed task, a current-thread runtime only drives its tasks while something is inside `block_on`, and a caller polling `operation.status` never is, so the first operation a test drove sat in `running` for ever. It is in `docs/lessons-learned.md`.
+
+The ten, all of them still in `src/tui/actions.rs` and all of them now asserting against a daemon instead of a store:
+
+| test | what it needed |
+|---|---|
+| `the_cursor_row_materialises_its_blobs_into_daemon_handles` | renamed from `…_where_mp_open_puts_them`; the directory moved, so the assertion did |
+| `a_row_without_attachments_resolves_to_an_empty_list` | a session |
+| `saving_the_same_attachment_twice_keeps_both_copies` | a session |
+| `the_browser_gets_the_html_blob_written_to_a_file` | a session |
+| `the_browser_rendition_inlines_cid_images_as_data_uris` | a session |
+| `a_draft_answers_the_attachment_key_from_its_own_frontmatter` | a session, for the `draft.path` under `cursor_draft` |
+| `a_draft_without_attachments_resolves_to_an_empty_list` | the same |
+| `a_missing_draft_attachment_is_named_on_the_status_line` | the same |
+| `edit_current_resolves_the_cursor_draft_through_the_index` | the same |
+| `edit_recipients_finds_the_draft_through_the_index` | the same |
+
+None was deleted, because none of them was pinned elsewhere: `actions_tests.rs` pins which method an action issues, not what the helper under it does with the answer.
+Two more that were already passing are stronger for the fixture and were given one anyway: `a_message_without_html_says_so_instead_of_opening_an_empty_page` was passing because an `App` with no session refuses exactly as a row with no markup does, which is a false pass, and `an_unresolved_search_hit_is_served_from_the_fetch` shares the module's builder.
+
+Three tests were added to `src/tui/commands.rs`, over the machinery that has no `actions.rs` caller a test can reach:
+`an_operation_is_polled_to_the_state_it_settled_in` (a real `calendar.rebuild` from `{operation_id}` to its settled result),
+`a_refused_sync_is_the_sentence_the_daemon_gave` (a local-only account, whose refusal is what lands on the status line),
+and `the_local_pass_finds_the_row_the_index_holds` (the overlay's AST rendered, sent, re-parsed daemon-side and run against the FTS index, with the body travelling on the hit).
+
+### The final residue
+
+Eight rows, unchanged from the table P5-U5 wrote, and the reason each is still there is unchanged too:
+
+| function | needle | why |
+|---|---|---|
+| `readonly_view_for_row` | `store_for_mutation(` | the read-only Markdown rendition (#0075, `RD-06`); nothing registered renders a stored message as Markdown |
+| `handle_search_result_action` | `store_for_mutation(` | the same rendition under another caller |
+| `handle_action` | `store_for_mutation(` | the `OpenEventSource` arm's `invite.ics` blob; no `message.*` method hands out an attachment blob inline |
+| `store_for_mutation` | `open_store(` | the helper those three share; it dies with the last of them |
+| `selected_selector` | `open_store(` | the `mp://` selector of the cursor row (`RD-07`): no listing carries one |
+| `ingest_search_hit` | `open_store(` | ingesting a server-only hit; `LST-09`'s `message.fetch` is not built |
+| `fetch_search_hit` | `imap_client::` | the raw fetch by Message-ID behind that ingest |
+| `send_one_draft` | `send_draft(` | the undo-send hold's fire path (#0090, `SND-04`), held in the TUI until P6-U1/U2 |
+
+Three surfaces and one plan decision stand between this and the zero P5-U10 needs.
+
+### Approved test edits
+
+- **`src/tui/actions.rs`'s own test modules**: the ten rows above, plus `app_on_row` and `app_on_draft` taking the fixture so they can give the `App` a session. No assertion was weakened; the one that changed (`the_cursor_row_materialises_its_blobs_into_daemon_handles`) asserts a stronger property than the path it replaced, since it also pins one directory per handle.
+- **`src/tui/commands.rs`'s test module**: its local `Daemon` now delegates to `TestDaemon` rather than building a second dispatcher, and three tests were added.
+- No line of `src/tui/actions_tests.rs`, `src/tui/app/queries_tests.rs`, the golden frames or anything under `tests/` was touched: `git diff --stat 3dfb184..HEAD -- src/tui/actions_tests.rs src/tui/app/queries_tests.rs src/tui/ui/golden_frames*.rs tests/` is empty.
+
+### Follow-ups
+
+- **P5-U8 replaces the `operation.status` poll** with the `operation.finished` subscription, and with it `new_inbox_mail`'s place in the answer: an arrival list belongs on the event stream, and the account runtime's tick reports none today.
+- The server leg of `LST-08` is still `lib_do_multi_search` on a background thread. It reaches no engine *needle* the gate scans (it takes `app.imap_config`, already loaded), so the gate does not name it, and `message.list_server` is the method it becomes.
+- The handle lifetime the attachment and browser keys now inherit: ten minutes, where a materialised copy used to live until the temp directory was swept.
+- `DFT-11`'s client-side recipient rewrite, and the second index refresh it costs, for `draft.set_recipients`.
+- `src/tui/app/store_rows.rs` is now the last store-backed reader in the TUI and its only caller is a wedged session. P5-U10 is where it dies.
+
+### Validation
+
+`timeout 1200 cargo test --workspace --offline` -> **2 156 passed, 0 failed, 1 ignored**, `pgrep -af '[m]p daemon'` empty afterwards.
+That is 1 310 lib tests (part 1's 1 303 passing plus the row that was failing, plus three query-string round trips and three command-layer rows) and every `tests/` suite green.
+
+`cargo test --offline --lib actions_tests` -> **22 passed**, three times over.
+`--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, unmoved, no snapshot re-approved. `--lib queries_tests` -> 18 (plus the `#[ignore]`d timing row).
+Every `daemon_*_slice` suite green: read 22, draft 34, mutation 35, send 50, sync 38, admin 44.
+
+`git diff --stat 3dfb184..HEAD -- src/tui/actions_tests.rs src/tui/app/queries_tests.rs src/tui/ui/golden_frames*.rs tests/` is empty.
+
+`mp --help` recursive and `mp dump-keys --json` byte-identical to the Phase 0 captures, from a binary rebuilt in the same run.
+`cargo clippy --workspace --offline --all-targets` -> **39 warnings**, the baseline every unit before part 1 quoted, none of them on a line this unit wrote. Part 1's 33 is closed: it was clippy stopping short of a test target that did not compile.
+
+`cargo install --path . --offline` green.
+
+A pty smoke against an `examples/mkfixture` root (`script -qec "stty rows 40 cols 120; mp"`, 120x40, `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` all inside the fixture):
+the shell painted with `··` in every count column, the bootstrap filled the sidebar (`Inbox 201`, `Drafts 0`, `Sent 50`, `Archive 100`, `Bulk 500`), `a` opened the archive confirm and `y` archived the row with `Email archived` on the activity line and the row gone from the list, `ss` parked behind the startup auto-fetch with the `Quick sync queued (waiting for the current sync)` line and then ran, printing `Quick sync (alpha)...` and settling on `Synced: 0 new, 0 existing`, and `q` left with exit 0.
+The sync leg went through `sync.quick` and `operation.status` end to end.
+It did not *fail*, which is the one thing the smoke could not produce: the fixture's account has no IMAP block, so the pre-daemon check `app.imap_config.is_none()` short-circuits before the call (the `IMAP not configured` line, verbatim), and an account given a bogus host plus a stored password reaches the server, fails per mailbox and still settles a clean pass, which is `sync_mailboxes`' behaviour before and after.
+The refusal path is pinned by `a_refused_sync_is_the_sentence_the_daemon_gave` instead, over a local-only account, which is the branch whose sentence reaches the status line.
+
+The first smoke is also what found the weak-handle bug: `q` painted and the process sat there until the pty's own timeout, because the sync worker's strong `QueryHandle` was keeping the session thread that `Session::close` joins alive.

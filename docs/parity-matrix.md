@@ -324,18 +324,22 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ff` (`src/tui/app/keymap.rs:581`), `Action::ServerSearch` (`src/tui/app/types.rs:1619`)
 - Daemon surface: `message.search` local first, then the server leg as an `operation.*` streaming results on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui/commands.rs`)
+- Status: routed (P5-U6); GUI not started
 - Note: deduplication is by Message-ID, so a message found twice appears once.
+  The local pass is `message.search` with `body: true` since P5-U6; the server leg is still the TUI's own `lib_do_multi_search` behind a background thread, and moving it onto an operation with streamed results is P5-U8's.
+  The overlay holds a parsed query and the method takes what a user typed, so the query is rendered back into the grammar (`search::to_query_string`) rather than sent as an engine enum.
 
 ### LST-09 Act on a search result without leaving the overlay
 
 - Classification: GUI parity
 - Source anchor: the SERVER SEARCH keymap section (`src/tui/app/keymap.rs`): `Enter`, `e`, `y`, `f`, `r`, `R`, `w`, `a`, `b`, `o`, `O`
-- Daemon surface: `message.get`, `message.materialize`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`, `message.save_attachments`
+- Daemon surface: `message.get`, `message.materialise_html`, `message.materialise_attachment`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: not started
+- Status: routed (P5-U6) except the fetch and the Markdown rendition; GUI not started
+- Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6.
+  Two keys are not, and are the two rows of `TUI_ACTION_ENGINE_RESIDUE` this entry accounts for: `f` ingests a server-only hit, for which `message.fetch` is not built, and `Enter` / `e` / `y` render a stored message as Markdown, which is `RD-06`.
 
 ### LST-10 Show the conversation a message belongs to
 
@@ -436,6 +440,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: TUI golden frames
 - Status: not started
 - Note: the handle keeps its blob alive until release or expiry (`ANO-6`).
+  Not built, and it is one of the three surfaces standing between `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) and the zero P5-U10 needs: `readonly_view_for_row`, `handle_search_result_action` and the shared `store_for_mutation` are three of its eight rows.
+  `message.materialise_html` is not it: that renders the sender's markup for a browser, where this renders the store's own Markdown view of a message (#0075).
 
 ### RD-07 Copy a message's `mp://` selector to the clipboard
 
@@ -445,6 +451,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: TBD (Phase 9)
 - Validation: `tests/cli_selector_contract.rs` for the selector shape
 - Status: not started
+- Note: no listing carries a selector, so `selected_selector` still opens a store to build one, which is one row of `TUI_ACTION_ENGINE_RESIDUE`.
+  `message.get` would answer it, at the price of a whole-message read per clipboard copy; a `selector` on the listing row is the shape that would close it.
 
 ### RD-08 Copy the Markdown rendition path of a search hit
 
@@ -602,8 +610,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `draft.path`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- Status: routed (P5-U6); GUI not started
 - Note: the only selector-to-path edge, and the handle external editors and agents use, so it stays supported under the filesystem boundary.
+  It is also every draft-only key of the TUI since P5-U6: `cursor_draft` resolves the file under the cursor through it, where it used to open the store's drafts index.
+  The lookup had two outcomes (not in the index, and the index could not be read) where `draft.path` has one refusal, so the second status line is gone and its reason is in the log.
 
 ### DFT-07 Edit a draft in the editor
 
@@ -622,7 +632,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `draft.reply`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- Status: routed (P5-U6); GUI not started
+- Note: the TUI's four reply keys went through it in P5-U6, addressed by the `row_id` the method gained for them; a search hit that resolved to no local row is the one reply the daemon cannot build, and is still built client-side from the fetch the overlay is rendering.
 
 ### DFT-09 Forward a message to new recipients
 
@@ -631,17 +642,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `draft.forward`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- Status: routed (P5-U6); GUI not started
 - Note: the forward carries the original attachments, which the GUI must reproduce rather than dropping.
+  P5-U6 routed the TUI's two forward keys through it and gave the method `headers`, the compose wizard's override of the recipients and the subject it collected before the draft existed.
 
 ### DFT-10 Compose wizard for new and forwarded mail
 
 - Classification: GUI parity
 - Source anchor: the compose wizard variants in `src/tui/app/types.rs`, `src/tui/ui/compose.rs`
-- Daemon surface: `draft.create`, `signature.list`; the wizard itself is client-side
+- Daemon surface: `draft.create`, `draft.forward` with `headers`, `signature.list`; the wizard itself is client-side
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: not started
+- Status: routed (P5-U6) for its forward mode; GUI not started
 - Note: an inline body field, a signature picker, and a submit chord; the overlay-internal keys go into `docs/baselines/pre-daemon/manual-keys.md`, the P0-U2 inventory (`ANO-2`).
 
 ### DFT-11 Edit the recipients of an existing draft
@@ -650,8 +662,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ce` in the drafts mailbox (`src/tui/app/keymap.rs:656`)
 - Daemon surface: `draft.set_recipients`, which re-splices the signature block
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
+- Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui/actions.rs`)
 - Status: not started
+- Note: `draft.set_recipients` is not built and the rewrite is still a client-side write to the file `draft.path` resolved (P5-U6 routed the resolution, not the write).
+  It reaches no engine module, so the residue gate does not name it; what it costs is a second drafts-index refresh the daemon could have done in one.
 
 ### DFT-12 Watch draft files and refresh the derived index after an external edit
 
@@ -671,8 +685,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp open <selector> [--mailbox]` (`src/main.rs`), TUI `to`, search overlay `o`
 - Daemon surface: `message.materialise_attachment`, one call per part, opened client-side through `parse::open_file_with_system`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`
-- Status: routed (P4-U8); GUI not started
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `the_cursor_row_materialises_its_blobs_into_daemon_handles` (`src/tui/actions.rs`)
+- Status: routed (P5-U6); GUI not started
 - Note: the printed path is the one row of the slice that is not byte-identical to the pre-daemon binary and cannot be: a materialised file lives under `<data_dir>/runtime/handles/<handle>/` with a lifetime attached, rather than in the client's own temp directory. The handle is deliberately not released, because the viewer just launched is holding the file.
 
 ### ATT-02 Save a received message's attachments into a client-named directory
@@ -709,10 +723,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `tb` (`src/tui/app/keymap.rs:633`), search overlay `b`
-- Daemon surface: `message.materialize` for the `.html` companion, opened client-side
+- Daemon surface: `message.materialise_html`, opened client-side through `parse::open_file_with_system`
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/parse.rs` for the companion document
-- Status: not started
+- Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file` and `the_browser_rendition_inlines_cid_images_as_data_uris` (`src/tui/actions.rs`)
+- Status: routed (P5-U6); GUI not started
+- Note: the daemon writes the rendition rather than the markup: the charset meta, the CSP tag and the `cid:` inlining are three #0037 fixes, and serving unhardened markup through a new door would undo them.
+  A message whose sender wrote no markup is `-32602`, which the client renders as its "No HTML version available" line and not as an error.
+  The file lands in a handle directory with a lifetime, where the TUI wrote it into the row's own materialisation directory; the handle is deliberately not released, because the browser just launched is holding it (`ATT-01`'s rule).
 
 ## Sending, outbox, and the undo hold
 
@@ -733,8 +750,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `send.approved`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12); GUI not started
+- Status: routed (P5-U6); GUI not started
 - Note: `--all-accounts` is a loop in the client over `global_config.accounts` in configuration order, so `send.approved` names one account and a caller that sends `all_accounts` is refused.
+  The TUI's `cX` went through it in P5-U6 and derives its line from the settled `{sent, failed}`; an account with neither is the "No approved emails found" the empty scan printed.
+  The transport check stays client-side, because its sentence is the key's and the progress line has to say which transport was resolved.
 
 ### SND-03 Approve and send the current draft with one key
 
@@ -816,9 +835,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ss` (`src/tui/app/keymap.rs:593`) and `sS` (`src/tui/app/keymap.rs:594`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`
-- Status: routed (P4-U10); GUI not started
+- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `an_operation_is_polled_to_the_state_it_settled_in` and `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui/commands.rs`)
+- Status: routed (P5-U6); GUI not started
 - Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
+  The TUI's two keys went through them in P5-U6, which also collapsed the client-side IMAP/Graph fork: the daemon's pass body loads whichever configuration the account has, so only the progress line still says which transport it is.
+  The arm keeps its worker thread and polls `operation.status` every 100 ms to a terminal state; P5-U8 replaces that with the `operation.finished` event `mp sync` already waits on.
 
 ### SYN-02 Sync command options
 
@@ -846,9 +867,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: the `Fetch`, `FetchAccount`, and `LoadMailbox` actions in `src/tui/app/types.rs` (`LoadMailbox` at `src/tui/app/types.rs:1611`)
 - Daemon surface: `state.bootstrap` returning zeroed counts for an `opening` account, filled by `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: TUI golden frames; `src/tui/ui/golden_frames_daemon.rs`
+- Status: routed (P5-U6); GUI not started
 - Note: implicit workflow with no command, and the reason a client shows content before sync completes.
+  `LoadMailbox` became `message.list` / `draft.list` in P5-U4 and the two fetch arms became `sync.quick` in P5-U6, each still on the worker thread it always had.
+  The `opening` -> ready transition is still `BgResult::AccountOpened` rather than an event, which is P5-U8's.
 
 ### SYN-05 Sync health and error surfacing per account
 
@@ -1061,9 +1084,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `calendar.rsvp` as an `operation.*`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, and the successful reply through the daemon's fake transport)
-- Status: routed (P4-U14)
+- Status: routed (P5-U6)
 - Note: whole-series only in v1, the reply travels as iMIP over SMTP, and the target message must carry an `invite.ics` blob.
   The Graph refusal (`ANO-4`) is made before anything about the selector is examined, so a surface that shows the RSVP buttons disabled can say why without naming a resolvable message.
+  P5-U6 routed the TUI's `V` through it and gave the method a `row_id` address beside the selector, because an agenda row carries a `messages.id` and nothing else (#0050).
+  Three client-side checks stay ahead of the call, all three to keep the sentence the key has always printed: the row carries no invitation, the account is Graph, SMTP is not configured.
 
 ### CAL-02 Agenda view with an upcoming and past toggle and a refresh
 
