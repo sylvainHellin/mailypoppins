@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U7 have landed; P5-U8 is next.
+Status: in-progress. P5-U1 to P5-U8 have landed; P5-U9 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -26,7 +26,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U5 | T | this commit | actions to commands, the contract | done (tests) |
 | P5-U6 | I | `d0c0049`, `b51b3fa`, `723ba60`, `e3055e7` | actions to commands | done |
 | P5-U7 | T | this commit | events replace watcher threads, the contract | done (tests) |
-| P5-U8 | I | | events replace watcher threads | open |
+| P5-U8 | I | `115aef0`, `33e42aa`, `e28ed30`, `bca8413` | events replace watcher threads | done |
 | P5-U9 | T | | the parity-gate oracle suite | open |
 | P5-U10 | I | | the crate boundary for the TUI | open |
 | P5-U11 | I | | the gate run, the report, the docs | open |
@@ -906,3 +906,112 @@ And the fixture account must not be local-only, or `sync.quick` refuses it befor
 - `AccountState::watcher_active` keeps its name and changes its meaning: it is the daemon session's health now, not an IDLE connection's, and the sidebar renders it unchanged.
 - The unbounded notification buffer P5-U2 recorded and `BACKLOG.md` carries is closed by the drain, and the queue caps (512 events, 4 MiB) plus `state.resync_required` are what bound it on the daemon's side.
 - `mp_client::StateTracker` is stricter than the protocol (any jump above `watermark + 1` is a gap, exact only on a stream that coalesced nothing), which `docs/daemon-protocol.md` already records as a Phase 3b item in `BACKLOG.md`. A TUI that drains a coalescing queue is the first client it can bite.
+
+## P5-U8: events replace watcher threads
+
+Four commits.
+`115aef0` is the daemon half (the arrival list on the wire, runtimes by default, the watcher, the engine-lock turn), `33e42aa` the TUI half, `e28ed30` the test edits the default flip owes, `bca8413` the docs.
+
+`src/tui/events.rs` (452 lines) is the module the contract names.
+`src/daemon/runtime/watcher.rs` (262, 244 before its test) is where `imap_watch` and the Graph poller went.
+`src/tui/helpers.rs` lost 189, `src/tui/actions.rs` 224 net, `src/tui/commands.rs` gained 430, `src/tui/session.rs` 189 and `src/engine_lock.rs` 187.
+1 754 insertions and 768 deletions across `src/` and `crates/`, of which about 150 insertions are test modules: **roughly 1 600 lines written and 760 removed, net +840 excluding tests.**
+
+All 20 rows of `src/tui/events_tests.rs` and all 3 of `tests/tui_daemon_recovery.rs` pass.
+
+### The events, and where each of the four kinds lands
+
+`Incoming` carries the events *and* the connection's own state on one channel, which is what keeps a `Reconnected` from overtaking the last event of the dead instance.
+`EventState` (three fields on `App`: the instance, the watermark, the operations this client started) is what `apply_event` consults before it looks at a kind, and `App::apply_bootstrap` is the only thing that sets it, which is why a resync and a reconnect are both spelled "bootstrap again".
+
+`sync.completed` lands through `bg::land_sync`, extracted from the `BgResult::Fetch` arm so a tick the daemon's watcher ran and a pass this client asked for produce the same status line, the same per-account health mark (#0071) and the same refresh.
+`operation.finished` builds the `BgResult` the worker thread used to post and hands it to `handle_bg_result`, which is what makes `bg_count` come down exactly once per operation.
+`state.invalidate` scoped to the counts recounts the sidebar through one `mailbox.list`; everything else goes to `MessageRowDelta::decode` and the delta consumer P5-U4 left switched off.
+
+**A tick this client asked for is not landed twice.** The daemon publishes `sync.completed` to every client *and* answers the asking client's operation, so `apply_tick` ignores an outcome for an account this client has a pass in flight for. Without it a `F` would notify twice and reload twice.
+
+### The four operations, started and awaited
+
+`Action::Fetch`, `Action::Sync`, `Action::FetchAccount`, `Action::SendApproved` and `Action::Rsvp` moved out of `handle_action` into `commands::dispatch`: each starts its operation, records `id -> Awaited`, and returns.
+There is no worker thread and no `BgResult` channel left for them, and `operation.status` appears nowhere under `src/tui/`.
+Every client-side check that owns its own sentence stayed ahead of the call (the park gate, "IMAP not configured", the RSVP's three refusals, `resolve_send_transport`'s missing transport), because those are the key's words and not `mp`'s.
+
+### The session survives its daemon
+
+The session thread `select!`s over the call channel and the notification stream, so an event does not wait for the next keystroke.
+A `None` from the reader is the socket closing: it posts `Disconnected`, refuses every call at once rather than waiting out the 30 s ceiling, and retries `client::reopen_session` on a widening gap from 250 ms to 2 s.
+`reopen_session` is `client_session` with the exit-4 diagnostic replaced by `None`, so the auto-start policy and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping are the same ones and a TUI on the alternate screen is not ended by a diagnostic it cannot show.
+Nothing falls back to the store: the recovery test asserts it as the engine lock the fallback would have to hold.
+
+### The decisions this unit had to take
+
+**Runtimes are on by default, and an account with no store is the exception.**
+`ReadPool::open` opens SQLite read-write, so a runtime for an account nobody has synced *creates* its database, and every read method then answers an empty list where it refused with `-32006` and the pre-daemon sentence `<account> has no local store yet, so no received mail can be addressed; run `mp sync` first`.
+Five parity suites are built on a fixture account that is configured and deliberately storeless (`tests/support/send_fixture.rs`: "a configured account with no store at all"), so materialising one breaks the gate this phase exists to pass.
+Such an account therefore gets no runtime and is reported `blocked` with the sentence that says what to do.
+**This is the decision that wants ratifying**: it contradicts P3b-U8's rule that a configured account gets a live runtime, and the three `tests/daemon_config.rs` rows that pinned it now say `blocked` for an account added mid-swap. The alternative was to keep those three rows and break the five parity suites, which is the wrong way round with P5-U9 next.
+
+**The engine lock grew a second layer.**
+`flock` is per open file description, so a daemon holding a runtime's lock refuses every guarded drain it starts itself: the send slice's Sent copies stayed `SentPendingAppend` for ever the moment runtimes came on.
+`EngineLock::hold_for_runtime` announces in a process-local registry that this process is the account's engine, and `EngineLock::take_turn_at` - what `outbox::drain_guarded_at`, `pending_ops::resume_account` and `sync::engine::run_sync_guarded_at` call now - takes an in-process gate instead of a second description.
+One pass at a time either way, which is the #0116 invariant, and `try_acquire_at` still means "take the lock" for the runtime and for a test asking whether anyone holds it.
+It also removes the wart P4-U10 recorded: a `mp sync --mailbox` on a daemon that is the engine now runs instead of being answered `blocked` by that daemon's own lock.
+
+**The watcher is a watch and not a scheduler.**
+One IDLE round of 300 s per IMAP account, one 60 s enumeration per Graph account, the same numbers and the same backoff curve the TUI's two threads used, and a round that sees the mailbox move runs one quick tick through `tick_and_commit`.
+It publishes the counts that moved with it, one `Change::MailboxCounts` per mailbox whose totals changed, so a client's sidebar converges without a tick-specific rule.
+A blocked runtime does not watch: the engine holding the lock is watching the same mailbox.
+
+**`new_inbox_mail` is on the event and stays on the answer.**
+`from_sync_result` fills it from `SyncResult::new_inbox_mail`, which already held exactly that list, so the sibling `sync.quick` answers with is now the same list whether the pass went through the guarded path or the runtime's tick - which closes P5-U6's `[]`.
+
+### Approved test edits
+
+Pre-approved by the brief:
+
+- **`tests/daemon_account_runtime.rs`**: `without_the_environment_opt_in_…` deleted with the opt-in; its twin renamed to `the_account_becomes_ready_and_the_daemon_holds_the_engine_lock`; the sandbox seeds an empty store, because a daemon does not create one.
+- **`tests/daemon_sync_outcome.rs`**: `PAYLOAD_KEYS` is 14 with `new_inbox_mail` and the two payload literals carry it; `no_outcome_is_emitted_without_the_account_runtimes_opt_in` deleted with the gate it was about; the `account_runtimes` parameter dropped from the fixture.
+- **`tests/daemon_sync_slice.rs`**: the fake hook is armed without the variable; `loud_outcome` carries the new field; the two engine-lock rows take the lock **before** the daemon starts (`Slice::start_behind_a_held_lock`), because the daemon would otherwise be the holder.
+- **`tests/support/parity.rs`**: `DAEMON_ENV_HOOKS` is 12 names.
+
+Forced by the flip and recorded here rather than assumed:
+
+- **`src/tui/actions_tests.rs`**: `Action::Fetch` and `Action::Sync` left the list of actions `dispatch` hands back. This is a **collision between two landed T units**: P5-U5 pinned that `dispatch` returns `false` for them, P5-U7 pins that it returns `true` for `Fetch`, and both cannot hold. The newer contract is the one this unit implements; the older row keeps its other three entries and says why in its doc comment.
+- **`tests/daemon_config.rs`**: the sandbox seeds a store per configured account, and the three rows about an account added mid-swap (`config.init`, `config.add_account`, the reload's `gamma`) expect `blocked` and a free engine lock. See the decision above.
+- **`tests/daemon_read_only_methods.rs`**: `serving_reads_holds_no_engine_lock` said "the daemon must not take the engine lock before Phase 5"; this is Phase 5, so the row asserts the reads it still serves in both directions and the lock the daemon does hold.
+- **`tests/daemon_bootstrap.rs`**: `assert_opening_and_zeroed` asserts "not ready" rather than the literal `opening`, because an account settles now instead of staying `opening` for ever. The zeroed counts and the empty drafts, which is what the row is about, are unchanged.
+- **Eight suites** lost a dead `.env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")` line and five lost a doc-comment mention: `daemon_draft_watch`, `daemon_operations`, `daemon_bootstrap`, `daemon_handshake`, `daemon_read_only_methods`, `daemon_lifecycle`, `daemon_handles`, `daemon_events`.
+
+No line of `src/tui/events_tests.rs`, `src/tui/app/queries_tests.rs`, `tests/tui_daemon_recovery.rs` or the golden frames was touched.
+
+### Follow-ups
+
+- An account whose store appears after the daemon started gets its runtime at the next daemon start; a re-check after a pass that created one would close it (`BACKLOG.md`).
+- The runtime's tick still carries neither a mailbox subset nor `--dry-run`, so those passes take the guarded path; they run now rather than being refused, but they do not go through the tick.
+- A tick costs the client one `mailbox.list` for the tick's own recount and one per mailbox whose counts the runtime published; a client could suppress the second.
+- #0042's Graph delta query is a daemon item now: the poller still enumerates the whole inbox every minute.
+- `mp_client::StateTracker` is stricter than the protocol about gaps, and a TUI draining a coalescing queue is the first client that could be bitten; the TUI applies the watermark itself, so nothing is wrong today.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1800 cargo test --workspace --offline` -> **2 179 passed, 0 failed, 1 ignored**, `pgrep -af '[m]p daemon'` empty afterwards.
+That is P5-U6's 2 156, plus the 20 rows of `src/tui/events_tests.rs` and the 3 of `tests/tui_daemon_recovery.rs` compiling and passing for the first time, plus one engine-lock row, one watcher row and one command row, minus the three rows deleted with the opt-in and the Graph backoff curve that left `src/tui/helpers.rs`.
+
+`cargo test --offline --lib events_tests` -> 20, three times over; `--test tui_daemon_recovery` -> 3, three times over.
+`--lib actions_tests` -> 22, `--lib queries_tests` -> 18 (plus the ignored timing row), `--lib 'ui::golden_frames::'` -> 20, `--lib golden_frames_daemon` -> 22, no snapshot re-approved.
+Every `daemon_*_slice` suite green with its own count: read 22, draft 34, mutation 35, send 50, sync 38, admin 44.
+
+`git diff --stat 40059a8..HEAD -- src/tui/events_tests.rs src/tui/app/queries_tests.rs src/tui/ui/golden_frames*.rs` is empty; under `tests/` and in `actions_tests.rs`, the edits above.
+`rg -n "ACCOUNT_RUNTIMES" src crates docs tests` is empty outside the two contract files that scan for it, the two historical tickets and the Phase 3b gate evidence.
+
+`mp --help` recursive and `mp dump-keys --json` byte-identical to the Phase 0 captures, from a binary rebuilt in the same run.
+`cargo clippy --workspace --offline --all-targets` -> **34 distinct warnings**, which is the 33-warning baseline plus one in `tests/tui_daemon_recovery.rs` (`&PathBuf` where `&Path` would do), a file this unit may not edit and P5-U7 committed. None is on a line this unit wrote.
+`cargo install --path . --offline` green.
+
+The pty smoke, against an `examples/mkfixture` root at 120x40 with `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` inside it: the shell painted with `··` in every count column, the bootstrap filled the sidebar (`Inbox 201`, `Drafts 0`, `Sent 50`, `Archive 100`, `Bulk 5000`) and the list and preview painted from the daemon.
+A `kill -9` on the pid file's daemon put `The daemon is not reachable; reconnecting…` on the activity line in the warning colour within one idle tick, and the session then auto-started a replacement and painted `Reconnected to the daemon`, re-bootstrapping against the new instance.
+`q` left with exit 0, and `mp daemon stop` took the replacement down.
+
+`rustfmt --edition 2021` on `src/tui/events.rs`, `src/daemon/runtime/watcher.rs`, `src/daemon/client.rs`, `src/daemon/config.rs`, `src/daemon/sync_outcome.rs`, `crates/mp-protocol/src/events.rs`, `src/tui/session.rs`, `src/tui/commands.rs`, `src/tui/app/bootstrap.rs`, `src/daemon/methods/sync.rs` and `src/daemon/runtime/account.rs`, all clean; the files that were not rustfmt-clean at `40059a8` (`src/tui/{mod,bg,actions}.rs`, `src/engine_lock.rs`, `src/daemon/runtime/mod.rs`) were left alone.
+
+The throwaway `git worktree` at `~/.cache/mp-stub-p5u7` was removed.
