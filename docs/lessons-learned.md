@@ -1722,7 +1722,7 @@ A contract test that means "these keys and no others" is worth writing; what it 
 That is exactly right for a daemon with no account runtime, which is every Phase 4 daemon, and exactly wrong for one that has started a runtime: the runtime holds `store.lock` for its whole lifetime, `flock` is per open file description rather than per process (`src/engine_lock.rs`), so the pass opens a second description of a file its own process already locked, contends with itself, and reports `blocked` for work nobody else is doing.
 
 So a pass routes through `tick_and_commit`, the runtime's own tick, when a live runtime exists, and through the guarded call only when none does.
-The tick carries neither a mailbox subset nor `--dry-run`, so a request that names either still takes the guarded path and is answered `blocked` by this daemon's own runtime; account runtimes are behind `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` until Phase 5, so nothing reaches that corner by default.
+The tick carries neither a mailbox subset nor `--dry-run`, so a request that names either still takes the guarded path. Until P5-U8 that was answered `blocked` by this daemon's own runtime; the process-local engine gate below means it takes a turn and runs instead, and a tick that can carry a subset is in `BACKLOG.md`.
 The general shape: any daemon-side call to a `*_guarded` entry point has to ask first whether this process is already the engine.
 
 ## A client that renders an operation has to bootstrap before it starts one
@@ -1886,3 +1886,21 @@ An in-process daemon fixture built on `Builder::new_current_thread()` serves eve
 `Session::close` drops its sender and then **joins** the session thread, whose loop ends when the last sender goes. `Session::handle()` used to hand out a strong clone, so any worker still holding one made `q` block until that worker was done. With a mailbox load that is milliseconds; with P5-U6's sync arm, which polls `operation.status` until the pass finishes, it is however long the mailbox takes, and the symptom is a TUI that paints the quit and then never exits.
 
 `QueryHandle` holds a `WeakUnboundedSender` and upgrades it per call. Quitting closes the channel under every worker, their next call fails with the closed-session error the door already had, and they end. The rule generalises: a handle onto a shared resource that something *joins* on shutdown has to be weak, or the join is a lock on the slowest holder.
+
+## `flock` is per open file description, so a daemon that holds a lock for a runtime's lifetime refuses its own drains
+
+`src/engine_lock.rs` is a `flock` on `<account_dir>/store.lock`, and every guarded path (the outbox drain, the mutation-queue drain, the sync ingest) takes it for the length of one pass. An account runtime holds it for its whole *lifetime*, which is what makes the daemon the account's engine. The two are incompatible in one process: `flock` is per open file description, not per process, so the `send.draft` running inside that same daemon opens the lock file a second time, contends with its own runtime, and skips the drain it owes. The symptom is a message that goes out and whose Sent copy is never filed (`SentPendingAppend` for ever), and nothing in the log says "refused" any louder than a `debug!`.
+
+The fix is two entry points, not one. `EngineLock::hold_for_runtime` announces in a process-local registry that this process is the account's engine; `EngineLock::take_turn_at`, which every guarded pass calls now, checks that registry first and takes an in-process gate instead of a second description. One pass at a time either way, which is the invariant #0116 wants, and `try_acquire_at` keeps meaning exactly "take the lock" for the runtime and for a test asking whether anybody holds it.
+
+## A daemon that opens an account's store creates it, and an empty store is not the same answer as no store
+
+`ReadPool::open` opens SQLite read-write, so starting an account runtime for an account nobody has ever synced *materialises* its database. Every read and mutation method then answers an empty list where it used to refuse with `-32006` and the sentence `<account> has no local store yet, so no received mail can be addressed; run `mp sync` first`. Five parity suites are built on a fixture account that is configured and deliberately storeless, and all of them went red the moment account runtimes were turned on by default (P5-U8).
+
+An account with no store therefore gets no runtime and is reported `blocked` with the sentence that says what to do. The cost is that it stays that way until the next daemon start, which is in `BACKLOG.md`. The general rule: "open it and see" is not a probe when opening creates.
+
+## A `tokio::select!` arm that builds its timer inside the loop never fires under a poller
+
+The TUI's session thread waits for a daemon to come back with `select! { call = inbox.recv() => …, _ = sleep(gap) => reconnect() }`. Written that way the `sleep` future is constructed fresh on every iteration, so every refused call - and the UI thread polls its session while it waits - resets the timer and the reconnect branch is never reached. It looks exactly like a reconnect that does not work, for as long as anything is asking.
+
+`tokio::time::sleep_until(deadline)` with the deadline computed *outside* the loop fixes it: the future is rebuilt each iteration and still expires at the same instant. Any `select!` whose other arm is hot needs a deadline rather than a duration.

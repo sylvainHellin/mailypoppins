@@ -857,9 +857,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp watch [--mailbox] [--timeout N]` with exit code 2 on timeout, `src/main.rs`, `src/imap_client/watch.rs`, `imap_watch` (`src/tui/helpers.rs:45`)
 - Daemon surface: `sync.watch` as a client-scoped operation over the daemon's watcher
 - GUI location: TBD (Phase 9)
-- Validation: manual, requires a live server; validation and narrowing in `tests/daemon_sync_slice.rs`
-- Status: routed (P4-U10); GUI not started
-- Note: the on-demand IDLE connection was **not** built and the narrowing of `mp watch --mailbox` to INBOX is recorded in `BACKLOG.md` (P4-U10 took the route the plan recommends). Both sides carry it: the client warns on stderr and rewrites the mailbox before it calls, and the daemon refuses anything but INBOX with `-32602`. `--timeout N` stays client-side (wait, `operation.cancel`, `ℹ Timed out.`, exit 2), because a daemon-side timer would be a second place that knows about one client's patience.
+- Validation: manual, requires a live server; validation and narrowing in `tests/daemon_sync_slice.rs`; `tests/tui_daemon_recovery.rs` for the runtime's own watch
+- Status: routed (P5-U8); GUI not started
+- Note: P5-U8 moved `imap_watch` and the Graph poller out of `src/tui/` and into the account runtime (`src/daemon/runtime/watcher.rs`), so the watch runs once per account beside the engine rather than once per client: a round that sees the mailbox move runs a quick tick and publishes `sync.completed`, and no client holds a server connection of its own any more. `sync.watch` is unchanged and is still the one-shot a `mp watch` asks for.
+  The on-demand IDLE connection was **not** built and the narrowing of `mp watch --mailbox` to INBOX is recorded in `BACKLOG.md` (P4-U10 took the route the plan recommends). Both sides carry it: the client warns on stderr and rewrites the mailbox before it calls, and the daemon refuses anything but INBOX with `-32602`. `--timeout N` stays client-side (wait, `operation.cancel`, `ℹ Timed out.`, exit 2), because a daemon-side timer would be a second place that knows about one client's patience.
 
 ### SYN-04 Startup refresh, asynchronous store open, and background mailbox load
 
@@ -868,10 +869,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `state.bootstrap` returning zeroed counts for an `opening` account, filled by `state.event`
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames; `src/tui/ui/golden_frames_daemon.rs`
-- Status: routed (P5-U6); GUI not started
+- Status: routed (P5-U8); GUI not started
 - Note: implicit workflow with no command, and the reason a client shows content before sync completes.
   `LoadMailbox` became `message.list` / `draft.list` in P5-U4 and the two fetch arms became `sync.quick` in P5-U6, each still on the worker thread it always had.
-  The `opening` -> ready transition is still `BgResult::AccountOpened` rather than an event, which is P5-U8's.
+  P5-U8 took the wait off those threads: a pass is started by `commands::dispatch` and its finish arrives as an `operation.finished` event, so nothing polls `operation.status` any more.
+  The `opening` -> ready transition is still `BgResult::AccountOpened` as well as the bootstrap's, because the store-backed open is what a client with a wedged session has left; the account runtime's readiness now reaches the client as an event beside it.
 
 ### SYN-05 Sync health and error surfacing per account
 
@@ -1182,8 +1184,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `src/notify.rs`, using osascript on macOS and notify-send on Linux with sanitized payloads
 - Daemon surface: the daemon decides a notification is warranted and emits `state.event`; the client holding the entitlement presents it
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/notify.rs`
-- Status: not started
+- Validation: unit tests in `src/notify.rs`; `a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list` (`src/tui/events_tests.rs`), `a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals` (`tests/tui_daemon_recovery.rs`)
+- Status: routed (P5-U8); GUI not started
+- Note: the daemon decides *what arrived* and the client decides whether to notify. `sync.completed` carries `new_inbox_mail`, `[{from, subject}]` per ingested inbox message, and the TUI reads `notifications = true` on the way to `crate::notify` exactly where it always did (#0009). A client that dropped the event for that setting would drop the status line and the reload with it, so the opt-in is at the notifier and not at the stream.
 
 ### INT-06 Editor suspension and resume around an external `$EDITOR`
 

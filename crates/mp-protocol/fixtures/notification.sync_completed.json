@@ -1,0 +1,30 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "sync.completed",
+    "payload": {
+      "account": "tum",
+      "bodies_truncated": 0,
+      "error": null,
+      "failed_mutations": 0,
+      "flags_updated": 3,
+      "new_inbox_mail": [
+        {
+          "from": "Ada Lovelace <ada@example.com>",
+          "subject": "The analytical engine"
+        }
+      ],
+      "non_converging": [],
+      "pruned": 0,
+      "prunes_deferred": 0,
+      "saved": 1,
+      "severity": "ok",
+      "skipped": 41,
+      "uid_rebound": 0,
+      "uidvalidity_resets": 0
+    },
+    "revision": 4223
+  }
+}

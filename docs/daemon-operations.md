@@ -253,7 +253,7 @@ A candidate that loads is installed, and then the runtimes are reconciled in one
 
 `config.reload` returns only once every runtime it touched has settled, so a removed account's engine lock is free by the time the call answers and an account can be renamed in one edit without the new runtime racing the old one.
 A started runtime creates its account directory if it is missing, exactly as `mp config init` does, so an account added by a hand edit comes up the same way as one added through `config.add_account`.
-A daemon without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` swaps the configuration and starts nothing, because it has no runtimes to reconcile.
+An account the swap added has no local store yet, so it settles `blocked` rather than `ready` until something syncs it; see [Account runtimes](#account-runtimes).
 
 Secrets go in through `config.set_password` and nowhere else, under the keys the pre-daemon binary already reads (`smtp-password-<account>`, `imap-password-<account>`).
 The backend is opened on first use, not at startup: a first run has no configuration to select one from.
@@ -266,7 +266,7 @@ The wire shapes, the error payloads and the two event kinds are in [daemon-proto
 The daemon polls every `<account_dir>/drafts/*.md` and every `<config_dir>/signatures/*.md` once a second and publishes what settled (`src/daemon/watch.rs`).
 It is the TUI's one-second fingerprint poll moved into the daemon, with no `notify` dependency, one `stat` per file per poll and no file contents read while looking.
 
-It runs whether or not `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` is set: it opens no store and takes no engine lock, so gating it behind the runtimes would cost a lock nothing about drafts needs.
+It runs independently of the account runtimes: it opens no store and takes no engine lock, so an account whose runtime is blocked still has its drafts watched.
 The roots are one per configured account plus the global signatures directory, re-derived by every successful `config.reload`, so an added account is watched from the next poll and a removed one is forgotten with its rows.
 A root that does not exist is an empty root and is picked up on the poll after it appears: an account that has never had a draft is not a startup failure.
 
@@ -302,12 +302,24 @@ Ten minutes is longer than the gap between opening a picker and saving from it, 
 
 ## Account runtimes
 
-With `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` the daemon starts one `AccountRuntime` per configured account (`src/daemon/runtime/account.rs`), and without it there is no runtime, no engine lock and no store to open.
+The daemon starts one `AccountRuntime` per configured account (`src/daemon/runtime/account.rs`), and has done since P5-U8; the environment opt-in that used to gate them is gone.
 The starts run off the startup path, on `spawn_blocking`, because each one takes an advisory lock and opens SQLite; the socket is already accepting connections while they happen.
 
 An account is `opening` from the moment the daemon lists it until its start comes back, then `ready` or `blocked`.
 That is what `mp daemon status --json` prints and what a bootstrapped client receives as an `account.state_changed` event, and the two cannot disagree: the runtime table is filled before the change is committed.
 A start that fails outright, an unusable account directory or an unopenable store, reads as `blocked` with the failure as its reason.
+
+**An account with no local store gets no runtime**, and is reported `blocked` with `<account> has no local store yet; run `mp sync` to create one`.
+The reason is not tidiness: opening a store creates it, and an empty database under an account nobody has synced would turn every read method's `-32006` refusal into an empty answer, so a user who configured an account and has not synced it would be told it has no mail rather than that it has no store.
+The first `mp sync` creates the store through the guarded path, and the runtime comes up with the next daemon start.
+
+### The watcher
+
+A ready runtime watches its account's server, which is what the TUI used to do per client (`src/daemon/runtime/watcher.rs`, P5-U8).
+An IMAP account holds a 300-second IDLE round on INBOX and renews it; a Graph account enumerates the inbox every 60 seconds and compares the *set* of ids, because one arrival plus one archive inside a minute leaves the count unchanged.
+A round that sees the mailbox move runs one quick tick, which publishes `sync.completed` with the arrivals it ingested and one count change per mailbox whose totals moved; a round that fails backs off from 30 seconds to 5 minutes and says so in the log.
+A blocked runtime does not watch: the engine holding the lock is watching the same mailbox.
+This is a watch and not a scheduler - it reacts to a server saying something changed - and a periodic tick with no client anywhere is still Phase 6's.
 
 ### The engine lock
 
@@ -390,11 +402,6 @@ Its name is `mailypoppins::daemon::client::REQUIRE_ENV`, and `DaemonFixture::mp_
 The hook sits at that exact point on purpose: a forced failure leaves nothing on disk to clean up.
 It is what pins the exit-4 diagnostic in `tests/daemon_lifecycle.rs`.
 
-`MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` opts into account runtimes before Phase 5, and it is the one hook here that is not test-only: it turns on real behaviour, described under [Account runtimes](#account-runtimes) above.
-Absent, the daemon creates no runtime and takes no engine lock, and `daemon.status` reports an empty account list.
-What that lock covers grew in #0122: besides the outbox and mutation-queue drains it now guards the IMAP sync ingest, so once a runtime holds it for its lifetime a concurrent `mp sync` prints `Sync skipped: another engine is syncing '<account>'; leaving the ingest to it` and exits 0 instead of ingesting the same window twice.
-It is an environment variable rather than a flag so it cannot leak into `mp --help` or into anyone's muscle memory.
-
 `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS=<n>` flips every configured account to `ready` `n` milliseconds after the **first** `state.bootstrap`, committing one change per account in `config.toml` order.
 Phase 3a starts no account runtimes, so nothing else would ever report readiness and the snapshot would never converge by event.
 The countdown starts at the bootstrap rather than at daemon startup, so a client that bootstraps cannot lose the race against it and no test has to sleep to win it.
@@ -412,8 +419,8 @@ A bare object is read as an array of one.
 Phase 3b schedules no tick, so nothing would otherwise publish an outcome and every assertion about one arriving over the socket would be vacuous.
 Each element's `account` is ignored and replaced by the configured name, and every other field travels verbatim, `severity` included, so a test can pin a severity no fake sync could produce.
 The outcomes are committed off the bootstrap's own path and after its revision was captured, so every one of them lands above the revision the bootstrap reported.
-It is inert unless `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` is set too: without a runtime there is no tick, and a hook that fired anyway would report on an engine that is not running.
 Unset, empty, unparseable, or with no configured account it does nothing.
+It had a second gate until P5-U8, the account-runtimes opt-in, and lost it with the variable.
 It is what pins the socket cases in `tests/daemon_sync_outcome.rs`, and its name is `mailypoppins::daemon::sync_outcome::FAKE_SYNC_OUTCOME_ENV`.
 
 `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT=<json>` serves the SMTP submission and the Sent-mailbox APPEND in process and writes one line per transport event to a log file.

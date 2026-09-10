@@ -145,7 +145,7 @@ Every other method, known or unknown, is gated.
 ```
 
 The fields are the daemon's own `daemon.json` metadata plus the live account list, so a client comparing them against its own paths learns whether it is talking to the daemon it meant to.
-`accounts` is empty unless the daemon was started with `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`, and an account state is one of `opening`, `ready`, `blocked`: `opening` while its runtime is still starting, then whichever the runtime reported.
+`accounts` lists the configured accounts, and a state is one of `opening`, `ready`, `blocked`: `opening` while its runtime is still starting, then whichever the runtime reported (`blocked` covers both a lock held elsewhere and an account with no local store yet).
 The shape does not change with the opt-in, only which states appear in it.
 `mp daemon status --json` prints this object with a leading `"running": true`, or the same keys with null values and `"running": false` when nothing answers.
 
@@ -189,7 +189,7 @@ A draft that does not parse stays a row with `valid: false`, `status: "invalid"`
 
 An account's `state` is one of `opening`, `ready` or `blocked`, and it reports the runtime rather than the store: it answers "has this account's runtime come up", where `account.list`'s `state` answers "can I read this account's store on disk".
 The two are deliberately different questions.
-Without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` no runtime is ever started, so every account stays `opening`; with it, an account is `opening` in a snapshot taken before its runtime came back and converges by event afterwards.
+An account is `opening` in a snapshot taken before its runtime came back and converges by event afterwards.
 For an `opening` account all counts are `0` and the draft list is empty, exactly as the TUI presents an account it has not opened yet; readiness arrives afterwards as an ordinary event.
 `sync_health` is an object whose `state` is `unknown`, `ok` or `failed`, and a fresh bootstrap reports `unknown`.
 
@@ -628,8 +628,8 @@ The refusal arrives before anything opens a socket, and before either drain runs
 A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
 A pass that ran answers `{blocked: false, outcome: <sync.completed payload>}` and publishes the same payload as a `sync.completed` event, unless it was a dry run, whose counts describe mail that was not ingested and would read to every other client as mail that arrived.
 
-Both answers also carry `new_inbox_mail`, `[{from, subject}]` for every message the pass ingested into the inbox and `[]` for a pass that ingested none, was blocked, or ran through an account runtime's tick (which keeps no arrival list).
-It is a sibling of `outcome` rather than a member of it, and deliberately: the outcome is the `sync.completed` payload published to *every* client, and a per-message list belongs only in the answer to the client that asked for the pass, which is what a desktop notification is scoped to (#0009).
+Both answers also carry `new_inbox_mail`, `[{from, subject}]` for every message the pass ingested into the inbox and `[]` for a pass that ingested none or was blocked.
+Since P5-U8 the `sync.completed` payload carries the same list under the same name, and the answer's copy is the same list for the client that asked: a tick nobody asked for - an account runtime's watcher noticing the mailbox move - has no answer for the arrivals to ride, and the desktop notification of #0009 is scoped to the client that is looking rather than to the one that typed a command.
 
 Each of the five slots of a tick is one `operation.progress` report whose `phase` is one of `head_outbox`, `head_mutations`, `body`, `tail_outbox`, `tail_mutations`, in that order (#0114).
 For the four drain phases, `done` is what the drain completed and `total` what it left behind - still-pending sends, or rolled-back mutations - and both are `null` when the drain had nothing a user would want told.
@@ -806,8 +806,10 @@ A tick is a command outcome rather than a resource's state, so the event names n
 | `non_converging` | array of string | mailboxes that downloaded the same UIDs again, sorted and deduplicated |
 | `failed_mutations` | u64 | queued mutations that failed and were rolled back |
 | `error` | string or null | the engine's error rendered with `{:#}`, `null` on a tick that ran |
+| `new_inbox_mail` | array of `{from, subject}` | what the tick ingested into an inbox, `[]` when it ingested none |
 
 Every key is present on every payload, so a client never branches on an absent one, and a tick that did not fail carries `"error": null` rather than an empty string.
+`new_inbox_mail` is a sender and a subject per message and nothing else: a client renders a notification from it, and a row id or a uid would invite it to treat an arrival as an address into a list it has not refetched.
 
 The severity is decided in this order: an `error` that is not null is `error` whatever else the tick did; otherwise a non-empty `non_converging` **or** a `failed_mutations` above zero is `warning`; otherwise the tick is `ok`.
 `bodies_truncated` and `prunes_deferred` never raise it: a deadline stop is progress, because the mailbox has more mail on the server and the next tick resumes from the same cursor, and a deferred prune is a suspended deletion rather than a failure.
@@ -927,3 +929,12 @@ The same two gained `headers` `{to, cc, bcc, subject}`, an all-four-fields overr
 `sync.quick` and `sync.full` answer with `new_inbox_mail` beside `blocked` and `outcome`, the inbox arrivals a desktop notification reads (#0009); it is a sibling of the outcome and not a member, because the outcome is the payload published to every client.
 No fixture and no pinned key list moved for any of the four: each is a new optional parameter or a new key of an operation result that nothing pins exhaustively.
 `message.search`'s local pass gained nothing at all, which is what `search::to_query_string` exists for: a client holding a parsed query renders it back into the grammar the method reads rather than putting an engine enum on the wire.
+
+P5-U8 added one field and turned one thing on.
+`sync.completed` gained `new_inbox_mail`, `[{from, subject}]` for every message the tick ingested into an inbox and `[]` for a tick that ingested none, which is what carries the desktop notification of #0009 now that the watcher runs in the daemon: nobody asks a runtime for its tick, so its answer has no reader and the event is the only carrier left.
+It is `default` on the way in, so a payload written by a daemon that predates it decodes as a tick that notified about nothing.
+`sync.quick` and `sync.full` keep their sibling `new_inbox_mail`, which now reports the same list whether the pass went through the guarded path or through the runtime's tick.
+`crates/mp-protocol/fixtures/notification.sync_completed.json` is the fixture for it, and `tests/daemon_sync_outcome.rs`'s payload key list is fourteen names.
+
+Account runtimes are on by default from the same unit, which is not a wire change but is a change to what a client sees: `daemon.status` and the bootstrap snapshot report `ready` for an account whose runtime holds the engine lock, `blocked` for one whose lock is held elsewhere **and** for one that has no local store yet, and `opening` only while a start is in flight.
+An account with no store is deliberately not given one: materialising an empty database would turn the `-32006` refusals of the read and mutation families into empty answers for an account the user has not set up, so it is reported blocked with the sentence that says to run `mp sync`.
