@@ -14,6 +14,7 @@ pub mod draft;
 pub mod events;
 pub mod frame;
 pub mod send;
+pub mod state;
 
 mod error;
 mod message;
