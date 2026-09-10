@@ -3,9 +3,9 @@ mod actions;
 #[cfg(test)]
 mod actions_tests;
 mod bg;
+pub mod commands;
 mod event;
 mod helpers;
-mod mutations;
 pub mod queries;
 mod runtime;
 pub mod session;

@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 use mp_protocol::RpcError;
 
 use crate::config::AccountConfig;
-use crate::ops::{Backend, ServerOp};
+use crate::ops::Backend;
 use crate::pending_ops;
 use crate::selector::{Namespace, Selector, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
@@ -551,9 +551,31 @@ pub const MESSAGE_MUTATION_METHOD_SPECS: [MethodSpec; 2] = [
     MethodSpec::new("message.delete", MethodKind::Command, 1),
 ];
 
-/// One of the two, selected by its own [`MethodSpec`].
+/// The three mutations a client drives from a list row, in method-name order
+/// (P5-U6, `docs/parity-matrix.md` MSG-03/04/05).
+///
+/// An array of their own rather than three more entries in
+/// [`MESSAGE_MUTATION_METHOD_SPECS`], for the reason
+/// [`MESSAGE_SERVER_METHOD_SPECS`] is one: that array is pinned at two by
+/// `tests/daemon_mutation_slice.rs`, whose `MUTATION_METHODS` is the P4-U8
+/// slice's own list and is checked at compile time. Growing it would edit a
+/// pinned test to say something it was not written to say; these three are a
+/// later slice and declare themselves separately.
+///
+/// All three are `Command`: each moves the revision and invalidates
+/// `message:<account>/<mailbox>/<uid>`. All three are `Durable`, the same
+/// reason the two above are: a caller that asked to settle its op may not have
+/// the drain torn down because its socket went away.
+pub const MESSAGE_QUEUE_METHOD_SPECS: [MethodSpec; 3] = [
+    MethodSpec::new("message.move", MethodKind::Command, 1),
+    MethodSpec::new("message.set_flag", MethodKind::Command, 1),
+    MethodSpec::new("message.set_read", MethodKind::Command, 1),
+];
+
+/// One of the five, selected by its own [`MethodSpec`].
 pub struct MessageMutationMethod {
-    /// Which of [`MESSAGE_MUTATION_METHOD_SPECS`] this instance serves.
+    /// Which of [`MESSAGE_MUTATION_METHOD_SPECS`] or
+    /// [`MESSAGE_QUEUE_METHOD_SPECS`] this instance serves.
     pub spec: MethodSpec,
     /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
@@ -574,7 +596,7 @@ impl Method for MessageMutationMethod {
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
         Box::pin(async move {
             let snapshot = self.config.snapshot();
-            let archive = self.spec.name == "message.archive";
+            let kind = Kind::of(self.spec.name);
             // On a blocking thread, because a [`Store`] is not `Sync` and this
             // method holds one across the drain's `await`: the local commit and
             // the server op are one unit, and splitting them to satisfy the
@@ -582,7 +604,7 @@ impl Method for MessageMutationMethod {
             // drain's own I/O still runs on the daemon's runtime, through the
             // handle this thread blocks on.
             let done = tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current().block_on(mutate(&params, &snapshot, archive))
+                tokio::runtime::Handle::current().block_on(mutate(&params, &snapshot, kind))
             })
             .await;
             let (result, resource) = match done {
@@ -602,13 +624,16 @@ impl Method for MessageMutationMethod {
     }
 }
 
-/// Register the two mutations on `dispatcher`.
+/// Register the five mutations on `dispatcher`.
 pub fn register_mutations(
     dispatcher: &mut Dispatcher,
     config: Arc<super::super::config::ConfigStore>,
     canonical: Arc<super::super::state::CanonicalState>,
 ) {
-    for spec in MESSAGE_MUTATION_METHOD_SPECS {
+    for spec in MESSAGE_MUTATION_METHOD_SPECS
+        .into_iter()
+        .chain(MESSAGE_QUEUE_METHOD_SPECS)
+    {
         dispatcher.register(Arc::new(MessageMutationMethod {
             spec,
             config: Arc::clone(&config),
@@ -617,8 +642,33 @@ pub fn register_mutations(
     }
 }
 
-/// The `result` of `message.archive` and `message.delete`, plus the resource
-/// the call invalidated.
+/// Which of the five mutations a call is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Archive,
+    Delete,
+    Move,
+    SetFlag,
+    SetRead,
+}
+
+impl Kind {
+    /// The kind a registered method name is. The fallthrough is `set_read`
+    /// rather than a panic because only [`register_mutations`] mints these and
+    /// it mints exactly the five names below.
+    fn of(method: &str) -> Kind {
+        match method {
+            "message.archive" => Kind::Archive,
+            "message.delete" => Kind::Delete,
+            "message.move" => Kind::Move,
+            "message.set_flag" => Kind::SetFlag,
+            _ => Kind::SetRead,
+        }
+    }
+}
+
+/// The `result` of one of the five mutations, plus the resource the call
+/// invalidated.
 ///
 /// The order of the four steps is the pre-daemon command's, and it is the whole
 /// safety property of this slice: resolve the account, resolve the message,
@@ -627,13 +677,46 @@ pub fn register_mutations(
 /// secret store's own sentence and leaves the row exactly where it was, rather
 /// than archiving it locally and queueing a move behind a password the user has
 /// not entered yet.
+///
+/// # `settle`
+///
+/// That third step is what `settle: false` skips (P5-U6). It defaults to
+/// `true`, which is `mp archive`'s blocking UX unchanged, and a client that
+/// sends `false` gets the interactive contract instead: the row change and the
+/// owed server op commit in one transaction and the next sync tick drains it
+/// (#0039). The TUI has never waited for a server on a keystroke - it is why
+/// `u` over a thousand-message selection costs no network - and a mutation that
+/// resolved credentials would also refuse outright on an account whose password
+/// is not in the keyring yet, where the pre-daemon TUI wrote the local half and
+/// carried on.
+///
+/// No credential is resolved on that path, which is deliberate: the drain
+/// resolves one when it runs, and a client that queues has asked for exactly
+/// that.
 async fn mutate(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
-    archive: bool,
+    kind: Kind,
 ) -> Result<(Value, String), RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(&snapshot.accounts, &name)?;
+
+    // The new state, read before anything is opened: a caller who named none is
+    // `-32602` over an untouched store.
+    let destination = match kind {
+        Kind::Archive => Some(ARCHIVE_MAILBOX.to_string()),
+        Kind::Move => Some(destination_param(params, account)?),
+        _ => None,
+    };
+    let read = match kind {
+        Kind::SetRead => Some(bool_param(params, "read")?),
+        _ => None,
+    };
+    let flagged = match kind {
+        Kind::SetFlag => Some(bool_param(params, "flagged")?),
+        _ => None,
+    };
+    let settle_owed = flag_param(params, "settle", true)?;
 
     let store = Store::open(crate::config::store_path(&name))
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
@@ -643,68 +726,120 @@ async fn mutate(
     let resource = format!("message:{name}/{}/{}", row.mailbox, row.uid);
     let source_server = crate::config::find_server_name_for_role(account, &row.mailbox);
 
-    // The secrets backend is opened on first use rather than at startup, the
-    // same rule `config.set_password` follows: a first run has no configuration
-    // to select one from, and the opener is idempotent.
-    if let Err(e) = crate::secrets::init(snapshot.config.secrets_backend) {
-        return Err(credentials(&name, &anyhow::anyhow!("{e}")));
-    }
-    let backend = Backend::resolve(account).map_err(|e| credentials(&name, &e))?;
+    let backend = if settle_owed {
+        // The secrets backend is opened on first use rather than at startup,
+        // the same rule `config.set_password` follows: a first run has no
+        // configuration to select one from, and the opener is idempotent.
+        if let Err(e) = crate::secrets::init(snapshot.config.secrets_backend) {
+            return Err(credentials(&name, &anyhow::anyhow!("{e}")));
+        }
+        Some(Backend::resolve(account).map_err(|e| credentials(&name, &e))?)
+    } else {
+        None
+    };
     let blobs = BlobStore::for_account(&name);
     let gone = || invalid_params(format!("{selector} is no longer in the store"));
+    let rows = [row.id];
 
-    let result = if archive {
-        // Through the durable queue, the same seam the TUI drains (#0039): the
-        // row moves and the owed server op commit in one transaction, then the
-        // op runs synchronously so the caller keeps its blocking UX. On a
-        // server refusal `run_and_settle` rolls the row home and propagates the
-        // error verbatim.
-        let op = ServerOp::Move {
-            message_id: row.message_id.clone(),
-            source_mailbox: source_server,
-            dest_mailbox: crate::config::find_server_name_for_role(account, ARCHIVE_MAILBOX),
-        };
-        let Some((_previous, op_id)) =
-            pending_ops::apply_move(&store, &name, row.id, ARCHIVE_MAILBOX, op)
-                .map_err(|e| internal(format!("{e:#}")))?
-        else {
-            return Err(gone());
-        };
-        settle(&store, &blobs, op_id, &backend).await?;
-        json!({
-            "account": name,
-            "id": id,
-            "selector": selector,
-            "mailbox": row.mailbox,
-            "moved_to": {
-                "mailbox": ARCHIVE_MAILBOX,
-                // The Message-ID as the store holds it, which is what the
-                // pre-daemon "now" line printed.
-                "selector": Selector::new(&name, ARCHIVE_MAILBOX, &row.message_id).to_string(),
-            },
-        })
-    } else {
-        // A delete has nothing to roll back (the row is gone and the server
-        // still holds the message), so a refusal propagates verbatim and the
-        // next sync refetches the UID.
-        let op = ServerOp::Delete {
-            message_id: row.message_id.clone(),
-            source_mailbox: source_server,
-        };
-        let Some((_previous, op_id)) = pending_ops::apply_delete(&store, &blobs, &name, row.id, op)
-            .map_err(|e| internal(format!("{e:#}")))?
-        else {
-            return Err(gone());
-        };
-        settle(&store, &blobs, op_id, &backend).await?;
-        json!({
-            "account": name,
-            "id": id,
-            "selector": selector,
-            "mailbox": row.mailbox,
-        })
+    // Through the durable queue in every case, which is the one place a row
+    // change and the [`crate::ops::ServerOp`] it owes are committed together
+    // (#0039). On a server refusal `run_and_settle` rolls a move home and
+    // propagates the error verbatim; a delete has nothing to roll back (the row
+    // is gone and the server still holds the message), so the next sync
+    // refetches the UID.
+    let (queued, result) = match kind {
+        Kind::Archive | Kind::Move => {
+            let destination = destination.expect("an archive and a move both name a mailbox");
+            let dest_server = crate::config::find_server_name_for_role(account, &destination);
+            let queued = crate::mutations::queue_move(
+                &store,
+                &name,
+                &rows,
+                &destination,
+                &source_server,
+                &dest_server,
+            );
+            let result = json!({
+                "account": name,
+                "id": id,
+                "selector": selector,
+                "mailbox": row.mailbox,
+                "moved_to": {
+                    "mailbox": destination,
+                    // The Message-ID as the store holds it, which is what the
+                    // pre-daemon "now" line printed.
+                    "selector": Selector::new(&name, &destination, &row.message_id).to_string(),
+                },
+            });
+            (queued, result)
+        }
+        Kind::Delete => {
+            let queued =
+                crate::mutations::queue_delete(&store, &blobs, &name, &rows, &source_server);
+            let result = json!({
+                "account": name,
+                "id": id,
+                "selector": selector,
+                "mailbox": row.mailbox,
+            });
+            (queued, result)
+        }
+        Kind::SetRead => {
+            let read = read.expect("message.set_read reads its new state");
+            let queued =
+                crate::mutations::queue_read_flag(&store, &name, &rows, read, &source_server);
+            let result = json!({
+                "account": name,
+                "id": id,
+                "selector": selector,
+                "mailbox": row.mailbox,
+                "read": read,
+            });
+            (queued, result)
+        }
+        Kind::SetFlag => {
+            let flagged = flagged.expect("message.set_flag reads its new state");
+            let queued =
+                crate::mutations::queue_flag(&store, &name, &rows, flagged, &source_server);
+            let result = json!({
+                "account": name,
+                "id": id,
+                "selector": selector,
+                "mailbox": row.mailbox,
+                "flagged": flagged,
+            });
+            (queued, result)
+        }
     };
+
+    let Some(queued) = queued.first() else {
+        return Err(gone());
+    };
+    if let Some(backend) = backend {
+        settle(&store, &blobs, queued.op_id, &backend).await?;
+    }
     Ok((result, resource))
+}
+
+/// `destination`, the mailbox a `message.move` moves into, resolved the way
+/// every other mailbox parameter is.
+///
+/// Not `mailbox`: that key is already the *narrowing* of a selector address on
+/// this method, and one key may not mean two things. Drafts is not a
+/// destination, which [`resolve_mailbox`] already refuses for every caller.
+fn destination_param(params: &Value, account: &AccountConfig) -> Result<String, RpcError> {
+    let wanted = string_param(params, "destination")?;
+    resolve_mailbox(account, &wanted)
+}
+
+/// A required boolean parameter, which is what the new state of a flag is.
+fn bool_param(params: &Value, name: &str) -> Result<bool, RpcError> {
+    match params.get(name) {
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(invalid_params(format!(
+            "{name} is a required boolean: the state to set, not the state to toggle"
+        ))),
+    }
 }
 
 /// Run the owed op and settle it, reporting the server's refusal verbatim.

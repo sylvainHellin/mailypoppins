@@ -8,7 +8,4 @@ app/types.rs store
 helpers.rs imap_client
 helpers.rs store
 mod.rs store
-mutations.rs ops
-mutations.rs pending_ops
-mutations.rs store
 queries.rs store

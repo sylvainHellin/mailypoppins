@@ -25,6 +25,7 @@ pub mod selector;
 pub mod dump;
 pub mod read_cmd;
 pub mod engine_lock;
+pub mod mutations;
 pub mod ops;
 pub mod outbox;
 pub mod pending_ops;

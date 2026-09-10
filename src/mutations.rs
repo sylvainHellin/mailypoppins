@@ -1,24 +1,45 @@
-//! The TUI's entry into the durable mutation queue.
+//! The entry into the durable mutation queue the message mutations share.
 //!
 //! A flag, a move, an archive or a delete is one local write and one server op.
 //! [`queue_move`], [`queue_delete`], [`queue_read_flag`] and [`queue_flag`]
 //! commit the local store change and the owed [`ServerOp`] in one transaction
-//! through [`crate::pending_ops`] (#0039), then hand back the rows they touched
-//! so the caller can drop them from the list it is showing. The server op is
-//! retired later by the background drain at the sync/fetch resume point, and a
-//! refusal is rolled back there, so the TUI no longer spawns a per-op server
-//! thread and keeps no rollback of its own: the queue owns both.
+//! through [`crate::pending_ops`] (#0039), then hand back what they queued so
+//! the caller can drop those rows from the list it is showing and settle the
+//! ops it owes. The server op is retired later by the background drain at the
+//! sync/fetch resume point, and a refusal is rolled back there, so a queueing
+//! caller spawns no per-op server thread and keeps no rollback of its own: the
+//! queue owns both.
 //!
-//! Splitting it out of `actions.rs` keeps the pairing testable: an action arm
-//! needs a live terminal, while a queue function needs only a store, so a test
-//! can assert both halves at once (the row changed, and *this* op was queued)
-//! over an ingested fixture.
+//! # Why it is not in the TUI any more
+//!
+//! It was `src/tui/mutations.rs` until P5-U6 (#0124): the TUI committed the row
+//! change itself and the daemon's `message.archive` had a second copy of the
+//! same pairing. Now the five message mutations are daemon methods
+//! (`src/daemon/methods/message.rs`) and this is the one place that pairs a row
+//! change with the [`ServerOp`] it owes, for a client that queues and for
+//! `mp archive`, which queues and then drains.
+//!
+//! Rows are named by `messages.id`, the store's own key, rather than by the
+//! TUI's `MessageRef` wrapper around it: the daemon addresses a row by that id
+//! on the wire (`row_id`, P5-U4) and this module is below both clients.
 
-use super::app::MessageRef;
 use crate::ops::ServerOp;
 use crate::pending_ops;
 use crate::store::write;
 use crate::store::{BlobStore, Store};
+
+/// One queued mutation: the row it changed and the server op it owes.
+///
+/// The op id is what a caller that wants the pre-daemon blocking UX hands to
+/// [`crate::pending_ops::run_and_settle`]; a caller that queues ignores it and
+/// lets the next drain retire it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Queued {
+    /// The `messages.id` the mutation changed.
+    pub row_id: i64,
+    /// The `pending_ops` row the change owes the server.
+    pub op_id: i64,
+}
 
 /// The Message-ID a queued op names, read off the row before the op is built.
 ///
@@ -27,15 +48,15 @@ use crate::store::{BlobStore, Store};
 /// message by Message-ID; this is the one lightweight read that supplies it.
 /// `None` (with a log line) when the row is already gone, which is a skip rather
 /// than an error.
-fn message_id_of(store: &Store, msg: MessageRef, what: &str) -> Option<String> {
-    match write::row_coordinates(store, msg.row_id()) {
+fn message_id_of(store: &Store, row_id: i64, what: &str) -> Option<String> {
+    match write::row_coordinates(store, row_id) {
         Ok(Some(row)) => Some(row.message_id),
         Ok(None) => {
-            log::warn!("[store] {msg} has no row to {what}");
+            log::warn!("[store] message {row_id} has no row to {what}");
             None
         }
         Err(e) => {
-            log::warn!("[store] reading {msg} to {what} failed: {e:#}");
+            log::warn!("[store] reading message {row_id} to {what} failed: {e:#}");
             None
         }
     }
@@ -48,17 +69,17 @@ fn message_id_of(store: &Store, msg: MessageRef, what: &str) -> Option<String> {
 /// Rows that are already gone are skipped rather than reported: a message the
 /// store no longer holds cannot be moved, and a second mutation racing the
 /// first is a user action rather than a bug.
-pub(crate) fn queue_move(
+pub fn queue_move(
     store: &Store,
     account: &str,
-    msgs: &[MessageRef],
+    rows: &[i64],
     dest_mailbox: &str,
     source_server: &str,
     dest_server: &str,
-) -> Vec<MessageRef> {
-    let mut moved = Vec::with_capacity(msgs.len());
-    for msg in msgs {
-        let Some(message_id) = message_id_of(store, *msg, "move") else {
+) -> Vec<Queued> {
+    let mut moved = Vec::with_capacity(rows.len());
+    for row_id in rows.iter().copied() {
+        let Some(message_id) = message_id_of(store, row_id, "move") else {
             continue;
         };
         let op = ServerOp::Move {
@@ -66,36 +87,36 @@ pub(crate) fn queue_move(
             source_mailbox: source_server.to_string(),
             dest_mailbox: dest_server.to_string(),
         };
-        match pending_ops::apply_move(store, account, msg.row_id(), dest_mailbox, op) {
-            Ok(Some(_)) => moved.push(*msg),
-            Ok(None) => log::warn!("[store] {msg} has no row to move"),
-            Err(e) => log::warn!("[store] queuing a move for {msg} failed: {e:#}"),
+        match pending_ops::apply_move(store, account, row_id, dest_mailbox, op) {
+            Ok(Some((_previous, op_id))) => moved.push(Queued { row_id, op_id }),
+            Ok(None) => log::warn!("[store] message {row_id} has no row to move"),
+            Err(e) => log::warn!("[store] queuing a move for message {row_id} failed: {e:#}"),
         }
     }
     moved
 }
 
 /// Delete rows and queue the server deletes. Returns the rows actually removed.
-pub(crate) fn queue_delete(
+pub fn queue_delete(
     store: &Store,
     blobs: &BlobStore,
     account: &str,
-    msgs: &[MessageRef],
+    rows: &[i64],
     source_server: &str,
-) -> Vec<MessageRef> {
-    let mut deleted = Vec::with_capacity(msgs.len());
-    for msg in msgs {
-        let Some(message_id) = message_id_of(store, *msg, "delete") else {
+) -> Vec<Queued> {
+    let mut deleted = Vec::with_capacity(rows.len());
+    for row_id in rows.iter().copied() {
+        let Some(message_id) = message_id_of(store, row_id, "delete") else {
             continue;
         };
         let op = ServerOp::Delete {
             message_id,
             source_mailbox: source_server.to_string(),
         };
-        match pending_ops::apply_delete(store, blobs, account, msg.row_id(), op) {
-            Ok(Some(_)) => deleted.push(*msg),
-            Ok(None) => log::warn!("[store] {msg} has no row to delete"),
-            Err(e) => log::warn!("[store] queuing a delete for {msg} failed: {e:#}"),
+        match pending_ops::apply_delete(store, blobs, account, row_id, op) {
+            Ok(Some((_previous, op_id))) => deleted.push(Queued { row_id, op_id }),
+            Ok(None) => log::warn!("[store] message {row_id} has no row to delete"),
+            Err(e) => log::warn!("[store] queuing a delete for message {row_id} failed: {e:#}"),
         }
     }
     deleted
@@ -103,16 +124,16 @@ pub(crate) fn queue_delete(
 
 /// Set the read flag on rows and queue the server ops that mirror it. Returns
 /// the rows actually flagged.
-pub(crate) fn queue_read_flag(
+pub fn queue_read_flag(
     store: &Store,
     account: &str,
-    msgs: &[MessageRef],
+    rows: &[i64],
     read: bool,
     server_mailbox: &str,
-) -> Vec<MessageRef> {
-    let mut out = Vec::with_capacity(msgs.len());
-    for msg in msgs {
-        let Some(message_id) = message_id_of(store, *msg, "flag") else {
+) -> Vec<Queued> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row_id in rows.iter().copied() {
+        let Some(message_id) = message_id_of(store, row_id, "flag") else {
             continue;
         };
         let op = ServerOp::SetRead {
@@ -120,10 +141,10 @@ pub(crate) fn queue_read_flag(
             mailbox: server_mailbox.to_string(),
             read,
         };
-        match pending_ops::apply_set_read(store, account, msg.row_id(), read, op) {
-            Ok(Some(_)) => out.push(*msg),
-            Ok(None) => log::warn!("[store] {msg} has no row to flag"),
-            Err(e) => log::warn!("[store] queuing a read flag for {msg} failed: {e:#}"),
+        match pending_ops::apply_set_read(store, account, row_id, read, op) {
+            Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
+            Ok(None) => log::warn!("[store] message {row_id} has no row to flag"),
+            Err(e) => log::warn!("[store] queuing a read flag for message {row_id} failed: {e:#}"),
         }
     }
     out
@@ -131,16 +152,16 @@ pub(crate) fn queue_read_flag(
 
 /// Set the `\Flagged` star on rows and queue the server ops that mirror it
 /// (#0007). Returns the rows actually starred.
-pub(crate) fn queue_flag(
+pub fn queue_flag(
     store: &Store,
     account: &str,
-    msgs: &[MessageRef],
+    rows: &[i64],
     flagged: bool,
     server_mailbox: &str,
-) -> Vec<MessageRef> {
-    let mut out = Vec::with_capacity(msgs.len());
-    for msg in msgs {
-        let Some(message_id) = message_id_of(store, *msg, "flag") else {
+) -> Vec<Queued> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row_id in rows.iter().copied() {
+        let Some(message_id) = message_id_of(store, row_id, "flag") else {
             continue;
         };
         let op = ServerOp::SetFlagged {
@@ -148,10 +169,10 @@ pub(crate) fn queue_flag(
             mailbox: server_mailbox.to_string(),
             flagged,
         };
-        match pending_ops::apply_set_flagged(store, account, msg.row_id(), flagged, op) {
-            Ok(Some(_)) => out.push(*msg),
-            Ok(None) => log::warn!("[store] {msg} has no row to flag"),
-            Err(e) => log::warn!("[store] queuing a flag for {msg} failed: {e:#}"),
+        match pending_ops::apply_set_flagged(store, account, row_id, flagged, op) {
+            Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
+            Ok(None) => log::warn!("[store] message {row_id} has no row to flag"),
+            Err(e) => log::warn!("[store] queuing a flag for message {row_id} failed: {e:#}"),
         }
     }
     out
@@ -162,10 +183,16 @@ mod tests {
     use super::*;
     use crate::reconcile::tests::{fixture, invite_ics, Fixture};
     use crate::store::read;
-    use crate::tui::app::calendar_view;
+    use crate::tui::app::{calendar_view, MessageRef};
 
-    fn refs(ids: &[i64]) -> Vec<MessageRef> {
-        ids.iter().copied().map(MessageRef::new).collect()
+    fn refs(ids: &[i64]) -> Vec<i64> {
+        ids.to_vec()
+    }
+
+    /// The rows a batch of [`Queued`] changed, which is what the assertions
+    /// about "what went" are written against.
+    fn rows(queued: &[Queued]) -> Vec<i64> {
+        queued.iter().map(|q| q.row_id).collect()
     }
 
     fn mailbox_of(fx: &Fixture, id: i64) -> Option<String> {
@@ -190,7 +217,7 @@ mod tests {
         let moved = queue_move(&fx.store, "alice", &refs(&[id]), "archive", "INBOX", "Archive");
 
         assert_eq!(mailbox_of(&fx, id).as_deref(), Some("archive"));
-        assert_eq!(moved, vec![MessageRef::new(id)]);
+        assert_eq!(rows(&moved), vec![id]);
         assert_eq!(
             only_queued_op(&fx),
             ServerOp::Move {
@@ -211,7 +238,7 @@ mod tests {
 
         let deleted = queue_delete(&fx.store, &fx.blobs, "alice", &refs(&[id]), "Archive");
 
-        assert_eq!(deleted, vec![MessageRef::new(id)]);
+        assert_eq!(rows(&deleted), vec![id]);
         assert!(mailbox_of(&fx, id).is_none(), "the row survived the delete");
         assert_eq!(
             only_queued_op(&fx),

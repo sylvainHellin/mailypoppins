@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -14,8 +13,9 @@ use super::app::{
 use super::helpers::{
     edit_file, lib_do_multi_search_graph, lib_do_sync_graph, resume_terminal, suspend_terminal,
 };
+use super::commands;
+use super::session::QueryHandle;
 use crate::store::open_store;
-use super::mutations;
 
 use crate::draft::{
     create_draft_from_source, find_drafts, new_draft_skeleton, DraftFromSource,
@@ -205,7 +205,7 @@ fn attach_file_to_draft(app: &mut App, path: &str) {
         Ok(()) => {
             let selector = Selector::for_draft(&app.account_config.name, &id);
             app.set_status(format!("Attached {path} to {selector}"));
-            refresh_drafts_after_flip(app);
+            commands::refresh_drafts_after_flip(app);
         }
         Err(e) => {
             app.set_status_level(format!("Attach failed: {e:#}"), StatusLevel::Error);
@@ -697,250 +697,6 @@ fn indexed_draft_path(app: &mut App, id: &str) -> Option<PathBuf> {
 // Approve and mark-draft (#0052 scope items 4 and 5)
 // ---------------------------------------------------------------------------
 
-/// Which way a draft's `status:` is flipped.
-///
-/// The legal transitions are not this module's to decide: they are
-/// [`crate::draft::mark_as_approved`] and [`crate::draft::mark_as_draft`],
-/// the same two functions `mp mark-approved` and `mp mark-draft` call, so an
-/// illegal flip fails in the TUI with the error text the CLI prints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DraftStatusFlip {
-    Approve,
-    Demote,
-}
-
-impl DraftStatusFlip {
-    /// How the operation names itself in a failure line.
-    fn what(self) -> &'static str {
-        match self {
-            DraftStatusFlip::Approve => "Approve",
-            DraftStatusFlip::Demote => "Mark-draft",
-        }
-    }
-
-    fn apply(self, path: &Path) -> Result<String> {
-        match self {
-            DraftStatusFlip::Approve => crate::draft::mark_as_approved(path),
-            DraftStatusFlip::Demote => crate::draft::mark_as_draft(path),
-        }
-    }
-
-    /// The line one flip shows, in the CLI's two shapes: the draft moved, or
-    /// it was already where it was being moved to. Named by its selector,
-    /// which is the handle the user can hand to `mp` (#0050), not by a path.
-    fn line(self, already: bool, selector: &Selector) -> String {
-        match (self, already) {
-            (DraftStatusFlip::Approve, false) => format!("Approved {selector}"),
-            (DraftStatusFlip::Approve, true) => format!("Already approved: {selector}"),
-            (DraftStatusFlip::Demote, false) => format!("Demoted {selector}"),
-            (DraftStatusFlip::Demote, true) => format!("Already a draft: {selector}"),
-        }
-    }
-}
-
-/// Re-index the drafts directory after a status flip and put the list, the
-/// sidebar counts and the cached Drafts mailbox back in step with the files.
-///
-/// Same sequence as `mp mark-approved`'s `reindex_drafts`, plus the refresh of
-/// the two things the CLI does not have: an open list and a sidebar count.
-fn refresh_drafts_after_flip(app: &mut App) {
-    if let Err(e) = crate::store::drafts::refresh_account(&app.account_config.name) {
-        log::warn!("[drafts] refreshing after a status flip failed: {e:#}");
-    }
-    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
-        app.invalidate_cache_idx(idx);
-    }
-    app.recount_all_mailboxes();
-    app.reload_current_mailbox();
-}
-
-/// Open the store and look a draft up by id for a delete: the shared prelude
-/// of the single-row and batch draft deletes. `Store::open` rather than
-/// `open_store`, for the reason the Drafts load gives: a never-synced account
-/// has no store file and still has drafts.
-fn draft_store_and_row(
-    app: &mut App,
-    id: &str,
-) -> Option<(crate::store::Store, crate::store::drafts::DraftRow)> {
-    let account = app.account_config.name.clone();
-    let store = match crate::store::Store::open(crate::config::store_path(&account)) {
-        Ok(store) => store,
-        Err(e) => {
-            app.set_status_level(
-                format!("Reading the drafts index of {account} failed: {e:#}"),
-                StatusLevel::Error,
-            );
-            return None;
-        }
-    };
-    match crate::store::drafts::find(&store, &account, id) {
-        Ok(Some(row)) => Some((store, row)),
-        Ok(None) => {
-            app.set_status_level(
-                format!("That draft is no longer in the index ({id})"),
-                StatusLevel::Error,
-            );
-            None
-        }
-        Err(e) => {
-            app.set_status_level(
-                format!("Reading the draft {id} failed: {e:#}"),
-                StatusLevel::Error,
-            );
-            None
-        }
-    }
-}
-
-/// Delete the draft under the cursor: file and index row, behind the same `d`
-/// confirmation received mail uses (#0073). Local-only, so no background op.
-///
-/// The TUI never force-deletes: an approved draft keeps its guard, and the user
-/// demotes it with the mark-draft key first, exactly as the CLI asks. An
-/// in-flight draft (#0063) is refused by the same library check the CLI runs.
-fn delete_draft(app: &mut App, id: &str) {
-    let account = app.account_config.name.clone();
-    let Some((store, row)) = draft_store_and_row(app, id) else {
-        return;
-    };
-    match crate::draft::delete_indexed_draft(&store, &account, &row, false) {
-        Ok(()) => {
-            drop(store);
-            let selector = Selector::for_draft(&account, id);
-            app.set_status(format!("Deleted {selector}"));
-            refresh_drafts_after_flip(app);
-        }
-        Err(e) => app.set_status_level(
-            format!("Delete failed: {e:#}"),
-            StatusLevel::Error,
-        ),
-    }
-}
-
-/// Delete a parse-skipped draft by its path (#0080).
-///
-/// A skipped file has no index row and no `id:`, so the guard [`delete_draft`]
-/// runs (approved, mid-send) cannot apply and there is nothing to resolve: the
-/// file the error row names is removed straight from disk, and the drafts
-/// refresh drops the row it stood for.
-fn delete_skip_file(app: &mut App, path: &std::path::Path) {
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            app.set_status(format!("Deleted {}", path.display()));
-            refresh_drafts_after_flip(app);
-        }
-        Err(e) => {
-            app.set_status_level(format!("Delete failed: {e:#}"), StatusLevel::Error);
-        }
-    }
-}
-
-/// Delete every selected draft, counting what went and logging what was
-/// refused, the same shape as the batch status flip (#0073). A draft the guard
-/// keeps (approved, or mid-send) is one miss among N, not an abort.
-fn delete_drafts_batch(app: &mut App, ids: &[String]) {
-    let account = app.account_config.name.clone();
-    let total = ids.len();
-    let mut deleted = 0usize;
-    for id in ids {
-        let Some((store, row)) = draft_store_and_row(app, id) else {
-            continue;
-        };
-        match crate::draft::delete_indexed_draft(&store, &account, &row, false) {
-            Ok(()) => deleted += 1,
-            Err(e) => log::warn!("[drafts] not deleting {id}: {e:#}"),
-        }
-    }
-    if deleted == total {
-        app.set_status(format!("Deleted {deleted} drafts"));
-    } else {
-        app.set_status_level(
-            format!("Deleted {deleted} of {total} drafts; the rest were kept (see the log)"),
-            StatusLevel::Warning,
-        );
-    }
-    refresh_drafts_after_flip(app);
-}
-
-/// Flip the `status:` of the draft under the cursor.
-fn status_flip(app: &mut App, flip: DraftStatusFlip) {
-    let why = format!(
-        "{} needs a draft; received mail has no draft status to flip",
-        flip.what()
-    );
-    let Some((id, path)) = cursor_draft(app, &why) else {
-        return;
-    };
-    match flip.apply(&path) {
-        Ok(msg) => {
-            let selector = Selector::for_draft(&app.account_config.name, &id);
-            app.set_status(flip.line(msg.starts_with("Already"), &selector));
-            refresh_drafts_after_flip(app);
-        }
-        Err(e) => app.set_status_level(
-            format!("{} failed: {e:#}", flip.what()),
-            StatusLevel::Error,
-        ),
-    }
-}
-
-/// Flip the `status:` of every selected draft, counting what took it.
-///
-/// The counting and its two status-line shapes are the pre-nuke build's: a
-/// batch is not all-or-nothing, and a draft the flip refuses (an already-sent
-/// one, say) is one failure among N rather than an abort. The reason lands in
-/// the log, because the status line has room for a count and not for N errors.
-fn status_flip_batch(app: &mut App, ids: &[String], flip: DraftStatusFlip) {
-    let total = ids.len();
-    let account = app.account_config.name.clone();
-    // One store open for the whole batch, not one per draft.
-    let store = match crate::store::Store::open(crate::config::store_path(&account)) {
-        Ok(store) => store,
-        Err(e) => {
-            app.set_status_level(
-                format!("Reading the drafts index of {account} failed: {e:#}"),
-                StatusLevel::Error,
-            );
-            return;
-        }
-    };
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-    for id in ids {
-        let outcome = match crate::store::drafts::find(&store, &account, id) {
-            Ok(Some(row)) => flip.apply(&row.path).map(|_| ()),
-            Ok(None) => Err(anyhow::anyhow!("no longer in the index")),
-            Err(e) => Err(e),
-        };
-        match outcome {
-            Ok(()) => succeeded += 1,
-            Err(e) => {
-                log::warn!("[drafts] {} failed for {id}: {e:#}", flip.what());
-                failed += 1;
-            }
-        }
-    }
-    let line = match flip {
-        DraftStatusFlip::Approve if failed == 0 => format!("Approved {succeeded} drafts"),
-        DraftStatusFlip::Approve => {
-            format!("Approved {succeeded}/{total} drafts ({failed} failed)")
-        }
-        DraftStatusFlip::Demote if failed == 0 => format!("Marked {succeeded} as draft"),
-        DraftStatusFlip::Demote => {
-            format!("Marked {succeeded}/{total} as draft ({failed} failed)")
-        }
-    };
-    if failed == 0 {
-        app.set_status(line);
-    } else {
-        app.set_status_level(line, StatusLevel::Warning);
-    }
-    // The refresh re-opens the store to write the index; this read handle has
-    // no business being alive across it (WAL single-writer discipline).
-    drop(store);
-    refresh_drafts_after_flip(app);
-}
-
 // ---------------------------------------------------------------------------
 // Send (#0052 scope item 3)
 // ---------------------------------------------------------------------------
@@ -1025,6 +781,21 @@ fn send_status_line(report: &SendReport) -> Result<String> {
 // Mutation plumbing (#0038 scope item 7)
 // ---------------------------------------------------------------------------
 
+/// A blocking door onto the daemon that a `&mut App` can be held across.
+///
+/// The `App` owns the `Session` and every action arm needs the `App` mutably,
+/// so a borrow of the session cannot outlive the call it is made for. A
+/// [`QueryHandle`] is a clone of the session's call channel: it starts no
+/// second connection, keeps no session alive, and answers like any other closed
+/// door when there is no session at all, which is a wedged session thread and
+/// nothing else in a real run.
+fn daemon_door(app: &App) -> QueryHandle {
+    app.session
+        .as_ref()
+        .map(|session| session.handle())
+        .unwrap_or_else(QueryHandle::closed)
+}
+
 /// The account's store and blob store, or a status line saying why not.
 ///
 /// A mutation without a store is not a silent no-op: the row it would have
@@ -1084,37 +855,21 @@ fn selected_selector(app: &App) -> Option<crate::selector::Selector> {
 // back a refusal itself. So this module keeps no backend resolver, no per-op
 // dispatch thread and no rollback of its own: the queue owns all three.
 
-/// What a mutation leaves stale beyond the list it just changed.
-///
-/// The destination mailbox's cached list no longer matches its rows, every
-/// sidebar count is one query away from the truth, and an invite that moved or
-/// died changes the agenda the Calendar view is holding (the same refresh
-/// `bg.rs` runs after an RSVP). The store write has already happened when this
-/// is called, so all three read the new state.
-fn refresh_after_mutation(app: &mut App, dest_idx: Option<usize>, touched_invite: bool) {
-    if let Some(idx) = dest_idx {
-        app.invalidate_cache_idx(idx);
-    }
-    app.recount_all_mailboxes();
-    if touched_invite {
-        app.rebuild_calendar_if_loaded();
-    }
-}
-
-/// True when any of `msgs` is an invite row in the current list, read *before*
-/// the mutation removes them.
-fn any_invite(app: &App, msgs: &[MessageRef]) -> bool {
-    app.emails
-        .iter()
-        .any(|e| e.is_invite && e.msg.is_some_and(|m| msgs.contains(&m)))
-}
-
 pub(super) fn handle_action(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     action: Action,
     bg_tx: &mpsc::Sender<BgResult>,
 ) -> Result<()> {
+    // The command layer first (P5-U6): the fifteen actions that are one or
+    // more daemon calls and no terminal are handled there, and `true` means
+    // this function owes them nothing. The door is taken by value because
+    // `dispatch` needs `&mut App` and a borrow of the session inside it would
+    // collide; a handle is a clone of the call channel and nothing more.
+    let door = daemon_door(app);
+    if commands::dispatch(app, &door, &action) {
+        return Ok(());
+    }
     match action {
         Action::EditCurrent => {
             // One key, two things to open, because the row under the cursor is
@@ -1138,7 +893,7 @@ pub(super) fn handle_action(
                 // user comes back to already shows the new state, and before
                 // any reload can read the row back unread (see
                 // lessons-learned, the #0004 ordering trap).
-                mark_open_read(app, msg);
+                commands::mark_open_read(app, &door, msg);
                 return open_readonly_view(app, terminal, msg.row_id());
             }
             // A parse-skipped draft (#0080) has no index row to resolve, so it
@@ -1447,185 +1202,6 @@ pub(super) fn handle_action(
                         app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error)
                     }
                 }
-            }
-        }
-
-        Action::Approve => {
-            status_flip(app, DraftStatusFlip::Approve);
-        }
-        Action::BatchApprove(ids) => {
-            status_flip_batch(app, &ids, DraftStatusFlip::Approve);
-        }
-        Action::MarkDraft => {
-            status_flip(app, DraftStatusFlip::Demote);
-        }
-        Action::BatchMarkDraft(ids) => {
-            status_flip_batch(app, &ids, DraftStatusFlip::Demote);
-        }
-        Action::Archive => {
-            if let Some(msg) = app.selected_email_ref() {
-                archive_msgs(app, vec![msg], false);
-            }
-        }
-
-        Action::Delete => {
-            // A Drafts row has no `messages` row to prepare, so `d` on it went
-            // to `delete_msgs` and reported "nothing to delete" (#0073). Route
-            // it to the local-only draft delete instead; received mail keeps
-            // the store-mutation path.
-            let skip_path = app
-                .selected_email()
-                .and_then(|e| e.skip.as_ref().map(|s| s.path.clone()));
-            let draft_id = app.selected_email().and_then(|e| e.draft_id.clone());
-            if let Some(path) = skip_path {
-                // A parse-skipped draft has no index row, so it is deleted by
-                // its path: the file the user can see is the file that goes
-                // (#0080).
-                delete_skip_file(app, &path);
-            } else if let Some(id) = draft_id {
-                delete_draft(app, &id);
-            } else if let Some(msg) = app.selected_email_ref() {
-                delete_msgs(app, vec![msg], false);
-            }
-        }
-
-        Action::BatchArchive(msgs) => {
-            archive_msgs(app, msgs, true);
-        }
-
-        Action::BatchDelete(msgs) => {
-            delete_msgs(app, msgs, true);
-        }
-
-        Action::BatchDeleteDrafts(ids) => {
-            delete_drafts_batch(app, &ids);
-        }
-
-        Action::MoveToMailbox { msgs, dest_idx } => {
-            // Quick-move to an arbitrary mailbox (#0018): the generalized
-            // archive. The store row moves and the owed server move enqueue in
-            // one transaction; the drain carries it to the server at the next
-            // resume point and rolls a refusal back (#0039).
-            let (dest_mailbox, dest_label) = match app.mailboxes.get(dest_idx) {
-                Some(mb) => (mailbox_key(mb), mb.label.clone()),
-                None => return Ok(()),
-            };
-            let dest_server = match app
-                .mailboxes
-                .get(dest_idx)
-                .and_then(|mb| mb.server_name.clone())
-            {
-                Some(s) => s,
-                None => {
-                    app.set_status_level(
-                        format!("{dest_label} has no server-side folder"),
-                        StatusLevel::Error,
-                    );
-                    return Ok(());
-                }
-            };
-            let source_server = app.active_server_mailbox();
-
-            let Some((store, _blobs)) = store_for_mutation(app, "Move") else {
-                return Ok(());
-            };
-            let account = app.account_config.name.clone();
-            let touched_invite = any_invite(app, &msgs);
-            let moved =
-                mutations::queue_move(&store, &account, &msgs, &dest_mailbox, &source_server, &dest_server);
-            drop(store);
-            if moved.is_empty() {
-                app.set_status_level(
-                    "Move failed: nothing to move".to_string(),
-                    StatusLevel::Error,
-                );
-                return Ok(());
-            }
-
-            let removed: HashSet<MessageRef> = moved.iter().copied().collect();
-            app.remove_selected_from_list_batch(&removed);
-            app.selection.clear();
-            refresh_after_mutation(app, Some(dest_idx), touched_invite);
-
-            let count = moved.len();
-            app.set_status_level(
-                if count == 1 {
-                    format!("Moved to {dest_label}")
-                } else {
-                    format!("Moved {count} emails to {dest_label}")
-                },
-                StatusLevel::Success,
-            );
-        }
-
-        Action::ToggleRead => {
-            if let Some(email) = app.selected_email() {
-                let new_read = !email.read;
-                let Some(msg) = email.msg else {
-                    return Ok(());
-                };
-                let label = if new_read {
-                    "Marked as read"
-                } else {
-                    "Marked as unread"
-                };
-                if set_read_flag(app, vec![msg], new_read) {
-                    app.set_status(label.to_string());
-                }
-            }
-        }
-
-        Action::MarkAsRead(msg) => {
-            // The mark that rides on an explicit open (#0110): same path as the
-            // manual `u` toggle, no status line of its own. Queued by the two
-            // focus keys, which cannot open a store themselves, and carrying
-            // the row they resolved so a later cursor move in the same drained
-            // batch cannot redirect the write (#0108).
-            mark_open_read(app, msg);
-        }
-
-        Action::BatchToggleRead(msgs) => {
-            let any_unread = msgs
-                .iter()
-                .any(|m| app.emails.iter().any(|e| e.msg == Some(*m) && !e.read));
-            let new_read = any_unread;
-            let count = msgs.len();
-            if set_read_flag(app, msgs, new_read) {
-                app.selection.clear();
-                app.set_status(if new_read {
-                    format!("Marked {count} as read")
-                } else {
-                    format!("Marked {count} as unread")
-                });
-            }
-        }
-
-        Action::ToggleFlag => {
-            if let Some(email) = app.selected_email() {
-                let new_flag = !email.flagged;
-                let Some(msg) = email.msg else {
-                    return Ok(());
-                };
-                let label = if new_flag { "Flagged" } else { "Unflagged" };
-                if set_flag(app, vec![msg], new_flag) {
-                    app.set_status(label.to_string());
-                }
-            }
-        }
-
-        Action::BatchToggleFlag(msgs) => {
-            let any_unflagged = msgs
-                .iter()
-                .any(|m| app.emails.iter().any(|e| e.msg == Some(*m) && !e.flagged));
-            let new_flag = any_unflagged;
-            let count = msgs.len();
-            if set_flag(app, msgs, new_flag) {
-                app.selection.clear();
-                app.set_status(if new_flag {
-                    format!("Flagged {count}")
-                } else {
-                    format!("Unflagged {count}")
-                });
             }
         }
 
@@ -2171,6 +1747,28 @@ pub(super) fn handle_action(
 
         Action::EditSignatureFile { name } => {
             edit_signature_file(app, terminal, &name)?;
+        }
+
+        // The fifteen the command layer owns (P5-U6). Listed rather than
+        // wildcarded so a new action still has to be classified here, and
+        // unreachable because `dispatch` answered `true` for every one of them
+        // before this match was entered.
+        Action::Approve
+        | Action::BatchApprove(_)
+        | Action::MarkDraft
+        | Action::BatchMarkDraft(_)
+        | Action::Archive
+        | Action::Delete
+        | Action::BatchArchive(_)
+        | Action::BatchDelete(_)
+        | Action::BatchDeleteDrafts(_)
+        | Action::MoveToMailbox { .. }
+        | Action::ToggleRead
+        | Action::MarkAsRead(_)
+        | Action::BatchToggleRead(_)
+        | Action::ToggleFlag
+        | Action::BatchToggleFlag(_) => {
+            log::error!("[actions] {action:?} reached handle_action; tui::commands owns it");
         }
 
         Action::ComposeWizardSubmit => {
@@ -3007,7 +2605,7 @@ fn handle_search_result_action(
                 app.server_search_index = app.server_search_results.len() - 1;
             }
 
-            archive_msgs(app, vec![msg], false);
+            commands::archive_msgs(app, &daemon_door(app), vec![msg], false);
         }
 
         _ => {}
@@ -3205,184 +2803,6 @@ fn fetch_search_hit(app: &mut App, bg_tx: &mpsc::Sender<BgResult>) {
     });
 }
 
-/// Archive one or many messages: the store rows move into the archive mailbox
-/// and the owed server moves enqueue in the same transaction (#0039).
-///
-/// The drain carries them to the server at the next sync/fetch resume point and
-/// rolls a refusal back, so there is no per-op thread and no status to wait on:
-/// the local move is instant and confirmed. `batch` says whether the selection
-/// should be cleared afterwards, the only difference between the single and the
-/// batch arm.
-fn archive_msgs(app: &mut App, msgs: Vec<MessageRef>, batch: bool) {
-    let Some(dest_idx) = app.find_mailbox_by_kind(MailboxKind::Archive) else {
-        app.set_status_level(
-            "Archive mailbox not configured".to_string(),
-            StatusLevel::Error,
-        );
-        return;
-    };
-    let dest_mailbox = match app.mailboxes.get(dest_idx) {
-        Some(mb) => mailbox_key(mb),
-        None => return,
-    };
-    let dest_server = app.archive_server_name.clone();
-    let source_server = app.active_server_mailbox();
-
-    let Some((store, _blobs)) = store_for_mutation(app, "Archive") else {
-        return;
-    };
-    let account = app.account_config.name.clone();
-    let touched_invite = any_invite(app, &msgs);
-    let archived_refs =
-        mutations::queue_move(&store, &account, &msgs, &dest_mailbox, &source_server, &dest_server);
-    drop(store);
-    if archived_refs.is_empty() {
-        app.set_status_level(
-            "Archive failed: nothing to archive".to_string(),
-            StatusLevel::Error,
-        );
-        return;
-    }
-
-    let archived: HashSet<MessageRef> = archived_refs.iter().copied().collect();
-    app.remove_selected_from_list_batch(&archived);
-    if batch {
-        app.selection.clear();
-    }
-    refresh_after_mutation(app, Some(dest_idx), touched_invite);
-
-    let count = archived_refs.len();
-    app.set_status_level(
-        if count == 1 {
-            "Email archived".to_string()
-        } else {
-            format!("Archived {count} emails")
-        },
-        StatusLevel::Success,
-    );
-}
-
-/// Delete one or many messages: the store rows go and the owed server deletes
-/// enqueue in the same transaction (#0039).
-///
-/// The rows are removed rather than tombstoned, so a refused server delete is
-/// answered by the next sync refetching the message; the drain surfaces the
-/// refusal (see [`crate::pending_ops`]).
-fn delete_msgs(app: &mut App, msgs: Vec<MessageRef>, batch: bool) {
-    let source_server = app.active_server_mailbox();
-    let Some((store, blobs)) = store_for_mutation(app, "Delete") else {
-        return;
-    };
-    let account = app.account_config.name.clone();
-    let touched_invite = any_invite(app, &msgs);
-    let deleted_refs = mutations::queue_delete(&store, &blobs, &account, &msgs, &source_server);
-    drop(store);
-    if deleted_refs.is_empty() {
-        app.set_status_level(
-            "Delete failed: nothing to delete".to_string(),
-            StatusLevel::Error,
-        );
-        return;
-    }
-
-    // Every deleted row's id is dead the moment the row is: the list, the
-    // selection set and the cursor anchor must not carry one across this
-    // boundary, because a re-ingest of the same message mints a new id.
-    let deleted: HashSet<MessageRef> = deleted_refs.iter().copied().collect();
-    app.remove_selected_from_list_batch(&deleted);
-    if batch {
-        app.selection.clear();
-    }
-    refresh_after_mutation(app, None, touched_invite);
-
-    let count = deleted_refs.len();
-    app.set_status_level(
-        if count == 1 {
-            "Email deleted".to_string()
-        } else {
-            format!("Deleted {count} emails")
-        },
-        StatusLevel::Success,
-    );
-}
-
-/// Set the read flag on one or many messages: the store row and the owed server
-/// op commit together (#0039).
-///
-/// Returns false when nothing was applied, so the caller can skip its status
-/// line. The in-memory list is updated beside the row because the list is what
-/// the user is looking at; the drain rolls both the store row and (on the next
-/// refresh) the list back if the server refuses.
-fn set_read_flag(app: &mut App, msgs: Vec<MessageRef>, read: bool) -> bool {
-    let server_mailbox = app.active_server_mailbox();
-    let Some((store, _blobs)) = store_for_mutation(app, "Read flag") else {
-        return false;
-    };
-    let account = app.account_config.name.clone();
-    let flagged = mutations::queue_read_flag(&store, &account, &msgs, read, &server_mailbox);
-    drop(store);
-    if flagged.is_empty() {
-        return false;
-    }
-
-    for msg in &flagged {
-        app.set_email_read(*msg, read);
-    }
-    true
-}
-
-/// Mark the message under the cursor read because the user opened it (#0110).
-///
-/// The trigger is an explicit open: `Enter` / `e`, or a focus move into the
-/// body pane. This reverses #0087, whose trigger was merely showing a row in
-/// the preview, so a `j` / `k` walk down an unread inbox now leaves it unread
-/// and queues no `\Seen` ops.
-///
-/// Reuses the manual [`set_read_flag`] path, so the local write and the owed
-/// `\Seen` op commit together (#0039) and converge on the next sync (#0004)
-/// rather than opening a second write path. Returns whether a row was marked.
-///
-/// A Drafts row carries no [`MessageRef`] and an already-read row has nothing
-/// to write, so both are no-ops and the mark costs one store open per genuine
-/// open rather than one per keypress. `u` still toggles either way, and this
-/// never re-marks a row the user toggled back to unread, because it fires only
-/// on the next explicit open.
-///
-/// The message is passed in rather than read off the cursor: the queued
-/// [`Action::MarkAsRead`] is drained after a whole coalesced key batch (#0108),
-/// by which time the cursor may sit on a different row than the one that was
-/// opened. A ref the list no longer holds is a no-op, as is an already-read
-/// one.
-fn mark_open_read(app: &mut App, msg: MessageRef) -> bool {
-    let Some(email) = app.emails.iter().find(|e| e.msg == Some(msg)) else {
-        return false;
-    };
-    if email.read {
-        return false;
-    }
-    set_read_flag(app, vec![msg], true)
-}
-
-/// Set the `\Flagged` star on one or many messages (#0007): the store row and
-/// the owed server op commit together (#0039). Modelled on [`set_read_flag`].
-fn set_flag(app: &mut App, msgs: Vec<MessageRef>, flagged: bool) -> bool {
-    let server_mailbox = app.active_server_mailbox();
-    let Some((store, _blobs)) = store_for_mutation(app, "Flag") else {
-        return false;
-    };
-    let account = app.account_config.name.clone();
-    let starred = mutations::queue_flag(&store, &account, &msgs, flagged, &server_mailbox);
-    drop(store);
-    if starred.is_empty() {
-        return false;
-    }
-
-    for msg in &starred {
-        app.set_email_flagged(*msg, flagged);
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3440,116 +2860,6 @@ mod tests {
             flagged: false,
             is_invite,
         }
-    }
-
-    /// The mark that rides on an explicit open (#0110) is a real mutation, not
-    /// an intent: the store row gains `\Seen` and exactly one `SetRead` op is
-    /// owed to the server, because it goes through the same `set_read_flag` the
-    /// manual `u` toggle uses (#0039). A second call over the same row is a
-    /// no-op, so re-opening does not queue a duplicate op.
-    #[test]
-    fn opening_a_message_marks_it_read_and_queues_one_server_op() {
-        let dir = tempfile::tempdir().unwrap();
-        let _data_dir = crate::config::test_env::DataDirOverride::set(dir.path());
-
-        // `set_read_flag` resolves the store from the account name rather than
-        // being handed one, so the store has to sit where `open_store` looks.
-        let account = "alice";
-        std::fs::create_dir_all(crate::config::account_dir(account)).unwrap();
-        let store = crate::store::Store::open(crate::config::store_path(account)).unwrap();
-        let blobs = BlobStore::for_account(account);
-        let email = crate::parse::FetchedEmail {
-            from: "Sender <s@example.com>".into(),
-            to: "me@example.com".into(),
-            cc: None,
-            reply_to: None,
-            bcc: None,
-            subject: "Unread".into(),
-            date: "Mon, 20 Jul 2026 09:00:00 +0000".into(),
-            body_text: "Hello.".into(),
-            html_body: None,
-            has_attachments: false,
-            message_id: Some("<inbox-1@example.com>".into()),
-            attachments: Vec::new(),
-            flags: Default::default(),
-            calendar_ics: None,
-            event: None,
-        };
-        let row_id = crate::ingest::ingest_message(
-            &store,
-            &blobs,
-            &crate::ingest::IngestInput {
-                account,
-                mailbox: "inbox",
-                uid: 1,
-                email: &email,
-                raw: None,
-            },
-        )
-        .unwrap()
-        .row_id;
-        drop(store);
-
-        let mut app = App::default_for_tests();
-        app.account_config.name = account.to_string();
-        // The cursor sits on a *different* row than the one that was opened,
-        // which is what a `Tab` and a `J` coalesced into one batch produce
-        // (#0108): the mark must follow the ref it was given, not the cursor.
-        app.emails = std::sync::Arc::new(vec![
-            entry("Unread", row_id, false),
-            entry("Moved onto", row_id + 1, false),
-        ]);
-        app.visible = vec![0, 1];
-        app.list_index = 1;
-
-        let msg = MessageRef::new(row_id);
-        assert!(mark_open_read(&mut app, msg), "the open marked nothing");
-        assert!(app.emails[0].read, "the opened list row is stale");
-        assert!(!app.emails[1].read, "the row under the cursor was marked");
-
-        let store = crate::store::open_store(account).unwrap();
-        assert!(crate::store::read::find_by_id(&store, row_id)
-            .unwrap()
-            .unwrap()
-            .is_read());
-        let queued = crate::pending_ops::queued_ops(&store, account).unwrap();
-        assert_eq!(queued.len(), 1, "expected exactly one owed server op");
-        assert_eq!(
-            queued[0].op,
-            crate::ops::ServerOp::SetRead {
-                message_id: "<inbox-1@example.com>".to_string(),
-                mailbox: "INBOX".to_string(),
-                read: true,
-            }
-        );
-        drop(store);
-
-        assert!(
-            !mark_open_read(&mut app, msg),
-            "an already-read row re-marked"
-        );
-        let store = crate::store::open_store(account).unwrap();
-        assert_eq!(
-            crate::pending_ops::queued_ops(&store, account).unwrap().len(),
-            1,
-            "re-opening queued a duplicate op"
-        );
-    }
-
-    /// The agenda is only rebuilt when a mutation actually touched an invite,
-    /// which is read off the list rows *before* they are removed.
-    #[test]
-    fn only_a_mutation_that_touches_an_invite_asks_for_an_agenda_rebuild() {
-        let mut app = App::default_for_tests();
-        app.emails = std::sync::Arc::new(vec![
-            entry("Standup", 1, true),
-            entry("Receipt", 2, false),
-        ]);
-
-        assert!(any_invite(&app, &[MessageRef::new(1)]));
-        assert!(any_invite(&app, &[MessageRef::new(2), MessageRef::new(1)]));
-        assert!(!any_invite(&app, &[MessageRef::new(2)]));
-        assert!(!any_invite(&app, &[MessageRef::new(404)]));
     }
 
     // -----------------------------------------------------------------------
@@ -4220,7 +3530,6 @@ mod store_backed_drafts {
 mod store_backed_mutations {
     use super::store_backed_drafts::{fixture_email, Fixture};
     use super::*;
-    use crate::draft::mark_draft_sent;
     use crate::tui::app::EmailEntry;
 
     /// An account that submits to a closed port: the SMTP conversation fails
@@ -4464,86 +3773,6 @@ mod store_backed_mutations {
 
         assert_eq!(err.to_string(), "SMTP not configured");
         assert_eq!(outbox_counts(&fx).total(), 0, "nothing was enqueued");
-    }
-
-    /// Approve and mark-draft flip the file `mp mark-approved` /
-    /// `mp mark-draft` flip, name the draft by its selector, and leave the
-    /// index holding the new status.
-    #[test]
-    fn approve_and_mark_draft_flip_the_indexed_status() {
-        let fx = Fixture::new();
-        let (_path, selector, id) = a_draft(&fx);
-        let mut app = app_on_draft(&id);
-
-        status_flip(&mut app, DraftStatusFlip::Approve);
-        assert_eq!(app.status_message.as_deref(), Some(&*format!("Approved {selector}")));
-        assert_eq!(fx.resolve(&selector).status, "approved");
-
-        // The reload the flip triggers emptied the list (the fixture app has
-        // no mailboxes to load from), so the cursor is put back by hand.
-        app.emails = std::sync::Arc::new(vec![draft_entry(&id)]);
-        app.rebuild_visible();
-        status_flip(&mut app, DraftStatusFlip::Approve);
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some(&*format!("Already approved: {selector}"))
-        );
-
-        app.emails = std::sync::Arc::new(vec![draft_entry(&id)]);
-        app.rebuild_visible();
-        status_flip(&mut app, DraftStatusFlip::Demote);
-        assert_eq!(app.status_message.as_deref(), Some(&*format!("Demoted {selector}")));
-        assert_eq!(fx.resolve(&selector).status, "draft");
-    }
-
-    /// An illegal transition fails with the library's own error text, which is
-    /// the one `mp mark-draft` prints: a sent email has left the draft
-    /// pipeline and is not rewritten back into it.
-    #[test]
-    fn marking_a_sent_draft_back_to_draft_fails_like_the_cli() {
-        let fx = Fixture::new();
-        let (path, _selector, id) = a_draft(&fx);
-        let draft = crate::draft::parse_email_draft(&path).unwrap();
-        mark_draft_sent(&draft, None).unwrap();
-        crate::store::drafts::refresh_account("alice").unwrap();
-
-        let mut app = app_on_draft(&id);
-        status_flip(&mut app, DraftStatusFlip::Demote);
-
-        let status = app.status_message.clone().unwrap();
-        assert!(
-            status.starts_with("Mark-draft failed: Cannot revert a sent email back to draft"),
-            "{status}"
-        );
-    }
-
-    /// The batch flips every selected draft and counts what it could not do,
-    /// which is the pre-nuke build's contract: one refusal is one failure, not
-    /// an abort.
-    #[test]
-    fn the_batch_flips_every_selected_draft_and_counts_the_refusals() {
-        let fx = Fixture::new();
-        let (_p1, sel_one, one) = a_draft(&fx);
-        let (_p2, sel_two, two) = a_draft(&fx);
-        let mut app = App::default_for_tests();
-        app.account_config.name = "alice".to_string();
-
-        status_flip_batch(&mut app, &[one.clone(), two.clone()], DraftStatusFlip::Approve);
-        assert_eq!(app.status_message.as_deref(), Some("Approved 2 drafts"));
-        assert_eq!(fx.resolve(&sel_one).status, "approved");
-        assert_eq!(fx.resolve(&sel_two).status, "approved");
-
-        status_flip_batch(
-            &mut app,
-            &[one.clone(), "not-in-the-index".to_string()],
-            DraftStatusFlip::Demote,
-        );
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Marked 1/2 as draft (1 failed)")
-        );
-        assert_eq!(fx.resolve(&sel_one).status, "draft");
-        assert_eq!(fx.resolve(&sel_two).status, "approved");
     }
 
     /// `$EDITOR` opens the file the index holds for the row under the cursor.

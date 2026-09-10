@@ -251,6 +251,18 @@ pub struct QueryHandle {
 }
 
 impl QueryHandle {
+    /// A handle onto no session at all, which answers every call with the same
+    /// error a handle taken from a closed session answers with.
+    ///
+    /// What a client with no `Session` holds: `Session::connect` only fails
+    /// when the session thread wedged (every ordinary failure to reach a daemon
+    /// has already exited the process), and the run's own
+    /// `MAILYPOPPINS_DAEMON_REQUIRE` check fails on the way out. Nothing falls
+    /// back to the store behind it.
+    pub fn closed() -> QueryHandle {
+        QueryHandle { calls: None }
+    }
+
     /// Call one method and wait for its answer, on whatever thread holds this.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         match self.calls.as_ref() {
