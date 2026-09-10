@@ -1523,3 +1523,28 @@ The price is that every later unit adding a variant breaks a test file it is not
 
 The variant is still the right shape, so the fix is a one-arm edit to the older file, and the unit that adds a variant should budget for it and get it approved rather than discover it at validation time.
 A `#[non_exhaustive]` enum would not help: it forces a wildcard on downstream crates, and a file that has none stops compiling either way.
+
+## A derived `Default` and a serde field default are two different configurations
+
+`SmtpSettings` and `ImapSettings` carried `#[serde(default = "default_smtp_port")]` on `port` *and* `#[derive(Default)]` on the struct.
+The two disagree by construction: a `config.toml` with an empty `[accounts.smtp]` table loads port 465, and one with no `[accounts.smtp]` table at all loads port 0, because the absent table takes `AccountConfig`'s `#[serde(default)]`, which is the derived `Default`, and the field defaults never run.
+The same omission gave `fetch_concurrency = 0` and `body_fetch_deadline_secs = 0`, so an account configured without an `[accounts.imap]` table asked for an unbounded body fetch it never meant.
+`EmailSettings` was already right, with a hand-written `Default` that calls the same functions its `serde(default = …)` attributes name.
+
+Nothing noticed for as long as the values were only ever read after a connection attempt failed. `config.get` reporting the *effective* configuration (P3b-U8) is what made the two readings visible in one place.
+When a struct has per-field serde defaults and is itself the target of a `#[serde(default)]`, write `Default` by hand from the same functions.
+
+## `rustfmt <file>` formats the whole module tree below it
+
+`rustfmt --edition 2021 src/daemon/mod.rs` does not format that file: it formats it *and* every `mod` it declares, recursively, because rustfmt takes a crate root and follows the module graph.
+Running it on a `mod.rs` to tidy a two-line edit reformatted `src/daemon/runtime/mod.rs`, a file the unit never touched, and put unrelated churn in the diff.
+
+Format the leaf files you edited, and check `git diff --stat` afterwards for files you did not.
+
+## `tests/engine_lock_ingest.rs` flakes about once in twelve runs, and has since before #0122
+
+Roughly one run in twelve of the whole binary fails in `the_unconditional_policy_still_rebinds_onto_a_listed_uid_under_the_lock` or `the_lock_holder_runs_the_pass_and_releases_the_lock`, with a guarded pass returning `Ok(None)` (the "another engine holds the lock" refusal) against a lock file in its own tempdir that nothing else should be able to hold.
+`mp_sync_exits_zero_and_says_it_skipped_when_another_process_holds_the_lock` runs in the same binary and `fork`s an `mp` child while other tests hold their own `flock`'d descriptors: the child inherits every open descriptor until `exec` closes the `O_CLOEXEC` ones, and an inherited copy keeps the `flock` alive for that window.
+
+Measured at 2 failures in 25 runs on the tree with the config-ownership unit and 2 in 25 on the tree without it, so it is not that unit's doing.
+The fix is to keep the process-spawning test off the threads that hold locks (its own binary, or `serial_test`), and it is not to widen the assertions.

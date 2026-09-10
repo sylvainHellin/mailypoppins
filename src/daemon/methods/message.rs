@@ -34,8 +34,8 @@ use super::{internal, invalid_params, string_param};
 
 /// `message.list` as the dispatcher serves it.
 pub struct MessageList {
-    /// The accounts `config.toml` declared when this daemon started.
-    pub accounts: Arc<Vec<AccountConfig>>,
+    /// The live configuration, so a reload is visible to the next listing.
+    pub config: Arc<super::super::config::ConfigStore>,
 }
 
 impl Method for MessageList {
@@ -54,7 +54,7 @@ impl Method for MessageList {
         // the daemon schedules work, not to how it dispatches, so it belongs
         // with the account runtimes of Phase 5.
         Box::pin(async move {
-            list(&params, &self.accounts)
+            list(&params, &self.config.accounts())
                 .map(Outcome::query)
                 .map_err(DomainError::from)
         })

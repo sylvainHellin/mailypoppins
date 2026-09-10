@@ -77,3 +77,47 @@ pub struct SyncCompleted {
     /// The one free-text field there is, and never a status line.
     pub error: Option<String>,
 }
+
+/// The `kind` a completed configuration swap travels as.
+pub const KIND_CONFIG_CHANGED: &str = "config.changed";
+
+/// The `kind` a rejected configuration candidate travels as.
+pub const KIND_CONFIG_INVALID: &str = "config.invalid";
+
+/// What one configuration swap did, as the `config.changed` event carries it
+/// and as `config.reload` returns it (P3b-U8).
+///
+/// The three lists are account names, sorted lexicographically so two daemons
+/// reconciling the same edit report it identically. `config_revision` is the
+/// counter `config.get` reports, which starts at 0 and moves by one per
+/// successful swap: it is not the state revision, which moves on every event
+/// from every source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigChanged {
+    /// Accounts the swap started a runtime for.
+    pub added: Vec<String>,
+    /// Accounts whose effective configuration changed.
+    pub updated: Vec<String>,
+    /// Accounts the swap stopped.
+    pub removed: Vec<String>,
+    /// The configuration revision the swap moved to.
+    pub config_revision: u64,
+}
+
+/// Why a configuration candidate was refused, as the `config.invalid` event
+/// carries it and as the `-32007` payload spells it.
+///
+/// One shape for both, so a client renders a diagnostic the same way whether it
+/// asked for the reload or merely watched one. `line` is the 1-based line of
+/// the offending token and `null` for a diagnostic with no position: a
+/// semantic refusal has no span to point at, and inventing one would send a
+/// user to an innocent line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigInvalid {
+    /// The file the daemon read, or would have read.
+    pub path: String,
+    /// The 1-based line of the offending token, `null` when there is none.
+    pub line: Option<u32>,
+    /// One line a user can act on.
+    pub message: String,
+}

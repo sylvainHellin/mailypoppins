@@ -45,8 +45,8 @@ use super::{internal, string_param};
 
 /// `mailbox.list` as the dispatcher serves it.
 pub struct MailboxList {
-    /// The accounts `config.toml` declared when this daemon started.
-    pub accounts: Arc<Vec<AccountConfig>>,
+    /// The live configuration, so a reload is visible to the next listing.
+    pub config: Arc<crate::daemon::config::ConfigStore>,
 }
 
 impl Method for MailboxList {
@@ -61,7 +61,7 @@ impl Method for MailboxList {
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
         Box::pin(async move {
-            list(&params, &self.accounts)
+            list(&params, &self.config.accounts())
                 .map(Outcome::query)
                 .map_err(DomainError::from)
         })

@@ -359,6 +359,58 @@ impl CanonicalState {
         revision
     }
 
+    /// Replace the set of accounts the state holds, keeping what is known
+    /// about the ones that stay (P3b-U8).
+    ///
+    /// A configuration swap adds and removes accounts, and a change naming an
+    /// account the state does not have is dropped by [`Inner::reduce`]: an
+    /// added account must therefore exist here before its runtime reports
+    /// readiness, and a removed one must be gone before the swap is over. It
+    /// commits nothing and takes no revision, because it is not a change a
+    /// client applies: the `state.remove` of a departed account and the
+    /// `account.state_changed` of a new one are published around it, and
+    /// `config.changed` closes the swap.
+    pub fn reseed(&self, accounts: Vec<AccountSeed>) {
+        let _gate = self.gate.enter();
+        let mut inner = lock(&self.inner);
+        let names: Vec<String> = accounts.iter().map(|seed| seed.name.clone()).collect();
+        inner.accounts.retain(|view| names.contains(&view.name));
+        inner.mailboxes.retain(|name, _| names.contains(name));
+        inner.drafts.retain(|name, _| names.contains(name));
+        inner.outbox.retain(|name, _| names.contains(name));
+        for seed in accounts {
+            // An account that stayed keeps its state and its counts: a swap
+            // that touched another account may not blank this one's sidebar.
+            let mailboxes = seed
+                .mailboxes
+                .into_iter()
+                .map(|seed| MailboxView {
+                    seed,
+                    total: 0,
+                    unread: 0,
+                    badge: 0,
+                })
+                .collect();
+            if inner.accounts.iter().any(|view| view.name == seed.name) {
+                continue;
+            }
+            inner.mailboxes.insert(seed.name.clone(), mailboxes);
+            inner.drafts.insert(seed.name.clone(), Vec::new());
+            inner
+                .outbox
+                .insert(seed.name.clone(), OutboxView::default());
+            inner.accounts.push(AccountView {
+                name: seed.name,
+                state: AccountState::Opening,
+                health: crate::sync_health::SyncHealth::default(),
+            });
+        }
+        // The order a client reads is the order `config.toml` writes.
+        inner
+            .accounts
+            .sort_by_key(|view| names.iter().position(|name| name == &view.name));
+    }
+
     /// Create this connection's queue endpoint, which nothing writes to until
     /// [`CanonicalState::bootstrap`] attaches it.
     ///

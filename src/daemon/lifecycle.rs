@@ -51,12 +51,12 @@ use tokio::sync::watch;
 use mp_client::Connection;
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
+use super::config::{start_account, ConfigState, ConfigStore};
 use super::runtime::{
     self, acquire_start_lock, ensure_runtime_dir, instance_path, pid_path, probe_socket,
     remove_stale_socket, socket_path, InstanceMeta, SocketProbe,
 };
-use super::server::{serve, AccountStatus, DaemonState};
-use super::session::ConfigReport;
+use super::server::{serve, DaemonState};
 
 /// Test-only hook: make `run` exit nonzero after logging is up and before the
 /// socket is bound, so `mp daemon start` has a deterministic dead child to
@@ -227,15 +227,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // handshake reports which of the three cases this daemon is in, so a client
     // can tell "no accounts yet" from "your config does not parse".
     let config_path = crate::config::config_path();
-    let (accounts, configured, config) = if !config_path.exists() {
+    let (state, loaded) = if !config_path.exists() {
         echo(&format!("no config at {}", config_path.display()));
-        (
-            Vec::new(),
-            Vec::new(),
-            ConfigReport::Absent {
-                path: config_path.clone(),
-            },
-        )
+        (ConfigState::Absent, crate::config::GlobalConfig::default())
     } else {
         match crate::config::load_global_config() {
             Ok(config) => {
@@ -243,11 +237,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
                     "config loaded, {} accounts",
                     config.accounts.len()
                 ));
-                let report = ConfigReport::Loaded {
-                    path: config_path.clone(),
-                    accounts: config.accounts.len(),
-                };
-                (account_statuses(&config), config.accounts.clone(), report)
+                (ConfigState::Ok, config)
             }
             Err(e) => {
                 warn!("[daemon] no usable config, serving zero accounts: {e:#}");
@@ -255,16 +245,20 @@ async fn run(foreground_logs: bool) -> Result<()> {
                     eprintln!("no usable config, serving zero accounts: {e:#}");
                 }
                 (
-                    Vec::new(),
-                    Vec::new(),
-                    ConfigReport::Invalid {
-                        path: config_path.clone(),
-                        problem: format!("{e:#}"),
-                    },
+                    ConfigState::Invalid(format!("{e:#}")),
+                    crate::config::GlobalConfig::default(),
                 )
             }
         }
     };
+    // The daemon owns the configuration from here: `config.*` reads and swaps
+    // this store, and nothing else re-reads the file.
+    let config = Arc::new(ConfigStore::new(
+        config_path.clone(),
+        state,
+        loaded,
+        env_flag(ACCOUNT_RUNTIMES_ENV),
+    ));
 
     ensure_runtime_dir()?;
     let socket = socket_path();
@@ -297,7 +291,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // is what excludes a second daemon.
     drop(start_lock);
 
-    let state = Arc::new(DaemonState::new(meta, accounts, configured, config));
+    let state = Arc::new(DaemonState::new(meta, config));
     if env_flag(ACCOUNT_RUNTIMES_ENV) {
         spawn_account_runtimes(Arc::clone(&state));
     }
@@ -386,29 +380,7 @@ fn spawn_signal_watch(shutdown: watch::Sender<bool>) -> Result<()> {
     Ok(())
 }
 
-/// The accounts `daemon.status` reports, as the daemon starts.
-///
-/// Empty unless [`ACCOUNT_RUNTIMES_ENV`] is set, because without it no runtime
-/// is created and there is nothing to report on. With it, every configured
-/// account starts at `opening` and stays there until its runtime comes back:
-/// [`DaemonState::status_result`] reads
-/// [`RuntimeTable`](super::server::RuntimeTable) over this seed, and
-/// [`spawn_account_runtimes`] is what fills it.
-fn account_statuses(config: &crate::config::GlobalConfig) -> Vec<AccountStatus> {
-    if !env_flag(ACCOUNT_RUNTIMES_ENV) {
-        return Vec::new();
-    }
-    config
-        .accounts
-        .iter()
-        .map(|account| AccountStatus {
-            name: account.name.clone(),
-            state: "opening".to_string(),
-        })
-        .collect()
-}
-
-/// Start one [`AccountRuntime`] per configured account, off the startup path
+/// Start one account runtime per configured account, off the startup path
 /// (P3b-U4).
 ///
 /// Off it on purpose: `start` takes the account's engine lock and opens SQLite,
@@ -428,58 +400,17 @@ fn account_statuses(config: &crate::config::GlobalConfig) -> Vec<AccountStatus> 
 /// runtime this phase holds the engine lock, drains nothing on its own and
 /// serves reads.
 fn spawn_account_runtimes(state: Arc<DaemonState>) {
-    use super::runtime::account::{AccountRuntime, Readiness};
-    use super::runtime::pool::DEFAULT_READ_POOL_SIZE;
-    use super::state::Change;
-
-    for account_config in state.configured.iter().cloned() {
+    for account_config in state.config.accounts().iter().cloned() {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let account = account_config.name.clone();
-            let started = tokio::task::spawn_blocking(move || {
-                AccountRuntime::start(account_config, DEFAULT_READ_POOL_SIZE)
-            })
+            start_account(
+                &state.runtimes,
+                &state.canonical,
+                account_config,
+                state.config.account_runtimes,
+            )
             .await;
-
-            let change = match started {
-                Ok(Ok(runtime)) => {
-                    let change = match runtime.readiness() {
-                        Readiness::Blocked { reason } => {
-                            info!("[daemon] {account} is blocked: {reason}");
-                            Change::AccountBlocked {
-                                account: account.clone(),
-                                reason,
-                            }
-                        }
-                        _ => {
-                            info!("[daemon] {account} is ready");
-                            Change::AccountReady {
-                                account: account.clone(),
-                            }
-                        }
-                    };
-                    state.runtimes.insert(Arc::new(runtime));
-                    change
-                }
-                // A start that failed and a start whose thread died read the
-                // same way to a client: nothing about the account can be
-                // served, and the reason says which it was.
-                Ok(Err(e)) => blocked_by_failure(&state, &account, format!("{e:#}")),
-                Err(e) => blocked_by_failure(&state, &account, format!("the start task {e}")),
-            };
-            state.canonical.apply(change);
         });
-    }
-}
-
-/// Record a start that never produced a runtime and build the change that says
-/// so.
-fn blocked_by_failure(state: &DaemonState, account: &str, reason: String) -> super::state::Change {
-    warn!("[daemon] could not start the runtime for {account}: {reason}");
-    state.runtimes.insert_failure(account, reason.clone());
-    super::state::Change::AccountBlocked {
-        account: account.to_string(),
-        reason,
     }
 }
 

@@ -20,6 +20,7 @@
 //! with the state that owns it.
 
 pub mod account;
+pub mod config;
 pub mod mailbox;
 pub mod message;
 pub mod state;
@@ -30,12 +31,12 @@ use serde_json::Value;
 
 use mp_protocol::RpcError;
 
-use crate::config::AccountConfig;
-
+use super::config::ConfigStore;
 use super::dispatch::Dispatcher;
 use super::operations::{
     fake_operations, OperationCancelMethod, OperationRegistry, OperationStatusMethod, TestOperation,
 };
+use super::server::RuntimeTable;
 use super::state::{fake_ready_delay, CanonicalState};
 
 /// JSON-RPC's own "invalid params".
@@ -52,17 +53,28 @@ const INTERNAL_ERROR: i32 = -32603;
 /// [`FAKE_OPERATIONS_ENV`](super::operations::FAKE_OPERATIONS_ENV).
 pub fn register(
     dispatcher: &mut Dispatcher,
-    accounts: Arc<Vec<AccountConfig>>,
+    config: Arc<ConfigStore>,
+    runtimes: Arc<RuntimeTable>,
     canonical: Arc<CanonicalState>,
     operations: Arc<OperationRegistry>,
 ) {
     dispatcher.register(Arc::new(account::AccountList {
-        accounts: Arc::clone(&accounts),
+        config: Arc::clone(&config),
     }));
     dispatcher.register(Arc::new(mailbox::MailboxList {
-        accounts: Arc::clone(&accounts),
+        config: Arc::clone(&config),
     }));
-    dispatcher.register(Arc::new(message::MessageList { accounts }));
+    dispatcher.register(Arc::new(message::MessageList {
+        config: Arc::clone(&config),
+    }));
+    self::config::register(
+        dispatcher,
+        Arc::new(self::config::ConfigFamily {
+            store: config,
+            runtimes,
+            canonical: Arc::clone(&canonical),
+        }),
+    );
     dispatcher.register(Arc::new(self::state::StateBootstrap::new(
         Arc::clone(&canonical),
         fake_ready_delay(),

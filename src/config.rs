@@ -189,7 +189,7 @@ fn default_send_hold_secs() -> u64 {
     20
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SmtpSettings {
     #[serde(default)]
     pub host: String,
@@ -201,11 +201,25 @@ pub struct SmtpSettings {
     pub accept_invalid_certs: bool,
 }
 
+/// Hand-written rather than derived, so an account with no `[accounts.smtp]`
+/// table at all holds the same port as one whose table omits `port`. A derived
+/// `Default` gives `0`, and the two readings of one omission may not differ.
+impl Default for SmtpSettings {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: default_smtp_port(),
+            username: String::new(),
+            accept_invalid_certs: false,
+        }
+    }
+}
+
 fn default_smtp_port() -> u16 {
     465
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ImapSettings {
     #[serde(default)]
     pub host: String,
@@ -238,6 +252,21 @@ pub struct ImapSettings {
     /// Clamped to [0, 600] at load.
     #[serde(default = "default_body_fetch_deadline_secs")]
     pub body_fetch_deadline_secs: u64,
+}
+
+/// As for [`SmtpSettings`]: an absent `[accounts.imap]` table and an empty one
+/// must load to the same three defaults.
+impl Default for ImapSettings {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: default_imap_port(),
+            username: String::new(),
+            accept_invalid_certs: false,
+            fetch_concurrency: default_fetch_concurrency(),
+            body_fetch_deadline_secs: default_body_fetch_deadline_secs(),
+        }
+    }
 }
 
 fn default_imap_port() -> u16 {
@@ -829,7 +858,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
 /// Reject out-of-range retention values at load time rather than at the first
 /// eviction pass. The global table is checked on its own so a config with no
 /// accounts still fails loudly.
-fn validate_retention(config: &GlobalConfig) -> Result<()> {
+pub(crate) fn validate_retention(config: &GlobalConfig) -> Result<()> {
     RetentionPolicy::resolve(&config.retention, &RetentionConfig::default())?;
     for account in &config.accounts {
         retention_for(config, account)?;
@@ -840,7 +869,7 @@ fn validate_retention(config: &GlobalConfig) -> Result<()> {
 /// Refuse to parse legacy configs containing `[accounts.directories]` or
 /// per-mailbox `local = "..."` keys. Per the v1.0 "no migrations" invariant,
 /// fail loud and instruct the user to re-run `mp config init`.
-fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
+pub(crate) fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
     let mut hits: Vec<&'static str> = Vec::new();
     if content.contains("[accounts.directories]")
         || content.contains("[directories]")

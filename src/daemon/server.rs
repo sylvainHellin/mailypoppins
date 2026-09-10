@@ -35,11 +35,12 @@ use mp_protocol::{
     METHOD_STATE_RESYNC_REQUIRED,
 };
 
+use super::config::ConfigStore;
 use super::dispatch::Dispatcher;
 use super::operations::OperationRegistry;
 use super::runtime::account::{AccountRuntime, Readiness, TickKind, TickOutcome};
 use super::runtime::InstanceMeta;
-use super::session::{ConfigReport, Session};
+use super::session::Session;
 use super::state::events::{Event, Outbound, Outgoing, Subscriber};
 use super::state::{
     seeds_from_config, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, Revision,
@@ -76,19 +77,6 @@ enum AfterFlush {
     Close,
     /// Close it and take the daemon down: `daemon.stop` has been answered.
     Shutdown,
-}
-
-/// One account as `daemon.status` reports it.
-///
-/// The `state` here is the seed the daemon starts from, which is `opening` for
-/// every configured account: what a runtime reports once it has come up lives
-/// in [`RuntimeTable`] and overrides this.
-#[derive(Clone, Debug)]
-pub struct AccountStatus {
-    /// The configured account name.
-    pub name: String,
-    /// One of `opening`, `ready`, `blocked`.
-    pub state: String,
 }
 
 /// The live per-account runtimes, keyed by account name (P3b-U4).
@@ -165,6 +153,19 @@ impl RuntimeTable {
         }
     }
 
+    /// Take `account` out of the table, so dropping what comes back releases
+    /// its engine lock and closes its store (P3b-U8).
+    ///
+    /// The drop is the caller's, on `spawn_blocking`: it closes SQLite, and a
+    /// reload promises the lock is free by the time it answers. A start that
+    /// only ever failed has nothing to hand back and is simply forgotten.
+    pub fn remove(&self, account: &str) -> Option<Arc<AccountRuntime>> {
+        match lock(&self.entries).remove(account)? {
+            RuntimeEntry::Live(runtime) => Some(runtime),
+            RuntimeEntry::Failed(_) => None,
+        }
+    }
+
     /// The runtime serving `account`, for a caller that wants to tick it or
     /// read through its pool.
     pub fn get(&self, account: &str) -> Option<Arc<AccountRuntime>> {
@@ -181,20 +182,12 @@ impl RuntimeTable {
 pub struct DaemonState {
     /// What this daemon published in `daemon.json`.
     pub meta: InstanceMeta,
-    /// Accounts the daemon knows about, empty unless account runtimes were
-    /// opted into with `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`.
-    pub accounts: Vec<AccountStatus>,
-    /// The accounts `config.toml` declared when this daemon started, in the
-    /// file's order. This is what `account.list` reports and what
-    /// `message.list` resolves an account name against: a runtime table would
-    /// be empty in Phase 2, and a client still has to be able to ask which
-    /// accounts exist. Shared with the methods registered on
-    /// [`DaemonState::dispatcher`], which hold the same list rather than a
-    /// reference back to the state that owns them.
-    pub configured: Arc<Vec<crate::config::AccountConfig>>,
-    /// How the configuration looked when this daemon started, reported by the
-    /// handshake as `config_status`.
-    pub config: ConfigReport,
+    /// The configuration this daemon owns (P3b-U8): the live snapshot, its
+    /// revision, and the accounts every read method resolves against. Shared
+    /// with the methods registered on [`DaemonState::dispatcher`], which hold
+    /// the same store rather than a reference back to the state that owns
+    /// them, so a swap is visible to all of them at once.
+    pub config: Arc<ConfigStore>,
     /// Every domain method this build serves, registered once at startup and
     /// read-only afterwards.
     pub dispatcher: Dispatcher,
@@ -210,26 +203,25 @@ pub struct DaemonState {
     /// which projects its live entries.
     pub operations: Arc<OperationRegistry>,
     /// The account runtimes, filled in as each `start` comes back and empty
-    /// without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` (P3b-U4).
-    pub runtimes: RuntimeTable,
+    /// without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` (P3b-U4). Behind an
+    /// `Arc` because the `config.*` family reconciles it against a new
+    /// configuration and must reach it without reaching back into the state
+    /// that owns the dispatcher.
+    pub runtimes: Arc<RuntimeTable>,
 }
 
 impl DaemonState {
     /// Assemble the state and register the domain methods on it.
-    pub fn new(
-        meta: InstanceMeta,
-        accounts: Vec<AccountStatus>,
-        configured: Vec<crate::config::AccountConfig>,
-        config: ConfigReport,
-    ) -> Self {
-        let configured = Arc::new(configured);
-        // Seeded from the configuration alone: Phase 3a opens no store and
-        // starts no runtime, so every account is `opening` with zeroed counts
-        // until something reports otherwise.
+    pub fn new(meta: InstanceMeta, config: Arc<ConfigStore>) -> Self {
+        let configured = config.accounts();
+        // Seeded from the configuration alone: no store is opened and no
+        // runtime started here, so every account is `opening` with zeroed
+        // counts until something reports otherwise.
         let canonical = Arc::new(CanonicalState::new(
             InstanceId::new(meta.instance_id.clone()),
             seeds_from_config(&configured),
         ));
+        let runtimes = Arc::new(RuntimeTable::default());
         let operations = Arc::new(OperationRegistry::new());
         canonical.attach_operations(Arc::clone(&operations));
         // The registry emits events and stamps none: a revision belongs to the
@@ -252,19 +244,18 @@ impl DaemonState {
         let mut dispatcher = Dispatcher::new();
         super::methods::register(
             &mut dispatcher,
-            Arc::clone(&configured),
+            Arc::clone(&config),
+            Arc::clone(&runtimes),
             Arc::clone(&canonical),
             Arc::clone(&operations),
         );
         DaemonState {
             meta,
-            accounts,
-            configured,
             config,
             dispatcher,
             canonical,
             operations,
-            runtimes: RuntimeTable::default(),
+            runtimes,
         }
     }
 
@@ -307,15 +298,17 @@ impl DaemonState {
             "started_at": self.meta.started_at,
             "data_dir": self.meta.data_dir.display().to_string(),
             "config_dir": self.meta.config_dir.display().to_string(),
-            // The runtime table is the truth for an account whose start has
-            // come back; the seed below it is `opening`, which is what an
-            // account still starting - or one the daemon never started - is.
+            // The live configuration says which accounts there are; the
+            // runtime table says how each one is doing. An account with no
+            // entry yet is `opening`, which is what an account whose start is
+            // still in flight is.
             "accounts": self
-                .accounts
+                .config
+                .status_accounts()
                 .iter()
-                .map(|a| {
-                    let state = self.runtimes.state_of(&a.name).unwrap_or(a.state.as_str());
-                    json!({"name": a.name, "state": state})
+                .map(|name| {
+                    let state = self.runtimes.state_of(name).unwrap_or("opening");
+                    json!({"name": name, "state": state})
                 })
                 .collect::<Vec<_>>(),
         })
@@ -774,34 +767,17 @@ fn frame_error(error: &FrameError) -> RpcError {
 mod tests {
     use super::*;
 
-    /// A daemon state with no accounts, which is the Phase 2 shape.
-    fn state_fixture() -> DaemonState {
+    /// A daemon state whose configuration is `config`, at revision 0.
+    fn state_from(state: super::super::config::ConfigState, accounts: &[&str]) -> DaemonState {
         use std::path::PathBuf;
-        DaemonState::new(
-            InstanceMeta {
-                app_version: "0.0.0-test".to_string(),
-                protocol_min: mp_protocol::PROTOCOL_MIN,
-                protocol_max: mp_protocol::PROTOCOL_MAX,
-                instance_id: "abcd".to_string(),
-                pid: 42,
-                started_at: "2026-01-01T00:00:00Z".to_string(),
-                data_dir: PathBuf::from("/tmp/data"),
-                config_dir: PathBuf::from("/tmp/config"),
-            },
-            Vec::new(),
-            Vec::new(),
-            ConfigReport::Absent {
-                path: PathBuf::from("/tmp/config/config.toml"),
-            },
-        )
-    }
-
-    /// The same, with one configured account, so the canonical state has a
-    /// seed a change can be addressed to.
-    fn state_with_one_account(name: &str) -> DaemonState {
-        use std::path::PathBuf;
-        let account = crate::config::AccountConfig {
-            name: name.to_string(),
+        let config = crate::config::GlobalConfig {
+            accounts: accounts
+                .iter()
+                .map(|name| crate::config::AccountConfig {
+                    name: name.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         };
         DaemonState::new(
@@ -815,16 +791,24 @@ mod tests {
                 data_dir: PathBuf::from("/tmp/data"),
                 config_dir: PathBuf::from("/tmp/config"),
             },
-            vec![AccountStatus {
-                name: name.to_string(),
-                state: "opening".to_string(),
-            }],
-            vec![account],
-            ConfigReport::Loaded {
-                path: PathBuf::from("/tmp/config/config.toml"),
-                accounts: 1,
-            },
+            Arc::new(ConfigStore::new(
+                PathBuf::from("/tmp/config/config.toml"),
+                state,
+                config,
+                false,
+            )),
         )
+    }
+
+    /// A daemon state with no accounts at all.
+    fn state_fixture() -> DaemonState {
+        state_from(super::super::config::ConfigState::Absent, &[])
+    }
+
+    /// The same, with one configured account, so the canonical state has a
+    /// seed a change can be addressed to.
+    fn state_with_one_account(name: &str) -> DaemonState {
+        state_from(super::super::config::ConfigState::Ok, &[name])
     }
 
     /// A tick whose body fails, so the commit path is exercised without an

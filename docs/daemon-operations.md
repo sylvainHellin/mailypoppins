@@ -104,6 +104,29 @@ Every other classification is an error, `Absent` included: deleting nothing is c
 A clean shutdown unlinks the socket, and unlinks `daemon.json` and `daemon.pid` only while they still name this instance, so a daemon that started after us does not have its metadata deleted by our exit.
 `SIGTERM` and `SIGINT` both run the same path, so a foreground daemon killed with Ctrl-C leaves no socket behind.
 
+## Configuration ownership
+
+The daemon reads `config.toml` once, at startup, and owns it from then on.
+What it holds is a `ConfigStore` (`src/daemon/config.rs`): the loaded `GlobalConfig`, the state it is in (`ok`, `absent`, `invalid`), the file it came from, and a revision that starts at 0 and moves by one per successful swap.
+Every read method resolves its account against that store rather than against a list captured at startup, so a reload is visible to the next `account.list` without a restart, and `mp daemon status` lists the accounts the live configuration names.
+
+Nothing watches the file yet: a swap happens when a client asks for one, through `config.reload`, `config.init` or `config.add_account`.
+The file watcher is a later unit; the mechanism it will drive is this one.
+
+A swap is atomic in the sense that matters: the candidate is parsed and validated in full before anything is stopped, written or installed.
+A candidate that does not load leaves the previous snapshot live, its runtimes running and their engine locks held, and the revision where it was; the caller gets `-32007` with `{path, line?, message}` and every bootstrapped client gets the same three fields as a `config.invalid` event.
+A candidate that loads is installed, and then the runtimes are reconciled in one order: stop the accounts that went, restart the accounts whose effective configuration changed, start the accounts that appeared, and announce the whole thing with one `config.changed`.
+
+`config.reload` returns only once every runtime it touched has settled, so a removed account's engine lock is free by the time the call answers and an account can be renamed in one edit without the new runtime racing the old one.
+A started runtime creates its account directory if it is missing, exactly as `mp config init` does, so an account added by a hand edit comes up the same way as one added through `config.add_account`.
+A daemon without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` swaps the configuration and starts nothing, because it has no runtimes to reconcile.
+
+Secrets go in through `config.set_password` and nowhere else, under the keys the pre-daemon binary already reads (`smtp-password-<account>`, `imap-password-<account>`).
+The backend is opened on first use, not at startup: a first run has no configuration to select one from.
+It is a process-wide singleton, so a `secrets_backend` change in `config.toml` takes a daemon restart even though the rest of the swap is live.
+
+The wire shapes, the error payloads and the two event kinds are in [daemon-protocol.md](daemon-protocol.md).
+
 ## Account runtimes
 
 With `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` the daemon starts one `AccountRuntime` per configured account (`src/daemon/runtime/account.rs`), and without it there is no runtime, no engine lock and no store to open.

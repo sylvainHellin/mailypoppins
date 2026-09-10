@@ -59,8 +59,8 @@ pub struct AccountEntry {
 
 /// `account.list` as the dispatcher serves it.
 pub struct AccountList {
-    /// The accounts `config.toml` declared when this daemon started.
-    pub accounts: Arc<Vec<AccountConfig>>,
+    /// The live configuration, so a reload is visible to the next listing.
+    pub config: Arc<super::super::config::ConfigStore>,
 }
 
 impl Method for AccountList {
@@ -74,7 +74,7 @@ impl Method for AccountList {
         _params: Value,
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
-        Box::pin(async move { Ok(Outcome::query(list(&self.accounts))) })
+        Box::pin(async move { Ok(Outcome::query(list(&self.config.accounts()))) })
     }
 }
 

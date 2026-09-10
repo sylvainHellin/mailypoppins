@@ -112,8 +112,8 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.list`, `operation.status` and `state.bootstrap` are the queries this build serves.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel` is the one command this build serves.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.list`, `operation.status`, `state.bootstrap`, `config.get` and `config.validate` are the queries this build serves.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account` and `config.init` are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. No method of this build declares it: the long-running work is sync, authentication and the rebuilds, all of which arrive in Phase 5, and until then the only operation is the one the `test.operation` hook registers. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -270,6 +270,60 @@ An empty mailbox of a ready account is an empty listing, not an error.
 
 `mp --daemon list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
 
+### The `config.*` family
+
+The daemon owns the configuration: it is the only component that parses a complete `config.toml`, and `config.*` is how a client reads it, checks an edit, swaps it, adds an account and stores a password.
+Six methods, all of them `durable`, because a configuration swap undone by a disconnect would leave the daemon serving a configuration nobody chose.
+
+| method | kind | params | result |
+|---|---|---|---|
+| `config.add_account` | command | `{account: {…}}` | `{added, updated, removed}` |
+| `config.get` | query | `{}` | `{revision, path, state, config}` |
+| `config.init` | command | `{account: {…}, secrets_backend?, theme?, notifications?}` | `{added, updated, removed, path}` |
+| `config.reload` | command | `{}` | `{added, updated, removed}` |
+| `config.set_password` | command | `{account, kind, value}` | `{stored, account, kind, key}` |
+| `config.validate` | query | `{toml}` | `{ok}` or `{ok: false, errors: [{line, message}]}` |
+
+**The configuration revision.** `config.get` wraps the configuration rather than being it, because a client that reads one needs to know *which* one it read.
+`revision` starts at 0 for whatever the daemon loaded at startup, including "no configuration at all", and moves by one per successful swap; it is the same counter `config.changed` carries as `config_revision`, and it is not the state revision, which moves on every event from every source.
+A rejected candidate moves it not at all, because nothing was swapped, which is why `config.invalid` carries no revision.
+`path` and `state` are the two facts `initialize`'s `config_status` reports, spelled the same way (`ok`, `absent`, `invalid`), recomputed from the live snapshot so a client that connected before a `config.init` does not have to reconnect to learn the file now exists.
+
+**Effective means after serde defaults, not after the engine's clamps.**
+A `config.toml` that omits `smtp.port` reports `465`, because that is what `GlobalConfig` holds once it has loaded.
+The `[1, 8]` and `[0, 600]` clamps on `imap.fetch_concurrency` and `imap.body_fetch_deadline_secs` belong to `ImapConfig::load`, which needs credentials and is not on this path, so `config.get` reports the loaded value.
+Retention is reported resolved, per-account overrides layered over the global table with every optional filled in, which is what the engine acts on.
+
+**Secrets never travel.** `smtp.password` and `imap.password` are always present and always the literal `<redacted>`.
+Present, because their absence would say "no password is stored", which is a fact about the secrets backend and one a redacted read must not go and look up; the literal, because a length, a prefix or a fixed number of asterisks all leak something.
+`oauth2.client_id` is not redacted: it is a public identifier, `mp config show` prints it in the clear, and redacting it would break the one screen that exists to diagnose an OAuth2 setup.
+
+**`config.validate` is a pure function of the string it is given.**
+It reads no file, writes no file, swaps nothing and moves no revision: it is the "would this load?" a GUI asks while the user is still typing, running the same three checks the loader runs (legacy keys, the TOML parse, retention) against the parameter.
+A `line` is the 1-based line of the offending token, and `null` when the diagnostic has no position: a TOML syntax error carries a span, a semantic refusal does not, and inventing a position would send a user to an innocent line.
+
+**A swap is stop-removed, then update, then start-added, and the announcement comes last.**
+A removed account publishes `state.remove` of `account:<name>`; an updated or added one publishes `account.state_changed` when its runtime settles; `config.changed` is published after every per-account event of that swap, so everything the reload did is in front of the event that announces it.
+The order matters beyond tidiness: releasing a removed account's engine lock before an added account tries to take one is what lets an account be renamed in one edit without the new runtime losing a race to the old one.
+`config.reload` answers only once every runtime it touched has settled, so "the lock is free again" is not something a caller has to poll for.
+An account counts as *updated* when the object `config.get` reports for it changed; the three lists are sorted lexicographically, so two daemons reconciling the same edit report it identically.
+Every successful swap publishes exactly one `config.changed`, even when all three lists are empty.
+
+**A rejected candidate changes nothing.**
+`config.reload` on a file that does not load answers `-32007` with `{path, line?, message}` and publishes a `config.invalid` event carrying the same three fields, so a caller and a watcher render one diagnostic.
+The previous snapshot stays live, its runtimes keep serving and keep their engine locks, and the revision does not move.
+
+**`config.init` and `config.add_account` carry no secret and validate before they write.**
+The candidate document is built in memory, validated, and only then written, so a refusal leaves `config.toml` byte-identical.
+`config.init` refuses an existing file with `-32602` naming it, because `mp config init` asks "Overwrite? [y/N]" and a daemon has nobody to ask; `config.add_account` refuses a missing file with `-32602` naming `config.init`, and a duplicate account name with `-32602` naming the name.
+The daemon-era equivalent of the wizard's password prompt is a second call to `config.set_password`: one path into the secrets backend is one path to audit.
+
+**`config.set_password` publishes no event.**
+A stored password changes nothing a client can observe, because `config.get` said `<redacted>` before and says `<redacted>` after; its `affected` names `account:<name>` so a client holding a per-account view re-reads what depends on credentials.
+The key is the one the existing backend already uses, `smtp-password-<account>` or `imap-password-<account>`, so the daemon and the pre-daemon binary agree about where a password is.
+An unknown account is `-32005` with `{account}`, and neither its message nor its payload echoes the value: an error message is the single most likely place for a secret to escape.
+The backend is opened on first use rather than at startup, because a first run has no configuration to select one from; a daemon that has already opened one keeps it, so changing `secrets_backend` takes a restart.
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
@@ -393,7 +447,10 @@ A removal is a fact about a moment and is never merged with anything, in either 
 
 `operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
 `sync.completed` is the third lifecycle kind, described below.
-The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.removed` and `outbox.counts_changed`, which are not wire kinds: those changes travel as `state.invalidate` and `state.remove`, and the seven kinds listed here are the whole of what a client sees.
+`config.changed` and `config.invalid` are the fourth and fifth: `config.changed` carries `{added, updated, removed, config_revision}` and closes every successful swap, `config.invalid` carries `{path, line, message}` and is the diagnostic a rejected candidate publishes.
+Both are lifecycle events, so two swaps never coalesce into one: the lists are the whole payload, and merging them would hide the first swap's from a client that was slow to read.
+An account removed by a swap travels as `state.remove` of `account:<name>` and needs no kind of its own.
+The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.removed` and `outbox.counts_changed`, which are not wire kinds: those changes travel as `state.invalidate` and `state.remove`, and the kinds listed here are the whole of what a client sees.
 
 ### `sync.completed`
 

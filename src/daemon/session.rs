@@ -156,7 +156,7 @@ impl Session {
                 "restart_required": false,
                 "shutdown_on_last_client": false,
             },
-            "config_status": state.config.to_json(),
+            "config_status": state.config.report().to_json(),
         }))
     }
 }
@@ -414,11 +414,12 @@ mod tests {
                 data_dir: PathBuf::from("/tmp/mp-test-data"),
                 config_dir: PathBuf::from("/tmp/mp-test-config"),
             },
-            Vec::new(),
-            Vec::new(),
-            ConfigReport::Absent {
-                path: PathBuf::from("/tmp/mp-test-config/config.toml"),
-            },
+            std::sync::Arc::new(crate::daemon::config::ConfigStore::new(
+                PathBuf::from("/tmp/mp-test-config/config.toml"),
+                crate::daemon::config::ConfigState::Absent,
+                crate::config::GlobalConfig::default(),
+                false,
+            )),
         )
     }
 
@@ -479,6 +480,12 @@ mod tests {
                 "daemon.status".to_string(),
                 "daemon.stop".to_string(),
                 "account.list".to_string(),
+                "config.add_account".to_string(),
+                "config.get".to_string(),
+                "config.init".to_string(),
+                "config.reload".to_string(),
+                "config.set_password".to_string(),
+                "config.validate".to_string(),
                 "mailbox.list".to_string(),
                 "message.list".to_string(),
                 "operation.cancel".to_string(),
