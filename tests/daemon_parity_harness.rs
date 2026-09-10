@@ -49,7 +49,8 @@ use std::process::Output;
 use tempfile::TempDir;
 
 use support::parity::{
-    assert_byte_identical, oracle, oracle_bin, process_is_alive, socket_path, DaemonFixture,
+    assert_byte_identical, daemon_is_listening, mp_no_daemon, oracle, oracle_bin, pgrep_line_for,
+    process_is_alive, socket_path, DaemonFixture, EXIT_UNAVAILABLE,
 };
 
 /// The commands compared in the agreement test, with the name each assertion
@@ -58,37 +59,6 @@ const UNMIGRATED: [&[&str]; 3] = [&["--version"], &["config", "path"], &["list-m
 
 fn root() -> TempDir {
     TempDir::new().expect("a temporary parity root")
-}
-
-/// Every `mp daemon run` this host can see, as `pgrep -af` reports it: one
-/// line per process, pid first.
-fn daemon_pgrep_lines() -> Vec<String> {
-    let out = std::process::Command::new("pgrep")
-        .args(["-af", "[m]p daemon"])
-        .output()
-        .expect("run pgrep");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// The `pgrep` line for `pid`, if the process list still holds one.
-///
-/// The assertion is scoped to one pid rather than to "the list is empty"
-/// because it is neither: this binary runs its tests on several threads, so a
-/// sibling test's fixture is legitimately in the list while this one checks,
-/// and so is a daemon the developer started by hand. Neither is a leak this
-/// fixture caused, and a set difference taken across two `pgrep` calls races
-/// the siblings instead.
-fn pgrep_line_for(pid: u32) -> Option<String> {
-    daemon_pgrep_lines().into_iter().find(|line| {
-        line.split_whitespace()
-            .next()
-            .and_then(|first| first.parse::<u32>().ok())
-            == Some(pid)
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +351,100 @@ fn a_second_fixture_can_bind_the_same_root_after_the_first_has_stopped() {
         "which bound the same socket path the first one unlinked on its way out"
     );
     second.stop();
+}
+
+// ---------------------------------------------------------------------------
+// 4. The harness can also run with no daemon at all (P4-U2)
+// ---------------------------------------------------------------------------
+
+/// [`mp_no_daemon`] is the other half of the fixture: a slice asserting that a
+/// command needs no daemon needs a way to run it with none, and with none
+/// appearing either.
+#[test]
+fn the_no_daemon_helper_runs_a_command_and_starts_nothing() {
+    let tmp = root();
+    let out = mp_no_daemon(&["config", "path"], tmp.path());
+
+    assert_eq!(out.status.code(), Some(0), "`mp config path` needs nothing");
+    assert!(
+        !socket_path(tmp.path()).exists(),
+        "and nothing bound {}",
+        socket_path(tmp.path()).display()
+    );
+    assert!(
+        !daemon_is_listening(tmp.path()),
+        "nor is anything answering there"
+    );
+}
+
+/// The same helper on a command that does need one: exit 4, not a fallback and
+/// not a spawned daemon.
+#[test]
+fn the_no_daemon_helper_leaves_a_routed_command_at_exit_four() {
+    let tmp = root();
+    let out = mp_no_daemon(&["--daemon", "account", "list"], tmp.path());
+
+    assert_eq!(
+        out.status.code(),
+        Some(EXIT_UNAVAILABLE),
+        "a routed command with auto-start off exits {EXIT_UNAVAILABLE}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !socket_path(tmp.path()).exists(),
+        "auto-start was off, so nothing was started"
+    );
+}
+
+/// A daemon started from `/` serves a client standing anywhere: its own
+/// working directory carries no meaning, because the client resolves every
+/// path before it crosses the socket.
+#[test]
+fn a_daemon_started_from_root_answers_a_client_standing_elsewhere() {
+    let tmp = root();
+    let elsewhere = root();
+    let fixture = DaemonFixture::start_in(tmp.path(), Some(Path::new("/")));
+
+    let from_root = fixture.mp_in(Path::new("/"), &["--daemon", "account", "list"]);
+    let from_temp = fixture.mp_in(elsewhere.path(), &["--daemon", "account", "list"]);
+    fixture.stop();
+
+    assert_eq!(from_temp.status.code(), Some(0), "the routed command works");
+    assert_byte_identical(&from_temp, &from_root);
+}
+
+/// The require hook fails a command that answered in process. Every command
+/// does today, which is exactly why the hook exists before the slices: a slice
+/// that migrates one flips this assertion from failing to passing, and that
+/// flip is the proof the command really routed.
+#[test]
+fn the_require_hook_fails_a_command_that_answered_in_process() {
+    let tmp = root();
+    let fixture = DaemonFixture::start(tmp.path());
+    // The same command twice, once in process and once over the socket, so the
+    // only difference between the two runs is the thing being asserted.
+    let unmigrated = fixture.mp_routed(&["account", "list"]);
+    let routed = fixture.mp_routed(&["--daemon", "account", "list"]);
+    fixture.stop();
+
+    assert_ne!(
+        unmigrated.status.code(),
+        Some(0),
+        "`mp account list` without the flag answers from its own process, and the hook must not \
+         let that pass\nstdout: {}",
+        String::from_utf8_lossy(&unmigrated.stdout)
+    );
+    let complaint = String::from_utf8_lossy(&unmigrated.stderr);
+    assert!(
+        complaint.contains("MAILYPOPPINS_DAEMON_REQUIRE") && complaint.contains("account list"),
+        "the failure names the hook and the command: {complaint}"
+    );
+    assert_eq!(
+        routed.status.code(),
+        Some(0),
+        "`mp --daemon account list` does route, so the hook is satisfied\nstderr: {}",
+        String::from_utf8_lossy(&routed.stderr)
+    );
 }
 
 #[test]

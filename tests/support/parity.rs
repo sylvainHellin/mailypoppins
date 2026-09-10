@@ -58,6 +58,32 @@
 //!   3.0 fixes.
 //! - [`MP`] - the just-built `mp` under test.
 //!
+//! # Running without a daemon (P4-U2)
+//!
+//! Three helpers cover the other half of the migration, the one where no
+//! daemon is listening:
+//!
+//! - [`mp_no_daemon`] runs the client with `MAILYPOPPINS_DAEMON_AUTOSTART=0`,
+//!   so a command that would have started one exits 4 instead. That is what a
+//!   no-daemon-list assertion needs: "it ran, and nothing appeared".
+//! - [`mp_autostart`] runs it with auto-start on and the bound set through
+//!   `MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS`, so a test waits milliseconds
+//!   rather than the five-second default.
+//! - [`stop_daemon`] ends whatever the auto-start left behind. It has to be a
+//!   command rather than a kill, because a daemon this process did not spawn
+//!   is nobody's child: `mp daemon run` detaches into its own session.
+//!
+//! [`DaemonFixture::start_in`] and [`DaemonFixture::mp_in`] give the daemon
+//! and the client different working directories, which is how a test proves
+//! the daemon's own cwd carries no meaning: start it from `/`, run the client
+//! from a temp directory, and a relative path still resolves under the temp
+//! directory.
+//!
+//! [`DaemonFixture::mp_routed`] sets `MAILYPOPPINS_DAEMON_REQUIRE=1`, which
+//! makes a command that answered in process fail loudly instead of passing a
+//! parity comparison it never earned. Until a slice migrates a command, every
+//! command fails under it; that is the point of having it before the slices.
+//!
 //! # Process hygiene
 //!
 //! [`DaemonFixture`] kills and reaps its daemon on [`DaemonFixture::stop`] and
@@ -103,7 +129,10 @@ const LOCK_TIMEOUT_SECS: u64 = 2100;
 
 /// Every daemon environment hook `docs/daemon-operations.md` documents, removed
 /// from any child this module spawns.
-pub const DAEMON_ENV_HOOKS: [&str; 10] = [
+pub const DAEMON_ENV_HOOKS: [&str; 13] = [
+    "MAILYPOPPINS_DAEMON_AUTOSTART",
+    "MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS",
+    "MAILYPOPPINS_DAEMON_REQUIRE",
     "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES",
     "MAILYPOPPINS_DAEMON_FAIL_START",
     "MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS",
@@ -171,8 +200,22 @@ pub struct DaemonFixture {
 impl DaemonFixture {
     /// Boot a daemon against `tmp`, used as both the data and the config root.
     pub fn start(tmp: &Path) -> Self {
+        Self::start_in(tmp, None)
+    }
+
+    /// Boot a daemon against `tmp` from a chosen working directory.
+    ///
+    /// `cwd` exists for one assertion: a daemon started from `/` must answer
+    /// exactly as one started from the test's temp directory, because the
+    /// client resolves every path before it crosses the socket. A daemon whose
+    /// cwd mattered would produce a different answer here, which is the
+    /// failure P4-U2's absolutisation rule prevents.
+    pub fn start_in(tmp: &Path, cwd: Option<&Path>) -> Self {
         fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
         let mut cmd = mp_command(tmp);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         let child = cmd
             .args(["daemon", "run"])
             .stdout(Stdio::null())
@@ -205,6 +248,34 @@ impl DaemonFixture {
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("run `mp {}`: {e}", args.join(" ")))
+    }
+
+    /// Run the client from `cwd`, against the same root.
+    ///
+    /// The client is the process with a meaningful working directory, so this
+    /// is where a relative `-o` or a relative `attachments:` entry is anchored.
+    pub fn mp_in(&self, cwd: &Path, args: &[&str]) -> Output {
+        mp_command(&self.root)
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run `mp {}` in {}: {e}", args.join(" "), cwd.display()))
+    }
+
+    /// Run the client with [`REQUIRE_ENV`] set, so a command that answered
+    /// from its own process fails instead of passing for the daemon's work.
+    ///
+    /// A slice migrating a command switches its parity assertion from [`mp`]
+    /// to this the moment the command routes, and the assertion stops being a
+    /// tautology.
+    ///
+    /// [`mp`]: DaemonFixture::mp
+    pub fn mp_routed(&self, args: &[&str]) -> Output {
+        mp_command(&self.root)
+            .env(REQUIRE_ENV, "1")
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run routed `mp {}`: {e}", args.join(" ")))
     }
 
     /// Terminate the daemon and wait until it is really gone.
@@ -249,6 +320,131 @@ impl Drop for DaemonFixture {
     fn drop(&mut self) {
         self.terminate();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Running without a daemon
+// ---------------------------------------------------------------------------
+
+/// `MAILYPOPPINS_DAEMON_AUTOSTART`: `0` turns on-demand starting off.
+pub const AUTOSTART_ENV: &str = "MAILYPOPPINS_DAEMON_AUTOSTART";
+
+/// `MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS`: the whole auto-start budget.
+pub const AUTOSTART_TIMEOUT_ENV: &str = "MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS";
+
+/// `MAILYPOPPINS_DAEMON_REQUIRE`: fail a command that did not route.
+pub const REQUIRE_ENV: &str = "MAILYPOPPINS_DAEMON_REQUIRE";
+
+/// The exit code of a client that could not reach a daemon (plan section 3.0).
+pub const EXIT_UNAVAILABLE: i32 = 4;
+
+/// Run `mp` against `root` with no daemon listening and auto-start off.
+///
+/// The assertion this enables is "the command ran, and no daemon appeared":
+/// with auto-start on, a command that needs one would start it and the test
+/// could no longer tell a no-daemon-list command from a migrated one.
+pub fn mp_no_daemon(args: &[&str], root: &Path) -> Output {
+    fs::create_dir_all(root).unwrap_or_else(|e| panic!("create {}: {e}", root.display()));
+    mp_command(root)
+        .env(AUTOSTART_ENV, "0")
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run `mp {}` without a daemon: {e}", args.join(" ")))
+}
+
+/// Run `mp` against `root` with auto-start on and the whole budget set to
+/// `budget_ms`, from `cwd` when one is given.
+///
+/// The budget is explicit because the default is five seconds and a test that
+/// expects a failure would otherwise pay all of it; a test that expects a
+/// success needs it long enough for a real daemon to bind, which is well under
+/// a second on this tree.
+pub fn mp_autostart(args: &[&str], root: &Path, budget_ms: u64, cwd: Option<&Path>) -> Output {
+    fs::create_dir_all(root).unwrap_or_else(|e| panic!("create {}: {e}", root.display()));
+    let mut cmd = mp_command(root);
+    cmd.env(AUTOSTART_TIMEOUT_ENV, budget_ms.to_string());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run `mp {}` with auto-start: {e}", args.join(" ")))
+}
+
+/// Stop whatever daemon is running against `root`, and wait until the socket
+/// is gone.
+///
+/// A daemon an auto-start produced is not this process's child: `mp daemon
+/// run` detaches into its own session, which is what keeps it alive after the
+/// client that wanted it exits. So it is ended the way a user would end it,
+/// through `mp daemon stop`, rather than with a signal to a pid nobody owns.
+pub fn stop_daemon(root: &Path) -> Output {
+    let out = mp_command(root)
+        .env(AUTOSTART_ENV, "0")
+        .args(["daemon", "stop"])
+        .output()
+        .unwrap_or_else(|e| panic!("run `mp daemon stop` against {}: {e}", root.display()));
+    let socket = socket_path(root);
+    let start = Instant::now();
+    while socket.exists() {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "`mp daemon stop` returned but {} is still there after {DEADLINE:?}",
+            socket.display()
+        );
+        std::thread::sleep(TICK);
+    }
+    out
+}
+
+/// Whether anything currently accepts a connection on `root`'s socket.
+pub fn daemon_is_listening(root: &Path) -> bool {
+    UnixStream::connect(socket_path(root)).is_ok()
+}
+
+/// Every `mp daemon run` this host can see, as `pgrep -af` reports it: one
+/// line per process, pid first.
+///
+/// The bracket in the pattern is the usual trick that keeps `pgrep` from
+/// matching its own command line.
+pub fn daemon_pgrep_lines() -> Vec<String> {
+    let out = Command::new("pgrep")
+        .args(["-af", "[m]p daemon"])
+        .output()
+        .expect("run pgrep");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The `pgrep` line for `pid`, if the process list still holds one.
+///
+/// The assertion is scoped to one pid rather than to "the list is empty"
+/// because it is neither: a test binary runs on several threads, so a sibling
+/// test's fixture is legitimately in the list while this one checks, and so is
+/// a daemon the developer started by hand. Neither is a leak the caller
+/// caused, and a set difference taken across two `pgrep` calls races the
+/// siblings instead.
+pub fn pgrep_line_for(pid: u32) -> Option<String> {
+    daemon_pgrep_lines().into_iter().find(|line| {
+        line.split_whitespace()
+            .next()
+            .and_then(|first| first.parse::<u32>().ok())
+            == Some(pid)
+    })
+}
+
+/// The pid in `<root>/runtime/daemon.pid`, if a daemon wrote one.
+///
+/// Diagnostic only, exactly as the runtime layout says: it answers "which
+/// process did the auto-start produce", which is what a leak assertion needs,
+/// and never "is a daemon running", which is the socket's question.
+pub fn daemon_pid_file(root: &Path) -> Option<u32> {
+    fs::read_to_string(root.join("runtime").join("daemon.pid"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
 }
 
 /// Whether `pid` still names a live or unreaped process.

@@ -1611,3 +1611,18 @@ Cargo autodiscovers `tests/*.rs` **and** `tests/*/main.rs` as integration-test t
 A shared helper module therefore lives at `tests/support/mod.rs`, reached by `mod support;` from each test binary that wants it; adding `tests/support.rs` or `tests/support/main.rs` turns it into a test binary of its own with no `#[test]` in it.
 
 The cost of the arrangement is that each test binary compiles its own copy of the module and warns about every item it does not use, which is what the `#![allow(dead_code)]` at the top of `tests/support/mod.rs` and `tests/support/parity.rs` is for.
+
+## The command name a daemon policy is written in comes from clap, not from a match
+
+`needs_daemon` is written in the names a user types: `daemon`, `dump-keys`, `config path`.
+Deriving them from a 40-arm match over the `Commands` enum would restate every `#[command(name = …)]` clap already knows, and a renamed variant would silently move a command on or off the no-daemon list.
+
+`Cli::parse()` is `from_arg_matches(command().get_matches())`, so splitting it into those two lines costs nothing and leaves the `ArgMatches` in hand: `matches.subcommand_name()` and the nested one on the inner matches give the typed names, kebab-case included, with no second source of truth.
+`get_matches` answers `--help` and `--version` and exits exactly as `parse` does, so the help surface does not move.
+
+## A test that needs "a start that never becomes ready" can hold the start lock itself
+
+`MAILYPOPPINS_DAEMON_FAIL_START=1` produces a daemon that dies, which the start routine detects through `try_wait` and reports immediately: a good test of the diagnostic, and no test at all of the timeout, because it never spends the budget.
+
+`flock`ing `<root>/runtime/daemon.start.lock` from the test body is the other case.
+The client's auto-start cannot take the lock, concludes another starter is ahead of it, and waits out its whole bound for a readiness nobody will deliver, which is what makes `elapsed >= budget` assertable at 800 ms instead of at the five-second default.
