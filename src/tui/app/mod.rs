@@ -5,6 +5,7 @@ mod keymap;
 mod keys;
 #[cfg(test)]
 mod queries_tests;
+mod store_rows;
 mod types;
 
 pub use calendar_view::load_events_for_account;
@@ -1383,7 +1384,7 @@ impl App {
                     }
                 ));
                 match entry {
-                    EntryKey::Msg(msg) => self.load_message_body(*msg).unwrap_or_default(),
+                    EntryKey::Msg(msg) => self.message_body(*msg).unwrap_or_default(),
                     EntryKey::Draft(id) => self.load_draft_body(id).unwrap_or_default(),
                 }
             }
@@ -1461,20 +1462,43 @@ impl App {
         crate::parse::extract_email_address(&self.account_config.default_from)
     }
 
+    /// Read one message body for the preview memo (P5-U4).
+    ///
+    /// One `message.get` on the session the `App` holds, which is the
+    /// per-cursor-move read `docs/plans/preview-latency.md` measures: the memo
+    /// above it means a frame on an unchanged selection issues nothing at all,
+    /// and a move issues exactly one call.
+    ///
+    /// `None` means the row is gone or the daemon refused it, which the preview
+    /// shows as an empty body and the log explains, exactly as a stale
+    /// reference has always behaved.
+    pub(crate) fn message_body(&self, msg: MessageRef) -> Option<String> {
+        let account = self.account_config.name.clone();
+        match self.queries() {
+            Some(queries) => super::queries::message_body(queries, &account, msg)
+                .unwrap_or_else(|e| {
+                    log::warn!("[queries] previewing {msg} of {account}: {e:#}");
+                    None
+                }),
+            None => self.load_message_body(msg),
+        }
+    }
+
+    /// The daemon session as a query source, or `None` for an `App` that has
+    /// none: a wedged `Session::connect` (P5-U2) and every unit test.
+    pub(crate) fn queries(&self) -> Option<&dyn super::queries::Queries> {
+        self.session
+            .as_ref()
+            .map(|session| session as &dyn super::queries::Queries)
+    }
+
     /// Read one message body from the active account's blob store.
     ///
-    /// `None` means the row itself is gone, which is a stale reference rather
-    /// than an evicted body; the preview shows an empty body either way, and
-    /// the log says which happened.
+    /// The pre-daemon path, which is [`Self::message_body`]'s fallback and the
+    /// oracle its contract test compares against; see
+    /// [`super::store_rows`].
     fn load_message_body(&self, msg: MessageRef) -> Option<String> {
-        let account = &self.account_config.name;
-        let store = open_store(account)?;
-        let blobs = crate::store::BlobStore::for_account(account);
-        let body = crate::store::read::load_body(&store, &blobs, msg.row_id());
-        if body.is_none() {
-            log::warn!("[store] {msg} is not in the store; previewing an empty body");
-        }
-        body
+        store_rows::load_message_body(&self.account_config.name, msg)
     }
 
     /// Read one draft's body from the file the drafts index points at.
@@ -1900,10 +1924,22 @@ impl App {
         self.restore_cursor(anchor, fallback);
     }
 
-    /// Recount all mailbox sizes with one grouped query (#0038).
+    /// Recount all mailbox sizes with one query (#0038, P5-U4).
     /// Only needed after full sync/reconciliation that moves emails between mailboxes.
+    ///
+    /// One `mailbox.list` where it was one grouped store query, on the same
+    /// thread it always ran on: this is a recount after a sync, not a
+    /// per-keystroke read.
     pub fn recount_all_mailboxes(&mut self) {
-        self.mailbox_counts = count_all_emails(&self.account_config.name, &self.mailboxes);
+        let account = self.account_config.name.clone();
+        self.mailbox_counts = match self.queries() {
+            Some(queries) => super::queries::mailbox_counts(queries, &account, &self.mailboxes)
+                .unwrap_or_else(|e| {
+                    log::warn!("[queries] recounting the mailboxes of {account}: {e:#}");
+                    vec![0; self.mailboxes.len()]
+                }),
+            None => count_all_emails(&account, &self.mailboxes),
+        };
     }
 
     pub(crate) fn switch_mailbox(&mut self, idx: usize) {

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 
 use crate::parse::FetchedEmail;
-use crate::store::read::{self, MessageRow};
-use crate::store::{drafts, open_store, Store};
+use crate::store::read::MessageRow;
+use crate::store::{drafts, Store};
 use crate::types::MailboxRole;
 
 // ---------------------------------------------------------------------------
@@ -204,48 +204,15 @@ impl EmailEntry {
     }
 }
 
-/// Load one mailbox of one account from the store, newest first.
+/// The store-backed mailbox load and sidebar count, which are no longer this
+/// module's: the query layer replaced both call sites (P5-U4) and
+/// [`super::store_rows`] is where the store-backed pair lives now, as the
+/// equality oracle and as what a sessionless `App` reads.
 ///
-/// `mailbox` is the role or slug ingest recorded, which is the leaf of the
-/// `MailboxInfo::dir` the sidebar carries (see [`mailbox_key`]).
-///
-/// There is no directory walk and no fallback to one. After #0037 nothing
-/// writes `.md`, so a message that is not in the store is an ingest bug, and a
-/// walk that produced it anyway would hide that bug behind a slow path.
-/// A store that cannot be opened or queried logs and yields an empty list,
-/// which is what a mailbox that has never synced looks like anyway.
-///
-/// One SQL query and no blob reads at all: the bodies are loaded lazily, one
-/// at a time behind the preview (see [`PreviewBody`]) and once per list
-/// generation behind body search. The `[TIMING]` span for a cold start
-/// therefore shows a single row-count mark and nothing else.
-pub fn load_emails(account: &str, mailbox: &str) -> Vec<EmailEntry> {
-    let mut span = crate::timing::TimingSpan::with_context(
-        "load_emails",
-        format!("{account}/{mailbox}"),
-    );
-    if mailbox == crate::selector::DRAFTS_MAILBOX {
-        let entries = load_drafts(account);
-        span.mark(&format!("{} draft(s) from the index", entries.len()));
-        return entries;
-    }
-    let Some(store) = open_store(account) else {
-        return Vec::new();
-    };
-    let rows = match read::list_mailbox(&store, account, mailbox) {
-        Ok(rows) => rows,
-        Err(e) => {
-            log::warn!("[store] listing {account}/{mailbox} failed: {e:#}");
-            return Vec::new();
-        }
-    };
-    span.mark(&format!("{} row(s), no blob reads", rows.len()));
-
-    let status = status_for_mailbox(mailbox);
-    rows.into_iter()
-        .map(|row| entry_from_row(row, &status))
-        .collect()
-}
+/// Re-exported here because they were `tui::app::load_emails` and
+/// `tui::app::count_all_emails` before Phase 5 and the tests of this module
+/// still compare against them.
+pub use super::store_rows::{count_all_emails, load_emails};
 
 /// The Drafts mailbox, listed from the drafts index instead of `messages`
 /// (#0050 scope item 5).
@@ -264,7 +231,7 @@ pub fn load_emails(account: &str, mailbox: &str) -> Vec<EmailEntry> {
 /// such a send retires the file (see [`crate::draft::settle_sent_draft`]); a
 /// *partial* send, or one with no durable record, keeps it, marked `sent` and
 /// addressable.
-fn load_drafts(account: &str) -> Vec<EmailEntry> {
+pub(super) fn load_drafts(account: &str) -> Vec<EmailEntry> {
     let (rows, skipped) = indexed_drafts(account);
     // The unparseable files lead the list: they are the ones the user is
     // hunting for ("my draft disappeared"), and they have no date to sort by,
@@ -310,41 +277,6 @@ fn indexed_drafts(account: &str) -> (Vec<drafts::DraftRow>, Vec<drafts::SkippedD
             (Vec::new(), skipped)
         }
     }
-}
-
-/// Per-mailbox message counts for the sidebar, as one grouped query.
-///
-/// Index-aligned with `mailboxes`: a mailbox the store has no rows for counts
-/// zero, so a configured-but-never-synced mailbox keeps its slot rather than
-/// shifting every count after it.
-///
-/// Drafts are the exception, and have to be: they are not `messages` rows, so
-/// the grouped query cannot see them and the sidebar would show 0 next to a
-/// populated list. That count comes from [`indexed_drafts`], the same refresh
-/// plus read the Drafts mailbox load itself does.
-pub fn count_all_emails(account: &str, mailboxes: &[MailboxInfo]) -> Vec<usize> {
-    let store = open_store(account);
-    let counts = store
-        .as_ref()
-        .and_then(|store| match read::mailbox_counts(store, account) {
-            Ok(counts) => Some(counts),
-            Err(e) => {
-                log::warn!("[store] counting mailboxes for {account} failed: {e:#}");
-                None
-            }
-        })
-        .unwrap_or_default();
-    mailboxes
-        .iter()
-        .map(|mb| {
-            let key = mailbox_key(mb);
-            if key == crate::selector::DRAFTS_MAILBOX {
-                draft_count(account)
-            } else {
-                counts.get(&key).copied().unwrap_or(0)
-            }
-        })
-        .collect()
 }
 
 /// How many rows the Drafts mailbox holds, for whoever labels it.
@@ -432,7 +364,7 @@ pub(crate) fn entry_from_row(row: MessageRow, status: &str) -> EmailEntry {
 /// The date falls back to the filename through the same [`resolve_date`] the
 /// file build used, so a draft whose frontmatter has no `date:` yet still
 /// sorts by its `YYYY-MM-DD-...` stem rather than collapsing to the bottom.
-fn entry_from_draft(row: crate::store::drafts::DraftRow) -> EmailEntry {
+pub(crate) fn entry_from_draft(row: crate::store::drafts::DraftRow) -> EmailEntry {
     let (date_display, date_sort) = resolve_date(&row.date, &None, &row.path);
     EmailEntry {
         msg: None,
@@ -471,7 +403,7 @@ fn entry_from_draft(row: crate::store::drafts::DraftRow) -> EmailEntry {
 /// the `skip` for the preview pane and the row's error styling. `read` is true
 /// so the list does not render it bold as if it were unread mail; the error
 /// colour is what marks it, decided by [`crate::tui::ui::list`].
-fn entry_from_skip(skip: crate::store::drafts::SkippedDraft) -> EmailEntry {
+pub(crate) fn entry_from_skip(skip: crate::store::drafts::SkippedDraft) -> EmailEntry {
     let (date_display, date_sort) = resolve_date(&None, &None, &skip.path);
     let filename = skip
         .path
@@ -2246,6 +2178,12 @@ pub fn build_mailboxes(config: &crate::config::AccountConfig) -> Vec<MailboxInfo
 mod tests {
     use super::*;
     use std::path::Path;
+
+    // The store-backed readers this module used to own moved to
+    // `super::store_rows` with P5-U4 (#0124), and with them the two imports
+    // only their tests still need.
+    use crate::store::open_store;
+    use crate::store::read;
 
     // -----------------------------------------------------------------------
     // Action::suspends_terminal (#0108)

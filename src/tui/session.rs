@@ -181,18 +181,28 @@ impl Session {
 
     /// Call one method and wait for its answer.
     ///
-    /// The door the query layer (P5-U3/U4) will use for a read the frame cannot
-    /// be painted without. It blocks the UI thread, so a call that can be
-    /// awaited off-frame belongs in [`Session::dispatch`] instead.
+    /// The door the query layer (P5-U4) uses for a read the frame cannot be
+    /// painted without. It blocks the UI thread, so a call that can be awaited
+    /// off-frame belongs in [`Session::dispatch`] or on a [`QueryHandle`] of a
+    /// worker thread instead.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let (answer, wait) = sync_mpsc::sync_channel::<Result<Value, String>>(1);
-        self.dispatch(method, params, move |result| {
-            let _ = answer.send(result);
-        });
-        match wait.recv_timeout(CALL_TIMEOUT) {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(e)) => Err(anyhow!("{method}: {e}")),
-            Err(e) => Err(anyhow!("{method}: no answer from the daemon ({e})")),
+        match self.calls.as_ref() {
+            Some(calls) => call_on(calls, method, params),
+            None => Err(anyhow!("{method}: the daemon session is closed")),
+        }
+    }
+
+    /// A blocking door onto this session that a worker thread can own.
+    ///
+    /// The `App` owns the `Session` and the UI thread owns the `App`, so a
+    /// background load cannot borrow one. A handle is the call channel and
+    /// nothing else: it starts no second connection, it keeps no session alive
+    /// (a call on a handle whose session has closed fails like any other), and
+    /// it is what keeps the mailbox walk of #0003 off the draw thread now that
+    /// the walk is a daemon call.
+    pub fn handle(&self) -> QueryHandle {
+        QueryHandle {
+            calls: self.calls.clone(),
         }
     }
 
@@ -229,5 +239,47 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// A cloneable, sendable door onto a [`Session`], for a thread that is not the
+/// UI thread. See [`Session::handle`].
+#[derive(Clone, Debug)]
+pub struct QueryHandle {
+    /// `None` for a handle taken from a session that was already closed.
+    calls: Option<async_mpsc::UnboundedSender<Call>>,
+}
+
+impl QueryHandle {
+    /// Call one method and wait for its answer, on whatever thread holds this.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value> {
+        match self.calls.as_ref() {
+            Some(calls) => call_on(calls, method, params),
+            None => Err(anyhow!("{method}: the daemon session is closed")),
+        }
+    }
+}
+
+/// Post one call and block for its answer, which is what both doors do.
+fn call_on(
+    calls: &async_mpsc::UnboundedSender<Call>,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let (answer, wait) = sync_mpsc::sync_channel::<Result<Value, String>>(1);
+    let call = Call {
+        method: method.to_string(),
+        params,
+        then: Box::new(move |result| {
+            let _ = answer.send(result);
+        }),
+    };
+    if calls.send(call).is_err() {
+        return Err(anyhow!("{method}: the daemon session is closed"));
+    }
+    match wait.recv_timeout(CALL_TIMEOUT) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(anyhow!("{method}: {e}")),
+        Err(e) => Err(anyhow!("{method}: no answer from the daemon ({e})")),
     }
 }

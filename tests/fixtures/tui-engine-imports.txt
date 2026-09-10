@@ -2,6 +2,7 @@ actions.rs send
 actions.rs store
 app/calendar_view.rs store
 app/mod.rs store
+app/store_rows.rs store
 app/types.rs ingest
 app/types.rs store
 helpers.rs imap_client
@@ -10,3 +11,4 @@ mod.rs store
 mutations.rs ops
 mutations.rs pending_ops
 mutations.rs store
+queries.rs store

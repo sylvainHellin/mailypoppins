@@ -404,6 +404,39 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
     }
 }
 
+/// Fold one row delta into the open list, or ask for the mailbox again
+/// (P5-U4).
+///
+/// The consumer end of [`crate::tui::queries::MessageRowDelta`], and the seam
+/// P5-U8 connects to the session's event stream: this build subscribes to that
+/// stream and drains none of it (P5-U2), and it starts no account runtime, so
+/// no event exists to drain yet. What is here is the whole of what an event
+/// costs the list once one does: a replace lands where the row stands, a
+/// removal drops it, and anything the client cannot apply reloads the mailbox
+/// through the same off-thread path a mailbox switch takes.
+///
+/// The cache slot moves with the list, because the two share the allocation and
+/// a slot that kept the pre-delta rows would undo the delta on the next visit.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowDelta) -> bool {
+    let Some(mailbox) = app.current_local_mailbox_key() else {
+        return true;
+    };
+    let mut rows = (*app.emails).clone();
+    if super::queries::apply_row_delta(&mut rows, &mailbox, delta) {
+        let rows = std::sync::Arc::new(rows);
+        if let Some(slot) = app.email_cache.get_mut(app.active_mailbox) {
+            *slot = Some(std::sync::Arc::clone(&rows));
+        }
+        app.emails = rows;
+        app.scrub_selection();
+        app.rebuild_visible();
+        return true;
+    }
+    app.reload_current_mailbox();
+    false
+}
+
 /// Land a fetch-into-store result on the overlay (#0104): the hit named by
 /// its Message-ID becomes a resolved row, and the mailbox lists pick the new
 /// row up. Shared by the Graph inline path (`actions::fetch_search_hit`) and
@@ -898,6 +931,82 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, crate::tui::app::Action::FetchAccount(0))),
             "a remote active account kicks its startup auto-fetch after the open"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Row deltas over the open list (P5-U4, the seam P5-U8 turns on)
+    // -----------------------------------------------------------------------
+
+    /// One `message.row` event for the open mailbox lands in the list and in
+    /// the cache slot that shares its allocation, and owes no reload.
+    #[test]
+    fn a_row_delta_for_the_open_mailbox_lands_in_the_list_and_its_cache_slot() {
+        let _data = DataDir::new();
+        let mut app = app_with_warm_caches();
+
+        let delta = super::super::queries::MessageRowDelta::decode(&mp_protocol::EventEnvelope {
+            instance_id: "bg".to_string(),
+            revision: 3,
+            kind: "message.row".to_string(),
+            payload: serde_json::json!({
+                "account": "alice",
+                "mailbox": "archive",
+                "message": {
+                    "id": 7,
+                    "uid": 7,
+                    "message_id": "<seven@example.com>",
+                    "from": "Sender <s@example.com>",
+                    "to": "me@example.com",
+                    "cc": serde_json::Value::Null,
+                    "reply_to": serde_json::Value::Null,
+                    "bcc": serde_json::Value::Null,
+                    "subject": "Seven",
+                    "date_sort": "2024-01-01T09:00:00",
+                    "date_display": "Mon, 01 Jan 2024 09:00:00 +0000",
+                    "flags": {"seen": true, "answered": false, "forwarded": false, "flagged": false},
+                    "has_attachments": false,
+                    "is_invite": false,
+                },
+            }),
+        })
+        .expect("a message.row event decodes");
+
+        assert!(apply_row_delta(&mut app, &delta), "a replace owes no reload");
+        assert_eq!(app.emails.len(), 1);
+        assert_eq!(app.emails[0].subject, "Seven");
+        assert_eq!(
+            app.email_cache[1].as_ref().map(|rows| rows.len()),
+            Some(1),
+            "the cache slot moves with the list it shares an allocation with"
+        );
+    }
+
+    /// An invalidate over the open mailbox's listing owes a reload, which goes
+    /// through the same off-thread path a mailbox switch takes.
+    #[test]
+    fn an_invalidate_over_the_open_mailbox_reloads_it_off_the_ui_thread() {
+        let _data = DataDir::new();
+        let mut app = app_with_warm_caches();
+
+        let delta = super::super::queries::MessageRowDelta::decode(&mp_protocol::EventEnvelope {
+            instance_id: "bg".to_string(),
+            revision: 4,
+            kind: "state.invalidate".to_string(),
+            payload: serde_json::json!({
+                "resource": "mailbox:alice/archive",
+                "scope": {"query": "list"},
+            }),
+        })
+        .expect("a state.invalidate over a listing decodes");
+
+        assert!(!apply_row_delta(&mut app, &delta), "an invalidate owes a reload");
+        assert!(
+            app.pending_actions.iter().any(|a| matches!(
+                a,
+                crate::tui::app::Action::LoadMailbox { mailbox_idx: 1, .. }
+            )),
+            "the reload is queued as the background load, not run here"
         );
     }
 }

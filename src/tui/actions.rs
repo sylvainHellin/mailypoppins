@@ -1807,23 +1807,40 @@ pub(super) fn handle_action(
         }
 
         Action::LoadMailbox { mailbox_idx, generation } => {
-            // Background mailbox walk (P1 step 2). Queued by
-            // `App::request_mailbox_load` on cache-miss switches/reloads so
-            // `load_emails` (seconds on large mailboxes) never blocks the
-            // UI thread. Follows the `BgResult::IndexReady` pattern:
+            // Background mailbox load (P1 step 2, daemon-backed since P5-U4).
+            // Queued by `App::request_mailbox_load` on cache-miss
+            // switches/reloads so the load (seconds on large mailboxes) never
+            // blocks the UI thread. Follows the `BgResult::IndexReady` pattern:
             // bump `bg_count` (spinner), spawn, deliver via `bg_tx`. The
             // handler in `tui/bg.rs` drops the result if the generation
             // or account/mailbox indices went stale meanwhile.
+            //
+            // The thread stays: what changed is that it blocks on one
+            // `message.list` (or `draft.list`) through a `QueryHandle` instead
+            // of on a store open, so the wait is still off the draw thread and
+            // the whole-list transfer is paid once per mailbox open, as
+            // `docs/baselines/decisions/list-transfer.md` chose.
             let mailbox = match app.mailboxes.get(mailbox_idx) {
                 Some(mb) => super::app::mailbox_key(mb),
                 None => return Ok(()),
             };
             let account = app.account_config.name.clone();
             let account_index = app.active_account;
+            let queries = app.session.as_ref().map(|session| session.handle());
             app.bg_count += 1;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
-                let entries = super::app::load_emails(&account, &mailbox);
+                let entries = match queries {
+                    Some(queries) => {
+                        super::queries::list_emails(&queries, &account, &mailbox).unwrap_or_else(
+                            |e| {
+                                log::warn!("[queries] listing {account}/{mailbox}: {e:#}");
+                                Vec::new()
+                            },
+                        )
+                    }
+                    None => super::app::load_emails(&account, &mailbox),
+                };
                 let _ = tx.send(BgResult::MailboxLoaded {
                     account_index,
                     mailbox_idx,

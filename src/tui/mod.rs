@@ -4,6 +4,7 @@ mod bg;
 mod event;
 mod helpers;
 mod mutations;
+pub mod queries;
 mod runtime;
 pub mod session;
 pub mod theme;
@@ -177,12 +178,24 @@ fn run_loop(
         let account_name = acct.account_config.name.clone();
         let mailboxes = acct.mailboxes.clone();
         let tx = bg_tx.clone();
+        let queries = app.session.as_ref().map(|session| session.handle());
         app.bg_count += 1;
         std::thread::spawn(move || {
-            // `count_all_emails` opens the store (running the integrity check /
-            // rebuild on the first open) and returns the grouped per-mailbox
-            // counts; the outbox read reuses the now-open, validated file.
-            let counts = app::count_all_emails(&account_name, &mailboxes);
+            // One `mailbox.list` per account, on a thread of its own (P5-U4).
+            // The daemon does the store open, the integrity check and the
+            // grouped query behind it, so the shape of this phase is unchanged:
+            // the opens overlap, none of them gates the paint, and the account
+            // reports `AccountOpened` when its counts land. The outbox read is
+            // still this process's own, until the send slice moves with P5-U6.
+            let counts = match &queries {
+                Some(queries) => {
+                    queries::mailbox_counts(queries, &account_name, &mailboxes).unwrap_or_else(|e| {
+                        log::warn!("[queries] counting the mailboxes of {account_name}: {e:#}");
+                        vec![0; mailboxes.len()]
+                    })
+                }
+                None => app::count_all_emails(&account_name, &mailboxes),
+            };
             let outbox = crate::outbox::counts_for_account(&account_name);
             let _ = tx.send(BgResult::AccountOpened {
                 account_index: i,
