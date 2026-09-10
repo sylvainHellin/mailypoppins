@@ -434,6 +434,12 @@ fn watching(app: &mut App, live: bool) {
 /// client bootstrapped against. A failure is logged and left for the next
 /// notice: a client with no snapshot refuses every event it is sent, which is
 /// visible without being fatal.
+///
+/// Through [`App::apply_resync_bootstrap`] rather than `apply_bootstrap`: the
+/// events this client missed are the ones that would have corrected an already
+/// opened account, and the watermark this call sets puts them out of reach, so
+/// the snapshot has to land over every account and the open mailbox has to be
+/// reloaded.
 fn rebootstrap(app: &mut App, door: &dyn Queries) {
     match door.call("state.bootstrap", json!({})) {
         Ok(answer) => match serde_json::from_value::<Bootstrap>(answer) {
@@ -443,7 +449,7 @@ fn rebootstrap(app: &mut App, door: &dyn Queries) {
                     bootstrap.revision,
                     bootstrap.instance_id
                 );
-                app.apply_bootstrap(&bootstrap);
+                app.apply_resync_bootstrap(&bootstrap);
             }
             Err(e) => log::warn!("[events] the bootstrap did not decode: {e}"),
         },

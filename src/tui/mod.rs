@@ -7,6 +7,8 @@ pub mod commands;
 mod event;
 pub mod events;
 #[cfg(test)]
+mod events_resync_tests;
+#[cfg(test)]
 mod events_tests;
 mod helpers;
 pub mod queries;
@@ -303,7 +305,9 @@ fn run_loop(
         // their mailboxes and their counts, landed on the shell that is
         // already on screen. `apply_bootstrap` skips any account whose
         // store-backed open (#0003) has already answered, so the two startup
-        // paths cannot fight over the counts while P5-U3/U4 are still ahead.
+        // paths cannot fight over the counts. A snapshot that arrives after a
+        // gap in the event stream is the other entry,
+        // `apply_resync_bootstrap` (`src/tui/events.rs`), which skips nothing.
         while let Ok(result) = boot_rx.try_recv() {
             match result {
                 Ok(bootstrap) => {

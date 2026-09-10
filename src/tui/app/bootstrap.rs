@@ -22,11 +22,23 @@
 //!
 //! [`App::apply_bootstrap`] touches an account **only while it is still
 //! `opening`**: the background open of #0003 clears that marker when it lands
-//! with the counts the account really has, and a bootstrap that arrives after
-//! it may not put a snapshot's numbers back over them.
+//! with the counts the account really has, and a bootstrap that arrives a beat
+//! after it at startup may not put a snapshot's numbers back over them.
 //!
-//! It is also the one place the event watermark is set (P5-U8), which is why a
-//! resync and a reconnect are both spelled "bootstrap again" rather than
+//! # The rule that keeps a recovered client honest
+//!
+//! [`App::apply_resync_bootstrap`] is the other entry, and it skips nothing.
+//! A `state.resync_required` or a reconnect to a new instance means the events
+//! between the last watermark and this snapshot are gone, so an account that
+//! opened long ago holds mailboxes, counts and cached listings that no event
+//! will ever correct: the watermark moves past them. That entry therefore
+//! drops every per-account listing cache, re-applies the snapshot's mailboxes
+//! and counts over every account it names, and reloads the open mailbox
+//! through [`App::reload_current_mailbox`], the same off-thread daemon-backed
+//! path a mailbox switch takes.
+//!
+//! Both entries are the one place the event watermark is set (P5-U8), which is
+//! why a resync and a reconnect are spelled "bootstrap again" rather than
 //! "clear a flag".
 
 use mp_protocol::state::{Bootstrap, MailboxRow};
@@ -96,9 +108,36 @@ impl App {
     /// would invalidate `active_account` mid-frame.
     ///
     /// An account whose store has already been opened in the background is
-    /// skipped whole (see the module header): until P5-U4 moves the row loading
-    /// onto the daemon, that open is the fresher answer.
+    /// skipped whole (see the module header): at startup that open is the
+    /// fresher answer, and the events that follow keep it fresh.
+    /// [`App::apply_resync_bootstrap`] is the entry for the case where they
+    /// did not.
     pub fn apply_bootstrap(&mut self, bootstrap: &Bootstrap) {
+        self.land_bootstrap(bootstrap, false);
+    }
+
+    /// Land a snapshot after a resync or a reconnect, over every account.
+    ///
+    /// The recovery entry, and the difference from [`App::apply_bootstrap`] is
+    /// that nothing is skipped: the client has just been told that the events
+    /// between its watermark and this snapshot are unavailable, so an account
+    /// that opened before the gap keeps mailboxes, counts and cached listings
+    /// that nothing will refresh once the watermark moves past them. Every
+    /// account the snapshot names takes the snapshot's mailboxes and counts,
+    /// every per-account listing cache is dropped, and the open mailbox is
+    /// reloaded through the ordinary off-thread path.
+    pub fn apply_resync_bootstrap(&mut self, bootstrap: &Bootstrap) {
+        self.land_bootstrap(bootstrap, true);
+        // Off the UI thread, through `Action::LoadMailbox`, which is where the
+        // daemon-backed listing comes from since P5-U4: the stale list stays
+        // visible until the fresh one lands, as it does on a same-mailbox
+        // reload.
+        self.reload_current_mailbox();
+    }
+
+    /// The body both entries share; `resync` is what the module header calls
+    /// the recovery rule.
+    fn land_bootstrap(&mut self, bootstrap: &Bootstrap, resync: bool) {
         // The only place a watermark is set (P5-U8). The instance and the
         // revision are the daemon's word about the state this snapshot
         // describes, so every event above it is comparable and everything at or
@@ -120,12 +159,21 @@ impl App {
             else {
                 continue;
             };
-            if !self.accounts[index].opening {
+            if !resync && !self.accounts[index].opening {
                 continue;
             }
 
             let rows = bootstrap.snapshot.mailboxes_of(&account.name);
             let state = &mut self.accounts[index];
+            if resync {
+                // Every cached listing predates the gap, whatever the rows
+                // below do with the sidebar. Dropped rather than kept: a row
+                // the client never heard about being removed is worse than a
+                // reload.
+                for slot in &mut state.email_cache {
+                    *slot = None;
+                }
+            }
             if !rows.is_empty() {
                 let template = super::build_mailboxes(&state.account_config);
                 state.mailboxes = rows
@@ -135,7 +183,9 @@ impl App {
                 state.mailbox_counts = rows.iter().map(|row| row.total as usize).collect();
                 // The per-mailbox caches are indexed by the same position, so
                 // they follow the row count or the next lookup is out of
-                // bounds. Nothing is lost: this account has not been opened.
+                // bounds. Nothing is lost: on the startup entry this account
+                // has not been opened, and on the resync entry the caches were
+                // just dropped anyway.
                 state.email_cache = vec![None; rows.len()];
             }
             // Ready clears the #0003 marker; `opening` and `blocked` both
