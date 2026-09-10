@@ -8,18 +8,21 @@ use super::app::{
 /// suffix says a fetch is not converging (#0115). Neither may ride a green
 /// line.
 fn drained_sync_level(text: &str) -> StatusLevel {
+    // The warning wins over the skip. A refused tick still drains the queues at
+    // its tail (#0114), so the skip line carries the rollback suffix when that
+    // drain failed, and a rolled-back mutation must not be reported as
+    // information (#0122 review).
+    if text.contains(super::helpers::FAILED_OPS_MARKER)
+        || text.contains(super::helpers::NON_CONVERGING_MARKER)
+    {
+        return StatusLevel::Warning;
+    }
     // A tick that was refused the engine lock did nothing at all (#0122): not a
     // green sync that happened, not a red one that failed.
     if text.contains(super::helpers::SYNC_SKIPPED_MARKER) {
         return StatusLevel::Info;
     }
-    if text.contains(super::helpers::FAILED_OPS_MARKER)
-        || text.contains(super::helpers::NON_CONVERGING_MARKER)
-    {
-        StatusLevel::Warning
-    } else {
-        StatusLevel::Success
-    }
+    StatusLevel::Success
 }
 
 /// Whether a `BgResult::MailboxLoaded` may be applied or must be dropped
@@ -472,6 +475,28 @@ mod tests {
                 "Sync skipped: another engine is syncing 'work'; leaving the ingest to it"
             ),
             StatusLevel::Info
+        ));
+    }
+
+    /// #0122 review: the tail drain runs whether or not the ingest was
+    /// refused, so a skipped sync can still carry the rollback suffix. The
+    /// mutations it rolled back are what the line is about, and Info would
+    /// hide them.
+    #[test]
+    fn a_skipped_sync_that_rolled_mutations_back_is_still_a_warning() {
+        assert!(matches!(
+            drained_sync_level(
+                "Sync skipped: another engine is syncing 'work'; leaving the ingest to it; \
+                 2 mutation(s) failed and were rolled back (see the log)"
+            ),
+            StatusLevel::Warning
+        ));
+        assert!(matches!(
+            drained_sync_level(
+                "Sync skipped: another engine is syncing 'work'; leaving the ingest to it; \
+                 fetch not converging on Sent Items (see the log)"
+            ),
+            StatusLevel::Warning
         ));
     }
 

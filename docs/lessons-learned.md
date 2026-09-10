@@ -1541,13 +1541,18 @@ Running it on a `mod.rs` to tidy a two-line edit reformatted `src/daemon/runtime
 
 Format the leaf files you edited, and check `git diff --stat` afterwards for files you did not.
 
-## `tests/engine_lock_ingest.rs` flakes about once in twelve runs, and has since before #0122
+## A `fork` in a test binary keeps its siblings' `flock`s alive, and that is a flake
 
 Roughly one run in twelve of the whole binary fails in `the_unconditional_policy_still_rebinds_onto_a_listed_uid_under_the_lock` or `the_lock_holder_runs_the_pass_and_releases_the_lock`, with a guarded pass returning `Ok(None)` (the "another engine holds the lock" refusal) against a lock file in its own tempdir that nothing else should be able to hold.
 `mp_sync_exits_zero_and_says_it_skipped_when_another_process_holds_the_lock` runs in the same binary and `fork`s an `mp` child while other tests hold their own `flock`'d descriptors: the child inherits every open descriptor until `exec` closes the `O_CLOEXEC` ones, and an inherited copy keeps the `flock` alive for that window.
 
-Measured at 2 failures in 25 runs on the tree with the config-ownership unit and 2 in 25 on the tree without it, so it is not that unit's doing.
-The fix is to keep the process-spawning test off the threads that hold locks (its own binary, or `serial_test`), and it is not to widen the assertions.
+Measured at 2 failures in 25 runs on the tree with the config-ownership unit and 2 in 25 on the tree without it, so it was not that unit's doing.
+
+The fix is a test target of its own: `tests/engine_lock_ingest_cli.rs` holds that one test and nothing else, so the fork has no sibling thread whose descriptors it can duplicate.
+It is declared in `Cargo.toml` with no `required-features`, because it is default-suite behaviour and only the binary boundary changed.
+Twenty runs of `engine_lock_ingest` and ten of `engine_lock_ingest_cli` pass after the split.
+
+The general rule: a test that spawns a process and a test that holds an `flock` must not share a binary, and widening an assertion is never the answer to either.
 
 ## A debounce that re-records its timer on every poll never fires
 

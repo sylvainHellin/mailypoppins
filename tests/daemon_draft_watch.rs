@@ -1173,6 +1173,73 @@ fn an_id_field_wins_over_the_file_stem() {
     );
 }
 
+/// A draft announced under its stem and then given an `id:` is announced under
+/// the id from then on, and the stem it left behind is removed (#0122 review).
+///
+/// The two names are the same file, so a client that only heard the second one
+/// would keep the first for ever: a phantom row in every snapshot, pointing at
+/// a draft that is also listed under its new name. The removal comes first,
+/// which is what lets a client apply the pair in order without ever showing
+/// two rows for one file.
+#[test]
+fn a_draft_that_gains_an_id_removes_the_stem_it_was_announced_under() {
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let path = dir.join("agent-written.md");
+    fs::write(
+        &path,
+        "---\n\
+         to: robin@example.com\n\
+         subject: \"Von einem Agenten\"\n\
+         status: draft\n\
+         ---\n\
+         \n\
+         Body.\n",
+    )
+    .expect("write draft");
+
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let debounce = unit_config().debounce;
+    let (first, t1) = settle(&mut watcher, Instant::now(), debounce);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(changed(&first[0]).id, "agent-written");
+
+    fs::write(
+        &path,
+        draft_document(
+            "d-minted",
+            "robin@example.com",
+            "Von einem Agenten",
+            "draft",
+            "Body, now with an id.",
+        ),
+    )
+    .expect("add an id: field");
+    let (second, _) = settle(&mut watcher, t1 + debounce, debounce);
+
+    assert_eq!(
+        second.len(),
+        2,
+        "one file under a new name is a removal and a change, not a change alone: {second:?}"
+    );
+    match &second[0] {
+        WatchEvent::DraftRemoved { account, id } => {
+            assert_eq!(account, "alpha");
+            assert_eq!(id, "agent-written", "the name the file is no longer under");
+        }
+        other => panic!("expected the stem to be removed first, got {other:?}"),
+    }
+    assert_eq!(changed(&second[1]).id, "d-minted");
+    assert_eq!(changed(&second[1]).path, path);
+
+    assert_eq!(
+        watcher.resolve("alpha", "agent-written"),
+        None,
+        "the stem resolves to nothing once the file is announced under its id"
+    );
+    assert_eq!(watcher.resolve("alpha", "d-minted"), Some(path));
+}
+
 #[test]
 fn a_parseable_draft_that_is_not_sendable_is_valid_and_not_ready() {
     let root = TempDir::new().expect("tempdir");
@@ -1306,14 +1373,21 @@ fn fixing_a_broken_draft_settles_into_a_change_on_the_same_resource() {
     )
     .expect("fix the draft");
     let (fixed, _) = settle(&mut watcher, t1 + debounce, debounce);
-    assert_eq!(fixed.len(), 1, "{fixed:?}");
-    let summary = changed(&fixed[0]);
+    assert_eq!(
+        fixed.len(),
+        2,
+        "the broken file was announced under its stem and the fixed one is announced under its \
+         `id:`, so the stem is removed before the change (#0122 review): {fixed:?}"
+    );
+    assert!(
+        matches!(&fixed[0], WatchEvent::DraftRemoved { account, id } if account == "alpha" && id == "kaputt"),
+        "a client keyed on the file's own name would otherwise hold two rows: {fixed:?}"
+    );
+    let summary = changed(&fixed[1]);
     assert_eq!(summary.subject, "Repariert");
     assert_eq!(
         summary.id, "d-broken",
-        "the `id:` field is readable again and it is the same draft; the stem-derived id the \
-         broken file was announced under is `kaputt`, so a client keyed on the file's own name \
-         would now hold two rows"
+        "the `id:` field is readable again and it is the same draft"
     );
 }
 

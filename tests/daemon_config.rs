@@ -1493,7 +1493,46 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
         "the test has not created gamma's directory; the daemon must"
     );
 
-    let result = call_ok(&mut conn, "config.reload", json!({})).await;
+    // The reload runs on a connection of its own so this one can read the
+    // events *while* the swap is in flight: what the order of the envelopes
+    // cannot say is whether the removed runtime was actually gone by the time
+    // the added one came up (#0122 review). The lock is sampled the moment
+    // gamma's readiness is decoded, which is strictly after the daemon
+    // published it, so a swap that started gamma before dropping alpha is
+    // caught with alpha's lock still held.
+    let mut driver = connect_initialized(&sandbox).await.0;
+    let reload = tokio::spawn(async move {
+        let result = call_ok(&mut driver, "config.reload", json!({})).await;
+        (driver, result)
+    });
+
+    let mut events: Vec<EventEnvelope> = Vec::new();
+    let mut alpha_lock_at_gamma_ready: Option<bool> = None;
+    loop {
+        let notification = within("a notification", conn.next_notification())
+            .await
+            .expect("the daemon delivers a notification rather than closing");
+        if notification.method != METHOD_STATE_EVENT {
+            continue;
+        }
+        let envelope: EventEnvelope = serde_json::from_value(notification.params.clone())
+            .unwrap_or_else(|e| {
+                panic!("the params are an event envelope: {e}; got {notification:?}")
+            });
+        if envelope.kind == "account.state_changed"
+            && envelope.payload["account"] == json!("gamma")
+            && envelope.payload["state"] == json!("ready")
+        {
+            alpha_lock_at_gamma_ready = Some(sandbox.engine_lock_is_free("alpha"));
+        }
+        let done = envelope.kind == KIND_CONFIG_CHANGED;
+        events.push(envelope);
+        if done {
+            break;
+        }
+    }
+
+    let (_driver, result) = reload.await.expect("the reload task finished");
     assert_keys(&result, &RECONCILE_KEYS, "a config.reload result");
     assert_eq!(result["removed"], json!(["alpha"]));
     assert_eq!(
@@ -1503,7 +1542,12 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
     );
     assert_eq!(result["added"], json!(["gamma"]));
 
-    let events = events_through_config_changed(&mut conn).await;
+    assert_eq!(
+        alpha_lock_at_gamma_ready,
+        Some(true),
+        "the removed account's engine lock is free by the time the added account reports ready: \
+         a stop that only ordered its event ahead would leave the next engine locked out"
+    );
     assert_eq!(
         describe(&events),
         vec![

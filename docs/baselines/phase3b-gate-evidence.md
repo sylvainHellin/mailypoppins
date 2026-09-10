@@ -151,14 +151,17 @@ Every test that starts one points `MAILYPOPPINS_DATA_DIR` at a `TempDir` and sto
 Both predate #0122 and neither is in code P3b-U12 wrote: the file had eleven before that unit and has two after it.
 The tree as a whole has never been rustfmt-clean, so this is a note rather than a regression, and it is in `BACKLOG.md`.
 
-## One flake, measured
+## One flake, measured, and then closed
 
-`tests/engine_lock_ingest.rs` fails about twice in twenty-five runs of its own binary, in `the_unconditional_policy_still_rebinds_onto_a_listed_uid_under_the_lock` or `the_lock_holder_runs_the_pass_and_releases_the_lock`, with a guarded pass returning the refusal against a lock file in its own tempdir.
+At `38f823c`, `tests/engine_lock_ingest.rs` failed about twice in twenty-five runs of its own binary, in `the_unconditional_policy_still_rebinds_onto_a_listed_uid_under_the_lock` or `the_lock_holder_runs_the_pass_and_releases_the_lock`, with a guarded pass returning the refusal against a lock file in its own tempdir.
 
-`mp_sync_exits_zero_and_says_it_skipped_when_another_process_holds_the_lock` runs in the same binary and forks an `mp` child while sibling tests hold their own `flock`ed descriptors; the child inherits every open descriptor until `exec` closes the `O_CLOEXEC` ones, and an inherited copy keeps the `flock` alive for that window.
+`mp_sync_exits_zero_and_says_it_skipped_when_another_process_holds_the_lock` ran in the same binary and forks an `mp` child while sibling tests hold their own `flock`ed descriptors; the child inherits every open descriptor until `exec` closes the `O_CLOEXEC` ones, and an inherited copy keeps the `flock` alive for that window.
 
-It was measured at 2 in 25 both with and without the config-ownership unit, so it is not that unit's doing, and the two whole-tree runs above both passed.
-The fix is to keep the process-spawning test off the threads that hold locks, and it is a `BACKLOG.md` follow-up rather than a widened assertion.
+It was measured at 2 in 25 both with and without the config-ownership unit, so it was not that unit's doing, and the two whole-tree runs above both passed.
+
+The review-fix commit that follows this evidence closes it: that one test moved to `tests/engine_lock_ingest_cli.rs`, a `[[test]]` target of its own with no `required-features`, so it still runs in the default suite and no sibling thread holds a lock for its fork to duplicate.
+The totals above are unchanged by the split, which moves one test out of `engine_lock_ingest` (9 to 8) and into a target that reports 1.
+Measured after the split: 20 consecutive runs of the `engine_lock_ingest` binary and 10 of `engine_lock_ingest_cli`, 0 failures.
 
 ## What Phase 3b does not answer
 

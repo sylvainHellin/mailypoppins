@@ -379,22 +379,31 @@ impl CanonicalState {
         inner.drafts.retain(|name, _| names.contains(name));
         inner.outbox.retain(|name, _| names.contains(name));
         for seed in accounts {
-            // An account that stayed keeps its state and its counts: a swap
-            // that touched another account may not blank this one's sidebar.
-            let mailboxes = seed
+            let kept = inner.accounts.iter().any(|view| view.name == seed.name);
+            // An account that stayed keeps its state and its counts, but not
+            // its mailboxes: a reload that changed this account's mailbox
+            // mapping must show the new sidebar, so the seeds are always the
+            // new ones and only the counts are carried across, per slug. A
+            // swap that touched another account leaves this one's numbers
+            // alone because every slug survives.
+            let previous = inner.mailboxes.remove(&seed.name).unwrap_or_default();
+            let mailboxes: Vec<MailboxView> = seed
                 .mailboxes
                 .into_iter()
-                .map(|seed| MailboxView {
-                    seed,
-                    total: 0,
-                    unread: 0,
-                    badge: 0,
+                .map(|seed| {
+                    let carried = previous.iter().find(|view| view.seed.slug == seed.slug);
+                    MailboxView {
+                        seed,
+                        total: carried.map_or(0, |view| view.total),
+                        unread: carried.map_or(0, |view| view.unread),
+                        badge: carried.map_or(0, |view| view.badge),
+                    }
                 })
                 .collect();
-            if inner.accounts.iter().any(|view| view.name == seed.name) {
+            inner.mailboxes.insert(seed.name.clone(), mailboxes);
+            if kept {
                 continue;
             }
-            inner.mailboxes.insert(seed.name.clone(), mailboxes);
             inner.drafts.insert(seed.name.clone(), Vec::new());
             inner
                 .outbox
@@ -867,6 +876,68 @@ mod tests {
             account: "alpha".to_string(),
         });
         assert_eq!(state.subscriber_count(), 0);
+    }
+
+    /// A `config.reload` that changed an account's mailbox mapping must show
+    /// the new sidebar, even though the account itself stayed (#0122 review).
+    /// The counts follow the slug: `inbox` kept its numbers, the added
+    /// `archive` starts at zero, and the departed `sent` is gone rather than
+    /// lingering with the totals it had.
+    #[test]
+    fn reseeding_a_kept_account_replaces_its_mailboxes_and_carries_the_counts() {
+        let mailbox = |slug: &str| MailboxSeed {
+            role: slug.to_string(),
+            slug: slug.to_string(),
+            label: slug.to_string(),
+        };
+        let state = CanonicalState::new(
+            InstanceId::new("test"),
+            vec![AccountSeed {
+                name: "alpha".to_string(),
+                mailboxes: vec![mailbox("inbox"), mailbox("sent")],
+            }],
+        );
+        state.apply(Change::MailboxCounts {
+            account: "alpha".to_string(),
+            mailbox: "inbox".to_string(),
+            total: 12,
+            unread: 3,
+            badge: 12,
+        });
+        state.apply(Change::MailboxCounts {
+            account: "alpha".to_string(),
+            mailbox: "sent".to_string(),
+            total: 5,
+            unread: 0,
+            badge: 5,
+        });
+
+        state.reseed(vec![AccountSeed {
+            name: "alpha".to_string(),
+            mailboxes: vec![mailbox("inbox"), mailbox("archive")],
+        }]);
+
+        let json = state.bootstrap(ConnectionId(1)).0.to_json();
+        let listed = json["mailboxes"]["alpha"]
+            .as_array()
+            .expect("alpha's mailboxes")
+            .clone();
+        let slugs: Vec<&str> = listed
+            .iter()
+            .map(|mailbox| mailbox["slug"].as_str().expect("a slug"))
+            .collect();
+        assert_eq!(
+            slugs,
+            vec!["inbox", "archive"],
+            "a kept account's mailboxes are the reload's, not the ones it started with"
+        );
+        assert_eq!(listed[0]["total"], serde_json::json!(12));
+        assert_eq!(listed[0]["unread"], serde_json::json!(3));
+        assert_eq!(
+            listed[1]["total"],
+            serde_json::json!(0),
+            "a mailbox the reload added has no counts until its account reports some"
+        );
     }
 
     /// An unset variable is no hook at all, and a value that is not a number

@@ -230,7 +230,7 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Nine environment variables exist for the contract tests and for the migration.
+Ten environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.

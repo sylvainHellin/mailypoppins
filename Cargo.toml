@@ -100,6 +100,15 @@ insta = "1.39"
 # reference `mp_protocol` items that do not exist yet
 # (.agents/workflow/native-gui-daemon/plan.md section 3.0). Declaring targets
 # explicitly does not disable autodiscovery of the other `tests/*.rs` files.
+# The CLI half of the engine-lock ingest contract (#0122), in a binary of its
+# own and deliberately *not* feature-gated: it runs in the default suite like
+# `tests/engine_lock_ingest.rs`. It is separate because it forks an `mp` child,
+# and a fork duplicates the `flock`ed descriptors sibling test threads hold, so
+# an inherited copy kept a sibling's engine lock alive and flaked that binary.
+[[test]]
+name = "engine_lock_ingest_cli"
+path = "tests/engine_lock_ingest_cli.rs"
+
 [[test]]
 name = "daemon_protocol_fixtures"
 path = "tests/daemon_protocol_fixtures.rs"

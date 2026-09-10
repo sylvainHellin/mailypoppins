@@ -142,6 +142,33 @@ The daemon holds the pin set and the seam is proved in process, but nothing in t
 
 All three pass as written.
 
+## Review fixes
+
+Three reviewers read `ad5b645..a37d36b` and raised six findings, all applied in one commit after the sweep.
+
+The blocking one is the flake `docs/baselines/phase3b-gate-evidence.md` had recorded and `BACKLOG.md` had deferred.
+`mp_sync_exits_zero_and_says_it_skipped_when_another_process_holds_the_lock` forks an `mp` child while sibling threads in the same binary hold `flock`ed descriptors on their own tempdirs, and the child's inherited copies keep those locks alive until `exec`, so a sibling's guarded pass was refused a lock nothing should have held.
+It moved to `tests/engine_lock_ingest_cli.rs`, a `[[test]]` target of its own with no `required-features`: still the default suite, still the same assertions, and no sibling to steal a lock from.
+Twenty runs of the `engine_lock_ingest` binary and ten of the new one pass.
+
+`CanonicalState::reseed` skipped a kept account entirely, so a `config.reload` that changed an account's mailbox mapping left the old sidebar in every `state.bootstrap`.
+A kept account now takes the new seed's mailboxes and carries the counts across per slug, which is what the `continue` was protecting.
+
+`DraftWatcher::poll_once` announced a settled file under its new name without retiring the old one, so a draft that gained an `id:` was listed twice: once under its stem for ever, once under the id.
+The `Some(_)` arm now emits `WatchEvent::DraftRemoved` for the previous name before the change, which is also what `fixing_a_broken_draft_settles_into_a_change_on_the_same_resource` had recorded as a known wart in its own assertion message.
+
+`tui::bg::drained_sync_level` read the skip marker before the rollback and non-convergence ones, so a refused tick whose tail drain rolled mutations back rendered as information.
+The warning arms come first now: a rolled-back mutation is the news in that line whatever the ingest half did.
+
+`docs/daemon-operations.md` said "Nine environment variables" over a list of ten, because `MAILYPOPPINS_DAEMON_WATCH_POLL_MS` and `MAILYPOPPINS_DAEMON_WATCH_DEBOUNCE_MS` share a paragraph.
+
+`a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_order` pinned the order of the envelopes and nothing about the work behind them.
+It now drives `config.reload` on a second connection and reads the events as they arrive, sampling the removed account's engine lock the moment gamma's readiness is decoded: the release strictly precedes the publication, so the sample is `true` for a correct swap and catches one that started the added runtime before dropping the removed one.
+
+Three test files were edited beyond the additions, each approved in advance: the new `tests/engine_lock_ingest_cli.rs` and the shrunk `tests/engine_lock_ingest.rs`, the two `tests/daemon_draft_watch.rs` tests above, and the strengthened `tests/daemon_config.rs` swap test.
+
+The suites move from 1802 to 1805 under the feature and from 1365 to 1366 without it.
+
 ## Acceptance criteria
 
 - The daemon survives client disconnects and continues watchers and durable operations. Met, 16 tests in `daemon_account_runtime` and 44 in `daemon_draft_watch`, the last of which drive a real socket and a subscribed client rather than the watcher in process.
@@ -155,6 +182,6 @@ All three pass as written.
 - `src/daemon/methods/{config.rs,draft.rs,message.rs,account.rs,mailbox.rs,mod.rs}`, `src/daemon/{server.rs,session.rs,lifecycle.rs,mod.rs}`, `src/daemon/state/{mod.rs,events.rs,snapshot.rs}`
 - `src/config.rs` for the two hand-written `Default` implementations, `src/store/{read.rs,sweep.rs}` for the handle reads and the pin seam
 - `crates/mp-protocol/src/{events.rs,error.rs,lib.rs}`, `crates/mp-client/src/{format.rs,lib.rs}`
-- `tests/{engine_lock_ingest,daemon_account_runtime,daemon_sync_outcome,daemon_config,daemon_draft_watch,daemon_handles}.rs`, plus `tests/daemon_bootstrap.rs` and `tests/daemon_events.rs` for the `Change` variants this phase adds
+- `tests/{engine_lock_ingest,engine_lock_ingest_cli,daemon_account_runtime,daemon_sync_outcome,daemon_config,daemon_draft_watch,daemon_handles}.rs`, plus `tests/daemon_bootstrap.rs` and `tests/daemon_events.rs` for the `Change` variants this phase adds
 - `docs/{architecture.md,daemon-protocol.md,daemon-operations.md,parity-matrix.md,lessons-learned.md}`, `docs/baselines/phase3b-gate-evidence.md`
 - `Cargo.toml`, `CHANGELOG.md`, `BACKLOG.md`

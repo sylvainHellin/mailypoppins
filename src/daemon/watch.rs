@@ -352,7 +352,22 @@ impl DraftWatcher {
                         match current {
                             Some(_) => {
                                 let event = describe(root, &path);
-                                state.announced = Some(announced_name(&event));
+                                let name = announced_name(&event);
+                                // The file kept its path and changed its name:
+                                // a draft that gained an `id:` was announced
+                                // under its stem and is announced under the id
+                                // from now on. Without the removal the stem's
+                                // row stays in every client's snapshot for
+                                // ever, pointing at a draft that is also there
+                                // under its new name.
+                                if let (Some(account), Some(old)) =
+                                    (root.account.clone(), state.announced.clone())
+                                {
+                                    if old != name {
+                                        events.push(WatchEvent::DraftRemoved { account, id: old });
+                                    }
+                                }
+                                state.announced = Some(name);
                                 events.push(event);
                             }
                             None => {
