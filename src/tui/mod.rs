@@ -1,5 +1,7 @@
 pub mod app;
 mod actions;
+#[cfg(test)]
+mod actions_tests;
 mod bg;
 mod event;
 mod helpers;

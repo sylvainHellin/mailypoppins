@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U4 have landed; P5-U5 is next.
+Status: in-progress. P5-U1 to P5-U5 have landed; P5-U6 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -23,7 +23,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U2 | I | this commit | TUI initialisation via handshake + bootstrap | done |
 | P5-U3 | T | this commit | the query layer contract | done (tests) |
 | P5-U4 | I | this commit | the query layer | done |
-| P5-U5 | T | | actions to commands, the contract | open |
+| P5-U5 | T | this commit | actions to commands, the contract | done (tests) |
 | P5-U6 | I | | actions to commands | open |
 | P5-U7 | T | | events replace watcher threads, the contract | open |
 | P5-U8 | I | | events replace watcher threads | open |
@@ -350,3 +350,130 @@ Every `daemon_*_slice` suite green: read 22, draft 34, mutation 35, send 50, syn
 A pty smoke against the `examples/mkfixture` fixture (two accounts, 541 messages, a 1 MiB body), `script -qec "stty rows 40 cols 120; mp"` under `MAILYPOPPINS_DAEMON_REQUIRE=1` against a daemon started beside it: the shell painted with `··` in every count column, then the daemon-backed list painted 18 rows of `alpha/inbox` with their dates and subjects, `j` moved the cursor, the headers pane filled from the row and the body pane from `message.get`, and `q` left with exit 0 and no daemon behind it. Started *beside* it rather than on demand because `MAILYPOPPINS_DAEMON_REQUIRE=1` is inherited by the auto-started `mp daemon run`, which is on the no-daemon list and refuses to start under it (worth knowing before the P5-U9 harness meets it).
 
 `rustfmt --edition 2021` on the two new files and on the five touched files that were rustfmt-clean at `aaf8ccd`; the six that were not (`src/tui/{mod,bg,actions}.rs`, `src/tui/app/{mod,types}.rs`, `tests/daemon_draft_slice.rs`) were left alone. `cargo install --path . --offline` green.
+
+## P5-U5: the action-to-command contract
+
+`src/tui/actions_tests.rs` (1 175 lines), registered behind `#[cfg(test)]` in `src/tui/mod.rs`, which is this commit's only production edit.
+
+22 tests: five on the classification table, ten on what a daemon-routed mutation issues, three on the invariants the unit preserves, and four on the residue gate (plus a test for the source scanner itself).
+
+It lives beside the event loop rather than under `app/` for one reason: `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET` are private constants of `src/tui/mod.rs`, and a child module sees its parent's private items, so the drain's bounds are asserted on the values rather than on a copy of them.
+
+### The contract
+
+Three names, all in one new module.
+
+```text
+mailypoppins::tui::commands
+
+enum commands::ActionRoute: Debug + PartialEq {
+    Daemon(&'static [&'static str]),  // the methods this action issues, in issue order
+    ClientOnly(&'static str),         // the reason: editor, browser, clipboard, picker, terminal
+    Local,                            // pure UI state; nothing leaves the process
+}
+fn commands::route(action: &Action) -> ActionRoute            // exhaustive, no wildcard arm
+
+fn commands::dispatch(
+    app: &mut App,
+    commands: &dyn crate::tui::queries::Queries,
+    action: &Action,
+) -> bool
+```
+
+**`Queries` is the door, and there is no second trait.** `Session::call` is the only way to the daemon and `Queries` is already the object-safe wrapper over it that P5-U3 contracted and P5-U4 built, for both `Session` and `QueryHandle`. A `Commands` trait with the identical method would be a second name for one thing and a second place to implement it.
+
+**`dispatch` returns a `bool` and takes the door as an argument.** `true` means the action was daemon-routed and is handled; `false` means `handle_action` still owns it. A refusal from the daemon is not a `false`: it lands on the status line exactly as a refused store mutation does today, which is why nothing returns a `Result` the caller would have to invent a second presentation for. The door is an argument rather than read off `app.session`, because `dispatch` needs `&mut App` and a borrow of the session inside it would collide; `Session::handle()` already exists for exactly that.
+
+**A route names a slice of methods, not one method.** `Action::Delete` is one key over two kinds of row (`message.delete` for received mail, `draft.discard` for a draft and for a parse-skipped draft file, #0073/#0080) and `Action::ServerSearch` is the local pass then the server leg. A single-method route would have made the table lie about both.
+
+### The table
+
+`ACTION_ROUTING` is `(variant, route, suspends_terminal)` for all fifty variants, in the enum's declaration order. Completeness is compile-time: a `variant_name` match with **no wildcard arm** is where a new `Action` fails to build, and the runtime rows then fail until it has a route and a `suspends_terminal` value.
+
+The third column is the one existing tests do not give. `src/tui/app/types.rs` has `suspending_actions_are_all_flagged` and `ordinary_actions_do_not_suspend_the_terminal`; each lists a subset, so neither fails when a *new* variant is classified wrongly. Neither was touched.
+
+Thirty of the fifty are `Daemon`, fifteen `ClientOnly` and five `Local`. `every_daemon_route_names_a_registered_method` asks a live `Dispatcher` for its `specs()` rather than listing the `MethodSpec` arrays here, so a family that grows is covered without this file moving, and a method declared in an array but never registered still fails. It fails on the tree as committed for the three the parity matrix names and nothing serves: **`message.set_read` (MSG-03), `message.set_flag` (MSG-04) and `message.move` (MSG-05)**.
+
+### What the mutation rows pin, and the two decisions behind them
+
+Each row asserts three things about one action: the **method**, the **parameters** it resolved, and the **effect** the daemon's own method body had on the store. The third is what makes the first two more than a spelling check: not "the TUI said `message.archive`" but "the row is in `archive` and the `ServerOp::Move` it owes is queued", read back through `crate::store::read` and `crate::pending_ops`.
+
+**A TUI mutation may not wait for the server.** `message.archive` and `message.delete` (P4-U8) resolve the backend before the store is touched and then drain the owed op synchronously, which is what gives `mp archive` its blocking UX. The TUI has never done either: it commits the row change and the owed op in one transaction and lets the next sync tick drain it (`src/tui/mutations.rs`, #0039), which is why `u` over a thousand-message selection costs no network and why the mark-read of an explicit open cannot stall a frame. Every row asserts the mutation **succeeded over an account with no credentials**, which is reachable only if the call queued rather than settled. How that is spelled is P5-U6's: a `settle: false` parameter defaulting to `true` so `mp archive` does not move, a separate durability, or a client-scoped variant. No row asserts the parameter's name.
+
+**Addressing is by `row_id`.** The address P5-U4 added to `message.get` for exactly this reason: the TUI holds a `MessageRef` and nothing else (#0050), and `"<mailbox>/<uid>"` would make it carry a second identity for every row. `address` (`src/daemon/methods/message.rs`) already accepts it, so the two existing mutations need no change on this axis.
+
+**A batch is one call per message, in selection order.** `MSG-06` sketches "batch forms"; this file pins the plain form instead, because today a reference to a row that is gone is skipped with a log line while the rest of the selection proceeds (`mutations::message_id_of`), which one call per row gives for free and a plural address would have to re-invent as a partial-failure shape. A plural address is worth taking the day a selection's round trips show up in a measurement.
+
+#0110 gets two rows. `mark_as_read_addresses_the_row_the_open_resolved` moves the cursor between the resolution and the dispatch, which is what the #0108 coalescing does when a `Tab` and a `J` land in one batch, and asserts the command addressed the carried `MessageRef`. `a_cursor_move_issues_no_command` asserts three `j` presses queue no mark and call nobody: a daemon-backed TUI makes the #0087 failure mode a write per keystroke, so it is pinned as a call count and not only as an absent `Action`. The queueing half stays where it is, in `src/tui/app/keys.rs`, untouched.
+
+### What `dispatch` does not handle
+
+The actions whose route names an **operation**-kind method (`sync.quick`, `sync.full`, `send.draft`, `send.approved`, `calendar.rsvp`, `message.search`, `message.list_server`) keep the arm they have in `handle_action`: each already owns a `std::thread::spawn` and a `BgResult` reply channel, and an operation answers `{operation_id}` at once and finishes later, so its arm has to wait somewhere and post a result. That wait is P5-U8's to turn into an event subscription. Their contract is the routing table plus the residue gate: the table says which method they issue, the scan says they no longer reach `crate::sync`, `crate::send` or `imap_client` to do it. There is no third way to pin them, because `handle_action` takes a `Terminal<CrosstermBackend<Stdout>>` and no test can build one.
+
+### The invariants, and why one of them is a source scan
+
+`the_drain_bounds_are_unchanged` reads `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET` themselves. `the_pre_draw_drain_still_stops_on_its_four_clauses` is a scan over `run_loop`'s drain block asserting the four clauses in evaluation order (`!app.running`, the batch cap, the wall-clock budget, a queued `suspends_terminal` action) and that `poll_pending_event` follows them, because the drain being incremental is load-bearing. `a_quit_clears_running_so_the_drain_stops` is the behavioural half of clause 1, which is what keeps a queued `e` after `q` from dispatching an editor on the way out.
+
+A whole-drain test is not available at any price: the loop owns a Crossterm terminal on the real stdout. Extracting the stop condition into a predicate was considered and dropped, because the invariant here is *unchanged* and a scan that fails when the drain is edited is a faithful pin of exactly that.
+
+### The residue gate
+
+`TUI_ACTION_ENGINE_RESIDUE` is `(file, function, needle, reason)` over the production code of `src/tui/{actions,mutations}.rs`, in the shape and intent of `CLI_ENGINE_RESIDUE` and `TUI_APP_STORE_RESIDUE`, with a **needle** column those two do not have: `handle_action` is a thousand lines, and a whole-function exemption there would exempt forty arms, so what a row permits is one symbol in one function. Eleven needles, each a call and not an import (`tests/architecture_boundaries.rs` already gates the TUI's imports file by file, and what it cannot say is which function still opens a store).
+
+Thirty-three call sites today against the eight the table names, so twenty-five have to go. The eight that stay:
+
+| function | needle | why |
+|---|---|---|
+| `readonly_view_for_row` | `store_for_mutation(` | the read-only Markdown rendition (#0075, RD-06); nothing registered renders a stored message as Markdown |
+| `handle_search_result_action` | `store_for_mutation(` | the same rendition under another caller |
+| `handle_action` | `store_for_mutation(` | the `OpenEventSource` arm's `invite.ics` blob, the read `app/mod.rs` already keeps as `load_message_ics` |
+| `store_for_mutation` | `open_store(` | the helper those three share; it dies with the last of them |
+| `selected_selector` | `open_store(` | the `mp://` selector of the cursor row (RD-07): no listing carries one |
+| `ingest_search_hit` | `open_store(` | ingesting a server-only hit; LST-09's `message.fetch` is not built |
+| `fetch_search_hit` | `imap_client::` | the raw fetch by Message-ID behind that ingest |
+| `send_one_draft` | `send_draft(` | the undo-send hold's fire path (#0090, SND-04), which the plan holds in the TUI until P6-U1/U2 |
+
+Every one of the eight was verified to exist today, so the table's "removed" direction is not carrying a guess.
+
+`src/tui/mutations.rs` has no caller left once the five message mutations are routed, and its four `queue_*` functions are what the three new methods need. The scan treats a missing file as a file with no residue, so deleting it is not a reason to edit this table; moving it into the daemon rather than deleting it keeps its eight unit tests, which are the only assertions anywhere that a flag change queues exactly one `ServerOp` of the right shape.
+
+### Approved test edits
+
+None. No existing test file was touched.
+
+### Validation
+
+The T-unit proof of a stub-free contract, in the shape P5-U1 and P5-U3 used: the file is a `#[cfg(test)] mod` inside the library rather than a `tests/` target, so the committed tree's `--lib` test target does not compile until P5-U6 lands.
+
+`timeout 900 cargo test --offline --lib actions_tests --no-run`, on the tree as committed:
+
+```
+error[E0432]: unresolved import `crate::tui::commands`
+   --> src/tui/actions_tests.rs:156:17
+    |
+156 | use crate::tui::commands::{dispatch, route, ActionRoute};
+    |                 ^^^^^^^^ could not find `commands` in `tui`
+error: could not compile `mailypoppins` (lib test) due to 1 previous error
+```
+
+One error, naming the one contract item that is a path: the module. The other two names are inside it, so the stub proof rather than the error text is what says the contract is complete.
+
+The stub proof, in a throwaway `git worktree` at `~/.cache/mp-stub-p5u5` with `CARGO_TARGET_DIR=~/.cache/mp-stub-target`, never committed: a `src/tui/commands.rs` with the enum, `route` and `dispatch` as `todo!()` makes `cargo test --offline --lib actions_tests --no-run` compile, which is the evidence that the file needs nothing else. (`~/.cache/mp-stub-p5u3` was removed to make room.)
+
+The rest of the tree is green: with the two `mod actions_tests;` lines commented out, `timeout 1200 cargo test --workspace --offline` -> **2 128 passed, 0 failed**, and `pgrep -af '[m]p daemon'` empty afterwards. That is P5-U4's 2 128 unchanged; this unit adds none to a compiling tree, because its 22 are in the target that does not compile. The lines were restored before the commit.
+
+`rustfmt --edition 2021` on `src/tui/actions_tests.rs`, clean (`src/tui/mod.rs` was not rustfmt-clean before this unit and was left alone).
+
+### The oracle was checked, not assumed
+
+A plausible implementation was written in the same throwaway worktree, and discarded there, purely to run the suite: **21 passed, 1 failed**, the failure being `the_actions_that_could_be_routed_were`, which only a change to the twenty-five call sites can satisfy and which the plausible implementation deliberately did not make.
+
+It cost, in that worktree: `route` as a copy of the table, a `dispatch` over the fifteen command-kind actions, three new `MethodSpec` entries (`message.move`, `message.set_flag`, `message.set_read`) served by the same `MessageMutationMethod`, and a `settle` parameter whose `false` branch calls `tui::mutations::queue_*` instead of `pending_ops` plus a synchronous drain. That is one plausible shape and is not proposed as P5-U6's; it exists only as the answer to "can these rows be satisfied".
+
+**One finding is worth carrying forward**: the data-root override of #0077 is *thread-local*, and the message mutations hop to `spawn_blocking` (a `Store` is not `Sync` and the commit and the owed op are one unit), so the blocking thread resolved `store_path` against the developer's own tree and every mutation refused with `-32006`. The fixture's runtime therefore installs the override on every thread it starts (`on_thread_start`, the guard forgotten because the thread dies with the runtime). Any in-process daemon fixture that reaches a command rather than a query needs the same three lines; it is in `docs/lessons-learned.md`.
+
+### Follow-ups
+
+- The three unbuilt renditions behind the residue table (`RD-06`'s Markdown rendition, `LST-09`'s `message.fetch`, `RD-07`'s selector) are what stands between this gate and the zero P5-U10 needs when `src/tui/` becomes a crate that cannot link the store.
+- A plural address for the batch mutations, if a selection's round trips ever show up in a measurement.
+- `src/tui/mutations.rs`'s eight unit tests, which follow its four functions wherever P5-U6 puts them.

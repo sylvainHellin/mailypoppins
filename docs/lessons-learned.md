@@ -1843,3 +1843,22 @@ The trap is that the two numbers are often equal in a fixture - ingest a mailbox
 ## `cargo test --lib golden_frames` counts 42 frames, not 20
 
 The filter is a substring over the whole test path, so it matches `ui::golden_frames::` and `ui::golden_frames_daemon::` alike. The hand-built family alone is `--lib 'ui::golden_frames::'`, with the trailing `::`; the daemon-backed one is unambiguous already. A report that says "20 golden frames" and a run that says 42 are the same run.
+
+## The data-root override is thread-local, and `spawn_blocking` leaves the thread
+
+`config::test_env::TestDataDir` points `store_path` and friends at a tempdir *for the calling thread only* (#0077, so no test mutates the process environment). An in-process daemon fixture that exercises a **query** never notices: `message.list` and `message.get` run on the current-thread runtime the test built, which is the test's own thread.
+
+A **command** does notice. `message.archive` and `message.delete` hop to `tokio::task::spawn_blocking`, because a `Store` is not `Sync` and the local commit and the owed server op are one unit that must not be split across an `await`. The blocking thread has no override, so it resolves the account's store under the developer's real data directory, finds no file, and the method refuses with `-32006` "alice has no local store to read yet" over a fixture that plainly has one.
+
+The fix is three lines on the runtime the fixture builds:
+
+```rust
+let root = crate::config::mailypoppins_data_dir();
+tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .on_thread_start(move || {
+        std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
+    })
+```
+
+`on_thread_start` runs for the blocking pool too, and the guard is forgotten rather than held because the thread it belongs to dies with the runtime, which dies with the fixture. `src/tui/actions_tests.rs` is the first fixture that needed it; any future one that drives a command rather than a query needs it too.
