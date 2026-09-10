@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod dispatch;
+pub mod handles;
 pub mod lifecycle;
 pub mod methods;
 pub mod operations;

@@ -213,6 +213,11 @@ pub struct DaemonState {
     /// which resolves an id through its settled inventory, and a
     /// configuration swap, which re-derives its roots.
     pub watch: Arc<super::watch::DraftWatch>,
+    /// Every live materialised handle (P3b-U12). Held here because the
+    /// retention sweep reads its pins from outside the dispatcher, and the
+    /// three `message.*` handle methods hold the same table rather than a
+    /// reference back to the state that owns them.
+    pub handles: Arc<super::handles::HandleTable>,
 }
 
 impl DaemonState {
@@ -253,6 +258,10 @@ impl DaemonState {
                 canonical.publish(event);
             }
         }));
+        // One table per daemon process, with its lifetime read once at startup:
+        // a handle minted under one lifetime and released under another would be
+        // a promise this daemon changed its mind about.
+        let handles = Arc::new(super::handles::HandleTable::from_env());
         let mut dispatcher = Dispatcher::new();
         super::methods::register(
             &mut dispatcher,
@@ -261,6 +270,7 @@ impl DaemonState {
             Arc::clone(&canonical),
             Arc::clone(&operations),
             Arc::clone(&watch),
+            Arc::clone(&handles),
         );
         DaemonState {
             meta,
@@ -270,6 +280,7 @@ impl DaemonState {
             operations,
             runtimes,
             watch,
+            handles,
         }
     }
 

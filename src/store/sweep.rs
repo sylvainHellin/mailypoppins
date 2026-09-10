@@ -44,6 +44,24 @@
 //! concurrent ingest transaction cannot interleave mid-statement: the sweep
 //! only ever sees committed blobs, and never evicts a blob an in-flight ingest
 //! has not yet committed.
+//!
+//! ## Pinned blobs (`ANO-6`)
+//!
+//! [`sweep_pinned`] is [`sweep`] plus the set of blobs a daemon client has
+//! materialised and not yet released: a pinned hash is dropped from the eviction
+//! plan, so the sweep cannot pull a file out from under a viewer that has it
+//! open. A pin changes *who may be a victim* and nothing else. It does not
+//! change `before_bytes`, because a pinned blob is resident disk and the cap is
+//! a statement about disk; it does not change the marker rule, because a first
+//! over-cap sweep warns whether or not anything is pinned; and the half-store
+//! guard compares the pinned-free plan against `before_bytes`, so a refusal is
+//! still a refusal about what would really have been deleted. `--force`
+//! overrules the guard, which is a fat-finger rule about volume, and never the
+//! pin, which is a correctness rule about a file another process has open.
+//! A sweep that cannot reach the cap because of pins leaves the marker set, and
+//! the next sweep after the release evicts.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -176,11 +194,27 @@ fn marker_set(conn: &Connection) -> Result<bool> {
 ///
 /// Pure with respect to the network: it reads and (unless `dry_run`) deletes
 /// blobs and the marker, nothing else.
+///
+/// The sweep with nothing pinned, which is what `mp store gc` and the post-sync
+/// sweep run: a borrowed pin set on [`SweepOptions`] would put a lifetime on
+/// every call site for the benefit of the one caller that has pins.
 pub fn sweep(
     store: &Store,
     blobs: &BlobStore,
     policy: &RetentionPolicy,
     opts: SweepOptions,
+) -> Result<SweepOutcome> {
+    sweep_pinned(store, blobs, policy, opts, &BTreeSet::new())
+}
+
+/// [`sweep`], with the hashes of every blob a live materialised handle still
+/// needs held back from the eviction plan (`ANO-6`).
+pub fn sweep_pinned(
+    store: &Store,
+    blobs: &BlobStore,
+    policy: &RetentionPolicy,
+    opts: SweepOptions,
+    pinned: &BTreeSet<String>,
 ) -> Result<SweepOutcome> {
     let conn = store.conn();
     let cap = policy.max_disk_bytes;
@@ -220,7 +254,7 @@ pub fn sweep(
     }
 
     // Marker already set: this over-cap run evicts.
-    let plan = eviction_plan(conn, policy, cap, before)?;
+    let plan = eviction_plan(conn, policy, cap, before, pinned)?;
     let would_evict: u64 = plan.iter().map(|e| e.size).sum();
 
     // Fat-finger guard: refuse to reap more than the guard fraction of current
@@ -336,6 +370,7 @@ fn eviction_plan(
     policy: &RetentionPolicy,
     cap: u64,
     before: u64,
+    pinned: &BTreeSet<String>,
 ) -> Result<Vec<EvictedBlob>> {
     let now = Utc::now().timestamp();
     let day = 86_400i64;
@@ -357,6 +392,12 @@ fn eviction_plan(
     // stable total order.
     let mut ordered: Vec<(u8, EvictedBlob)> = Vec::new();
     for c in attachments.iter().chain(bodies.iter()) {
+        // A blob a client has open is not a candidate at all: it is held back
+        // here, before the order, the cap arithmetic and both ANO-5 rules, so
+        // everything downstream reasons about a plan that could really run.
+        if pinned.contains(&c.hash) {
+            continue;
+        }
         let cutoff = match c.kind {
             BlobKind::Attachment => att_cutoff,
             BlobKind::Body => body_cutoff,

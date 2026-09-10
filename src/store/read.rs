@@ -428,6 +428,31 @@ pub fn find_by_id(store: &Store, id: i64) -> Result<Option<MessageRow>> {
     Ok(row)
 }
 
+/// The row id of one message addressed the way a client holds it: the account,
+/// the mailbox it was listed in and its UID.
+///
+/// `(account, mailbox, uid)` is the store's own `UNIQUE` key, and the mailbox is
+/// taken literally rather than resolved through the account's configured roles:
+/// a message in a mailbox the configuration no longer lists is still a message
+/// the store holds.
+pub fn find_row_by_uid(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    uid: i64,
+) -> Result<Option<i64>> {
+    let row = store
+        .conn()
+        .query_row(
+            "SELECT id FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid = ?3",
+            rusqlite::params![account, mailbox, uid],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading a message row by uid")?;
+    Ok(row)
+}
+
 /// One attachment of a message: the name it was sent under and its byte length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentRow {
@@ -523,6 +548,29 @@ pub fn load_invite_ics(store: &Store, blobs: &BlobStore, message_row: i64) -> Op
             None
         })?;
     read_blob(blobs, message_row, &hash)
+}
+
+/// The hash of a message's first blob of `kind` (`html`, `raw`, `body`, ...),
+/// or `None` when it has none.
+///
+/// The lookup [`load_html`] and [`load_raw`] make, exposed for a caller that
+/// needs the *identity* of the blob a read went through rather than its bytes:
+/// the daemon pins the hashes a materialisation read against the retention
+/// sweep, and cannot pin what it cannot name.
+pub fn blob_hash_of_kind(store: &Store, message_row: i64, kind: &str) -> Option<String> {
+    store
+        .conn()
+        .query_row(
+            "SELECT hash FROM message_blobs
+             WHERE message_row = ?1 AND kind = ?2 ORDER BY ordinal LIMIT 1",
+            rusqlite::params![message_row, kind],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or_else(|e| {
+            warn!("[store] reading the {kind} hash of message {message_row}: {e:#}");
+            None
+        })
 }
 
 /// Read one blob by its hash string, degrading to `None` with a log line.

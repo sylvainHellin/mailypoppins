@@ -1565,3 +1565,19 @@ The position exists, it is just thrown away one layer down.
 
 `src/daemon/watch.rs::frontmatter_line` recovers it with a second pass: slice the block between the two `---` delimiters, hand it to `serde_yaml::from_str::<serde_yaml::Value>`, and take `serde_yaml::Error::location()` offset by the lines before the block.
 A refusal by value rather than by syntax - a numeric `id:` (#0083) - parses cleanly in that second pass, which is exactly right: it has no position, and the diagnostic reports `null` instead of pointing the user at an innocent line.
+
+## A handle whose id names its directory needs the id before it has a path
+
+`HandleTable::materialise` mints the id and takes the file's `path`, and the file lives at `<runtime>/handles/<id>/<name>`: the path cannot be built before the id exists, and the id is not handed out before the call that wants the path.
+Calling `materialise` with a placeholder and fixing the entry afterwards would leave the table's own bookkeeping lying about where the file is.
+
+The seam is two-phase instead: `mint_id` returns an id no live handle holds, the caller writes the file under it, and `materialise_with_id` records the handle at the path that now exists.
+`materialise` stays exactly the contract, as `materialise_with_id(self.mint_id(), …)`.
+
+## A table whose clock is a parameter must not read the wall clock anywhere
+
+`HandleTable` takes `now` in `materialise`, `pinned_blobs` and `expire`, which is what makes every expiry assertion arithmetic instead of a sleep.
+`release` has no `now`, and making it consult `Utc::now()` anyway breaks every in-process test that mints at a fixed instant in the past: the handle is minted at `t0` and released at `t0`, but a wall clock says it expired two years ago.
+
+So `release` is a plain removal, and "an expired handle is not releasable" is true because the caller reaps first (`reap(&table, Utc::now())` at the top of every handle method) rather than because `release` checked.
+Once one method of a type takes its clock as a parameter, every method of that type has to.

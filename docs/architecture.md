@@ -145,6 +145,10 @@ When it does evict, victims are taken age-horizon-first (attachments then bodies
 The sweep and a concurrent ingest cannot interleave mid-statement: both go through the store's single-writer WAL connection discipline, so a `mp store gc` run during a sync only ever sees committed blobs.
 One half is deferred to #0085: on-open re-fetch of an evicted body does not exist yet (a plain `mp sync` skips a UID it already has a row for), so until it ships recovery is a targeted re-ingest, and `mp store gc` refuses to reclaim more than half a store at once without `--force`.
 
+`sweep_pinned` is the same sweep with a set of blob hashes held back from the eviction plan, and the daemon fills it from the handles a client has materialised and not yet released (`ANO-6`, [daemon-protocol.md](daemon-protocol.md#materialised-handles)).
+A pin changes who may be a victim and nothing else: the store's size, the two-strike marker and the half-store guard are all computed as before, over the plan the pin left, so `--force` still overrules the guard and never the pin.
+`sweep` is `sweep_pinned` with an empty set, which is what `mp store gc` and the post-sync sweep call.
+
 ## Data flow
 
 ### Receive

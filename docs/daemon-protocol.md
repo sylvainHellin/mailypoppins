@@ -276,6 +276,51 @@ An empty mailbox of a ready account is an empty listing, not an error.
 
 `mp --daemon list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
 
+### Materialised handles
+
+A client cannot read an account's blob store, so the daemon writes the bytes it asks for into its own runtime directory and hands back a path with an explicit lifetime.
+
+| method | kind | params | result |
+|---|---|---|---|
+| `message.materialise_attachment` | client_integration | `{account, id, part}` | `{handle, path, bytes, expires_at}` |
+| `message.materialise_html` | client_integration | `{account, id}` | `{handle, path, bytes, expires_at}` |
+| `message.release_handle` | query | `{handle}` | `{}` |
+
+Like the read-only methods, all three open the store by path and take no engine lock: materialising is a read plus a write into the daemon's own directory, and neither makes the daemon an account's engine.
+The two materialisers are *client_integration* because the daemon prepares the file and only the client's own process can open it; the release is a *query* because it moves no revision and invalidates no resource, handles being per-client scratch that appears in no snapshot and in no event.
+
+**A message is addressed as `"<mailbox>/<uid>"`**, the last two thirds of the `message:work/inbox/41` resource, which a client composes from the mailbox it listed and the `uid` of the row it is holding.
+The mailbox is taken literally rather than resolved through the account's configured roles, so a message in a mailbox the configuration no longer lists is still materialisable: a handle is about bytes in the store, not about what the sidebar shows.
+The store's row id was the other candidate and is a rebuild away from meaning a different message; the `Message-ID` header was the third and is shared by the Inbox and the Sent copy of one message.
+
+**`part` is a dense zero-based index into the message's user-facing attachment list**, the order `mp save` and the TUI show, with the iMIP sidecar excluded.
+It is the index of the row a client is looking at; addressing by the store's raw `ordinal` would leak the hidden sidecar's position into a list it is deliberately absent from.
+
+**`message.materialise_html` writes the browser rendition, not the raw markup**: the charset and the `Content-Security-Policy` meta tag the TUI's `b` binding injects before it hands a `file://` URL to a browser (#0037), with `cid:` references inlined as `data:` URIs.
+A sender who wrote no markup is `-32602`, not a daemon failure.
+
+**The file lands at `<data_dir>/runtime/handles/<handle>/<name>`**, one directory per handle at mode 0700, where `<name>` is the sanitised attachment filename or `message.html`.
+One directory per handle is what lets the file keep the sender's own name (`vertrag.pdf`, not a hash) without two handles colliding, and what makes a release a directory removal derivable from the id alone.
+The name is sanitised with the rule `mp save` applies, so a hostile `Content-Disposition` cannot escape the directory.
+`bytes` is the length of the file at `path` and not the size of the backing blob: for an attachment the two agree, for a rendition they do not, because the CSP tag is added after the blob is read.
+`handle` is opaque, non-empty and drawn from `[A-Za-z0-9_-]`, because it is also a directory name; a client echoes it and never parses it.
+
+**Expiry, not disconnection, ends a handle.**
+All three methods are `durable`: a GUI that opened an attachment in a viewer and then lost its connection must not have the file pulled out from under it.
+`expires_at` is RFC 3339, one lifetime ahead of the call, and a handle is live strictly before that instant.
+The lifetime is ten minutes, overridable through `MAILYPOPPINS_DAEMON_HANDLE_TTL_MS` ([daemon-operations.md](daemon-operations.md#materialised-handles)).
+Expired handles are reaped lazily, at the top of every handle call: the entry goes and its directory is unlinked.
+A client that needs its file longer materialises it again rather than betting on a comparison.
+
+**A live handle pins every blob its materialisation read**, and the retention sweep skips a pinned blob (`ANO-6`), so a sweep running beside a viewer cannot evict the file it has open.
+An attachment pins one blob; a rendition pins the `html` blob, plus the `raw` blob when the markup carried `cid:` references and the inline-image scan had to parse it.
+The pin ends with the release or with the expiry, and the next sweep reclaims.
+It holds back candidates and nothing else: the store's size, the warn-then-evict marker and the half-store guard are unchanged, and `--force` overrules that guard and never a pin.
+
+An unknown account is `-32005` with `{account}` and a configured account with no readable store is `-32006`, the two refusals every read method makes.
+Everything else a caller can get wrong is `-32602`: an id that is not `"<mailbox>/<uid>"`, a message the account does not hold, a `part` that is not one of the message's attachments or is absent, a message with no markup, and an unknown, already released or expired handle.
+Those last three are one answer on purpose: all of them mean "you are not holding that", and which of the three it was is not a distinction a client can act on.
+
 ### The `config.*` family
 
 The daemon owns the configuration: it is the only component that parses a complete `config.toml`, and `config.*` is how a client reads it, checks an edit, swaps it, adds an account and stores a password.
@@ -585,5 +630,6 @@ The `state.event` and `state.resync_required` notifications, and the `{instance_
 The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
 The event kinds: `state.invalidate` `{resource, scope}` and `state.remove` `{resource}`, the replacements `account.state_changed` `{account, state}`, `draft.changed` `{account, id, path, to, subject, status, valid, ready}` and `draft.invalid` `{account, id, path, diagnostics}`, and the lifecycle kinds `operation.progress`, `operation.finished`, `sync.completed`, `config.changed`, `config.invalid` and `signature.changed` `{name, path}` with the payloads above.
 The `draft.*` family, which is `draft.approve` `{account, id}` -> `{account, id, status, path}`, and the `draft_invalid` refusal it introduced.
+The three handle methods, `message.materialise_attachment` `{account, id, part}` and `message.materialise_html` `{account, id}` -> `{handle, path, bytes, expires_at}`, and `message.release_handle` `{handle}` -> `{}`, with the `"<mailbox>/<uid>"` message id, the ten-minute default lifetime, the `<data_dir>/runtime/handles/<handle>/<name>` layout, and the pin that keeps the retention sweep off a blob a client has open.
 The snapshot's draft row, `{id, path, to, subject, status, valid, ready}`, which a `draft.invalid` reduces into with `status: "invalid"` and `valid: false`.
 The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.

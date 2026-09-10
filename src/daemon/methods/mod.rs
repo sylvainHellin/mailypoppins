@@ -34,6 +34,7 @@ use mp_protocol::RpcError;
 
 use super::config::ConfigStore;
 use super::dispatch::Dispatcher;
+use super::handles::HandleTable;
 use super::operations::{
     fake_operations, OperationCancelMethod, OperationRegistry, OperationStatusMethod, TestOperation,
 };
@@ -60,6 +61,7 @@ pub fn register(
     canonical: Arc<CanonicalState>,
     operations: Arc<OperationRegistry>,
     watch: Arc<DraftWatch>,
+    handles: Arc<HandleTable>,
 ) {
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
@@ -70,6 +72,7 @@ pub fn register(
     dispatcher.register(Arc::new(message::MessageList {
         config: Arc::clone(&config),
     }));
+    message::register_handles(dispatcher, Arc::clone(&config), handles);
     self::draft::register(
         dispatcher,
         Arc::new(self::draft::DraftApprove {

@@ -61,6 +61,7 @@ Everything the daemon needs on disk lives in one directory below the data root, 
 <data_dir>/runtime/daemon.start.lock   flock target, never unlinked
 <data_dir>/runtime/daemon.pid          diagnostic only, never the lock
 <data_dir>/runtime/daemon.json         instance metadata
+<data_dir>/runtime/handles/<h>/<name>  one materialised handle's file, dir mode 0700
 ```
 
 The directory mode is enforced rather than assumed.
@@ -148,6 +149,20 @@ The watcher never opens a draft for writing: not to mint an `id:`, not to normal
 That is why a draft with no `id:` is announced under its file stem, where the explicit index refresh would mint one: minting inside a watcher means writing to a file an editor is holding open, which is the exact burst the debounce exists to survive.
 A file that will not parse is left byte-identical, mtime included, which is also what keeps it from republishing the same diagnostic on every poll.
 
+## Materialised handles
+
+`message.materialise_attachment` and `message.materialise_html` write the bytes a client asked for into `<data_dir>/runtime/handles/<handle>/<name>`, one directory per handle at mode 0700, and answer with the path (`src/daemon/handles.rs`).
+The wire shapes are in [daemon-protocol.md](daemon-protocol.md#materialised-handles); what follows is what the files and the lifetime do to a running daemon.
+
+A handle lives ten minutes by default and is released by `message.release_handle` or by expiry, never by a disconnect: a viewer holding an open file must not lose it because the socket that asked for it went away.
+While it lives it pins the blobs it read, and the retention sweep skips them, so a sweep running beside a viewer evicts something else or nothing.
+
+**Reaping is lazy.**
+Every handle call first drops the entries that expired since the last one and unlinks their directories; there is no periodic tick.
+The pin is already false the instant a handle expires - the table answers "is this blob spoken for *now*", not "was the last tick recent enough" - so a reaper would buy nothing a sweep needs, and its interval would be one more thing to get wrong.
+What that costs is a daemon nobody calls keeping expired scratch on disk until the next call; it sits inside the 0700 runtime directory, and the next materialisation clears it.
+A daemon that exits leaves `handles/` behind, which is why the directory is under `runtime/`: it is scratch, and removing the whole tree is safe with no daemon running.
+
 ## Account runtimes
 
 With `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` the daemon starts one `AccountRuntime` per configured account (`src/daemon/runtime/account.rs`), and without it there is no runtime, no engine lock and no store to open.
@@ -215,7 +230,7 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Eight environment variables exist for the contract tests and for the migration.
+Nine environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.
@@ -260,6 +275,11 @@ It is what pins the wire cases in `tests/daemon_operations.rs`, and its name is 
 Unset, unparseable or zero means the default, as with the readiness hook.
 Both exist because a test that waited for a real poll plus a real debounce would cost 1.3 seconds per assertion and the draft contract makes a lot of them; the sandboxes in `tests/daemon_draft_watch.rs` run at 25 ms and 100 ms.
 Their names are `mailypoppins::daemon::watch::WATCH_POLL_ENV` and `WATCH_DEBOUNCE_ENV`, so the test and the daemon cannot drift apart.
+
+`MAILYPOPPINS_DAEMON_HANDLE_TTL_MS=<n>` sets how long a materialised handle lives, which defaults to 600000 ms (ten minutes).
+Unset, unparseable or zero means the default, as with the watcher's two hooks: a daemon may not fail to start over a stray variable.
+It exists because a test of "an expired handle is no longer releasable" would otherwise cost ten minutes; `tests/daemon_handles.rs` runs its sandboxes at 60000 ms and its one expiry case at 400 ms.
+The lifetime is read once, at startup, so a handle cannot be minted under one lifetime and released under another; its name is `mailypoppins::daemon::handles::HANDLE_TTL_ENV`.
 
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
