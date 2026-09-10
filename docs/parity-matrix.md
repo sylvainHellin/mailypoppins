@@ -450,19 +450,21 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`src/tui/app/keymap.rs:613`)
-- Daemon surface: `message.archive`
+- Daemon surface: `message.archive`, addressed by `"<mailbox>/<uid>"` or by the selector the daemon resolves; the daemon commits the row move and drains the owed server op before it answers
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`, TUI golden frames
-- Status: not started
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames
+- Status: routed (P4-U8); GUI not started
+- Note: over an account with no credentials the backend refuses before the store is touched, which is the half the fixture reaches; the successful drain and its rollback wait on a fake IMAP backend.
 
 ### MSG-02 Delete a received message or a local draft
 
 - Classification: GUI parity
 - Source anchor: `mp delete <selector> [--mailbox] [--force]`, `mp delete --sent` (`src/main.rs`), TUI `d`
-- Daemon surface: `message.delete`, `draft.delete`, `draft.discard`
+- Daemon surface: `message.delete` for received mail, `draft.discard` for a draft and for the `--sent` sweep, which is a parameter of the same method rather than one of its own
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`
+- Status: routed (P4-U8); GUI not started
+- Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
 - Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
 
 ### MSG-03 Toggle read and unread
@@ -652,20 +654,21 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp open <selector> [--mailbox]` (`src/main.rs`), TUI `to`, search overlay `o`
-- Daemon surface: `message.materialize` handle, opened client-side
+- Daemon surface: `message.materialise_attachment`, one call per part, opened client-side through `parse::open_file_with_system`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`
-- Status: not started
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`
+- Status: routed (P4-U8); GUI not started
+- Note: the printed path is the one row of the slice that is not byte-identical to the pre-daemon binary and cannot be: a materialised file lives under `<data_dir>/runtime/handles/<handle>/` with a lifetime attached, rather than in the client's own temp directory. The handle is deliberately not released, because the viewer just launched is holding the file.
 
 ### ATT-02 Save a received message's attachments into a client-named directory
 
 - Classification: GUI parity
 - Source anchor: `mp save <selector> [-o dir] [--mailbox]`, the option at `src/main.rs:301` and the handler in `src/main.rs`
-- Daemon surface: `message.save_attachments` with an absolute destination
+- Daemon surface: `message.materialise_attachment`, one call per part, plus a client-side copy into the destination and a `message.release_handle` per part
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`
-- Status: not started
-- Note: the destination defaults to the current directory, so the client absolutises it against its own cwd and sends an absolute path (`ANO-15`); the result is a permanent user artifact rather than a daemon-owned handle with a lifetime, which is what separates this entry from `ATT-01`, `ATT-04`, and `ATT-05`.
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`
+- Status: routed (P4-U8); GUI not started
+- Note: the destination defaults to the current directory and only the client knows what that means (`ANO-15`), so the client resolves it twice over: the absolute form anchors the writes, and the spelling the user typed is what the `✓` lines print. The result is a permanent user artifact rather than a daemon-owned handle with a lifetime, which is what separates this entry from `ATT-01`, `ATT-04`, and `ATT-05`. The daemon never renames a part, so the `_1` rule for two parts sharing a name is applied client-side, within one call.
 
 ### ATT-03 Attach a file to a draft
 

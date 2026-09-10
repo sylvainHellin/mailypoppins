@@ -208,6 +208,22 @@ pub fn absolutise(path: &Path) -> PathBuf {
     }
 }
 
+/// The name a materialised part is written under, given the names this call has
+/// already used.
+///
+/// The daemon materialises one part per call, into a directory of its own, and
+/// never renames: two parts sent under one name come back as two handles
+/// carrying that one name. The `_1` rule that turns them into two files belongs
+/// where the names become paths, which is here - the same rule
+/// [`crate::store::read::materialise_attachments`] applied when the client did
+/// the materialising, so `mp save` writes what it always wrote.
+///
+/// Within one call only, deliberately: a rule that looked at what is already on
+/// disk would grow a `_1` copy on every run of the same save.
+pub fn unique_name(name: String, used: &[String]) -> String {
+    crate::store::read::unique_in(name, used)
+}
+
 /// [`absolutise`] against an explicit base, for a path whose anchor is not the
 /// cwd (a draft's own directory, say) and for tests.
 pub fn absolutise_in(path: &Path, base: &Path) -> PathBuf {

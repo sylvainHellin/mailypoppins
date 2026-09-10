@@ -6,10 +6,8 @@ use mailypoppins::draft::*;
 use mailypoppins::send::*;
 use mailypoppins::config_cmd::*;
 use mailypoppins::graph;
-use mailypoppins::ops::{Backend, ServerOp};
 use mailypoppins::pending_ops;
 use mailypoppins::selector::{Namespace, Selector};
-use mailypoppins::store::read::materialise_attachments;
 use mailypoppins::store::Store;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -1028,6 +1026,10 @@ async fn run_send_invite(
 
 /// The store's mailbox key for the archive folder. `mp archive` is a move with
 /// a fixed destination, exactly as the TUI frames it.
+// Unused from P4-U8, when `mp archive` started answering from the daemon and
+// the daemon started naming the destination mailbox itself, and deleted with
+// the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 const ARCHIVE_MAILBOX: &str = "archive";
 
 /// `--status` values for `mp list`. A closed set rather than a free string, so
@@ -1269,6 +1271,15 @@ fn select_mailboxes(
 /// How long a routed command waits for the daemon, per call.
 const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a routed *mutation* waits for the daemon.
+///
+/// Ten seconds is right for a store read and wrong for `message.archive`: the
+/// daemon commits the row change and drains the owed server op before it
+/// answers (#0039), so the call spans a round trip to the mail server. A client
+/// that gave up at ten seconds would exit 4 over work the daemon went on to
+/// finish, which is the one answer a mutation may never give.
+const DAEMON_MUTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Connect to the local daemon and complete the handshake, or end the run.
 ///
 /// One line, on purpose: the policy lives in
@@ -1313,13 +1324,24 @@ async fn daemon_try_call(
     method: &str,
     params: serde_json::Value,
 ) -> std::result::Result<serde_json::Value, mp_protocol::RpcError> {
-    match tokio::time::timeout(DAEMON_TIMEOUT, connection.call(method, params)).await {
+    daemon_try_call_within(connection, method, params, DAEMON_TIMEOUT).await
+}
+
+/// [`daemon_try_call`] under a budget of the caller's choosing, for the calls
+/// whose work is not a store read.
+async fn daemon_try_call_within(
+    connection: &mut mp_client::Connection,
+    method: &str,
+    params: serde_json::Value,
+    budget: std::time::Duration,
+) -> std::result::Result<serde_json::Value, mp_protocol::RpcError> {
+    match tokio::time::timeout(budget, connection.call(method, params)).await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(mp_client::ClientError::Rpc(error))) => Err(error),
         Ok(Err(e)) => daemon_unavailable(&format!("{method}: {e}")),
         Err(_) => daemon_unavailable(&format!(
             "{method} went unanswered for {}s",
-            DAEMON_TIMEOUT.as_secs()
+            budget.as_secs()
         )),
     }
 }
@@ -1700,6 +1722,150 @@ async fn routed_from_source(
         signature,
     );
     draft_call(account, method, params).await
+}
+
+// ---------------------------------------------------------------------------
+// The message-mutation slice, routed (P4-U8)
+// ---------------------------------------------------------------------------
+
+/// A string field of a daemon answer, which the shape says is there.
+fn wire_str(value: &serde_json::Value) -> &str {
+    value.as_str().unwrap_or_default()
+}
+
+/// `mp archive` and `mp delete` of received mail.
+///
+/// One call: the daemon resolves the selector, refuses in the command's own
+/// words when it cannot, loads the account's credentials *before* it touches
+/// the store, and then commits the row change and drains the op it owes the
+/// server in one go (#0039). The synchronous UX is preserved because the
+/// answer is the settled outcome rather than an acknowledgement.
+async fn routed_received_mutation(
+    account: &str,
+    method: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+) -> Result<serde_json::Value> {
+    let mut params = serde_json::json!({"account": account, "selector": selector});
+    if let Some(mailbox) = mailbox {
+        params["mailbox"] = serde_json::json!(mailbox);
+    }
+    let mut connection = daemon_connection().await;
+    daemon_try_call_within(&mut connection, method, params, DAEMON_MUTATION_TIMEOUT)
+        .await
+        .map_err(|e| refusal(account, e))
+}
+
+/// `mp delete <drafts selector>`: local-only, so one call and no backend.
+async fn routed_discard(account: &str, selector: &str, force: bool) -> Result<serde_json::Value> {
+    let mut connection = daemon_connection().await;
+    daemon_try_call(
+        &mut connection,
+        "draft.discard",
+        serde_json::json!({"account": account, "selector": selector, "force": force}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))
+}
+
+/// `mp delete --sent`: the sweep, and the two lines it prints.
+///
+/// The sweep keeps going past a draft it cannot remove, so the answer counts
+/// what went and lists what stayed; one `⚠ keeping …` line per survivor, then
+/// the summary. An account with nothing to sweep is a number rather than a
+/// refusal, and prints the sentence it always printed.
+async fn routed_sweep(account: &str) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call(
+        &mut connection,
+        "draft.discard",
+        serde_json::json!({"account": account, "sent": true}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+
+    let cleared = result["cleared"].as_u64().unwrap_or_default();
+    let kept = result["kept"].as_array().cloned().unwrap_or_default();
+    if cleared == 0 && kept.is_empty() {
+        println!("No sent drafts to clear on {account}");
+        return Ok(());
+    }
+    for row in &kept {
+        eprintln!(
+            "{} keeping {}: {}",
+            "\u{26a0}".yellow(),
+            wire_str(&row["selector"]),
+            wire_str(&row["error"])
+        );
+    }
+    println!(
+        "{} cleared {cleared} sent draft{} on {account}",
+        "\u{2713}".green(),
+        if cleared == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+/// The message `mp open` and `mp save` were pointed at.
+///
+/// One `message.get` with no body: it resolves the selector, so the client
+/// learns the canonical selector its refusals and its materialisation calls are
+/// phrased in, and the attachment list whose length is how many parts there are
+/// to ask for.
+async fn routed_attachment_target(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+) -> Result<mailypoppins::read_cmd::ShownMessage> {
+    let mut params =
+        serde_json::json!({"account": account, "selector": selector, "body": false});
+    if let Some(mailbox) = mailbox {
+        params["mailbox"] = serde_json::json!(mailbox);
+    }
+    typed_call(connection, account, "message.get", params).await
+}
+
+/// One materialised attachment: the file the daemon wrote, and the name it was
+/// sent under.
+///
+/// The daemon never renames a part - two parts sent under one name come back as
+/// two handles carrying that one name, in two directories - so the file lives
+/// at `<data_dir>/runtime/handles/<handle>/<name>` and stays there until it is
+/// released or its ten minutes are up.
+async fn routed_materialise(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    selector: &str,
+    part: usize,
+) -> Result<(String, PathBuf, String)> {
+    let result = daemon_try_call(
+        connection,
+        "message.materialise_attachment",
+        serde_json::json!({"account": account, "selector": selector, "part": part}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    Ok((
+        wire_str(&result["handle"]).to_string(),
+        PathBuf::from(wire_str(&result["path"])),
+        wire_str(&result["name"]).to_string(),
+    ))
+}
+
+/// Give a handle back, best-effort: the file has been copied where the user
+/// wanted it, and a release the daemon refuses is a handle its own expiry will
+/// collect.
+async fn release_handle(connection: &mut mp_client::Connection, handle: &str) {
+    if let Err(e) = daemon_try_call(
+        connection,
+        "message.release_handle",
+        serde_json::json!({ "handle": handle }),
+    )
+    .await
+    {
+        warn!("releasing handle {handle}: {}", e.message);
+    }
 }
 
 fn resolve_received_arg(
@@ -3023,40 +3189,25 @@ async fn main() -> Result<()> {
 
         Some(Commands::Archive { selector, mailbox }) => {
             // The server move and the row rewrite both belong to the selector's
-            // account: resolve it before opening the store or loading creds.
+            // account: resolve it before asking the daemon, so a cross-account
+            // selector is answered by its own account's store and credentials.
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = received_store(&account_config.name)?;
-            let (row, canonical) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let source_server = find_server_name_for_role(&account_config, &row.mailbox);
-            let dest_server = find_server_name_for_role(&account_config, ARCHIVE_MAILBOX);
-
-            // Through the durable queue, the same seam the TUI drains (#0039):
-            // the row moves and the owed server op commit in one transaction,
-            // then the op runs synchronously so the CLI keeps its blocking UX.
-            // A crash between the two halves leaves the op queued for the next
-            // drain rather than losing it, which server-first-then-row could
-            // not promise. On a server refusal `run_and_settle` rolls the row
-            // home and propagates the error verbatim, so a not-found stays
-            // byte-identical to the pre-queue message.
-            let op = ServerOp::Move {
-                message_id: row.message_id.clone(),
-                source_mailbox: source_server,
-                dest_mailbox: dest_server,
-            };
-            let backend = Backend::resolve(&account_config)?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            let Some((_previous, op_id)) =
-                pending_ops::apply_move(&store, &account_config.name, row.id, ARCHIVE_MAILBOX, op)?
-            else {
-                return Err(anyhow!("{canonical} is no longer in the store"));
-            };
-            pending_ops::run_and_settle(&store, &blobs, op_id, &backend).await?;
-            println!("{} archived {}", "\u{2713}".green(), canonical);
+            let moved = routed_received_mutation(
+                &account_config.name,
+                "message.archive",
+                &selector,
+                mailbox.as_deref(),
+            )
+            .await?;
+            println!(
+                "{} archived {}",
+                "\u{2713}".green(),
+                wire_str(&moved["selector"])
+            );
             println!(
                 "  {} {}",
                 "now".dimmed(),
-                Selector::new(&account_config.name, ARCHIVE_MAILBOX, &row.message_id)
+                wire_str(&moved["moved_to"]["selector"])
             );
         }
 
@@ -3066,39 +3217,7 @@ async fn main() -> Result<()> {
                 // sent draft on send leaves a directory of `status: sent`
                 // files with nothing left to do to them. Clear them in one
                 // call, file and row alike.
-                let store = drafts_store(&account_config.name)?;
-                let rows = mailypoppins::store::drafts::list(
-                    &store,
-                    &account_config.name,
-                    Some("sent"),
-                )?;
-                if rows.is_empty() {
-                    println!("No sent drafts to clear on {}", account_config.name);
-                } else {
-                    let mut cleared = 0usize;
-                    for row in &rows {
-                        match mailypoppins::draft::delete_indexed_draft(
-                            &store,
-                            &account_config.name,
-                            row,
-                            false,
-                        ) {
-                            Ok(()) => cleared += 1,
-                            Err(e) => eprintln!(
-                                "{} keeping {}: {e:#}",
-                                "\u{26a0}".yellow(),
-                                Selector::for_draft(&account_config.name, &row.id)
-                            ),
-                        }
-                    }
-                    reindex_drafts(&account_config.name);
-                    println!(
-                        "{} cleared {cleared} sent draft{} on {}",
-                        "\u{2713}".green(),
-                        if cleared == 1 { "" } else { "s" },
-                        account_config.name
-                    );
-                }
+                routed_sweep(&account_config.name).await?;
             } else {
                 // `required_unless_present = "sent"` guarantees the selector.
                 let selector = selector.expect("clap requires a selector without --sent");
@@ -3107,98 +3226,114 @@ async fn main() -> Result<()> {
                 // the selector's, not `-A`'s (the #0073 follow-up bug).
                 let account_config =
                     account_for_selector(&selector, &account_config, &global_config)?;
-                if is_drafts_selector(&selector, mailbox.as_deref())? {
+                let deleted = if is_drafts_selector(&selector, mailbox.as_deref())? {
                     // Drafts are local-only: no server op, just the file and
                     // the index row the rescan drops (#0073).
-                    let store = drafts_store(&account_config.name)?;
-                    let (row, canonical) =
-                        resolve_draft_arg(&store, &selector, &account_config.name)?;
-                    mailypoppins::draft::delete_indexed_draft(
-                        &store,
-                        &account_config.name,
-                        &row,
-                        force,
-                    )?;
-                    reindex_drafts(&account_config.name);
-                    println!("{} deleted {}", "\u{2713}".green(), canonical);
+                    routed_discard(&account_config.name, &selector, force).await?
                 } else {
-                    let store = received_store(&account_config.name)?;
-                    let (row, canonical) = resolve_received_arg(
-                        &store,
-                        &selector,
-                        &account_config.name,
-                        mailbox.as_deref(),
-                    )?;
-                    let source_server =
-                        find_server_name_for_role(&account_config, &row.mailbox);
-
-                    // The durable queue again (#0039): the row delete and the
-                    // owed server delete commit together, then the op runs
-                    // synchronously. A delete has nothing to roll back (the row
-                    // is gone and the server still holds the message), so a
+                    // The durable queue again (#0039): the daemon commits the
+                    // row delete and the owed server delete together, then
+                    // drains it. A delete has nothing to roll back (the row is
+                    // gone and the server still holds the message), so a
                     // refusal propagates verbatim and the next sync refetches
                     // the UID; the not-found message stays byte-identical.
-                    let op = ServerOp::Delete {
-                        message_id: row.message_id.clone(),
-                        source_mailbox: source_server,
-                    };
-                    let backend = Backend::resolve(&account_config)?;
-                    let blobs =
-                        mailypoppins::store::BlobStore::for_account(&account_config.name);
-                    let Some((_previous, op_id)) = pending_ops::apply_delete(
-                        &store,
-                        &blobs,
+                    routed_received_mutation(
                         &account_config.name,
-                        row.id,
-                        op,
-                    )?
-                    else {
-                        return Err(anyhow!("{canonical} is no longer in the store"));
-                    };
-                    pending_ops::run_and_settle(&store, &blobs, op_id, &backend).await?;
-                    println!("{} deleted {}", "\u{2713}".green(), canonical);
-                }
+                        "message.delete",
+                        &selector,
+                        mailbox.as_deref(),
+                    )
+                    .await?
+                };
+                println!(
+                    "{} deleted {}",
+                    "\u{2713}".green(),
+                    wire_str(&deleted["selector"])
+                );
             }
         }
 
         Some(Commands::Open { selector, mailbox }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = received_store(&account_config.name)?;
-            let (row, canonical) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            // Attachments are blobs; the system opener needs files, so they are
-            // materialised into a temp directory keyed by the row. The TUI's
-            // `o` comes through the same helper, so both put them in the same
-            // private place.
-            let dir = mailypoppins::parse::materialisation_dir(&row.id.to_string())?;
-            let files = materialise_attachments(&store, &blobs, row.id, &dir)?;
-            if files.is_empty() {
-                return Err(anyhow!("{canonical} has no attachments"));
+            let mut connection = daemon_connection().await;
+            let message = routed_attachment_target(
+                &mut connection,
+                &account_config.name,
+                &selector,
+                mailbox.as_deref(),
+            )
+            .await?;
+            if message.attachments.is_empty() {
+                return Err(anyhow!("{} has no attachments", message.selector));
             }
-            for file in &files {
-                mailypoppins::parse::open_file_with_system(file)?;
-                println!("{} opened {}", "\u{2713}".green(), file.display());
+            // Attachments are blobs; the system opener needs files, so the
+            // daemon materialises each part into its own handle directory and
+            // the client launches the opener - the one half of this only the
+            // user's own session can do (ANO-15). The handles are deliberately
+            // not released: the viewer just started is holding the file, and
+            // the handle's own lifetime is what ends it.
+            for part in 0..message.attachments.len() {
+                let (_handle, path, _name) = routed_materialise(
+                    &mut connection,
+                    &account_config.name,
+                    &message.selector,
+                    part,
+                )
+                .await?;
+                mailypoppins::parse::open_file_with_system(&path)?;
+                println!("{} opened {}", "\u{2713}".green(), path.display());
             }
         }
 
         Some(Commands::Save { selector, output, mailbox }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = received_store(&account_config.name)?;
-            let (row, canonical) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            // The destination is the user's, so this process resolves it: the
-            // daemon that will materialise the attachments from P4-U8 on was
-            // started from somewhere else and its cwd means nothing (P4-U2).
-            let dest =
-                mailypoppins::daemon::client::absolutise(&output.unwrap_or_else(|| PathBuf::from(".")));
-            let files = materialise_attachments(&store, &blobs, row.id, &dest)?;
-            if files.is_empty() {
-                return Err(anyhow!("{canonical} has no attachments"));
+            // The destination is the user's, so this process resolves it twice
+            // over: the absolute form is what the writes use, because the daemon
+            // was started from somewhere else and its cwd means nothing
+            // (ANO-15), and the spelling is what the user reads back.
+            let spelled = output.unwrap_or_else(|| PathBuf::from("."));
+            let dest = mailypoppins::daemon::client::absolutise(&spelled);
+
+            let mut connection = daemon_connection().await;
+            let message = routed_attachment_target(
+                &mut connection,
+                &account_config.name,
+                &selector,
+                mailbox.as_deref(),
+            )
+            .await?;
+            if message.attachments.is_empty() {
+                return Err(anyhow!("{} has no attachments", message.selector));
             }
-            for file in &files {
-                println!("{} {}", "\u{2713}".green(), file.display());
+
+            std::fs::create_dir_all(&dest)
+                .with_context(|| format!("creating {}", dest.display()))?;
+            // The daemon hands back the name the sender chose and never renames
+            // a part; two parts sent under one name are two handles carrying
+            // that one name, and the `_1` rule that makes them two files is
+            // applied here, where the names become paths. Within this call
+            // only: saving the same message twice writes the same two names
+            // rather than growing a copy per run.
+            let mut written: Vec<String> = Vec::new();
+            for part in 0..message.attachments.len() {
+                let (handle, path, name) = routed_materialise(
+                    &mut connection,
+                    &account_config.name,
+                    &message.selector,
+                    part,
+                )
+                .await?;
+                let name = mailypoppins::daemon::client::unique_name(name, &written);
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let out = dest.join(&name);
+                std::fs::write(&out, &bytes)
+                    .with_context(|| format!("writing {}", out.display()))?;
+                release_handle(&mut connection, &handle).await;
+                written.push(name);
+            }
+            for name in &written {
+                println!("{} {}", "\u{2713}".green(), spelled.join(name).display());
             }
         }
 

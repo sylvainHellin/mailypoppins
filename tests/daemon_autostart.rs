@@ -433,22 +433,19 @@ fn resolve_attachment_paths_yields_absolute_paths_for_relative_entries() {
 /// client standing in a temp directory, with `mp save` writing into the
 /// client's directory rather than into the daemon's.
 ///
-/// Ignored until P4-U8 migrates `mp save`: today the command answers in
-/// process, so the assertion would pass without proving anything about the
-/// socket. Un-ignore it in that unit and add `--daemon` (or drop it, once the
-/// flag is the default) to the invocation.
+/// Live from P4-U8, which migrated `mp save` onto the daemon and gave this
+/// root the seed it was missing: the fixture holds `bericht@example.com` with
+/// two attachments, and the command that fetches them now crosses the socket.
 #[test]
-#[ignore = "P4-U8 migrates `mp save`; until then this asserts the in-process path, not the socket"]
 fn mp_save_writes_into_the_clients_cwd_with_the_daemon_started_from_root() {
     let tmp = root();
     let standing_in = root();
+    support::mutation_fixture::seed(tmp.path());
     let fixture = DaemonFixture::start_in(tmp.path(), Some(Path::new("/")));
 
-    // P4-U8: this needs a fixture message with an attachment, and the routed
-    // form of the command.
     let out = fixture.mp_in(
         standing_in.path(),
-        &["save", "mp://alpha/inbox/msg@example.com"],
+        &["save", "mp://alpha/inbox/bericht@example.com"],
     );
     fixture.stop();
 

@@ -1692,3 +1692,26 @@ The general shape: when a wire type is richer than the projection a command prin
 `draft.create` writes `account.default_from`, which is what `SmtpConfig::load` copies when it succeeds and what the user actually configured when it does not.
 The same applies to the dry run's `From:` line for a draft with no `from:` field.
 Nothing in the parity table sees it (every fixture draft carries a `from:`), and it is a fix rather than a drift, but it is the one byte of the slice a broken secrets backend can move.
+
+## `mp daemon run` returns before `main` opens the secrets backend
+
+`main` answers `Commands::Daemon` and exits at the top of the function, ahead of `init_secrets_backend`, which is right for every daemon command and wrong the moment a method needs a credential: `Backend::resolve` inside the daemon would have failed with `secrets backend not initialized -- call secrets::init() first` instead of the `Secret '…' not found. Run \`mp config set-password\`.` sentence the pre-daemon binary produces, and the parity row is that exact sentence.
+
+`message.archive` and `message.delete` therefore call `secrets::init(snapshot.config.secrets_backend)` themselves, immediately before `Backend::resolve`, which is the rule `config.set_password` already followed: on first use rather than at startup, because a first run has no configuration to select a backend from and the opener is idempotent.
+Startup was the other candidate and is worse: a daemon that starts with no `config.toml` and later reloads one naming `secrets_backend = "keyring"` would have locked in the encrypted file, since the first kind wins.
+
+## A `Store` is not `Sync`, so a daemon method may not hold one across an `await`
+
+`Method::call` returns a `BoxFuture<'a, …> + Send`, and `rusqlite`'s statement cache is a `RefCell`, so any future holding a `&Store` across an await point fails to compile with "future cannot be sent between threads safely".
+Every earlier method got away with it because store work is synchronous; the two message mutations do not, because the local commit and the server drain are one unit (`pending_ops::run_and_settle`) and splitting them to satisfy the scheduler would change what the command promises.
+
+The fix is `tokio::task::spawn_blocking` plus `tokio::runtime::Handle::current().block_on(…)` inside it: the store never leaves the blocking thread, and the drain's own network I/O still runs on the daemon's runtime through the handle that thread blocks on.
+The CLI never hit this because `#[tokio::main]` block-drives `main`'s future, which needs no `Send`.
+
+## An exhaustive key assertion is a wall across every additive protocol field
+
+`tests/daemon_handles.rs` asserts a materialisation answers *exactly* `["bytes", "expires_at", "handle", "path"]`, sorted.
+That is a good assertion for the shape it pinned and it makes an additive field impossible: P4-U7's contract adds `name`, both files are committed, and no implementation satisfies both.
+The same shape bit `DRAFT_COMMANDS` in `tests/daemon_draft_slice.rs`, a five-name list beside a ten-name one, when `draft.discard` joined the family as a command.
+
+A contract test that means "these keys and no others" is worth writing; what it costs is that the unit adding a key has to reconcile it in the same commit, which the T unit that grows the contract should do rather than leave to the implementer.

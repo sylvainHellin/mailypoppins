@@ -42,13 +42,16 @@ use serde_json::{json, Value};
 use mp_protocol::RpcError;
 
 use crate::config::AccountConfig;
-use crate::selector::{Namespace, DRAFTS_MAILBOX};
+use crate::ops::{Backend, ServerOp};
+use crate::pending_ops;
+use crate::selector::{Namespace, Selector, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
 use crate::tui::app::{build_mailboxes, resolve_date};
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
+    ResourceId,
 };
 use super::super::handles::{
     handle_dir, reap, remove_handle_dir, HandleId, HandleKind, HandleTable,
@@ -348,6 +351,217 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
 }
 
 // ---------------------------------------------------------------------------
+// The mutations
+// ---------------------------------------------------------------------------
+
+/// The mailbox an archive moves a message into, the role id `mp archive` has
+/// always moved to. Named here rather than imported from the binary, because
+/// the daemon is the process that performs the move from P4-U8 on.
+const ARCHIVE_MAILBOX: &str = "archive";
+
+/// The two mutations, in method-name order.
+///
+/// Two methods rather than two flavours of one: archiving moves a row and owes
+/// the server a `Move`, deleting drops a row and owes it a `Delete`, and only
+/// the first has anything to roll back when the server refuses.
+///
+/// Both are `Command`: each moves the daemon's revision and invalidates
+/// `message:<account>/<mailbox>/<uid>`. Both are `Durable`, which is the whole
+/// reason they are not `ClientScoped`: the pre-daemon commands commit the row
+/// change and the owed server op in one transaction and then drain that op
+/// synchronously (`pending_ops::run_and_settle`, #0039), and a drain torn down
+/// because the calling socket went away would leave the op queued while its
+/// caller was told nothing.
+pub const MESSAGE_MUTATION_METHOD_SPECS: [MethodSpec; 2] = [
+    MethodSpec::new("message.archive", MethodKind::Command, 1),
+    MethodSpec::new("message.delete", MethodKind::Command, 1),
+];
+
+/// One of the two, selected by its own [`MethodSpec`].
+pub struct MessageMutationMethod {
+    /// Which of [`MESSAGE_MUTATION_METHOD_SPECS`] this instance serves.
+    pub spec: MethodSpec,
+    /// The live configuration, so a reload is visible to the next call.
+    pub config: Arc<super::super::config::ConfigStore>,
+    /// The state whose revision a command reports.
+    pub canonical: Arc<super::super::state::CanonicalState>,
+}
+
+impl Method for MessageMutationMethod {
+    fn spec(&self) -> MethodSpec {
+        self.spec
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            let snapshot = self.config.snapshot();
+            let archive = self.spec.name == "message.archive";
+            // On a blocking thread, because a [`Store`] is not `Sync` and this
+            // method holds one across the drain's `await`: the local commit and
+            // the server op are one unit, and splitting them to satisfy the
+            // scheduler would be a change to what the command promises. The
+            // drain's own I/O still runs on the daemon's runtime, through the
+            // handle this thread blocks on.
+            let done = tokio::task::spawn_blocking(move || {
+                tokio::runtime::Handle::current().block_on(mutate(&params, &snapshot, archive))
+            })
+            .await;
+            let (result, resource) = match done {
+                Ok(result) => result.map_err(DomainError::from)?,
+                Err(e) => {
+                    return Err(DomainError::internal(format!(
+                        "the mutation worker did not finish: {e}"
+                    )))
+                }
+            };
+            Ok(Outcome::command(
+                result,
+                self.canonical.revision().get(),
+                vec![ResourceId::new(resource)],
+            ))
+        })
+    }
+}
+
+/// Register the two mutations on `dispatcher`.
+pub fn register_mutations(
+    dispatcher: &mut Dispatcher,
+    config: Arc<super::super::config::ConfigStore>,
+    canonical: Arc<super::super::state::CanonicalState>,
+) {
+    for spec in MESSAGE_MUTATION_METHOD_SPECS {
+        dispatcher.register(Arc::new(MessageMutationMethod {
+            spec,
+            config: Arc::clone(&config),
+            canonical: Arc::clone(&canonical),
+        }));
+    }
+}
+
+/// The `result` of `message.archive` and `message.delete`, plus the resource
+/// the call invalidated.
+///
+/// The order of the four steps is the pre-daemon command's, and it is the whole
+/// safety property of this slice: resolve the account, resolve the message,
+/// **resolve the backend**, and only then commit the row change and drain the
+/// op it owes. An account with no credentials therefore refuses with the
+/// secret store's own sentence and leaves the row exactly where it was, rather
+/// than archiving it locally and queueing a move behind a password the user has
+/// not entered yet.
+async fn mutate(
+    params: &Value,
+    snapshot: &super::super::config::Snapshot,
+    archive: bool,
+) -> Result<(Value, String), RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(&snapshot.accounts, &name)?;
+
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let row = address(params, &store, &name)?;
+    let selector = Selector::for_message(&name, &row).to_string();
+    let id = format!("{}/{}", row.mailbox, row.uid);
+    let resource = format!("message:{name}/{}/{}", row.mailbox, row.uid);
+    let source_server = crate::config::find_server_name_for_role(account, &row.mailbox);
+
+    // The secrets backend is opened on first use rather than at startup, the
+    // same rule `config.set_password` follows: a first run has no configuration
+    // to select one from, and the opener is idempotent.
+    if let Err(e) = crate::secrets::init(snapshot.config.secrets_backend) {
+        return Err(credentials(&name, &anyhow::anyhow!("{e}")));
+    }
+    let backend = Backend::resolve(account).map_err(|e| credentials(&name, &e))?;
+    let blobs = BlobStore::for_account(&name);
+    let gone = || invalid_params(format!("{selector} is no longer in the store"));
+
+    let result = if archive {
+        // Through the durable queue, the same seam the TUI drains (#0039): the
+        // row moves and the owed server op commit in one transaction, then the
+        // op runs synchronously so the caller keeps its blocking UX. On a
+        // server refusal `run_and_settle` rolls the row home and propagates the
+        // error verbatim.
+        let op = ServerOp::Move {
+            message_id: row.message_id.clone(),
+            source_mailbox: source_server,
+            dest_mailbox: crate::config::find_server_name_for_role(account, ARCHIVE_MAILBOX),
+        };
+        let Some((_previous, op_id)) =
+            pending_ops::apply_move(&store, &name, row.id, ARCHIVE_MAILBOX, op)
+                .map_err(|e| internal(format!("{e:#}")))?
+        else {
+            return Err(gone());
+        };
+        settle(&store, &blobs, op_id, &backend).await?;
+        json!({
+            "account": name,
+            "id": id,
+            "selector": selector,
+            "mailbox": row.mailbox,
+            "moved_to": {
+                "mailbox": ARCHIVE_MAILBOX,
+                // The Message-ID as the store holds it, which is what the
+                // pre-daemon "now" line printed.
+                "selector": Selector::new(&name, ARCHIVE_MAILBOX, &row.message_id).to_string(),
+            },
+        })
+    } else {
+        // A delete has nothing to roll back (the row is gone and the server
+        // still holds the message), so a refusal propagates verbatim and the
+        // next sync refetches the UID.
+        let op = ServerOp::Delete {
+            message_id: row.message_id.clone(),
+            source_mailbox: source_server,
+        };
+        let Some((_previous, op_id)) = pending_ops::apply_delete(&store, &blobs, &name, row.id, op)
+            .map_err(|e| internal(format!("{e:#}")))?
+        else {
+            return Err(gone());
+        };
+        settle(&store, &blobs, op_id, &backend).await?;
+        json!({
+            "account": name,
+            "id": id,
+            "selector": selector,
+            "mailbox": row.mailbox,
+        })
+    };
+    Ok((result, resource))
+}
+
+/// Run the owed op and settle it, reporting the server's refusal verbatim.
+async fn settle(
+    store: &Store,
+    blobs: &BlobStore,
+    op_id: i64,
+    backend: &Backend,
+) -> Result<(), RpcError> {
+    pending_ops::run_and_settle(store, blobs, op_id, backend)
+        .await
+        .map_err(|e| internal(format!("{e:#}")))
+}
+
+/// `-32603` for an account whose credentials cannot be loaded, carrying the
+/// account so a client can act on it without reading English.
+///
+/// Not `-32005` and not `-32006`: the account is configured and its store is
+/// readable, so either of those would contradict what `account.list` says about
+/// the same account. Not `-32602` either: the caller's parameters were right.
+/// Protocol 1 has no credentials code, and inventing one would take a
+/// protocol-changelog entry without moving a single user-visible byte.
+fn credentials(account: &str, error: &anyhow::Error) -> RpcError {
+    RpcError {
+        code: super::INTERNAL_ERROR,
+        message: format!("{error}"),
+        data: Some(json!({ "account": account })),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Materialised handles
 // ---------------------------------------------------------------------------
 
@@ -434,7 +648,15 @@ pub fn register_handles(
     }
 }
 
-/// The `result` of the two materialisers: `{handle, path, bytes, expires_at}`.
+/// The `result` of the two materialisers:
+/// `{handle, path, name, bytes, expires_at}`.
+///
+/// The message is addressed the way [`get`] addresses one - `{id}` or
+/// `{selector, mailbox?}` - which P4-U8 added beside the `{id}` form P3b-U12
+/// shipped, because a client holding a selector cannot build
+/// `"<mailbox>/<uid>"` out of a `ShownMessage` and re-listing the mailbox to
+/// find the uid would be a second query to answer a question the daemon already
+/// answers.
 fn materialise(
     params: &Value,
     accounts: &[AccountConfig],
@@ -443,7 +665,6 @@ fn materialise(
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     super::account::ready_account(accounts, &name)?;
-    let (mailbox, uid) = message_param(params)?;
 
     // The store is opened by path, as `message.list` opens it, and no engine
     // lock is taken: materialising is a read plus a write into the daemon's own
@@ -451,9 +672,7 @@ fn materialise(
     let store = Store::open(crate::config::store_path(&name))
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
     let blobs = BlobStore::new(crate::config::blobs_dir(&name));
-    let row = read::find_row_by_uid(&store, &name, &mailbox, uid)
-        .map_err(|e| internal(format!("looking up {name}:{mailbox}/{uid}: {e:#}")))?
-        .ok_or_else(|| invalid_params(format!("{name} holds no message {mailbox}/{uid}")))?;
+    let row = address(params, &store, &name)?.id;
 
     let (filename, bytes, pinned) = match kind {
         HandleKind::Attachment => attachment_file(params, &store, &blobs, row)?,
@@ -611,6 +830,12 @@ fn write_handle(
     Ok(json!({
         "handle": handle.id.as_str(),
         "path": path.display().to_string(),
+        // The sanitised file name, so a client builds its own destination
+        // without parsing the daemon's path (P4-U8). The daemon never renames a
+        // part: two parts sent under one name come back as two handles carrying
+        // that one name, in two directories, and the `_1` rule that turns them
+        // into two files belongs where the names become paths, in the client.
+        "name": filename,
         // The length of the file, not the size of the backing blob: a rendition
         // grew by its CSP tag, and a client preallocating from this reads a file.
         "bytes": handle.bytes,

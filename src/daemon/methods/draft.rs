@@ -70,16 +70,17 @@ use super::super::dispatch::{
 };
 use super::{internal, invalid_params, string_param};
 
-/// The nine methods of the family, in method-name order.
+/// The ten methods of the family, in method-name order.
 ///
-/// Four queries read the directory and five commands write a file. All nine are
-/// durable: a draft written half way because its caller hung up is exactly what
-/// this family must never produce, and none of them runs long enough to be
-/// worth cancelling.
-pub const DRAFT_METHOD_SPECS: [MethodSpec; 9] = [
+/// Four queries read the directory and six commands write or remove one. All
+/// ten are durable: a draft written half way because its caller hung up is
+/// exactly what this family must never produce, and none of them runs long
+/// enough to be worth cancelling.
+pub const DRAFT_METHOD_SPECS: [MethodSpec; 10] = [
     MethodSpec::new("draft.approve", MethodKind::Command, 1),
     MethodSpec::new("draft.create", MethodKind::Command, 1),
     MethodSpec::new("draft.demote", MethodKind::Command, 1),
+    MethodSpec::new("draft.discard", MethodKind::Command, 1),
     MethodSpec::new("draft.forward", MethodKind::Command, 1),
     MethodSpec::new("draft.list", MethodKind::Query, 1),
     MethodSpec::new("draft.path", MethodKind::Query, 1),
@@ -140,6 +141,7 @@ impl Method for DraftMethod {
                 "draft.approve" => self.set_status(&params, accounts, true),
                 "draft.create" => create(&params, accounts, email),
                 "draft.demote" => self.set_status(&params, accounts, false),
+                "draft.discard" => discard(&params, accounts),
                 "draft.forward" => from_source(&params, accounts, email, false),
                 "draft.list" => list(&params, accounts),
                 "draft.path" => path(&params, accounts),
@@ -153,11 +155,14 @@ impl Method for DraftMethod {
             }
             // Every command of this family answers about one draft and carries
             // its id, which is the resource a client's cached row is keyed by.
-            let resource = format!(
-                "draft:{}/{}",
-                result["account"].as_str().unwrap_or_default(),
-                result["id"].as_str().unwrap_or_default()
-            );
+            // The one exception is the `draft.discard` sweep, which answers
+            // about a whole account and names no draft: it invalidates the
+            // account's drafts rather than one row.
+            let account = result["account"].as_str().unwrap_or_default();
+            let resource = match result["id"].as_str() {
+                Some(id) => format!("draft:{account}/{id}"),
+                None => format!("draft:{account}"),
+            };
             Ok(Outcome::command(
                 result,
                 self.canonical.revision().get(),
@@ -525,6 +530,101 @@ fn created(
             source,
         },
     )
+}
+
+/// The `result` of `draft.discard`: one draft removed, or the `--sent` sweep.
+///
+/// A draft is local, so there is no server op and no backend: just the file and
+/// the index row. `force` is required for an `approved` draft and for nothing
+/// else, because an approved draft is a queued send and deleting it drops that
+/// send; a `sent` draft needs none, since retiring one is the whole point of
+/// the sweep. Both refusals are
+/// [`crate::draft::delete_indexed_draft`]'s own sentences, verbatim.
+fn discard(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let account = configured(accounts, &string_param(params, "account")?)?;
+    let name = account.name.clone();
+
+    // The sweep is a parameter of this method rather than a method of its own:
+    // one verb over a set is the same verb. It names no draft, so a caller who
+    // named one disagrees with themselves.
+    if flag(params, "sent")? {
+        for key in ["id", "selector", "force"] {
+            if !matches!(params.get(key), None | Some(Value::Null)) {
+                return Err(invalid_params(format!(
+                    "a sent sweep clears every sent draft of an account and names none; \
+                     {key} and sent are two different calls"
+                )));
+            }
+        }
+        return sweep(&name);
+    }
+
+    let force = flag(params, "force")?;
+    let row = resolve(&name, &addressed_one(params, &name)?)?;
+    let store = drafts_store(&name)?;
+    crate::draft::delete_indexed_draft(&store, &name, &row, force)
+        .map_err(|e| invalid_params(format!("{e:#}")))?;
+    reindex(&store, &name);
+    Ok(json!({
+        "account": name,
+        "id": row.id,
+        "selector": Selector::for_draft(&name, &row.id).to_string(),
+        // The status it was in, which is what was discarded: a client prints
+        // one line either way, and a caller that cared about the difference
+        // (an approved draft is a queued send) learns it from the answer.
+        "status": row.status,
+    }))
+}
+
+/// Every `sent` draft of one account: what went, and what stayed.
+///
+/// The sweep keeps going past a file it cannot remove, because one unremovable
+/// draft is not a reason to leave the other nine behind; the survivors travel
+/// with their own error so the client can print one line each before its
+/// summary.
+fn sweep(account: &str) -> Result<Value, RpcError> {
+    let store = drafts_store(account)?;
+    // The scan first, so a draft written a millisecond ago is swept, and
+    // through the index so the walk keeps the `mtime DESC, id ASC` order
+    // `mp delete --sent` has always walked in.
+    reindex(&store, account);
+    let rows = crate::store::drafts::list(&store, account, Some("sent"))
+        .map_err(|e| internal(format!("listing the sent drafts of {account}: {e:#}")))?;
+
+    let mut cleared = 0u64;
+    let mut kept = Vec::new();
+    for row in &rows {
+        match crate::draft::delete_indexed_draft(&store, account, row, false) {
+            Ok(()) => cleared += 1,
+            Err(e) => kept.push(json!({
+                "id": row.id,
+                "selector": Selector::for_draft(account, &row.id).to_string(),
+                "error": format!("{e:#}"),
+            })),
+        }
+    }
+    reindex(&store, account);
+    Ok(json!({"account": account, "cleared": cleared, "kept": kept}))
+}
+
+/// The account's store, for the two things a discard needs one for: the
+/// mid-send check [`crate::draft::delete_indexed_draft`] makes against the
+/// outbox, and the index the removal has to leave consistent.
+fn drafts_store(account: &str) -> Result<Store, RpcError> {
+    Store::open(crate::config::store_path(account))
+        .map_err(|e| internal(format!("opening the store of {account}: {e:#}")))
+}
+
+/// Re-index the drafts directory, best-effort.
+///
+/// The removal already happened and the watcher would notice on its own; this
+/// is what keeps the next reader that goes through the index - `mp send`, the
+/// TUI - from resolving a row whose file is gone.
+fn reindex(store: &Store, account: &str) {
+    let dir = crate::config::drafts_dir(account);
+    if let Err(e) = crate::store::drafts::refresh(store, account, &dir) {
+        log::warn!("[draft] could not refresh the drafts index of {account}: {e:#}");
+    }
 }
 
 // ---------------------------------------------------------------------------

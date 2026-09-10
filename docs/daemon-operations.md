@@ -80,13 +80,22 @@ The migration moves the CLI one slice at a time, and a command routes the moment
 | `mp reply [--all] [--mailbox]` | `draft.reply` | P4-U6 |
 | `mp forward [--mailbox]` | `draft.forward` | P4-U6 |
 | `mp <selector>` (the dry run) | `draft.preview` | P4-U6 |
+| `mp archive <selector> [--mailbox]` | `message.archive` | P4-U8 |
+| `mp delete <selector> [--mailbox] [--force]` | `message.delete`, or `draft.discard` for a drafts selector | P4-U8 |
+| `mp delete --sent` | `draft.discard` with `sent: true` | P4-U8 |
+| `mp open <selector> [--mailbox]` | `message.get`, then `message.materialise_attachment` per part, opened in the client | P4-U8 |
+| `mp save <selector> [-o dir] [--mailbox]` | `message.get`, then `message.materialise_attachment` and `message.release_handle` per part, written in the client | P4-U8 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 
 Every other command still answers in process and will until its own slice.
 A routed command produces the pre-daemon binary's bytes, refusals included: `tests/daemon_read_slice.rs` compares stdout, stderr and the exit code against `~/.cache/mp-oracle/pre-daemon/mp` over one seeded root, for every flag combination and every error case.
 That is why a refusal the daemon spelled out comes back typed rather than printed at the call site: `account_not_ready` becomes the sentence a store-less read has always produced, and the rest leaves through `main`'s ordinary error path, which is where the pre-daemon binary reported it.
 `tests/daemon_draft_slice.rs` is the same gate for the draft slice, over a fixture whose drafts directories are stashed and restored between the two binaries, because half of those commands write.
+`tests/daemon_mutation_slice.rs` is the gate for `mp archive`, `mp delete`, `mp open` and `mp save`, with one row deliberately not byte-identical: `mp open` prints the path it handed the opener, and a daemon-materialised file lives under `<data_dir>/runtime/handles/<handle>/` rather than in the client's own temp directory, so that row is compared with the two directories masked.
+`mp save` is the mirror image of it: the absolute destination is what crosses the socket, and the spelling the user typed is what the `✓` lines print.
 The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.
+
+The daemon opens the secrets backend on first use, which from P4-U8 includes `message.archive` and `message.delete`: they load the account's IMAP or Graph credentials, and an account with none refuses with the `mp config set-password` sentence *before* the store is touched, so the row stays where it was.
 
 ## Exit codes
 

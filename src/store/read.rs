@@ -644,7 +644,7 @@ pub fn materialise_attachments(
 /// against what is on disk: the temp directory a row is materialised into is
 /// rewritten before every open, and a disk-based rule would grow a `_1` copy
 /// on each one.
-fn unique_in(name: String, used: &[String]) -> String {
+pub fn unique_in(name: String, used: &[String]) -> String {
     if !used.contains(&name) {
         return name;
     }

@@ -101,7 +101,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations.
 - `signature.*` for list, read, create, update, rename, delete, and per-account default selection.
 - `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes.
-- `draft.*` for the draft lifecycle, of which this build serves the nine methods of the draft slice.
+- `draft.*` for the draft lifecycle, of which this build serves the ten methods of the draft slice and the mutation slice.
 - `operation.*` for long-running operation status and cancellation.
 - `diagnostic.*` for logs, health, and support information.
 - `daemon.*` for status and graceful lifecycle control.
@@ -114,7 +114,7 @@ Every method registered on the dispatcher declares a kind, and the kind fixes wh
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.get`, `message.list`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `config.get` and `config.validate` are the queries this build serves.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account` and `config.init` are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `message.archive`, `message.delete` and the five `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. No method of this build declares it: the long-running work is sync, authentication and the rebuilds, all of which arrive in Phase 5, and until then the only operation is the one the `test.operation` hook registers. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -367,14 +367,38 @@ An absent `limit` means every hit.
 A query the search layer cannot use, a lone quote or bare punctuation, is `-32602` and not `-32603`: the parameter is wrong, not the store.
 A query nothing matches is an empty `hits` array, not an error.
 
+### Message mutations
+
+Two methods change a received message, and each of them owes the server an operation.
+
+| method | kind | params | result |
+|---|---|---|---|
+| `message.archive` | command | `{account, id\|selector, mailbox?}` | `{account, id, selector, mailbox, moved_to: {mailbox, selector}}` |
+| `message.delete` | command | `{account, id\|selector, mailbox?}` | `{account, id, selector, mailbox}` |
+
+Two methods rather than two flavours of one: archiving moves a row and owes a `Move`, deleting drops a row and owes a `Delete`, and only the first has anything to roll back when the server refuses.
+Both are commands, because each moves the daemon's revision and invalidates `message:<account>/<mailbox>/<uid>`, and both are `durable`: the daemon commits the row change and the owed server op in one transaction and then drains that op synchronously (#0039), and a drain torn down because the calling socket went away would leave the op queued while its caller was told nothing.
+The answer is therefore the settled outcome rather than an acknowledgement, which is what preserves the blocking UX `mp archive` and `mp delete` have always had.
+
+**A message is addressed exactly as `message.get` addresses one**: `id` is `"<mailbox>/<uid>"`, `selector` is the grammar the user types, `mailbox` narrows a selector the way `--mailbox` does, and neither or both is `-32602`.
+The refusals are that resolution's own sentences, ambiguity included, so a routed command reports what the pre-daemon one reported.
+
+**The backend is resolved before the store is touched.**
+An account whose credentials cannot be loaded refuses with the secret store's own sentence and leaves the row exactly where it was, rather than archiving it locally and queueing a move behind a password nobody has entered.
+That refusal is `-32603` with `{account}`: the account is configured and its store is readable, so `-32005` and `-32006` would contradict what `account.list` says about the same account, and the caller's parameters were right, so it is not `-32602`.
+Protocol 1 has no credentials code, and adding one would take a changelog entry without moving a user-visible byte.
+The secrets backend is opened on first use rather than at startup, the same rule `config.set_password` follows.
+
+`moved_to.selector` names the Message-ID as the store holds it, which is the "now" line `mp archive` prints.
+
 ### Materialised handles
 
 A client cannot read an account's blob store, so the daemon writes the bytes it asks for into its own runtime directory and hands back a path with an explicit lifetime.
 
 | method | kind | params | result |
 |---|---|---|---|
-| `message.materialise_attachment` | client_integration | `{account, id, part}` | `{handle, path, bytes, expires_at}` |
-| `message.materialise_html` | client_integration | `{account, id}` | `{handle, path, bytes, expires_at}` |
+| `message.materialise_attachment` | client_integration | `{account, id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_html` | client_integration | `{account, id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.release_handle` | query | `{handle}` | `{}` |
 
 Like the read-only methods, all three open the store by path and take no engine lock: materialising is a read plus a write into the daemon's own directory, and neither makes the daemon an account's engine.
@@ -383,6 +407,13 @@ The two materialisers are *client_integration* because the daemon prepares the f
 **A message is addressed as `"<mailbox>/<uid>"`**, the last two thirds of the `message:work/inbox/41` resource, which a client composes from the mailbox it listed and the `uid` of the row it is holding.
 The mailbox is taken literally rather than resolved through the account's configured roles, so a message in a mailbox the configuration no longer lists is still materialisable: a handle is about bytes in the store, not about what the sidebar shows.
 The store's row id was the other candidate and is a rebuild away from meaning a different message; the `Message-ID` header was the third and is shared by the Inbox and the Sent copy of one message.
+
+**`{selector, mailbox?}` addresses one too**, added in P4-U8 beside the `{id}` form and resolved exactly as `message.get` resolves it.
+A client holding a selector cannot build `"<mailbox>/<uid>"` out of a `message.get` record, which carries the mailbox and the `Message-ID` rather than the uid, and re-listing the mailbox to find that uid would be a second query to answer a question the daemon already answers.
+
+**`name` is the sanitised file name**, so a client builds its own destination without parsing the daemon's path.
+The daemon never renames a part: two parts sent under one name come back as two handles carrying that one name, in two directories, and the `_1` rule that turns them into two files belongs where the names become paths, which is the client (`mp save` applies it within one call, so saving the same message twice writes the same two names rather than growing a copy per run).
+There is no `mime` on the wire: the store keeps no content type for a part, and deriving one from the extension is a guess a client can make for itself.
 
 **`part` is a dense zero-based index into the message's user-facing attachment list**, the order `mp save` and the TUI show, with the iMIP sidecar excluded.
 It is the index of the row a client is looking at; addressing by the store's raw `ordinal` would leak the hidden sidecar's position into a list it is deliberately absent from.
@@ -471,13 +502,14 @@ The backend is opened on first use rather than at startup, because a first run h
 The daemon watches every account's drafts directory and the signatures directory, so a draft written by `$EDITOR`, by an agent or by the daemon itself reaches every client as an event without anybody asking.
 The watcher is described in [daemon-operations.md](daemon-operations.md); what it produces on the wire is the three kinds below and the snapshot rows above.
 
-The family is the nine methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
+The family is the ten methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
 
 | method | kind | params | result |
 |---|---|---|---|
 | `draft.approve` | command | `{account, id}` | `{account, id, status: "approved", path}` |
 | `draft.create` | command | `{account, name, no_signature?, signature?}` | `DraftCreated` |
 | `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
+| `draft.discard` | command | `{account, id\|selector, force?}` or `{account, sent: true}` | `{account, id, selector, status}` or `{account, cleared, kept}` |
 | `draft.forward` | command | `{account, source, no_signature?, signature?}` | `DraftCreated` |
 | `draft.list` | query | `{account, status?}` | `DraftListing` |
 | `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
@@ -498,6 +530,17 @@ The status is there because `mp mark-approved` needs the *previous* one to choos
 Every query answers from a fresh scan of the account's drafts directory rather than from the watcher's settled inventory, which is what makes a draft written a millisecond ago addressable: the pre-daemon binary rebuilt the index at the start of every command, and a resolution that waited for a poll plus a debounce would answer "no such draft" for up to a second.
 The scan takes no engine lock and opens no store, exactly as the watcher's lookup did.
 The two mutators fall back to that inventory when the scan finds nothing, because a file that will not parse has no `id:` and is announced under its stem, which is the id `draft.approve` refuses `draft_invalid` for.
+
+**`draft.discard` removes one draft, or sweeps the sent ones.**
+A draft is local, so there is no server op and no backend: just the file and the index row the next scan drops (#0073).
+`force` is required for an `approved` draft and for nothing else, because an approved draft is a queued send and deleting it drops that send; a `sent` draft needs none, since retiring one is the whole point of the sweep.
+The refusal is `delete_indexed_draft`'s own sentence, verbatim, and so is the refusal of a draft an outbox row still holds mid-send.
+The answer's `status` is the status the draft was in, which is what was discarded.
+
+The `--sent` sweep is a parameter of the same method rather than a method of its own, because one verb over a set is the same verb: `{account, sent: true}` clears every `sent` draft of one account and takes no selector, answering `{account, cleared, kept}` where `kept` is `[{id, selector, error}]`.
+The sweep keeps going past a file it cannot remove, so a client prints one line per survivor before its own summary.
+`sent: true` beside `id`, `selector` or `force` is `-32602`: a sweep names no draft, so a caller who named one disagrees with themselves.
+A sweep invalidates `draft:<account>` rather than one row, which is the family's one command that names no draft.
 
 `draft.approve` and `draft.demote` rewrite the `status:` line and nothing else, re-serialising no frontmatter, so a field the daemon does not model survives.
 They publish no event of their own: the watcher notices the daemon's write like any other and publishes the `draft.changed` that carries the new state, so an approval over the socket and an approval in an editor look identical from the outside.
@@ -747,7 +790,8 @@ Every method declares a kind (`Query`, `Command`, `Operation`, `ClientIntegratio
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
 The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
 The event kinds: `state.invalidate` `{resource, scope}` and `state.remove` `{resource}`, the replacements `account.state_changed` `{account, state}`, `draft.changed` `{account, id, path, to, subject, status, valid, ready}` and `draft.invalid` `{account, id, path, diagnostics}`, and the lifecycle kinds `operation.progress`, `operation.finished`, `sync.completed`, `config.changed`, `config.invalid` and `signature.changed` `{name, path}` with the payloads above.
-The `draft.*` family, which is the nine methods above with the `mp_protocol::draft` result types, the fresh-scan resolver behind `draft.path`, and the `draft_invalid` refusal `draft.approve` introduced.
-The three handle methods, `message.materialise_attachment` `{account, id, part}` and `message.materialise_html` `{account, id}` -> `{handle, path, bytes, expires_at}`, and `message.release_handle` `{handle}` -> `{}`, with the `"<mailbox>/<uid>"` message id, the ten-minute default lifetime, the `<data_dir>/runtime/handles/<handle>/<name>` layout, and the pin that keeps the retention sweep off a blob a client has open.
+The `draft.*` family, which is the ten methods above with the `mp_protocol::draft` result types, the fresh-scan resolver behind `draft.path`, and the `draft_invalid` refusal `draft.approve` introduced; `draft.discard` `{account, id|selector, force?}` -> `{account, id, selector, status}` and its sweep `{account, sent: true}` -> `{account, cleared, kept}` joined it in P4-U8, with `force` required for an `approved` draft alone and `sent` beside any address `-32602`.
+The two message mutations, `message.archive` and `message.delete` `{account, id|selector, mailbox?}`, both durable commands that resolve the backend before they touch the store, drain the op they owe the server before answering, and report a missing credential as `-32603` with `{account}`.
+The three handle methods, `message.materialise_attachment` `{account, id|selector, mailbox?, part}` and `message.materialise_html` `{account, id|selector, mailbox?}` -> `{handle, path, name, bytes, expires_at}`, and `message.release_handle` `{handle}` -> `{}`, with the `"<mailbox>/<uid>"` message id, the ten-minute default lifetime, the `<data_dir>/runtime/handles/<handle>/<name>` layout, and the pin that keeps the retention sweep off a blob a client has open; the `{selector, mailbox?}` addressing and the `name` field were added in P4-U8, both additive.
 The snapshot's draft row, `{id, path, to, subject, status, valid, ready}`, which a `draft.invalid` reduces into with `status: "invalid"` and `valid: false`.
 The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.
