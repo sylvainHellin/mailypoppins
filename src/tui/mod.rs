@@ -5,6 +5,7 @@ mod event;
 mod helpers;
 mod mutations;
 mod runtime;
+pub mod session;
 pub mod theme;
 mod ui;
 
@@ -13,6 +14,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use mp_protocol::state::Bootstrap;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, BgResult, MailboxKind};
@@ -68,15 +70,34 @@ pub fn dump_keys_json() -> String {
 
 /// Entry point for the TUI. Call this when `mp` is invoked with no arguments.
 pub fn run() -> Result<()> {
+    // The daemon session comes up before the terminal does (P5-U2). Two
+    // reasons: `client_session` may start a daemon and may end the run with the
+    // exit-4 diagnostic, and neither reads well through a terminal already in
+    // raw mode on the alternate screen. A session that cannot be built is a
+    // wedged session thread rather than an unreachable daemon -- an
+    // unreachable one has already exited by here -- so the TUI starts without
+    // one and the run's own `MAILYPOPPINS_DAEMON_REQUIRE` check fails on the
+    // way out, which is where a parity test looks.
+    let session = match session::Session::connect() {
+        Ok(session) => Some(session),
+        Err(e) => {
+            eprintln!("\u{26a0} the daemon session could not be opened: {e:#}");
+            None
+        }
+    };
     install_panic_hook();
     let mut terminal = init_terminal()?;
-    let result = run_loop(&mut terminal);
+    let result = run_loop(&mut terminal, session);
     restore_terminal()?;
     result
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    session: Option<session::Session>,
+) -> Result<()> {
     let mut app = App::new();
+    app.session = session;
 
     let size = terminal.size()?;
     app.terminal_width = size.width;
@@ -110,6 +131,20 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
 
     // Background task results channel
     let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();
+
+    // The daemon's whole state, asked for now and applied whenever it lands
+    // (P5-U2). Off the first-paint path on purpose: the shell `App::new` built
+    // is already complete -- accounts, sidebar, zeroed counts, the #0003
+    // loading marker -- so the first frame owes the daemon nothing, and the
+    // snapshot is a refinement rather than a prerequisite. A channel of its own
+    // rather than a `BgResult` variant because the bootstrap is a session
+    // event, not a background job of the app's, and P5-U4 rewrites this seam.
+    let (boot_tx, boot_rx) = mpsc::channel::<Result<Bootstrap, String>>();
+    if let Some(session) = app.session.as_ref() {
+        session.dispatch_bootstrap(move |result| {
+            let _ = boot_tx.send(result);
+        });
+    }
 
     // Baseline for the drafts poll: whatever the directory looks like now is
     // what the first listing will show, so the first change to react to is the
@@ -292,6 +327,26 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
             }
         }
 
+        // The daemon's `state.bootstrap` (P5-U2): which accounts there are,
+        // their mailboxes and their counts, landed on the shell that is
+        // already on screen. `apply_bootstrap` skips any account whose
+        // store-backed open (#0003) has already answered, so the two startup
+        // paths cannot fight over the counts while P5-U3/U4 are still ahead.
+        while let Ok(result) = boot_rx.try_recv() {
+            match result {
+                Ok(bootstrap) => {
+                    log::info!(
+                        "[tui] bootstrap at revision {} ({} account(s))",
+                        bootstrap.revision,
+                        bootstrap.snapshot.accounts.len()
+                    );
+                    app.apply_bootstrap(&bootstrap);
+                    dirty = true;
+                }
+                Err(e) => log::warn!("[tui] the daemon bootstrap failed: {e}"),
+            }
+        }
+
         // Check background task results (drain all available). These carry the
         // async work the UI parked -- sync completion, a body/invite/image
         // arrival -- so every drained result forces a redraw (#0093).
@@ -369,6 +424,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>
                 dirty = true;
             }
         }
+    }
+
+    // Close the session before the process leaves, so the daemon sees the
+    // client go rather than finding a dead socket later. `Drop` would do it
+    // too; doing it here waits for the thread, which keeps the shutdown
+    // ordered against the terminal restore in `run`.
+    if let Some(session) = app.session.as_mut() {
+        session.close();
     }
 
     Ok(())
