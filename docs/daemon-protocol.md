@@ -257,23 +257,33 @@ An unknown account is `account_unknown` and a configured account with no readabl
   "mailbox": "inbox",
   "total": 2,
   "messages": [{
+    "id": 3141,
     "uid": 1,
     "message_id": "<Bericht@example.com>",
     "from": "Ivana <ivana@example.com>",
+    "to": "alice@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
     "subject": "Bericht",
     "date_sort": "2026-07-02T11:57:30",
     "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
-    "flags": {"seen": true, "answered": true, "forwarded": true},
-    "has_attachments": true
+    "flags": {"seen": true, "answered": true, "forwarded": true, "flagged": false},
+    "has_attachments": true,
+    "is_invite": false
   }]
 }
 ```
 
 `mailbox` accepts a role, a slug or a sidebar label, exactly as `mp list-messages --mailbox` does, and the answer echoes the resolved id rather than the spelling that was sent.
 The order is the store's, `date_sort DESC, id DESC`, the same rows `mp list-messages` and the TUI list show.
-`message_id` is verbatim as ingest stored it, angle brackets included; `from`, `subject` and `date_display` travel as `""` when the header was absent, because the shape says `str`.
+`message_id` is verbatim as ingest stored it, angle brackets included; `from`, `to`, `subject` and `date_display` travel as `""` when the header was absent, because the shape says `str`.
+`cc`, `reply_to` and `bcc` are `str|null` instead: a client renders each of them only when the message carried one, and a flattened `""` would make an absent Cc indistinguishable from an empty one.
 The two dates are both carried because neither can be derived from the other: `date_sort` is `tui::app::resolve_date`'s UTC sort key, so every stack orders the same way, and `date_display` is the `Date:` header as the store holds it, which is the column a listing prints.
-`flags` carries the three axes named above and not the store's fourth, `\Flagged`.
+`flags` carries the four axes of the store, `\Flagged` included since P5-U4, because the star is a marker of its own in a list rather than a state of the read/answered/forwarded axis.
+`is_invite` says the row carries an iMIP payload, which is what draws the badge without reading a blob.
+`id` is `messages.id`, the synthetic row key: it is the identity a TUI holds for a listed row and the address `message.get` takes back as `row_id`.
+It is per store and per session, it survives no store rebuild, and a client that persisted one would be naming a row that may since have become another message.
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
 An empty mailbox of a ready account is an empty listing, not an error.
@@ -310,7 +320,7 @@ The projection is per account and covers every selected mailbox in one answer, b
 A name that is not one of the account's mailboxes selects nothing rather than failing, exactly as `dump::collect_records` treats an unmatched filter: a filter narrows a dump, it does not assert anything about it.
 A storeless account is `account_not_ready` here as everywhere else, and the *client* turns that into "no records" for the dump, because `collect_records` skips an account it cannot open rather than refusing the run.
 
-`message.get` takes `{"account": str, "id": str}` or `{"account": str, "selector": str, "mailbox": str|null}`, plus `body: bool`, and returns the record `mp show --json` prints (`read_cmd::ShownMessage`):
+`message.get` takes `{"account": str, "id": str}`, `{"account": str, "row_id": i64}` or `{"account": str, "selector": str, "mailbox": str|null}`, plus `body: bool`, and returns the record `mp show --json` prints (`read_cmd::ShownMessage`):
 
 ```json
 {
@@ -333,8 +343,10 @@ A storeless account is `account_not_ready` here as everywhere else, and the *cli
 The result *is* that record, field for field, and the text answer is `read_cmd::render_show` over the same one, so a client that received the payload prints either answer without opening a store and the JSON answer is the payload re-serialised rather than a second projection that could drift from it.
 HTML-only mail reads as the flattened text ingest derived, never as markup.
 
-A message is addressed either by `id` or by `selector`, never by both and never by neither; both mistakes are `-32602`.
+A message is addressed by exactly one of `id`, `row_id` and `selector`; naming none and naming more than one are both `-32602`.
 `id` is the `"<mailbox>/<uid>"` of the handle methods, taken literally, because a GUI holding a listed row has no selector to spell.
+`row_id` is the `id` a `message.list` row carries, for a client whose held row is named by it and by nothing else: the TUI's preview is such a client, and re-deriving a `"<mailbox>/<uid>"` on every cursor move would make it carry a second identity for the same row.
+A `row_id` no message has is `-32602` like every other address that names nothing.
 `selector` is the grammar `mp show` takes from a user (`<message-id>`, `<mailbox>/<message-id>`, `mp://<account>/<mailbox>/<message-id>`), resolved daemon-side the way `resolve_received_arg` resolves it, with the optional `mailbox` narrowing it exactly as `mp show --mailbox` does: the resolution needs the store the client no longer has.
 Which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
 An unknown uid, a malformed id, a mailbox the account does not have and a selector that resolves to nothing are all `-32602`, in the resolution's own words, so a routed `mp show` reports what the pre-daemon one reported.
@@ -533,7 +545,9 @@ The family is the ten methods below, all served from protocol 1 and all durable:
 
 The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
 `DraftCreated` is `{account, id, selector, path, source}`, whose `source` is `{id, selector}` for a reply or a forward and absent for a draft made from nothing.
-`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, subject, valid, ready}` in the index's order (`mtime DESC, id ASC`); `to` and `subject` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
+`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, cc, subject, date, valid, ready}` in the index's order (`mtime DESC, id ASC`); `to`, `cc`, `subject` and `date` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
+`cc` and `date` are the index's own columns and joined the row in P5-U4, for a client that lists drafts beside received mail: such a list prints the Cc line and sorts a draft by its `date:` field, falling back to the `YYYY-MM-DD-…` stem of `path` when the file has none.
+`mp list` reads neither.
 `DraftValidation` is `{account, reports}`, whose reports are `{id, selector, valid, error, warnings}`.
 `DraftLocation` is `{account, id, selector, path, status}` and `DraftPreview` is the dry run's record, whose body is cut at 500 characters while `body_truncated` is decided on 500 bytes and whose `signature` is `null` for the CLI, because the body already carries it (#0099).
 
@@ -870,3 +884,9 @@ The admin slice (P4-U14) added three families' worth of methods and three to `co
 Four of these results carry a path deliberately, because the command prints one and a client cannot compute it: `contact.stats.cache_path` and `contact.rebuild`'s settled `cache_path`, `config.cutover`'s `remnants[].path` and `drafts.imported[]`, and `config.reset_secrets`'s `removed[]`, beside `config.get`'s `path`.
 `config.get`'s `config` is the *effective* configuration, which means after serde defaults and not after the engine's clamps: a configuration that omits `smtp.port` reports `465` and one that omits `imap.port` reports `993`, where the pre-daemon binary printed `0` for both.
 P5-U2 added `mp_protocol::state`, the typed decode of the `state.bootstrap` result described above, which is a client-side shape and moves nothing on the wire.
+
+P5-U4 widened three shapes, additively, for the TUI's query layer; no field was renamed, none was dropped, and no command's output moved.
+A `message.list` row gained `id` (`messages.id`, and the `row_id` address below), the five columns a list and a header pane render and a CLI listing does not (`to`, `cc`, `reply_to`, `bcc`, `is_invite`), and a fourth flag axis, `flags.flagged`; `cc`, `reply_to` and `bcc` are nullable where `to` is flattened, because a client prints them only when they are there.
+`message.get` gained `row_id` as a third address beside `id` and `selector`, still exactly one of the three.
+`draft.list`'s row gained `cc` and `date`, the index's own columns, for a client that lists drafts beside received mail.
+The fixtures and the key lists that pin these shapes moved with them (`crates/mp-protocol/fixtures/message.list.response.json`, `tests/daemon_read_only_methods.rs`, `tests/daemon_protocol_fixtures.rs`, `tests/daemon_draft_slice.rs`), which is what a protocol change costs.

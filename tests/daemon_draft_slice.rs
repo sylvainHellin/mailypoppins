@@ -48,7 +48,8 @@
 //!
 //! pub struct DraftEntry {
 //!     pub id: String, pub selector: String, pub path: String, pub status: String,
-//!     pub to: Option<String>, pub subject: Option<String>,
+//!     pub to: Option<String>, pub cc: Option<String>,
+//!     pub subject: Option<String>, pub date: Option<String>,
 //!     pub valid: bool, pub ready: bool,
 //! }
 //! pub struct DraftSkip { pub path: String, pub error: String }
@@ -307,8 +308,13 @@ const DRAFT_COMMANDS: [&str; 6] = [
 
 /// Every field of a listed draft row: the whole of what `mp list` and a GUI
 /// draft list may say about a draft.
-const ENTRY_FIELDS: [&str; 8] = [
-    "id", "path", "ready", "selector", "status", "subject", "to", "valid",
+///
+/// `cc` and `date` joined it in P5-U4 (#0124), for a TUI drafts list that
+/// renders the same row a mailbox listing renders: it prints the Cc line and
+/// sorts by the `date:` field. `mp list` reads neither, so its output did not
+/// move; the protocol changelog carries the entry.
+const ENTRY_FIELDS: [&str; 10] = [
+    "cc", "date", "id", "path", "ready", "selector", "status", "subject", "to", "valid",
 ];
 
 // ---------------------------------------------------------------------------

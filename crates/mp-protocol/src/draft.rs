@@ -62,8 +62,20 @@ pub struct DraftEntry {
     pub status: String,
     /// The `to:` field, absent when the draft is bcc-only.
     pub to: Option<String>,
+    /// The `cc:` field, absent when the draft copies nobody (P5-U4).
+    ///
+    /// Here because a TUI drafts list renders the same row a mailbox listing
+    /// renders, and that row prints the Cc line; the CLI listing ignores it.
+    pub cc: Option<String>,
     /// The `subject:` field, absent when the file has none.
     pub subject: Option<String>,
+    /// The `date:` frontmatter field, absent when the file has none (P5-U4).
+    ///
+    /// The index's own column, not a mtime: a client sorts and displays a
+    /// draft by the same `resolve_date` rule every other row goes through, and
+    /// falls back to the `YYYY-MM-DD-…` filename stem in `path` when this is
+    /// absent, exactly as the store-backed listing does.
+    pub date: Option<String>,
     /// Whether the file parses.
     pub valid: bool,
     /// Whether it would send, which is a different question.

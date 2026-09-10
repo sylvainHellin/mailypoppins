@@ -565,17 +565,26 @@ fn domain_fixtures_use_the_declared_method_families() {
 #[test]
 fn the_read_only_response_fixtures_carry_the_documented_fields() {
     const ACCOUNT_ENTRY: &[&str] = &["backend", "default", "name", "state"];
+    // The six columns and the row id P5-U4 added for the TUI list are part of
+    // this shape since then, and `flags` carries the store's fourth axis with
+    // them; the protocol changelog carries the entry.
     const MESSAGE_ROW: &[&str] = &[
+        "bcc",
+        "cc",
         "date_display",
         "date_sort",
         "flags",
         "from",
         "has_attachments",
+        "id",
+        "is_invite",
         "message_id",
+        "reply_to",
         "subject",
+        "to",
         "uid",
     ];
-    const MESSAGE_FLAGS: &[&str] = &["answered", "forwarded", "seen"];
+    const MESSAGE_FLAGS: &[&str] = &["answered", "flagged", "forwarded", "seen"];
 
     let accounts = load("account.list.response.json");
     assert_keys(&accounts["result"], &["accounts"], "account.list result");

@@ -19,10 +19,12 @@
 //!                    "state":"opening"|"ready"|"blocked"}]}
 //! message.list  {"account":str,"mailbox":str,"limit":u32|null}
 //!   -> {"account":str,"mailbox":str,"total":u64,
-//!       "messages":[{"uid":i64,"message_id":str,"from":str,"subject":str,
-//!                    "date_sort":str,"date_display":str,
-//!                    "flags":{"seen":bool,"answered":bool,"forwarded":bool},
-//!                    "has_attachments":bool}]}
+//!       "messages":[{"id":i64,"uid":i64,"message_id":str,"from":str,"to":str,
+//!                    "cc":str|null,"reply_to":str|null,"bcc":str|null,
+//!                    "subject":str,"date_sort":str,"date_display":str,
+//!                    "flags":{"seen":bool,"answered":bool,"forwarded":bool,
+//!                             "flagged":bool},
+//!                    "has_attachments":bool,"is_invite":bool}]}
 //! ```
 //!
 //! # Contract points this file pins beyond the plan text
@@ -622,14 +624,24 @@ fn account_entry<'a>(result: &'a Value, name: &str) -> &'a Value {
 }
 
 /// What `message.list` must report for one stored row: the store's own values,
-/// with the three nullable headers flattened to the empty string.
+/// with `from`, `to`, `subject` and `date_display` flattened to the empty
+/// string and the three headers a client renders conditionally left nullable.
+///
+/// The row id, the six columns and the fourth flag axis joined the row in
+/// P5-U4 (#0124), which is what a TUI list holds beyond what a CLI listing
+/// prints; the protocol changelog carries the entry.
 fn expected_message(row: &read::MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
     json!({
+        "id": row.id,
         "uid": row.uid,
         "message_id": row.message_id,
         "from": row.from.clone().unwrap_or_default(),
+        "to": row.to.clone().unwrap_or_default(),
+        "cc": row.cc,
+        "reply_to": row.reply_to,
+        "bcc": row.bcc,
         "subject": row.subject.clone().unwrap_or_default(),
         "date_sort": date_sort,
         "date_display": row.date_display.clone().unwrap_or_default(),
@@ -637,8 +649,10 @@ fn expected_message(row: &read::MessageRow) -> Value {
             "seen": flags.seen,
             "answered": flags.answered,
             "forwarded": flags.forwarded,
+            "flagged": flags.flagged,
         },
         "has_attachments": row.has_attachments,
+        "is_invite": row.is_invite,
     })
 }
 
@@ -767,20 +781,26 @@ async fn message_list_reports_the_store_rows_newest_first() {
         assert_keys(
             message,
             &[
+                "id",
                 "uid",
                 "message_id",
                 "from",
+                "to",
+                "cc",
+                "reply_to",
+                "bcc",
                 "subject",
                 "date_sort",
                 "date_display",
                 "flags",
                 "has_attachments",
+                "is_invite",
             ],
             &format!("messages[{index}]"),
         );
         assert_keys(
             &message["flags"],
-            &["seen", "answered", "forwarded"],
+            &["seen", "answered", "forwarded", "flagged"],
             &format!("messages[{index}].flags"),
         );
         assert_eq!(

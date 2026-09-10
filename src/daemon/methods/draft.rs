@@ -295,10 +295,12 @@ fn entry(account: &str, row: &DraftRow) -> DraftEntry {
         path: row.path.display().to_string(),
         status: row.status.clone(),
         to: row.to.clone(),
+        cc: row.cc.clone(),
         subject: draft
             .as_ref()
             .ok()
             .map(|draft| draft.frontmatter.subject.clone()),
+        date: row.date.clone(),
         valid: draft.is_ok(),
         ready: draft
             .as_ref()

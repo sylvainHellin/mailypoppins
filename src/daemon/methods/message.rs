@@ -162,23 +162,40 @@ fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
 
 /// One stored row on the wire.
 ///
-/// The three nullable headers travel as `""` rather than `null`, because the
-/// shape says `str`. `flags` carries the three axes the protocol names and not
-/// the store's fourth (`\Flagged`): a client that needs the star waits for the
-/// version that adds it.
+/// `from`, `to`, `subject` and `date_display` travel as `""` rather than
+/// `null`, because the shape says `str`. `cc`, `reply_to` and `bcc` are
+/// `str|null` instead: the header pane prints each of them only when the
+/// message carried one (#0096), so a client's row holds an option and a
+/// flattened `""` would make an absent Cc indistinguishable from an empty one.
+///
+/// `flags` carries the four axes of [`crate::types::MessageFlags`], `flagged`
+/// (`\Flagged`, the star of #0007) included since P5-U4: it is what the TUI
+/// list renders as its own marker, and the version that adds it is this one.
 ///
 /// Both dates are here because neither can be derived from the other:
 /// `date_sort` is `resolve_date`'s UTC sort key, and `date_display` is the
 /// `Date:` header as the store holds it, which is the column a listing prints.
 /// A client renders from the wire alone rather than reading the store beside
 /// the daemon.
+///
+/// `id` is `messages.id`, the synthetic row key. It is here because it is the
+/// identity a TUI client holds for a listed row (`MessageRef`, #0050) and the
+/// address it hands back to [`get`]; it is per-store and per-session, it
+/// survives no rebuild (`docs/plans/preview-latency.md`, "hole 1"), and a
+/// client that persisted one would be naming a row that may since have become
+/// another message.
 pub fn to_json(row: &MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
     json!({
+        "id": row.id,
         "uid": row.uid,
         "message_id": row.message_id,
         "from": row.from.clone().unwrap_or_default(),
+        "to": row.to.clone().unwrap_or_default(),
+        "cc": row.cc,
+        "reply_to": row.reply_to,
+        "bcc": row.bcc,
         "subject": row.subject.clone().unwrap_or_default(),
         "date_sort": date_sort,
         "date_display": row.date_display.clone().unwrap_or_default(),
@@ -186,8 +203,10 @@ pub fn to_json(row: &MessageRow) -> Value {
             "seen": flags.seen,
             "answered": flags.answered,
             "forwarded": flags.forwarded,
+            "flagged": flags.flagged,
         },
         "has_attachments": row.has_attachments,
+        "is_invite": row.is_invite,
     })
 }
 
@@ -244,21 +263,43 @@ pub fn get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError
     Ok(result)
 }
 
-/// The row `id` or `selector` names: exactly one of them, always.
+/// The row `id`, `row_id` or `selector` names: exactly one of them, always.
 ///
-/// Neither is a caller who forgot and both is a caller who may disagree with
-/// themselves, so both are `-32602`. So is every way of naming nothing: an
+/// None is a caller who forgot and more than one is a caller who may disagree
+/// with themselves, so both are `-32602`. So is every way of naming nothing: an
 /// unknown uid, a malformed id, a mailbox the account does not have and a
 /// selector that resolves to no message are all the caller's parameter being
 /// wrong rather than the store failing.
+///
+/// `row_id` is the `id` a `message.list` row carries, which is what a client
+/// holding a listed row already has (P5-U4): the TUI's preview names the row it
+/// is on by `messages.id` and nothing else, and resolving it back through
+/// `"<mailbox>/<uid>"` would make the client carry a second identity for the
+/// same row and re-derive it on every cursor move.
 fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, RpcError> {
     let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
+    if addressed("row_id") {
+        if addressed("id") || addressed("selector") {
+            return Err(invalid_params(
+                "row_id, id and selector are three addresses; send exactly one",
+            ));
+        }
+        let row_id = params
+            .get("row_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| invalid_params("row_id is a messages.id, which is an integer"))?;
+        return read::find_by_id(store, row_id)
+            .map_err(|e| internal(format!("reading message {row_id}: {e:#}")))?
+            .ok_or_else(|| {
+                invalid_params(format!("{account} holds no message with row id {row_id}"))
+            });
+    }
     match (addressed("id"), addressed("selector")) {
         (true, true) => Err(invalid_params(
             "id and selector are two addresses; send exactly one",
         )),
         (false, false) => Err(invalid_params(
-            "a message is addressed by id or by selector; send exactly one",
+            "a message is addressed by id, by row_id or by selector; send exactly one",
         )),
         (true, false) => {
             let (mailbox, uid) = message_param(params)?;

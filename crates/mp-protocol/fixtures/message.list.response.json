@@ -6,31 +6,45 @@
     "mailbox": "inbox",
     "messages": [
       {
+        "bcc": null,
+        "cc": "team@example.com",
         "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
         "date_sort": "2026-07-02T11:57:30",
         "flags": {
           "answered": true,
+          "flagged": false,
           "forwarded": false,
           "seen": true
         },
         "from": "Ivana <ivana@example.com>",
         "has_attachments": false,
+        "id": 3141,
+        "is_invite": false,
         "message_id": "<Bericht@example.com>",
+        "reply_to": null,
         "subject": "Re: Obermeyer Center steering meeting",
+        "to": "alice@example.com",
         "uid": 1846
       },
       {
+        "bcc": null,
+        "cc": null,
         "date_display": "Wed, 1 Jul 2026 09:00:00 +0200",
         "date_sort": "2026-07-01T07:00:00",
         "flags": {
           "answered": false,
+          "flagged": true,
           "forwarded": false,
           "seen": false
         },
         "from": "billing@example.com",
         "has_attachments": true,
+        "id": 3140,
+        "is_invite": false,
         "message_id": "<Invoice-2025-114@example.com>",
+        "reply_to": "accounts@example.com",
         "subject": "Invoice 2025-114",
+        "to": "alice@example.com",
         "uid": 1845
       }
     ],
