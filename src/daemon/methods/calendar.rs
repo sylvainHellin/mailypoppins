@@ -6,7 +6,7 @@
 //!                       -> {operation_id}
 //!                       settles {account, resolved, invites_seen,
 //!                                replies_seen, cancelled}
-//! calendar.rsvp     {account, selector, mailbox?, response}
+//! calendar.rsvp     {account, selector|row_id, mailbox?, response}
 //!                       -> {operation_id}
 //!                       settles {account, selector, response, subject,
 //!                                organizer, message_id, delivered}
@@ -148,7 +148,7 @@ fn plan(
     only_params(
         method,
         params,
-        &["account", "mailbox", "response", "selector"],
+        &["account", "mailbox", "response", "row_id", "selector"],
     )?;
     let name = string_param(params, "account")?;
     let account = super::account::configured_account(&snapshot.accounts, &name)?.clone();
@@ -175,21 +175,49 @@ fn plan(
         }
     };
 
-    let selector = string_param(params, "selector")?;
-    bound_to(&selector, &account)?;
+    let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
+    if addressed("row_id") && addressed("selector") {
+        return Err(invalid_params(
+            "row_id and selector are two addresses; send exactly one",
+        ));
+    }
+    if !addressed("row_id") {
+        // Read before the store is opened, so a selector naming another
+        // account is refused in the same order it always was.
+        bound_to(&string_param(params, "selector")?, &account)?;
+    }
     super::account::ready_account(&snapshot.accounts, &name)?;
 
     let store =
         Store::open(crate::config::store_path(&name)).map_err(|e| server_error(&name, &e))?;
-    let query = crate::selector::parse_in(
-        &selector,
-        crate::selector::Namespace::Received,
-        &name,
-        params.get("mailbox").and_then(Value::as_str),
-    )
-    .map_err(|e| invalid_params(format!("{e:#}")))?;
-    let (row, canonical) = crate::selector::resolve_received(&store, &query)
+    // `row_id` is the `messages.id` a `message.list` row carries, the address
+    // P5-U4 gave `message.get` and P5-U6 gives this method: the TUI's agenda
+    // row holds a `MessageRef` and nothing else (#0050), and re-deriving a
+    // selector for it would be a whole-message read to answer a keypress.
+    let (row, canonical) = if addressed("row_id") {
+        let row_id = params
+            .get("row_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| invalid_params("row_id is a messages.id, which is an integer"))?;
+        let row = crate::store::read::find_by_id(&store, row_id)
+            .map_err(|e| server_error(&name, &e))?
+            .ok_or_else(|| {
+                invalid_params(format!("{name} holds no message with row id {row_id}"))
+            })?;
+        let canonical = crate::selector::Selector::for_message(&name, &row);
+        (row, canonical)
+    } else {
+        let selector = string_param(params, "selector")?;
+        let query = crate::selector::parse_in(
+            &selector,
+            crate::selector::Namespace::Received,
+            &name,
+            params.get("mailbox").and_then(Value::as_str),
+        )
         .map_err(|e| invalid_params(format!("{e:#}")))?;
+        crate::selector::resolve_received(&store, &query)
+            .map_err(|e| invalid_params(format!("{e:#}")))?
+    };
     // The invitation's own iMIP payload is the source of truth for the reply,
     // and it is a blob on the row (#0038 item 6).
     let blobs = BlobStore::for_account(&name);

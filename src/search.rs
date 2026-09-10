@@ -417,6 +417,77 @@ pub fn from_cli(positional: &str, flags: &Flags) -> Result<Query, String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Renderer: back to the grammar `parse` reads
+// ---------------------------------------------------------------------------
+
+/// A [`Query`] as a string [`parse`] reads back into the same query.
+///
+/// The inverse of [`parse`], and the reason it exists: `message.search` takes
+/// what the user typed and builds the AST daemon-side ([`from_cli`]), while the
+/// TUI's search overlay has already built one from its form fields. Rendering
+/// the AST back into the grammar is what lets the overlay's local pass go
+/// through the method instead of through a store of its own, without putting an
+/// engine enum on the wire.
+///
+/// Every value is quoted, which is always safe: a token that begins with a
+/// quote is a literal phrase, and `field:"value"` is the field form the
+/// tokenizer already reads. The two shapes it cannot carry are the two [`parse`]
+/// cannot produce either, so they are dropped rather than rendered wrong: a
+/// field term with an empty value (which `parse` refuses) and a value
+/// containing a `"` (which the tokenizer consumes as a delimiter). A
+/// [`Clause::Or`] of one term renders as a group and parses back as a
+/// [`Clause::Single`], which is the same query.
+pub fn to_query_string(q: &Query) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for clause in &q.clauses {
+        match clause {
+            Clause::Single(term) => parts.extend(render_term(term)),
+            Clause::Or(terms) => {
+                let rendered: Vec<String> = terms.iter().filter_map(render_term).collect();
+                if !rendered.is_empty() {
+                    parts.push(format!("({})", rendered.join(" OR ")));
+                }
+            }
+        }
+    }
+    if let Some(mailbox) = &q.in_mailbox {
+        parts.push(format!("in:{}", quote_value(mailbox)));
+    }
+    if let Some(message_id) = &q.message_id {
+        parts.push(format!("message-id:{}", quote_value(message_id)));
+    }
+    parts.join(" ")
+}
+
+/// One term as its grammar token, or `None` for a term the grammar cannot
+/// carry back (see [`to_query_string`]).
+fn render_term(term: &Term) -> Option<String> {
+    let field = |name: &str, value: &String| {
+        (!value.is_empty() && !value.contains('"'))
+            .then(|| format!("{name}:{}", quote_value(value)))
+    };
+    match term {
+        Term::From(v) => field("from", v),
+        Term::To(v) => field("to", v),
+        Term::Cc(v) => field("cc", v),
+        Term::Subject(v) => field("subject", v),
+        Term::Body(v) => field("body", v),
+        Term::Filename(v) => field("filename", v),
+        Term::Before(v) => field("before", v),
+        Term::After(v) => field("after", v),
+        // A free-text term is the one shape whose value may be empty: `""`
+        // tokenizes as a quoted word and resolves to `Text("")`.
+        Term::Text(v) => (!v.contains('"')).then(|| quote_value(v)),
+        Term::HasAttachment => Some("has:attachment".to_string()),
+    }
+}
+
+/// A value in the quotes the tokenizer strips again.
+fn quote_value(value: &str) -> String {
+    format!("\"{value}\"")
+}
+
 fn tok_pos(tok: &Tok) -> usize {
     match tok {
         Tok::LParen(p) | Tok::RParen(p) => *p,
@@ -1298,5 +1369,77 @@ mod tests {
 
         assert!(fts.match_expr.unwrap().contains("(\"invoice\" OR \"receipt\")"));
         assert!(fts.has_attachment); // local index column
+    }
+    // -- to_query_string: the inverse of the parser -------------------------
+
+    /// Every shape the grammar can express survives a render/parse round trip,
+    /// which is the property the TUI's local search pass rides on: the AST the
+    /// overlay built and the AST `message.search` rebuilds from the rendered
+    /// string are the same value.
+    #[test]
+    fn every_grammar_shape_round_trips_through_to_query_string() {
+        for input in [
+            "",
+            "urgent",
+            "urgent meeting",
+            "\"quarterly report\"",
+            "from:ada to:bob cc:x subject:s body:b text:t",
+            "filename:invoice.pdf",
+            "has:attachment",
+            "before:2024-01-01 after:2023-12-01",
+            "(invoice OR receipt)",
+            "invoice OR receipt",
+            "from:ada (invoice OR receipt) has:attachment",
+            "in:Sent",
+            "message-id:<abc@example.com>",
+            "from:\"Ada Lovelace\" in:\"Sent Items\"",
+            "re:budget",
+        ] {
+            let parsed = q(input);
+            let rendered = to_query_string(&parsed);
+            assert_eq!(
+                parse(&rendered).expect("the render parses"),
+                parsed,
+                "{input:?} rendered as {rendered:?} and came back a different query"
+            );
+        }
+    }
+
+    /// A flag-built query round trips too, which is the other way the overlay
+    /// builds one (`SearchForm::build_query` with no advanced line).
+    #[test]
+    fn a_flag_built_query_round_trips() {
+        let flags = Flags {
+            from: Some("ada@example.com".into()),
+            subject: Some("quarterly report".into()),
+            has_attachment: true,
+            after: Some("2024-01-01".into()),
+            ..Default::default()
+        };
+        let built = from_cli("invoice", &flags).expect("the flags build a query");
+        assert_eq!(parse(&to_query_string(&built)).unwrap(), built);
+    }
+
+    /// The two shapes the grammar cannot carry back are dropped rather than
+    /// rendered into something that parses as a different query: a field term
+    /// with an empty value, which `parse` refuses outright, and a value
+    /// carrying a `"`, which the tokenizer consumes as a delimiter. Neither is
+    /// reachable from `parse`; both are constructible by hand.
+    #[test]
+    fn a_term_the_grammar_cannot_carry_is_dropped_not_mangled() {
+        let query = Query {
+            clauses: vec![
+                Clause::Single(Term::From(String::new())),
+                Clause::Single(Term::Subject("a\"b".into())),
+                Clause::Single(Term::Text("kept".into())),
+            ],
+            in_mailbox: None,
+            message_id: None,
+        };
+        assert_eq!(to_query_string(&query), "\"kept\"");
+        assert_eq!(
+            parse(&to_query_string(&query)).unwrap().clauses,
+            vec![Clause::Single(Term::Text("kept".into()))]
+        );
     }
 }

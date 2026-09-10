@@ -56,6 +56,7 @@ use mp_protocol::events::{DraftInvalid, KIND_DRAFT_INVALID};
 use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, EmailSettings};
+use crate::draft::DraftRecipientEdit;
 use crate::selector::{Namespace, Selector};
 use crate::store::drafts::DraftRow;
 use crate::store::read::MessageRow;
@@ -494,12 +495,13 @@ fn from_source(
     } else {
         crate::draft::DraftFromSource::Forward
     };
+    let headers = recipient_headers(params)?;
     let (path, written) = crate::draft::create_draft_from_source(
         &name,
         &account.default_from,
         &built,
         kind,
-        None,
+        headers.as_ref(),
         signature_of(account, params, email).as_deref(),
     )
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
@@ -513,6 +515,50 @@ fn from_source(
             selector: selector.to_string(),
         }),
     )
+}
+
+/// The `headers` override of `draft.reply` and `draft.forward` (P5-U6), which
+/// rewrites the built draft's `to`, `cc`, `bcc` and `subject` in place.
+///
+/// Additive and absent by default, so every existing caller writes the draft
+/// the builder derived. It exists for the compose wizard's forward, which asks
+/// for the recipients and the subject *before* the draft is written and then
+/// keeps them over the ones the builder derived: without it that flow would
+/// have to build the draft through the daemon and then rewrite the file behind
+/// its back.
+///
+/// All four keys are required once `headers` is present, and an empty string
+/// clears the field, which is [`crate::draft::DraftRecipientEdit`]'s own
+/// contract. A partial object is the caller disagreeing with themselves about
+/// which fields the override covers.
+fn recipient_headers(params: &Value) -> Result<Option<DraftRecipientEdit>, RpcError> {
+    let headers = match params.get("headers") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(headers)) => headers,
+        Some(_) => {
+            return Err(invalid_params(
+                "headers is an object of to, cc, bcc and subject",
+            ))
+        }
+    };
+    let field = |name: &str| {
+        headers
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "headers overrides all four of to, cc, bcc and subject; {name} is missing \
+                     (send \"\" to clear it)"
+                ))
+            })
+    };
+    Ok(Some(DraftRecipientEdit {
+        to: field("to")?,
+        cc: field("cc")?,
+        bcc: field("bcc")?,
+        subject: field("subject")?,
+    }))
 }
 
 /// The answer of the three methods that write a new draft.
@@ -682,24 +728,44 @@ pub(super) fn addressed_one(params: &Value, account: &str) -> Result<String, Rpc
 /// The received message a reply or a forward is built from, and its canonical
 /// selector.
 ///
-/// `{id}` is `"<mailbox>/<uid>"`, the store's own key; `{selector, mailbox?}`
-/// is the grammar `mp reply` takes from a user, resolved here because resolving
-/// one needs the store the client no longer has. Neither is a caller who
-/// forgot, both is a caller who may disagree with themselves, and every way of
-/// naming nothing is the caller's parameter being wrong rather than the store
-/// failing.
+/// `{id}` is `"<mailbox>/<uid>"`, the store's own key; `{row_id}` is the
+/// `messages.id` a `message.list` row carries (P5-U4 added it to `message.get`
+/// and P5-U6 adds it here, for the same reason: the TUI holds a `MessageRef`
+/// and nothing else, #0050); `{selector, mailbox?}` is the grammar `mp reply`
+/// takes from a user, resolved here because resolving one needs the store the
+/// client no longer has. None is a caller who forgot, more than one is a caller
+/// who may disagree with themselves, and every way of naming nothing is the
+/// caller's parameter being wrong rather than the store failing.
 fn address_received(
     source: &Value,
     store: &Store,
     account: &str,
 ) -> Result<(MessageRow, Selector), RpcError> {
     let given = |key: &str| !matches!(source.get(key), None | Some(Value::Null));
+    if given("row_id") {
+        if given("id") || given("selector") {
+            return Err(invalid_params(
+                "row_id, id and selector are three addresses; send exactly one",
+            ));
+        }
+        let row_id = source
+            .get("row_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| invalid_params("row_id is a messages.id, which is an integer"))?;
+        let row = crate::store::read::find_by_id(store, row_id)
+            .map_err(|e| internal(format!("reading message {row_id}: {e:#}")))?
+            .ok_or_else(|| {
+                invalid_params(format!("{account} holds no message with row id {row_id}"))
+            })?;
+        let selector = Selector::for_message(account, &row);
+        return Ok((row, selector));
+    }
     match (given("id"), given("selector")) {
         (true, true) => Err(invalid_params(
             "id and selector are two addresses; send exactly one",
         )),
         (false, false) => Err(invalid_params(
-            "a message is addressed by id or by selector; send exactly one",
+            "a message is addressed by id, by row_id or by selector; send exactly one",
         )),
         (true, false) => {
             let id = string_param(source, "id")?;

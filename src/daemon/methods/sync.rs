@@ -320,10 +320,17 @@ async fn run_pass(
             .await
             .filter(|outcome| !outcome.blocked);
         return match outcome {
-            None => handle.succeed(json!({"blocked": true, "outcome": null})),
+            None => handle.succeed(blocked_result()),
             Some(outcome) => match outcome.error {
                 Some(error) => handle.fail(DomainError::internal(error)),
-                None => handle.succeed(json!({"blocked": false, "outcome": outcome.sync})),
+                // The runtime's tick keeps no arrival list, so a pass that went
+                // through it reports none: a client's desktop notification is
+                // the event stream's business once P5-U8 lands.
+                None => handle.succeed(json!({
+                    "blocked": false,
+                    "outcome": outcome.sync,
+                    "new_inbox_mail": [],
+                })),
             },
         };
     }
@@ -351,8 +358,9 @@ async fn run_pass(
         // Another process is this account's engine (#0122): nothing ran, no
         // session was opened, and that is a success the client renders as a
         // skip rather than a summary of a pass that never happened.
-        Ok(None) => handle.succeed(json!({"blocked": true, "outcome": null})),
+        Ok(None) => handle.succeed(blocked_result()),
         Ok(Some(pass)) => {
+            let arrivals = new_inbox_mail(&pass);
             let outcome = from_sync_result(
                 &request.account.name,
                 &pass,
@@ -366,9 +374,37 @@ async fn run_pass(
                 // that arrived.
                 canonical.apply(super::super::state::Change::SyncCompleted(outcome.clone()));
             }
-            handle.succeed(json!({"blocked": false, "outcome": outcome}));
+            handle.succeed(json!({
+                "blocked": false,
+                "outcome": outcome,
+                "new_inbox_mail": arrivals,
+            }));
         }
     }
+}
+
+/// The result of a pass another engine was already running (#0122).
+fn blocked_result() -> Value {
+    json!({"blocked": true, "outcome": null, "new_inbox_mail": []})
+}
+
+/// The inbox arrivals of one pass, as the desktop notification reads them
+/// (#0009).
+///
+/// A sibling of `outcome` rather than a member of it: [`SyncCompleted`] is the
+/// event payload every client already decodes and a per-message list has no
+/// business in a counters-and-severity summary that is published to everyone.
+/// This travels only in the answer to the client that asked for the pass, which
+/// is what a notification is scoped to.
+///
+/// [`SyncCompleted`]: mp_protocol::events::SyncCompleted
+fn new_inbox_mail(pass: &SyncResult) -> Value {
+    Value::Array(
+        pass.new_inbox_mail
+            .iter()
+            .map(|mail| json!({"from": mail.from, "subject": mail.subject}))
+            .collect(),
+    )
 }
 
 /// One end of the tick: the outbox, then the mutation queue, each reported as
