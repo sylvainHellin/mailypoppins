@@ -111,10 +111,17 @@ The table is what routes and through what:
 | `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 | `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
+| `mp`'s mailbox list, sidebar counts and preview body | `message.list` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
 
 The TUI's row is a session rather than a call: `mp` with no arguments connects through the same `client_session` every command above goes through, before it takes over the terminal, and holds the connection until the user quits.
-It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal, and it still opens each account's store in the background for the message rows, which P5-U3/U4 replace.
+It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal.
 A daemon it cannot reach ends the run with the ordinary exit-4 diagnostic, on a terminal that is still in its normal mode.
+
+Since P5-U4 the three reads a frame needs go the same way, through `crate::tui::queries` and the session the `App` holds.
+The two that can wait keep the thread they always had and block on a call rather than on a store open: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup, both through a `Session::handle()` a worker thread can own, so nothing about the load moved onto the draw thread.
+The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `docs/plans/preview-latency.md` budgets.
+The listing is transferred whole, once per mailbox open, as `docs/baselines/decisions/list-transfer.md` decided; the row deltas that keep it current decode here already and are applied by nothing until P5-U8 drains the event stream.
+An `App` with no session at all falls back to the store-backed readers of `src/tui/app/store_rows.rs`, which is the shape every TUI unit test runs in and, in a real run, only a `Session::connect` that wedged.
 
 `mp config path` is the one domain command that never contacts a daemon: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
 

@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1, P5-U2 and P5-U3 have landed; P5-U4 is next.
+Status: in-progress. P5-U1 to P5-U4 have landed; P5-U5 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -22,7 +22,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U1 | T | this commit | daemon-backed golden frames | done (tests) |
 | P5-U2 | I | this commit | TUI initialisation via handshake + bootstrap | done |
 | P5-U3 | T | this commit | the query layer contract | done (tests) |
-| P5-U4 | I | | the query layer | open |
+| P5-U4 | I | this commit | the query layer | done |
 | P5-U5 | T | | actions to commands, the contract | open |
 | P5-U6 | I | | actions to commands | open |
 | P5-U7 | T | | events replace watcher threads, the contract | open |
@@ -278,3 +278,75 @@ The rest of the tree is green: with the two `mod queries_tests;` lines commented
 An equality oracle is only worth writing if it is reachable, so a plausible query layer was written in the same throwaway worktree, and discarded there, purely to run the suite: **17 passed, 1 failed**, the failure being `the_query_layer_replaced_every_open_store_it_could`, which only a change to the six call sites can satisfy and which the plausible implementation deliberately did not make. The `#[ignore]`d timing row passed too, at 200 rows.
 
 Closing the four gaps above cost, in that worktree: eight fields added to `message::to_json` (`id`, `mailbox`, `to`, `cc`, `reply_to`, `bcc`, `flagged`, `is_invite`), a `row_id` address on `message.get`, and `date` plus `cc` on `mp_protocol::draft::DraftEntry`. That is one plausible shape and is not proposed as P5-U4's; it exists only as the answer to "can these 18 rows be satisfied".
+
+## P5-U4: the query layer
+
+`src/tui/queries.rs` (502 lines) is the module the contract names, and `src/tui/app/store_rows.rs` (124 lines) is where the store-backed readers it replaced went. The rest is the call sites: `src/tui/app/mod.rs`, `src/tui/app/types.rs`, `src/tui/actions.rs`, `src/tui/mod.rs`, `src/tui/bg.rs`, `src/tui/session.rs`, and the four wire gaps in `src/daemon/methods/{message,draft}.rs` and `crates/mp-protocol/src/draft.rs`. 626 lines of new file plus about 130 of changed line, excluding tests.
+
+### The four wire gaps, all closed additively
+
+No field was renamed, none was dropped, and no command's output moved: `mp --help`, `mp dump-keys --json` and every parity row of the read, draft, mutation, send, sync and admin slices are byte-identical.
+
+**A `message.list` row gained seven fields.** `id` (`messages.id`), the five columns a list and a header pane render and a CLI listing does not (`to`, `cc`, `reply_to`, `bcc`, `is_invite`), and `flags.flagged`, the store's fourth axis, which the row's own doc comment had been promising to "the version that adds it" since P2-U10.
+
+`flagged` went **inside `flags`** rather than beside it, because the four axes are one thing and the doc sentence that deferred it was about that member. `cc`, `reply_to` and `bcc` travel **nullable** where `from`, `to`, `subject` and `date_display` stay flattened to `""`: the header pane prints each of the three only when the message carried one, so a flattened `""` would make an absent Cc indistinguishable from an empty one and the two paths would render differently. `mailbox` was **not** added, unlike the throwaway worktree's shape: the delta events carry the mailbox in their payload and `message.get` is addressed by row id, so nothing needed it.
+
+**`message.get` gained `row_id`** as a third address, still exactly one of the three. The preview holds a `MessageRef` and nothing else (#0050); addressing by `"<mailbox>/<uid>"` would have made the client carry a second identity for every row and re-derive it on every cursor move.
+
+**`DraftEntry` gained `cc` and `date`**, the index's own columns, which `entry_from_draft` reads. The client-side fallback the T unit offered instead (the filename stem through `resolve_date`) is what happens when `date` is absent and is not a substitute for it: a draft whose frontmatter *has* a `date:` would otherwise sort and display differently through the daemon than through the store, and nothing client-side can recover a `cc:` at all.
+
+### The approved test edits, and why a protocol change costs them
+
+Three pinned key sets moved, which is exactly what `tests/daemon_protocol_fixtures.rs` says a protocol change must cost: "a field silently added, renamed or dropped on the wire fails this test instead of regenerating a fixture that agrees with the new code and with nothing else. Changing one of these lists is a protocol change and needs a changelog entry." The changelog entry is in `docs/daemon-protocol.md`.
+
+- `tests/daemon_read_only_methods.rs`: the live-row key list, its `flags` key list, `expected_message` and the module's shape sketch (P2-U10's pins).
+- `tests/daemon_protocol_fixtures.rs`: `MESSAGE_ROW` and `MESSAGE_FLAGS`, plus `crates/mp-protocol/fixtures/message.list.response.json`, which now shows a populated `cc`, a `reply_to` and a flagged row so the fixture documents the nullable-versus-flattened split rather than only asserting it.
+- `tests/daemon_draft_slice.rs`: `ENTRY_FIELDS` (8 -> 10) and the shape sketch.
+- `tests/fixtures/tui-engine-imports.txt`: two rows, re-recorded through the documented `UPDATE_TUI_ENGINE_IMPORTS=1`. `app/store_rows.rs uses store` is the move of an import `app/types.rs` and `app/mod.rs` already had; `queries.rs uses store` is a genuine widening, and it is types only (`MessageRow`, `DraftRow`, `SkippedDraft`), which is what P5-U10 has to resolve when the TUI becomes a crate that cannot link the store.
+
+No golden frame and no line of `queries_tests.rs` was touched.
+
+### Decisions
+
+**A wire row becomes a `MessageRow` and goes through `entry_from_row`.** The two paths are then equal by construction rather than by inspection: every derivation (the display name, the `(no subject)` fallback, `resolve_date`'s two strings, the flag axes) stays in the one function that owns it, and a change to it moves both paths together. The drafts branch does the same through `entry_from_draft` and `entry_from_skip`. The two `MessageRow` fields a listing does not carry, `body_blob` and `thread_id`, are the two an `EmailEntry` does not read. `src/main.rs` has a `row_from_wire` of its own for the CLI listing and it was left alone: it decodes what `mp list-messages` prints and nothing more, and unifying the two is P5-U10's when they are in one crate.
+
+**The uid index.** A held list is keyed by `messages.id` and the daemon removes a row by `message:<account>/<mailbox>/<uid>`, which is the resource its mutation methods already invalidate and which the T unit chose to follow rather than change. Nothing in an `EmailEntry` is a uid, so the correspondence is remembered in the query layer: a process-wide `(account, mailbox) -> (uid -> id)` table that every listing replaces wholesale for its own mailbox and every row replace adds one entry to. A uid the table does not know owes a refetch rather than a guess, which is what `apply_row_delta` returns `false` for. The alternative, a `uid` field on `EmailEntry`, is 31 struct literals across seven files, two of them the frozen golden-frame fixtures, and it is worth revisiting when the TUI moves to its own crate.
+
+**Two call sites keep their thread, one keeps the draw thread.** `Session::handle()` is new: a clone of the call channel that a worker thread can own, since the `App` owns the `Session` and the UI thread owns the `App`. The background mailbox load (`Action::LoadMailbox`) and the two-phase startup's per-account count both keep the `std::thread::spawn` they always had and block on a call instead of on a store open, so nothing moved onto the draw thread. The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made an unchanged selection free, which is the shape `docs/plans/preview-latency.md` budgets. `recount_all_mailboxes` is synchronous as it always was: it follows a sync, not a keystroke.
+
+**A refused preview is an empty pane, not an error.** `queries::message_body` logs and answers `None` for any refusal, which is what the store-backed path does with a stale reference *and* with a store it could not open. Its `Result` is therefore unreachable today; it is kept because the day a preview is routed through a minter (`docs/baselines/decisions/large-payloads.md`) a transport failure and a missing row stop being the same thing.
+
+**The store-backed readers were kept, in a file of their own.** `load_emails`, `count_all_emails` and `App::load_message_body` are still here, in `src/tui/app/store_rows.rs`, for two callers and no third: they are the equality oracle `queries_tests.rs` compares every answer against, and they are what an `App` with no session reads, which is every one of the ~370 TUI unit tests and, in a real run, only a `Session::connect` that wedged. They are in that file rather than in the two the gate scans because the gate is a scan for `open_store(` in `src/tui/app/{mod.rs,types.rs}`; the move is recorded here rather than left to be discovered. No paint path reaches them when a session exists, and P5-U10, which moves `src/tui/` into a crate that may not link the store, is where they die.
+
+That fallback is not the "direct fallback" P5-U8 forbids: nothing recovers a *failed* daemon call by reading the store, and a failed call degrades exactly as it did before (an empty list, zeroed counts, an empty preview, and a line in the log).
+
+**A `state.invalidate` scoped to the counts is not a row delta.** The daemon publishes mailbox count changes as `state.invalidate` over `mailbox:<account>/<slug>` with `{"query": "counts"}`, and decoding those as list invalidations would refetch the open list on every count change, which is the per-event whole-list transfer the deltas exist to avoid.
+
+### The delta consumer
+
+P5-U2 left the event stream connected and drained by nobody, so there was no place to apply a delta to. `tui::bg::apply_row_delta` is that place: it folds one `MessageRowDelta` into the open list and its cache slot (they share an allocation), or reloads the mailbox through the same off-thread path a switch takes when the delta owes a refetch. It is called by nothing and carries `#[cfg_attr(not(test), allow(dead_code))]` with two unit tests over it; **P5-U8 turns it on** when it drains the stream, and the unbounded notification buffer P5-U2 recorded is the same unit's.
+
+### Follow-ups
+
+- `queries.rs uses store` in the TUI engine-import allow-list, and `src/main.rs`'s duplicate wire-row decoder, both for P5-U10.
+- The uid index above, likewise: a `uid` on `EmailEntry` is the shape that would delete it.
+- `message.get` computes the attachment list and the selector for every preview, because the result is `ShownMessage` whole. It is inside the budget (the timing row measures it) and is one query more than the pre-daemon read did.
+- An empty stored body reads as `Some("")` through the store and `None` through `message.get`, which `shown_message` filters. The preview shows an empty pane either way, so no frame moves; a shape that cares would need `message.get` to stop filtering.
+
+### Validation
+
+`timeout 1200 cargo test --workspace --offline` -> **2 128 passed, 0 failed, 1 ignored**, `pgrep -af '[m]p daemon'` empty afterwards. That is P5-U3's 2 108 plus the 18 rows of `queries_tests.rs`, which compile and pass for the first time, plus the two delta rows in `src/tui/bg.rs`.
+
+`cargo test --offline --lib queries_tests` -> 18 passed, three times over; the `#[ignore]`d timing row separately with `-- --ignored` -> 1 passed, at 200 rows, inside the 5 ms W1 delta ceiling.
+
+`--lib 'ui::golden_frames::'` -> 20, `--lib golden_frames_daemon` -> 22, both unmoved and no snapshot re-approved. (`--lib golden_frames` matches both modules and reports 42.)
+
+Every `daemon_*_slice` suite green: read 22, draft 34, mutation 35, send 50, sync 38, admin 44.
+
+`git diff --stat aaf8ccd..HEAD -- src/tui/app/queries_tests.rs src/tui/ui/golden_frames*.rs` empty. Under `tests/`, the four files above, each with its reason.
+
+`mp --help` recursive and `mp dump-keys --json` byte-identical to the Phase 0 captures, from a binary rebuilt in the same run. `cargo clippy --workspace --offline --all-targets` -> 39 warnings, the baseline.
+
+A pty smoke against the `examples/mkfixture` fixture (two accounts, 541 messages, a 1 MiB body), `script -qec "stty rows 40 cols 120; mp"` under `MAILYPOPPINS_DAEMON_REQUIRE=1` against a daemon started beside it: the shell painted with `··` in every count column, then the daemon-backed list painted 18 rows of `alpha/inbox` with their dates and subjects, `j` moved the cursor, the headers pane filled from the row and the body pane from `message.get`, and `q` left with exit 0 and no daemon behind it. Started *beside* it rather than on demand because `MAILYPOPPINS_DAEMON_REQUIRE=1` is inherited by the auto-started `mp daemon run`, which is on the no-daemon list and refuses to start under it (worth knowing before the P5-U9 harness meets it).
+
+`rustfmt --edition 2021` on the two new files and on the five touched files that were rustfmt-clean at `aaf8ccd`; the six that were not (`src/tui/{mod,bg,actions}.rs`, `src/tui/app/{mod,types}.rs`, `tests/daemon_draft_slice.rs`) were left alone. `cargo install --path . --offline` green.

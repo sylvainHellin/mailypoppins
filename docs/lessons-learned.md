@@ -1831,3 +1831,15 @@ The obvious fix - connect in `main`, hand the `Connection` to the TUI - does not
 
 `timeout 25 script -qc "mp" /dev/null; echo $?` prints 0 whatever `mp` did, which makes a pty smoke test look like it passed.
 `-e` is the flag that propagates the child's status, and the typescript file records it either way as `[COMMAND_EXIT_CODE="4"]` on the `Script done` line.
+
+## An event that names a row by uid cannot be applied to a list keyed by row id
+
+The daemon invalidates and removes a message as `message:<account>/<mailbox>/<uid>`, because that is the resource its mutation methods already publish. The TUI holds every row as `MessageRef(messages.id)`, because a row id survives the move and the UIDVALIDITY reset that a uid does not (#0050). Both are right, and neither can be derived from the other without the store.
+
+So a client that receives one and holds the other needs a table, and the only place both are visible is the listing decode: the wire row carries `id` and `uid` together exactly once, when the list is built. `src/tui/queries.rs` keeps `(account, mailbox) -> (uid -> id)` from there, replaced wholesale per listing, and a uid the table does not know answers "refetch" rather than guessing at a row.
+
+The trap is that the two numbers are often equal in a fixture - ingest a mailbox in order and `uid == id` for every row of it - so an implementation that matched a uid against a row id passes the test suite and corrupts the second mailbox a user opens. Seed the oracle mailbox second, or check the two columns really differ, before believing a delta test.
+
+## `cargo test --lib golden_frames` counts 42 frames, not 20
+
+The filter is a substring over the whole test path, so it matches `ui::golden_frames::` and `ui::golden_frames_daemon::` alike. The hand-built family alone is `--lib 'ui::golden_frames::'`, with the trailing `::`; the daemon-backed one is unambiguous already. A report that says "20 golden frames" and a run that says 42 are the same run.
