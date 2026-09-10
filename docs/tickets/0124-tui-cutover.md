@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U6 have landed; P5-U7 is next.
+Status: in-progress. P5-U1 to P5-U7 have landed; P5-U8 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -25,7 +25,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U4 | I | this commit | the query layer | done |
 | P5-U5 | T | this commit | actions to commands, the contract | done (tests) |
 | P5-U6 | I | `d0c0049`, `b51b3fa`, `723ba60`, `e3055e7` | actions to commands | done |
-| P5-U7 | T | | events replace watcher threads, the contract | open |
+| P5-U7 | T | this commit | events replace watcher threads, the contract | done (tests) |
 | P5-U8 | I | | events replace watcher threads | open |
 | P5-U9 | T | | the parity-gate oracle suite | open |
 | P5-U10 | I | | the crate boundary for the TUI | open |
@@ -739,3 +739,170 @@ It did not *fail*, which is the one thing the smoke could not produce: the fixtu
 The refusal path is pinned by `a_refused_sync_is_the_sentence_the_daemon_gave` instead, over a local-only account, which is the branch whose sentence reaches the status line.
 
 The first smoke is also what found the weak-handle bug: `q` painted and the process sat there until the pty's own timeout, because the sync worker's strong `QueryHandle` was keeping the session thread that `Session::close` joins alive.
+
+## P5-U7: events replace watcher threads, the contract
+
+Two files, and one production edit.
+
+`src/tui/events_tests.rs` (1 367 lines), registered behind `#[cfg(test)]` in `src/tui/mod.rs`, is the in-process half: 20 tests over one event at a time, over the pre-draw drain, and over the three absences the unit creates.
+It lives beside the event loop rather than under `app/` for the reason P5-U5's file does: `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET` are private constants of `src/tui/mod.rs`, a child module sees its parent's private items, and the event drain is held to the same two bounds the terminal drain is.
+
+`tests/tui_daemon_recovery.rs` (395 lines) is the socket half: 3 tests over a real `mp daemon run`, one of which kills it with `SIGKILL` and starts another.
+
+### The contract
+
+Eight names.
+
+```text
+mailypoppins::tui::events                                        // the module
+
+enum events::Incoming: Debug {
+    Event(mp_protocol::EventEnvelope),               // one decoded `state.event`
+    Resync { instance_id: String, reason: String },  // `state.resync_required`
+    Disconnected { reason: String },                 // the daemon went away
+    Reconnected { instance_id: String },             // a daemon answers again
+}
+type events::Subscription = std::sync::mpsc::Receiver<events::Incoming>
+
+enum events::Applied: Debug + PartialEq {
+    Rows, Counts, NewMail(Vec<mp_protocol::events::Arrival>), Operation(String),
+    Duplicate, Refused, Ignored,
+}
+
+fn events::drain(app: &mut App, door: &dyn crate::tui::queries::Queries,
+                 events: &events::Subscription) -> usize
+
+impl App     { pub fn apply_event(&mut self, &mp_protocol::EventEnvelope) -> events::Applied }
+impl Session { pub fn events(&mut self) -> Option<events::Subscription> }
+
+mp_protocol::events::Arrival { from: String, subject: String }
+mp_protocol::events::SyncCompleted::new_inbox_mail: Vec<Arrival>
+```
+
+**`Subscription` is a `Receiver` and not a type of its own.**
+`run_loop` already holds three of them (`watch_rx`, `bg_rx`, `boot_rx`) and reads each with a `try_recv` drain, so a fourth needs no second vocabulary.
+It is also what lets the 20 in-process rows feed the drain without a socket: whether the far end is a session thread or a `Sender` in a test is not a property the drain may observe.
+
+**The connection's own state travels on the same channel as the events.**
+A daemon killed mid-session and a daemon restarted afterwards are facts the UI has to show, and they arrive where the events arrive.
+Two more variants keep them ordered against the events around them, where a second channel would let a `Reconnected` overtake the last event of the dead instance and make the watermark arithmetic disagree with what the client actually saw.
+
+**`apply_event` is on `App` and `drain` is not.**
+Applying one event is the model's business, which is what makes twelve of the rows one call and one assertion.
+Draining is the loop's: it is bounded, it re-bootstraps, and it therefore needs a door, as an argument rather than off `app.session` for the reason P5-U5 gave for `commands::dispatch` (a borrow of the session inside a `&mut App` method would collide, and `Session::handle()` exists for exactly that).
+
+**The drain's bound is not a new constant.**
+An event batch is drained in the same pre-draw pass as a terminal batch and is held to `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, read from the constants themselves.
+A first sync of a large mailbox publishing a row per message may not starve the paint any more than a bracketed paste may.
+
+### The watermark, and the four things a client does with an event
+
+`docs/daemon-protocol.md` fixes them and `mp_client::StateTracker` already implements them; what this file pins is that the TUI uses them.
+An event above the watermark is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one from an unfamiliar instance is refused whatever its number, and the refusal is sticky; and a `state.resync_required` costs a fresh `state.bootstrap`, which is asserted as a call on the door and not as a flag.
+
+The watermark is set by `App::apply_bootstrap`, which already exists and already takes the `instance_id` and the `revision`, so no name was added for it.
+That is also what makes the reconnect row honest: the instance and the revision come from the bootstrap's answer, not from the reconnect notice, because the notice is the client's guess and the answer is the daemon's word.
+
+### What the daemon owes
+
+Three things, and only the third is a Rust name.
+
+**Account runtimes are on by default.** Plan section 3.7 drops `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`, so `lifecycle::ACCOUNT_RUNTIMES_ENV` and the literal are scanned to zero over `src/`.
+That a daemon started *without* the variable serves a **ready** account is `tests/tui_daemon_recovery.rs`, over a real socket, because it is a property of `mp daemon run` and of its environment rather than of a dispatcher: `tests/support/parity.rs`'s `sandbox_env` removes every daemon hook from every child it spawns, so a fixture there cannot be given the opt-in by accident.
+The engine lock is half of that row and not decoration: an account reported `ready` by a daemon that holds no lock is a daemon claiming to be an engine it is not.
+
+**The watcher lives in the runtime.** `imap_watch`, `watcher_loop`, `graph_watcher_loop`, `WatchEvent` and `GRAPH_POLL_SECS` are scanned to zero over `src/tui/`.
+That a tick reaches a subscribed client as an event is the socket file again, through `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME`, armed **without** the runtimes variable, which is the second half of that row: `sync_outcome::fake_sync_outcomes` gates itself on that variable today and must stop, because after this unit there is no variable to gate on.
+
+**A tick carries its arrivals.** `SyncCompleted` gains `new_inbox_mail: Vec<Arrival>`.
+P5-U6 put the arrival list beside the *answer* to the client that asked for a pass, deliberately, and recorded the reason it could not stay there: *"a pass through an account runtime's tick reports `[]` ... that is P5-U8's to fix when the notification moves onto the event stream"*.
+Nobody asks for a runtime's tick, so the answer has no reader and the event is the only carrier the desktop notification of #0009 has left.
+`Arrival` is a protocol type rather than `crate::notify::NewMailMeta` because `mp-protocol` may not link the engine; the conversion is two fields and it is P5-U8's.
+
+Two costs come with that field, both additive and both P5-U8's to pay: `from_sync_result` has to fill it (from `SyncResult::new_inbox_mail`, which already holds exactly this list), and it is a protocol change, so `docs/daemon-protocol.md`'s `sync.completed` table, its changelog and `crates/mp-protocol/fixtures/` move with it.
+
+### The operation poll, and how a finish is observed instead
+
+P5-U6 gave each operation-kind arm a worker thread reading `operation.status` every 100 ms and named the replacement: *"P5-U8 replaces the poll with the `operation.finished` subscription"*.
+Three rows pin it.
+`a_quick_sync_starts_an_operation_and_polls_nothing` asserts the **call count**, because a poll merely made slower would still pass a row that only looked at the first call.
+`the_finished_operation_lands_where_the_poll_landed` feeds the matching `operation.finished` and asserts the status line is the one the polled answer produced, from the same pure function (`mp_client::format::sync_status_line`).
+`an_operation_this_client_never_started_is_ignored` is the other direction: operations are daemon-wide and their events reach every bootstrapped connection, so a TUI beside an `mp sync` sees the other window's operations finish and may not put a line on the screen about a pass the user did not ask *this* client for.
+
+The id is read off the daemon's own answer rather than invented, which is what the fixture's third recording column is for: `actions_tests.rs`'s fixture keeps the call and the parameters, this one keeps the result too, because an operation's id is minted by the daemon and a row that invented one would pin nothing.
+
+The source scan is the fourth pin and covers the three arms a test cannot drive (`sync.full`, `send.approved`, `calendar.rsvp`): they all go through one helper and the string appears once.
+
+### No direct fallback
+
+The plan's phrase for the failure this unit must not introduce: a client that answers a dead daemon by opening the store itself.
+It is asserted as a **lock**, not as an intention.
+An account's engine lock is `<root>/accounts/<account>/store.lock`, `flock`-held for a runtime's whole lifetime, and `flock` is per open file description rather than per process, so a second description of the same file conflicts even inside one process.
+During the outage the daemon is gone and the kernel has released its lock, so the test process can take it, unless the client under test took it first, which is exactly the fallback.
+The source-level half of the same question is the residue scan, and the store-backed readers of `src/tui/app/store_rows.rs` are unaffected: nothing recovers a failed daemon call by reading the store, and P5-U4 already recorded why that fallback is not this one.
+
+### Why the socket file compiles and fails anyway
+
+Every name `tests/tui_daemon_recovery.rs` uses exists at `51e2622`, and it must: `tests/*.rs` is autodiscovered and the `daemon` cargo feature that used to gate a contract file has been gone since P4-U1, so a `tests/` file that did not compile would take the build of that target down with it rather than fail an assertion.
+What it does instead is fail at **runtime**, on the three facts P5-U8 has to make true: the account stays `opening` for ever without the environment variable, a `sync.completed` payload carries no `new_inbox_mail` member, and a session whose daemon died never calls again because nothing reconnects.
+`new_inbox_mail` is read there out of the raw payload rather than off a decoded `SyncCompleted`, for the same reason: naming the field in Rust would turn that file into the compile error it may not be.
+
+The recovery row's first three assertions pass on the tree as committed: a live session answers, a session whose daemon was killed refuses rather than hanging or serving a stale answer, and no engine lock is held during the outage.
+Only the reconnect fails, at `waited 20s for the session to reconnect`, which is the one behaviour that does not exist.
+
+### The test edit P5-U8 owes
+
+`tests/daemon_account_runtime.rs`'s `without_the_environment_opt_in_the_daemon_starts_no_runtime_and_takes_no_engine_lock` asserts today's default and is the behaviour this unit removes.
+It is named here rather than edited, because a T unit does not edit a test to say something it was not written to say; P5-U8 either deletes it or turns it into the row about a daemon whose account is genuinely unreachable.
+
+`tests/daemon_sync_outcome.rs` and `tests/daemon_sync_slice.rs` arm the fake hook with `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` beside it and will need that pair dropped, and `tests/support/parity.rs`'s `DAEMON_ENV_HOOKS` loses a row with the variable.
+
+### Approved test edits
+
+None. No existing test file was touched, and `git diff --stat 51e2622..HEAD -- tests/` shows only the new file.
+
+### Validation
+
+The T-unit proof of a stub-free contract, in the shape P5-U1, P5-U3 and P5-U5 used: `src/tui/events_tests.rs` is a `#[cfg(test)] mod` inside the library rather than a `tests/` target, so the committed tree's `--lib` test target does not compile until P5-U8 lands.
+
+`timeout 900 cargo test --offline --lib events_tests --no-run`, on the tree as committed, is 17 errors naming five contract items and nothing else:
+
+```
+error[E0432]: unresolved import `mp_protocol::events::Arrival`
+error[E0432]: unresolved import `crate::tui::events`
+error[E0599]: no method named `apply_event` found for struct `app::App` in the current scope   (x13)
+error[E0599]: no method named `events` found for mutable reference `&mut tui::session::Session`
+error[E0560]: struct `SyncCompleted` has no field named `new_inbox_mail`
+error: could not compile `mailypoppins` (lib test) due to 17 previous errors
+```
+
+Four of the eight names are inside `crate::tui::events`, so the stub proof rather than the error text is what says the contract is complete.
+That proof, in a throwaway `git worktree` at `~/.cache/mp-stub-p5u7` with `CARGO_TARGET_DIR=~/.cache/mp-stub-target`, never committed: an `src/tui/events.rs` with the two enums, the alias, `drain` and `apply_event` as `todo!()`, a `Session::events` as `todo!()`, and `Arrival` plus the field on `SyncCompleted`, make `cargo test --offline --lib events_tests --no-run` compile.
+(`~/.cache/mp-stub-p5u5` was removed to make room.)
+The one thing the stub could not leave as `todo!()` is `from_sync_result`, which stops compiling the moment `SyncCompleted` grows a field: that is the cost recorded above, and `SyncResult::new_inbox_mail` is already exactly the list it needs.
+
+The rest of the tree is green: with the two `mod events_tests;` lines commented out, `TMPDIR=/var/tmp timeout 1800 cargo test --workspace --offline --no-fail-fast` -> **2 156 passed**, which is P5-U6's 2 156 unchanged, plus this unit's **3 failing rows** in `tests/tui_daemon_recovery.rs`, which are its contract and are described above.
+`pgrep -af '[m]p daemon'` empty afterwards; the killed daemon and both fixtures are reaped.
+The lines were restored before the commit.
+
+One environmental note, the same one P5-U6 recorded: `TMPDIR=/var/tmp` is not optional on a host whose `/tmp` tmpfs is full, because a hundred parallel store tests each build a tempdir there.
+
+`rustfmt --edition 2021` on `src/tui/events_tests.rs` and `tests/tui_daemon_recovery.rs`, both clean (`src/tui/mod.rs` was not rustfmt-clean before this unit and was left alone).
+
+### The oracle was checked, not assumed
+
+A plausible implementation was written in the same throwaway worktree, and discarded there, purely to run the suite: **17 passed, 3 failed**, the three failures being exactly the residue gates (`the_watcher_threads_are_gone_from_the_tui`, `the_tui_never_asks_for_an_operations_status`, `the_account_runtimes_opt_in_is_gone`), which only a change to the production code can satisfy and which the plausible implementation deliberately did not make.
+
+It cost, in that worktree: an `events.rs` of about 170 lines holding a `StateTracker`, a table of started operations and one `match` on the kind; a `watermark_from` call at the head of `App::apply_bootstrap`; and one arm in `commands::dispatch` for `Action::Fetch`.
+That is one plausible shape and is not proposed as P5-U8's; it exists only as the answer to "can these 20 rows be satisfied".
+
+Two findings from it are worth carrying forward.
+`App` needs somewhere to keep the watermark and the started operations, which the throwaway kept in thread-locals to avoid editing `App::shell`'s ninety-field literal; two fields on `App` is the honest shape.
+And the fixture account must not be local-only, or `sync.quick` refuses it before it mints an operation id, so `global_config()` configures IMAP on `127.0.0.1:9`, the discard port, with no credentials: credential resolution refuses before a socket is opened, which is the arrangement `tests/support/sync_fixture.rs` established for its `gamma` and the reason no row here can reach a network.
+
+### Follow-ups
+
+- `src/tui/helpers.rs` loses `watcher_loop`, `graph_watcher_loop`, `WatchEvent` and `graph_poll_delay` with its three unit tests over the Graph backoff curve; #0042's delta query, which was going to replace the minute-by-minute enumeration, becomes a daemon item.
+- `AccountState::watcher_active` keeps its name and changes its meaning: it is the daemon session's health now, not an IDLE connection's, and the sidebar renders it unchanged.
+- The unbounded notification buffer P5-U2 recorded and `BACKLOG.md` carries is closed by the drain, and the queue caps (512 events, 4 MiB) plus `state.resync_required` are what bound it on the daemon's side.
+- `mp_client::StateTracker` is stricter than the protocol (any jump above `watermark + 1` is a gap, exact only on a stream that coalesced nothing), which `docs/daemon-protocol.md` already records as a Phase 3b item in `BACKLOG.md`. A TUI that drains a coalescing queue is the first client it can bite.

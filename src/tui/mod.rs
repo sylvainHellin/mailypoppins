@@ -5,6 +5,8 @@ mod actions_tests;
 mod bg;
 pub mod commands;
 mod event;
+#[cfg(test)]
+mod events_tests;
 mod helpers;
 pub mod queries;
 mod runtime;
