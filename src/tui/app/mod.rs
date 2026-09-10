@@ -3,6 +3,8 @@ pub(crate) mod calendar_view;
 pub(crate) mod jump_date;
 mod keymap;
 mod keys;
+#[cfg(test)]
+mod queries_tests;
 mod types;
 
 pub use calendar_view::load_events_for_account;

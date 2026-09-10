@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 and P5-U2 have landed; P5-U3 is next.
+Status: in-progress. P5-U1, P5-U2 and P5-U3 have landed; P5-U4 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -21,7 +21,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 |---|---|---|---|---|
 | P5-U1 | T | this commit | daemon-backed golden frames | done (tests) |
 | P5-U2 | I | this commit | TUI initialisation via handshake + bootstrap | done |
-| P5-U3 | T | | the query layer contract | open |
+| P5-U3 | T | this commit | the query layer contract | done (tests) |
 | P5-U4 | I | | the query layer | open |
 | P5-U5 | T | | actions to commands, the contract | open |
 | P5-U6 | I | | actions to commands | open |
@@ -177,3 +177,104 @@ That is P5-U1's 2 075 plus its 22 frames plus this unit's 11 unit tests (5 in `m
 
 A manual smoke in a pty, against a sandbox root in the `tests/support/parity.rs` layout (`HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` all pointing at one temp tree with a one-account `config.toml`): `mp` connected, painted the shell, applied the bootstrap 250 ms later (one idle poll tick, so after the first frame), rendered `Inbox ··` and `Drafts ··` at 120x40, and quit on `q` with exit 0 under `MAILYPOPPINS_DAEMON_REQUIRE=1`, the session closing before the process left.
 The same run against a tree with no daemon printed the exit-4 diagnostic on a terminal still in its normal mode and exited 4.
+
+## P5-U3: the query layer contract
+
+`src/tui/app/queries_tests.rs` (1 155 lines), registered behind `#[cfg(test)]` in `src/tui/app/mod.rs`, which is this commit's only production edit.
+
+18 tests: four on the mailbox listing and the sidebar counts, two on the preview body, two on the drafts branch, six on row deltas, one on handle hygiene, one `#[ignore]`d timing row, and two on the gate over the six `open_store` call sites (plus a test for the source scanner itself).
+
+### The contract
+
+Eight names, all in one new module plus one `impl`.
+
+```text
+mailypoppins::tui::queries
+
+trait queries::Queries {                                  // object safe
+    fn call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value>;
+}
+impl queries::Queries for crate::tui::session::Session    // Session::call, verbatim
+
+queries::list_emails(&dyn Queries, account: &str, mailbox: &str) -> anyhow::Result<Vec<EmailEntry>>
+queries::mailbox_counts(&dyn Queries, account: &str, mailboxes: &[MailboxInfo]) -> anyhow::Result<Vec<usize>>
+queries::message_body(&dyn Queries, account: &str, msg: MessageRef) -> anyhow::Result<Option<String>>
+
+queries::MessageRowDelta: Debug                           // variants are P5-U4's
+queries::MessageRowDelta::decode(&mp_protocol::EventEnvelope) -> Option<MessageRowDelta>
+queries::apply_row_delta(&mut Vec<EmailEntry>, mailbox: &str, &MessageRowDelta) -> bool
+```
+
+**A trait plus free functions rather than three methods on `Session`.**
+`Session::call` already has exactly the signature `Queries::call` declares, so `impl Queries for Session` is one line and no second connect path is invented; P5-U2 wrote that method as "the door the query layer (P5-U3/U4) will use" and this is it.
+What the trait buys is a query layer testable without a socket: the file drives it over an in-process `Dispatcher`, the same fixture pattern P5-U1 established, so the contract is pinned against the daemon's real method bodies rather than against a hand-written JSON mock that could agree with nobody.
+
+**Typed in the TUI's vocabulary, not in a wire row.** `EmailEntry`, `MailboxInfo`, `MessageRef` are what the six call sites need, and they are what make the oracle the strongest available: the daemon-backed answer is compared field for field against the answer `open_store` produces today, over one seeded store, in one process.
+`EmailEntry` is not `PartialEq` and deriving it would be a production edit a T unit may not make, so rows are compared by their `Debug` rendering, which covers every field the list and the headers pane paint.
+
+**`apply_row_delta` returns "nothing is owed".** `true` means the delta was folded into the held list, `false` means the caller must re-issue `message.list`.
+A delta about another mailbox folds as a no-op and returns `true`: the sidebar's other three mailboxes move constantly, and refetching the open list on each of them would put back exactly the per-event whole-list transfer `docs/baselines/decisions/list-transfer.md` chose deltas to avoid.
+
+**The delta wire shapes are the daemon's own, not the decision's prose.** `message.row` for a replace, and `state.remove` / `state.invalidate` (`src/daemon/state/events.rs`, `KIND_REMOVE` and `KIND_INVALIDATE`) for the other two, with the `message:<account>/<mailbox>/<uid>` and `mailbox:<account>/<mailbox>` resource strings the mutation methods and the count changes already publish.
+The decision writes the remove as `message(account, row_id)`; the tree writes it by `(mailbox, uid)`, and following the tree keeps P5-U4 out of the mutation methods.
+
+### What P5-U4 has to decide, and this file deliberately does not
+
+Four gaps between what the wire carries and what an `EmailEntry` holds. The tests fail until each is closed, whichever way it is closed.
+
+- **The row id.** `entry_from_row` puts `MessageRef(messages.id)` on every entry and it is the identity the selection set, the preview memo and every mutation hold (#0050). `message.list`'s row carries `uid` and `message_id` and no `messages.id`.
+- **Six columns.** `to` (which Sent and Drafts display instead of `from`), `cc` / `reply_to` / `bcc` (#0096), `flagged` (#0007, left off the wire by P2-U10 on purpose) and `is_invite` (#0038). The named-field encoding the decision keeps makes adding them additive.
+- **Addressing `message.get`.** It takes `id` as `"<mailbox>/<uid>"` or a selector; the preview path holds a `MessageRef`.
+- **The drafts branch.** `mp_protocol::draft::DraftEntry` carries no `date` and no `cc`, both of which `entry_from_draft` reads.
+
+### The gate, and the three sites that stay
+
+`the_query_layer_replaced_every_open_store_it_could` is a source scan over the production code of `src/tui/app/{mod.rs,types.rs}` (line comments and `#[cfg(test)]` modules stripped), attributing every `open_store(` call to its enclosing function and comparing the set against `TUI_APP_STORE_RESIDUE`, a three-row table with a reason per row, in the shape and the intent of `tests/architecture_boundaries.rs`'s `CLI_ENGINE_RESIDUE`. It fails in both directions: a site still there belongs behind a query, a site gone belongs struck from the table in the same commit.
+
+The three that stay are `mod.rs`'s `load_calendar_events`, `load_message_invite` and `load_message_ics`. None has a daemon method to move to: `calendar.rebuild` is an operation over the store rather than a query that answers the invite rows the Calendar view lists, the invite card folds the account's REPLY rows over one payload (`reconcile::*`), and no `message.*` method hands out an attachment blob inline. Contracting one is neither this unit's brief nor P5-U4's.
+
+It lives in this module rather than in `tests/architecture_boundaries.rs` because it only becomes true when P5-U4 lands, and the plan requires `cargo test --workspace` to be green on a T unit's commit. This module is the target that does not compile, so a failing gate inside it costs the rest of the tree nothing; in `tests/architecture_boundaries.rs`, which compiles today, the same gate would turn the workspace run red.
+
+### The timing row
+
+`the_preview_query_stays_inside_the_p95_delta_ceiling`, `#[ignore]`d, run with `cargo test --offline --lib queries_tests -- --ignored`.
+It walks 200 rows down and back up on each path and asserts the daemon-backed p95 exceeds the store-backed p95 by at most **5 ms**, the W1 budget `docs/baselines/pre-daemon/workloads.md` fixes ("the same budget the transport decision (P1a-U2) is held to").
+
+Ignored for two reasons, both worth stating. It needs a 200-row fixture and a wall clock, which is a flake waiting for a loaded CI box next to rows that run in milliseconds on three messages. And it is a lower bound on W1 rather than W1: it prices the store read, the row conversion and the dispatch, and not the socket, the framing or the session thread's hop, and W1 itself is still `NOT TAKEN` in `docs/baselines/pre-daemon/measurements.md` (no account, no terminal on that host), so there is no recorded p95 for an absolute to be compared against. P5-U11 owns the real rerun.
+
+### Handle hygiene
+
+`a_preview_walk_leaves_no_handle_behind`. `message.get` answers inline: `docs/baselines/decisions/large-payloads.md` puts the threshold at 1 MiB and the three handle methods are the only minters in the daemon, so the preview owes no release when the cursor moves off. The test counts the directories under `<data>/runtime/handles/` after a walk down the list and back up, which is zero either way, whether because nothing was minted or because everything was released. That makes it the release contract the day a preview is routed through a minter instead.
+
+### Approved test edits
+
+None. No existing test file was touched.
+
+### Validation
+
+The T-unit proof of a stub-free contract, in the shape P5-U1 used: the file is a `#[cfg(test)] mod` inside the library rather than a `tests/` target, so the committed tree's `--lib` test target does not compile until P5-U4 lands.
+
+`timeout 900 cargo test --offline --lib queries_tests --no-run`, on the tree as committed:
+
+```
+error[E0432]: unresolved import `crate::tui::queries`
+   --> src/tui/app/queries_tests.rs:132:17
+    |
+132 | use crate::tui::queries::{
+    |                 ^^^^^^^ could not find `queries` in `tui`
+error: could not compile `mailypoppins` (lib test) due to 1 previous error
+```
+
+One error, naming the one contract item that is a path: the module. The other seven names are inside it, so the stub proof rather than the error text is what says the contract is complete.
+
+The stub proof, in a throwaway `git worktree` at `~/.cache/mp-stub-p5u3` with `CARGO_TARGET_DIR=~/.cache/mp-stub-target`, never committed: a `src/tui/queries.rs` with the trait, the `impl` for `Session` and five `todo!()` bodies makes `cargo test --offline --lib queries_tests --no-run` compile, which is the evidence that the file needs nothing else.
+
+The rest of the tree is green: with the two `mod queries_tests;` lines commented out, `timeout 1200 cargo test --workspace --offline` -> **2 108 passed, 0 failed**, and `pgrep -af '[m]p daemon'` empty afterwards. That is P5-U2's 2 108 unchanged; this unit adds none to a compiling tree, because its 18 are in the target that does not compile. The lines were restored before the commit.
+
+`rustfmt --edition 2021` on `src/tui/app/queries_tests.rs`, clean (`src/tui/app/mod.rs` was not rustfmt-clean before this unit and was left alone).
+
+### The oracle was checked, not assumed
+
+An equality oracle is only worth writing if it is reachable, so a plausible query layer was written in the same throwaway worktree, and discarded there, purely to run the suite: **17 passed, 1 failed**, the failure being `the_query_layer_replaced_every_open_store_it_could`, which only a change to the six call sites can satisfy and which the plausible implementation deliberately did not make. The `#[ignore]`d timing row passed too, at 200 rows.
+
+Closing the four gaps above cost, in that worktree: eight fields added to `message::to_json` (`id`, `mailbox`, `to`, `cc`, `reply_to`, `bcc`, `flagged`, `is_invite`), a `row_id` address on `message.get`, and `date` plus `cc` on `mp_protocol::draft::DraftEntry`. That is one plausible shape and is not proposed as P5-U4's; it exists only as the answer to "can these 18 rows be satisfied".
