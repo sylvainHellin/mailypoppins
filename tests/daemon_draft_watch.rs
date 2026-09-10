@@ -123,7 +123,8 @@
 //! }                                        // new variant
 //!
 //! // src/daemon/methods/draft.rs  ->  mailypoppins::daemon::methods::draft
-//! pub const DRAFT_METHOD_SPECS: [MethodSpec; 1];   // draft.approve
+//! pub const DRAFT_METHOD_SPECS: [MethodSpec; 9];   // draft.approve and the
+//!                                                 // eight the CLI cutover added
 //! ```
 //!
 //! # The watcher's semantics, pinned
@@ -255,14 +256,17 @@
 //!   `-32010..=-32000`, which is a protocol-changelog entry for P3b-U10 and
 //!   stays inside JSON-RPC's implementation-defined `-32099..=-32000`.
 //! - **`draft.approve` is the minimal `draft.*` method this unit needs**, and
-//!   the only one it pins: `{account, id}` in,
+//!   the only one whose contract it spells out: `{account, id}` in,
 //!   `{account, id, status: "approved", path}` out, `Command`, `since` 1,
 //!   `Durable`. It is `draft::mark_as_approved` behind the socket, so it
 //!   rewrites the `status:` line and nothing else. An unknown account is
 //!   `-32005` `{account}`; an unknown id is `-32602` with `{account, id}`; a
 //!   draft that will not parse is `-32010`; a draft already `sent` is `-32602`
 //!   with `{account, id, status}` (pinned here, exercised by no test in this
-//!   file). The rest of the `draft.*` family arrives with the CLI cutover.
+//!   file). The rest of the `draft.*` family arrived with the CLI cutover
+//!   (P4-U5 and P4-U6), which grew [`DRAFT_METHOD_SPECS`] to nine; this file
+//!   pins the whole roster by name and `draft.approve` in full, and
+//!   `tests/daemon_draft_slice.rs` owns the other eight.
 //! - **`draft.approve` resolves an id through the watcher's settled
 //!   inventory**, not through the drafts index: the index lives in a store
 //!   behind an engine lock, and the whole point of this unit is that watching
@@ -334,8 +338,19 @@ const SILENCE: Duration = Duration::from_millis(900);
 const WATCH_POLL_MS_ENV: &str = "MAILYPOPPINS_DAEMON_WATCH_POLL_MS";
 const WATCH_DEBOUNCE_MS_ENV: &str = "MAILYPOPPINS_DAEMON_WATCH_DEBOUNCE_MS";
 
-/// The one method of the `draft.*` family this unit pins.
-const DRAFT_METHODS: [&str; 1] = ["draft.approve"];
+/// The `draft.*` family, in method-name order. One method at P3b-U9, nine
+/// after the CLI cutover (P4-U5, P4-U6).
+const DRAFT_METHODS: [&str; 9] = [
+    "draft.approve",
+    "draft.create",
+    "draft.demote",
+    "draft.forward",
+    "draft.list",
+    "draft.path",
+    "draft.preview",
+    "draft.reply",
+    "draft.validate",
+];
 
 /// The keys a `draft.changed` payload carries, sorted.
 const DRAFT_CHANGED_KEYS: [&str; 8] = [
@@ -626,8 +641,11 @@ fn the_three_payload_types_round_trip_through_json() {
     );
 }
 
+/// The family is exactly the nine names above, and `draft.approve` - the one
+/// this file owns in full - declares the kind, `since` and cancel scope P3b-U9
+/// fixed for it.
 #[test]
-fn the_one_draft_method_declares_its_name_kind_since_and_cancel_scope() {
+fn the_draft_methods_declare_their_names_kind_since_and_cancel_scope() {
     let names: Vec<&str> = DRAFT_METHOD_SPECS.iter().map(|spec| spec.name).collect();
     assert_eq!(names, DRAFT_METHODS.to_vec());
 

@@ -991,7 +991,7 @@ async fn draft_list_filters_by_status() {
     let mut conn = slice.connect().await;
 
     for (status, expected) in [
-        ("draft", vec![fixture::NO_SUBJECT, fixture::VALID]),
+        ("draft", vec![fixture::VALID, fixture::NO_SUBJECT]),
         ("approved", vec![fixture::APPROVED]),
         ("sent", vec![fixture::SENT]),
     ] {
