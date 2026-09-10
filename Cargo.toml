@@ -159,3 +159,8 @@ required-features = ["daemon"]
 name = "daemon_sync_outcome"
 path = "tests/daemon_sync_outcome.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_config"
+path = "tests/daemon_config.rs"
+required-features = ["daemon"]
