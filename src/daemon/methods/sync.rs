@@ -398,11 +398,20 @@ fn blocked_result() -> Value {
 /// The inbox arrivals of one pass, as the desktop notification reads them
 /// (#0009).
 ///
-/// A sibling of `outcome` rather than a member of it: [`SyncCompleted`] is the
-/// event payload every client already decodes and a per-message list has no
-/// business in a counters-and-severity summary that is published to everyone.
-/// This travels only in the answer to the client that asked for the pass, which
-/// is what a notification is scoped to.
+/// A sibling of `outcome` rather than a member of it, which is a statement
+/// about this answer's shape and not about where the list travels: `outcome`
+/// is the [`SyncCompleted`] summary as the event publishes it, and the
+/// arrivals sit beside it so the client that asked for the pass reads them
+/// without unpacking a summary.
+///
+/// Since P5-U8 the same list also rides the published `SyncCompleted` itself
+/// ([`SyncCompleted::new_inbox_mail`], filled in `src/daemon/sync_outcome.rs`),
+/// because an account runtime's tick has no caller to answer and the desktop
+/// notification of #0009 would otherwise have died with the client-side
+/// watcher. A subscribed client that asked for the pass therefore sees the
+/// list twice, and drops one: `App::apply_tick` ignores a published tick for
+/// an account whose pass this client is awaiting, so the answer notifies and
+/// the event does not.
 ///
 /// [`SyncCompleted`]: mp_protocol::events::SyncCompleted
 fn new_inbox_mail(pass: &SyncResult) -> Value {

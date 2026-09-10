@@ -133,14 +133,16 @@ An `App` with no session at all falls back to the store-backed readers of `src/t
 Since P5-U6 the actions go the same way, through `crate::tui::commands` and the same session.
 Eight call sites are left on the direct path and `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) is the record of them: three surfaces are not built (`RD-06`'s Markdown rendition, `LST-09`'s `message.fetch`, `RD-07`'s selector) and one is held back by the plan (`SND-04`'s undo-send hold, Phase 6).
 
-**An operation is polled, not awaited.**
-`sync.quick`, `sync.full`, `send.approved` and `calendar.rsvp` answer `{operation_id}` and finish later, and the finish is a `state.event` the TUI's session thread does not read yet.
-Each arm therefore keeps the worker thread it always had, and that thread reads `operation.status` every 100 ms until the state is terminal before posting the `BgResult` its arm has always posted.
-That is a stopgap with a date on it: **P5-U8 replaces the poll with the `operation.finished` subscription** `mp sync` already uses (`await_operation`, `src/main.rs`).
-Nothing else in the tree waits on an operation without events.
+**An operation is awaited on the event stream, not polled.**
+`sync.quick`, `sync.full`, `send.approved` and `calendar.rsvp` answer `{operation_id}` at once and finish later.
+Since P5-U8 the arm issues the call on the UI thread, records the id against what it is waiting for (`App::events`, `commands::start_operation`) and returns; the finish arrives as an `operation.finished` event on the subscription the connection has held since its first `state.bootstrap`, and `commands::settled` turns the payload into the same `BgResult` the arm has always posted.
+A minute-long sync therefore costs one call and one event rather than six hundred `operation.status` reads, and the wait is a map entry rather than a thread.
+The spinner is `bg_count`, raised when the operation starts and lowered by the event; operations still in that map when a bootstrap reports a new instance died with the previous daemon and are dropped there (`App::apply_bootstrap`), because nothing will ever finish them.
+This is the mechanism `mp sync` already used from the CLI (`await_operation`, `src/main.rs`), and nothing in the tree waits on an operation without events.
 
-A worker's door onto the session is a **weak** sender, so quitting closes the channel under it: `Session::close` drops the strong sender and joins the session thread, and a poll loop holding a strong clone would have made `q` wait for the sync to finish.
-The worker's next call then fails with the closed-session error and the thread ends within one poll interval.
+The worker threads that remain are the ones that read rather than the ones that wait: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup.
+Their door onto the session is a **weak** sender, so quitting closes the channel under it: `Session::close` drops the strong sender and joins the session thread, and a worker holding a strong clone would make `q` wait for a call that is still in flight.
+Weak, the worker's next session call fails with the closed-session error every other refusal uses, and the thread ends.
 
 `mp config path` is the one domain command that never contacts a daemon: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
 

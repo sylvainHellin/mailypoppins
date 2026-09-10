@@ -835,11 +835,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ss` (`src/tui/app/keymap.rs:593`) and `sS` (`src/tui/app/keymap.rs:594`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `an_operation_is_polled_to_the_state_it_settled_in` and `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui/commands.rs`)
+- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui/events_tests.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
   The TUI's two keys went through them in P5-U6, which also collapsed the client-side IMAP/Graph fork: the daemon's pass body loads whichever configuration the account has, so only the progress line still says which transport it is.
-  The arm keeps its worker thread and polls `operation.status` every 100 ms to a terminal state; P5-U8 replaces that with the `operation.finished` event `mp sync` already waits on.
+  P5-U8 took the wait off the worker thread: a pass is started by `commands::dispatch` and its finish arrives as an `operation.finished` event, so nothing polls `operation.status` any more.
 
 ### SYN-02 Sync command options
 
