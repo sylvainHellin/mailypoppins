@@ -2097,9 +2097,18 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
 /// prints the success line.
 ///
 /// Routed side only (fake transport). What it proves is the shape of a
-/// successful send end to end: the transport saw the recipient, the outbox row
-/// reached `done`, the draft file moved to `sent`, and the line the user reads
+/// successful send end to end: the transport saw the recipients, the outbox
+/// row reached `done`, the draft file is gone, and the line the user reads
 /// came out of the daemon's own outcome.
+///
+/// "Retired" is the file being *removed*, not its `status:` line being
+/// rewritten. `draft::settle_sent_draft` marks the file sent and then deletes
+/// it whenever every recipient took the message and an outbox row is behind
+/// it, because from that moment the copy that matters is the server's: the
+/// durable row APPENDs it to Sent and ingest reads it back, so a file left in
+/// `drafts/` would be a second, staler copy showing up in `mp list` and the
+/// TUI with nothing left to do to it. So the assertion is the pair the
+/// deletion rests on - no file, and a row in the outbox.
 #[test]
 fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
     let slice = Slice::with_fake_transport();
@@ -2119,10 +2128,25 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
         text.contains("✓ Email sent successfully to all"),
         "the success line:\n{text}"
     );
+    let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
+    assert!(
+        !path.exists(),
+        "a fully delivered draft is retired, file and all: {} is still there",
+        path.display()
+    );
+    let minted: Vec<i64> = fixture::all_rows(slice.root(), fixture::ACCOUNT)
+        .into_iter()
+        .filter(|id| !fixture::SEEDED_ROWS.contains(id))
+        .collect();
     assert_eq!(
-        fixture::draft_status(slice.root(), fixture::ACCOUNT, "freigabe.md"),
-        "sent",
-        "a delivered draft is retired"
+        minted.len(),
+        1,
+        "the send left exactly one new outbox row, which is what the retirement rests on: {minted:?}"
+    );
+    assert_eq!(
+        fixture::row_state(slice.root(), fixture::ACCOUNT, minted[0]),
+        Some(OutboxState::Done),
+        "and that row is finished: SMTP took it and the Sent copy is filed"
     );
 
     let events = fixture::transport_events(&slice.log());
@@ -2130,8 +2154,20 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
         !events.is_empty(),
         "the fake transport served the send rather than the send being skipped"
     );
+    // SND-09 is about *this* message's copy, counted by its Message-ID rather
+    // than by the ledger's length: the send drains the account's outbox on its
+    // way out, so the seeded row that was waiting on its APPEND
+    // (`APPENDING_ROW`) files its copy in the same run and a total of two is
+    // the drain doing its job.
+    let mid = events
+        .iter()
+        .find_map(|event| match event {
+            fixture::TransportEvent::Submit { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the send submitted nothing: {events:?}"));
     assert_eq!(
-        fixture::appends(&slice.log()),
+        fixture::appends_of(&slice.log(), &mid),
         1,
         "SND-09: exactly one Sent copy, and it was filed by this send: {events:?}"
     );
@@ -2167,7 +2203,10 @@ fn a_routed_send_delivers_without_waiting_out_a_hold() {
 /// delivered row, a warning rather than a failure, and a listing an operator
 /// can act on.
 ///
-/// Routed side only (fake transport).
+/// Routed side only (fake transport). The refused address is
+/// [`fixture::REJECTED`], which the fixture puts on the approved draft's `cc:`
+/// line for exactly this row: a draft with one recipient is delivered whole or
+/// refused whole, and "partly" needs two.
 #[test]
 fn a_routed_send_whose_recipient_is_refused_is_partly_delivered() {
     let slice = Slice::with_transport(|log| {

@@ -118,6 +118,9 @@ pub const VALID: &str = draft_fixture::VALID;
 /// up.
 pub const APPROVED: &str = draft_fixture::APPROVED;
 
+/// The file [`APPROVED`] lives in, under [`ACCOUNT`]'s drafts directory.
+pub const APPROVED_FILE: &str = "freigabe.md";
+
 /// A draft that parses and does not validate: no subject.
 pub const NO_SUBJECT: &str = draft_fixture::NO_SUBJECT;
 
@@ -398,8 +401,50 @@ pub fn seed(root: &Path) {
         drop(Store::open(dir.join("store.sqlite3")).expect("open the added account's store"));
     }
 
+    widen_approved_draft(root);
     seed_graph_draft(root);
     seed_outbox(root);
+}
+
+/// Give the approved draft a second recipient, the one address the fake
+/// transport's `reject` map names.
+///
+/// `draft_fixture`'s approved draft goes to `ivana@example.com` and to nobody
+/// else, so a send of it is delivered whole or refused whole: the partly
+/// delivered outcome (`SND-08`) is unreachable from a *draft* send, and only
+/// the seeded outbox row carries it. A draft with [`REJECTED`] among its
+/// recipients makes it reachable.
+///
+/// The address goes on `cc:`, so the `to:` line stays `ivana@example.com` and
+/// the one row that prints it verbatim - `mp send-approved`'s
+/// `freigabe.md -> ivana@example.com` - does not move. The rewrite happens
+/// here rather than in `draft_fixture` so no other slice sees it, and the
+/// modification time is put back afterwards because the drafts index orders by
+/// `mtime DESC, id ASC` and a rewritten file would otherwise sort first.
+fn widen_approved_draft(root: &Path) {
+    let path = drafts_dir(root, ACCOUNT).join(APPROVED_FILE);
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let modified = fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
+
+    // `\ncc:\n` and not `cc:\n`: the latter is a substring of the `bcc:` line
+    // below it.
+    let widened = text.replace("\ncc:\n", &format!("\ncc: {REJECTED}\n"));
+    assert_ne!(
+        widened,
+        text,
+        "the approved draft has no empty `cc:` line to widen: {}",
+        path.display()
+    );
+    fs::write(&path, &widened).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("reopen {}: {e}", path.display()));
+    file.set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap_or_else(|e| panic!("restore the mtime of {}: {e}", path.display()));
 }
 
 /// One approved draft for [`GRAPH_ACCOUNT`], so `mp send` over a Graph
@@ -528,6 +573,30 @@ fn backdate(store: &Store) {
         )
         .expect("backdate the seeded outbox rows");
 }
+
+/// Every outbox row id `account` holds, in id order, whatever state it is in.
+///
+/// [`listed_rows`] answers out of `outbox::unfinished_rows`, which hides a row
+/// that reached `done` - and `done` is exactly where a fully delivered send
+/// leaves the row it minted. The durable record a retired draft rests on is
+/// therefore read straight from the table.
+pub fn all_rows(root: &Path, account: &str) -> Vec<i64> {
+    let store = store(root, account);
+    let mut statement = store
+        .conn()
+        .prepare("SELECT id FROM outbox WHERE account = ?1 ORDER BY id")
+        .expect("prepare the outbox row listing");
+    let ids = statement
+        .query_map(rusqlite::params![account], |row| row.get::<_, i64>(0))
+        .expect("list every outbox row")
+        .collect::<Result<Vec<i64>, _>>()
+        .expect("read every outbox row id");
+    ids
+}
+
+/// The four row ids [`seed_outbox`] writes, so a test can tell the row a send
+/// minted from the rows the fixture came with.
+pub const SEEDED_ROWS: [i64; 4] = [QUEUED_ROW, FAILED_ROW, PARTIAL_ROW, APPENDING_ROW];
 
 /// The state of one row now, or `None` when it is gone.
 pub fn row_state(root: &Path, account: &str, id: i64) -> Option<OutboxState> {
