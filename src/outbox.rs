@@ -1410,7 +1410,7 @@ pub async fn drain_guarded<M: SentMailbox>(
 }
 
 /// The mechanism, split out so a test can point it at a tempdir, exactly as
-/// [`crate::engine_lock::EngineLock::try_acquire_at`] is.
+/// [`crate::engine_lock::EngineLock::take_turn_at`] is.
 pub async fn drain_guarded_at<M: SentMailbox>(
     lock_path: &std::path::Path,
     store: &Store,
@@ -1419,7 +1419,7 @@ pub async fn drain_guarded_at<M: SentMailbox>(
     mailbox: &mut M,
     now: i64,
 ) -> Result<Option<DrainResult>> {
-    let Some(_lock) = crate::engine_lock::EngineLock::try_acquire_at(lock_path, account)? else {
+    let Some(_lock) = crate::engine_lock::EngineLock::take_turn_at(lock_path, account)? else {
         info!("[outbox] another engine is draining {account}; leaving the APPENDs to it");
         return Ok(None);
     };

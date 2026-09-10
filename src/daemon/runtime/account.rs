@@ -310,7 +310,14 @@ impl AccountRuntime {
         let account = cfg.name.clone();
         // The lock first, so a runtime that will report `Blocked` has already
         // learned it by the time the pool is open and it can say so.
-        let held = EngineLock::try_acquire_at(&dir.join("store.lock"), &account)?;
+        //
+        // `hold_for_runtime` rather than `try_acquire_at` because this lock is
+        // held for the runtime's whole lifetime (P5-U8): every guarded call
+        // inside this process - the send path's outbox drain, a `mp sync`
+        // routed here with a mailbox subset - then takes a turn at the
+        // process's own gate instead of opening a second description that
+        // contends with this one and refuses itself.
+        let held = EngineLock::hold_for_runtime(&dir.join("store.lock"), &account)?;
         let readiness = match &held {
             Some(_) => {
                 debug!("[daemon] {account} took the engine lock");
@@ -793,6 +800,17 @@ mod tests {
         assert!(EngineLock::try_acquire_at(&path, "alpha")
             .expect("readable")
             .is_none());
+        // This process is the account's engine while the runtime lives, so a
+        // guarded *pass* here takes a turn at the process's own gate rather
+        // than a second description of the same file (P5-U8), and one at a
+        // time.
+        let turn = EngineLock::take_turn_at(&path, "alpha")
+            .expect("readable")
+            .expect("the engine's own pass gets a turn");
+        assert!(EngineLock::take_turn_at(&path, "alpha")
+            .expect("readable")
+            .is_none());
+        drop(turn);
         drop(runtime);
         assert!(EngineLock::try_acquire_at(&path, "alpha")
             .expect("readable")

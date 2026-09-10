@@ -246,42 +246,65 @@ pub fn absolutise_in(path: &Path, base: &Path) -> PathBuf {
 /// to do with one, and a `Result` here would invite exactly the silent
 /// fallback the migration forbids.
 pub async fn client_session() -> Connection {
+    match open_session().await {
+        Ok((connection, _instance)) => connection,
+        Err(why) => unavailable(&why, &socket_path()),
+    }
+}
+
+/// The same sequence, answering instead of ending the run, with the daemon's
+/// `instance_id` beside the connection (P5-U8).
+///
+/// What the TUI's session thread reconnects with after a daemon died under it:
+/// the auto-start policy, the budget and the `MAILYPOPPINS_DAEMON_REQUIRE`
+/// bookkeeping are the same ones, because a reconnect is a connect, but a TUI
+/// on the alternate screen may not be ended by a diagnostic printed into a
+/// terminal in raw mode. `None` means "still nothing there", which is a state
+/// the client shows and retries out of.
+pub async fn reopen_session() -> Option<(Connection, String)> {
+    match open_session().await {
+        Ok(open) => Some(open),
+        Err(why) => {
+            info!("[client] no daemon to reconnect to: {why}");
+            None
+        }
+    }
+}
+
+/// Connect, starting a daemon on demand, or say why it could not be done.
+async fn open_session() -> Result<(Connection, String), String> {
     let socket = socket_path();
 
-    if let Ok(connection) = connect(&socket).await {
+    if let Ok(open) = connect(&socket).await {
         ROUTED.store(true, Ordering::SeqCst);
-        return connection;
+        return Ok(open);
     }
 
     if !autostart_enabled() {
-        unavailable(
-            &format!("none is listening and {AUTOSTART_ENV} turned on-demand starting off"),
-            &socket,
-        );
+        return Err(format!(
+            "none is listening and {AUTOSTART_ENV} turned on-demand starting off"
+        ));
     }
 
     let budget = autostart_budget();
     let deadline = Instant::now() + budget;
     if let Err(e) = autostart(budget).await {
-        unavailable(&format!("{e:#}"), &socket);
+        return Err(format!("{e:#}"));
     }
 
     let mut gap = RETRY_MIN;
     loop {
         match connect(&socket).await {
-            Ok(connection) => {
+            Ok(open) => {
                 ROUTED.store(true, Ordering::SeqCst);
-                return connection;
+                return Ok(open);
             }
             Err(e) => {
                 if Instant::now() >= deadline {
-                    unavailable(
-                        &format!(
-                            "one was started but did not answer within {} ms: {e}",
-                            budget.as_millis()
-                        ),
-                        &socket,
-                    );
+                    return Err(format!(
+                        "one was started but did not answer within {} ms: {e}",
+                        budget.as_millis()
+                    ));
                 }
                 tokio::time::sleep(gap).await;
                 gap = (gap * 2).min(RETRY_MAX);
@@ -290,11 +313,12 @@ pub async fn client_session() -> Connection {
     }
 }
 
-/// One connect plus `initialize`, under [`CONNECT_TIMEOUT`].
-async fn connect(socket: &Path) -> Result<Connection, ClientError> {
+/// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
+/// `instance_id` the handshake reported.
+async fn connect(socket: &Path) -> Result<(Connection, String), ClientError> {
     let handshake = async {
         let mut connection = Connection::connect(socket).await?;
-        connection
+        let result = connection
             .initialize(
                 ClientInfo {
                     kind: ClientKind::Cli,
@@ -308,7 +332,7 @@ async fn connect(socket: &Path) -> Result<Connection, ClientError> {
                 &[],
             )
             .await?;
-        Ok::<Connection, ClientError>(connection)
+        Ok::<(Connection, String), ClientError>((connection, result.instance_id))
     };
     match tokio::time::timeout(CONNECT_TIMEOUT, handshake).await {
         Ok(result) => result,

@@ -81,8 +81,8 @@ enum AfterFlush {
 
 /// The live per-account runtimes, keyed by account name (P3b-U4).
 ///
-/// Empty unless `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1`, and empty for an
-/// account whose `start` is still in flight: `daemon.status` reports `opening`
+/// Empty for an account whose `start` is still in flight:
+/// `daemon.status` reports `opening`
 /// for exactly the accounts this table has nothing for, which is why an absent
 /// entry is a state rather than a missing one.
 ///
@@ -202,8 +202,8 @@ pub struct DaemonState {
     /// loop, which tells it about a disconnect, and the bootstrap snapshot,
     /// which projects its live entries.
     pub operations: Arc<OperationRegistry>,
-    /// The account runtimes, filled in as each `start` comes back and empty
-    /// without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` (P3b-U4). Behind an
+    /// The account runtimes, filled in as each `start` comes back (P3b-U4,
+    /// started by default since P5-U8). Behind an
     /// `Arc` because the `config.*` family reconciles it against a new
     /// configuration and must reach it without reaching back into the state
     /// that owns the dispatcher.

@@ -28,6 +28,9 @@
 //! lifetime, the tick it runs - and [`pool`] is the read pool that runtime
 //! serves from. Both arrived in P3b-U4; this module was a single file until
 //! then, and the paths and the start lock below are unchanged by the move.
+//! [`watcher`] is P5-U8's: the IMAP IDLE loop and the Graph poller the TUI used
+//! to run per client, one per account and beside the engine that ingests what
+//! they find.
 //!
 //! ## Why a probe classifies instead of deciding
 //!
@@ -51,6 +54,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod account;
 pub mod pool;
+pub mod watcher;
 
 /// Mode of the runtime directory: nobody but the owner may even list it.
 const RUNTIME_DIR_MODE: u32 = 0o700;

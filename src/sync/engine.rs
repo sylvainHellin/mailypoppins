@@ -216,7 +216,7 @@ pub async fn run_sync_guarded(
 }
 
 /// The mechanism, split out so a test can point it at a tempdir, exactly as
-/// [`crate::engine_lock::EngineLock::try_acquire_at`] and
+/// [`crate::engine_lock::EngineLock::take_turn_at`] and
 /// [`crate::outbox::drain_guarded_at`] are.
 ///
 /// The lock is scoped to the call rather than to the process: it is released
@@ -228,7 +228,7 @@ pub async fn run_sync_guarded_at(
     run: &SyncRun<'_>,
     span: &mut TimingSpan,
 ) -> Result<Option<SyncResult>> {
-    let Some(_lock) = crate::engine_lock::EngineLock::try_acquire_at(lock_path, run.account)?
+    let Some(_lock) = crate::engine_lock::EngineLock::take_turn_at(lock_path, run.account)?
     else {
         info!(
             "[sync] another engine is syncing {}; leaving the ingest to it",

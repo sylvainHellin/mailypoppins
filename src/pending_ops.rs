@@ -564,7 +564,7 @@ pub async fn drain_account(
     account: &str,
     backend: &mut Backend,
 ) -> Result<Option<DrainResult>> {
-    match crate::engine_lock::EngineLock::try_acquire(account) {
+    match crate::engine_lock::EngineLock::take_turn(account) {
         Ok(Some(_lock)) => {
             let result = drain(store, blobs, account, backend, unix_now()).await?;
             Ok(Some(result))

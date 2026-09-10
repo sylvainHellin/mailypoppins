@@ -1,9 +1,9 @@
 //! `account.list`: the accounts `config.toml` declares, as the daemon sees them.
 //!
-//! Phase 2 starts no account runtime, so this reports the *configuration* plus
-//! what is on disk, not a runtime table: `daemon.status`'s `accounts` stays
-//! empty without `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`, and a client asking
-//! which accounts exist still deserves an answer.
+//! This reports the *configuration* plus what is on disk, not the runtime
+//! table: `daemon.status`'s `accounts` is what the runtimes say, and a client
+//! asking which accounts exist deserves an answer whether or not their
+//! runtimes have come up.
 //!
 //! The four facts, and where each comes from:
 //!

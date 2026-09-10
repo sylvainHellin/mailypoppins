@@ -63,13 +63,9 @@ use super::server::{serve, DaemonState};
 /// report. Pinned by `tests/daemon_lifecycle.rs`; no flag exposes it.
 pub const FAIL_START_ENV: &str = "MAILYPOPPINS_DAEMON_FAIL_START";
 
-/// Opt-in for account runtimes before Phase 5 (plan section 3.0). Absent, the
-/// daemon creates no runtime and acquires no engine lock.
-pub const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
-
 /// Test-only hook: flip every configured account to `ready` this many
 /// milliseconds after the **first** `state.bootstrap`, so an `opening`
-/// snapshot converges by event while Phase 3a still starts no runtimes.
+/// snapshot converges by event without waiting for a runtime to come up.
 ///
 /// Declared in [`super::state`], where the daemon reads it and where
 /// `tests/daemon_bootstrap.rs` imports it, and re-exported here so the daemon's
@@ -257,12 +253,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
     };
     // The daemon owns the configuration from here: `config.*` reads and swaps
     // this store, and nothing else re-reads the file.
-    let config = Arc::new(ConfigStore::new(
-        config_path.clone(),
-        state,
-        loaded,
-        env_flag(ACCOUNT_RUNTIMES_ENV),
-    ));
+    // Account runtimes are on (P5-U8): a daemon that started none would be a
+    // daemon that is nobody's engine, which is what the TUI cutover ends.
+    let config = Arc::new(ConfigStore::new(config_path.clone(), state, loaded, true));
 
     ensure_runtime_dir()?;
     let socket = socket_path();
@@ -296,11 +289,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
     drop(start_lock);
 
     let state = Arc::new(DaemonState::new(meta, config));
-    if env_flag(ACCOUNT_RUNTIMES_ENV) {
-        spawn_account_runtimes(Arc::clone(&state));
-    }
-    // Unconditional, unlike the runtimes above: watching drafts opens no store
-    // and takes no engine lock (P3b-U10).
+    spawn_account_runtimes(Arc::clone(&state));
+    // Watching drafts opens no store and takes no engine lock (P3b-U10), so it
+    // is started beside the runtimes rather than by one.
     super::watch::spawn(Arc::clone(&state.watch), Arc::clone(&state.canonical));
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(shutdown.clone())?;

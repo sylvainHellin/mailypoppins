@@ -18,6 +18,20 @@ use serde::{Deserialize, Serialize};
 /// The `kind` a completed sync tick travels as.
 pub const KIND_SYNC_COMPLETED: &str = "sync.completed";
 
+/// One message a tick ingested into an inbox, as the desktop notification of
+/// #0009 reads it (P5-U8).
+///
+/// Two fields and no more: the notifier prints a sender and a subject, and a
+/// payload that carried a row id or a uid would invite a client to treat an
+/// arrival as an address into a list it has not refetched yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Arrival {
+    /// The `From:` header as the message carried it.
+    pub from: String,
+    /// The subject, empty when the message had none.
+    pub subject: String,
+}
+
 /// How a client should present one tick.
 ///
 /// Decided by the daemon and carried on the wire rather than recomputed on
@@ -76,6 +90,16 @@ pub struct SyncCompleted {
     /// The engine's error, rendered with `{:#}`, or `null` on a tick that ran.
     /// The one free-text field there is, and never a status line.
     pub error: Option<String>,
+    /// What arrived in an inbox on this tick, for the desktop notification
+    /// (#0009, P5-U8).
+    ///
+    /// On the event rather than only in the answer to whoever asked for the
+    /// pass, because a runtime's tick is a pass nobody asked for and its
+    /// answer therefore has no reader. `default` so a payload written by a
+    /// daemon that predates the field still decodes as a tick that notified
+    /// about nothing.
+    #[serde(default)]
+    pub new_inbox_mail: Vec<Arrival>,
 }
 
 /// The `kind` a completed configuration swap travels as.

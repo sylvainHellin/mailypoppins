@@ -602,10 +602,10 @@ pub fn roots_from(accounts: &[crate::config::AccountConfig]) -> WatchRoots {
 
 /// Poll for the life of the daemon, committing what settles.
 ///
-/// Unconditional: watching drafts takes no engine lock and opens no store, so
-/// gating it behind `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` would make Phase
-/// 3b's drafts untestable without also acquiring locks the tests do not want
-/// held. The `stat` walk and the reparse run on `spawn_blocking`, off the
+/// Independent of the account runtimes: watching drafts takes no engine lock
+/// and opens no store, so it runs for an account whose runtime is blocked and
+/// for one that has not come up yet. The `stat` walk and the reparse run on
+/// `spawn_blocking`, off the
 /// reactor, because both touch a filesystem that may be slow.
 pub fn spawn(watch: Arc<DraftWatch>, canonical: Arc<CanonicalState>) {
     let interval = watch.config().poll_interval;

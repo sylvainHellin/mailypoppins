@@ -31,14 +31,54 @@
 //! holder went away. The lock file itself is never deleted; only the advisory
 //! lock on it moves between processes, so there is no unlink race.
 //!
+//! ## The daemon holds one for a runtime's whole lifetime (P5-U8)
+//!
+//! An account runtime takes the lock when it starts and keeps it until it
+//! stops, which is what makes the daemon *the* engine rather than one more
+//! process racing for it. That breaks the assumption every guarded call site
+//! made until then, because `flock` is per open file description rather than
+//! per process: a `send.draft` inside that same daemon opening the lock file a
+//! second time contends with its own runtime and would skip the drain it owes.
+//!
+//! So there are two entry points now. [`EngineLock::try_acquire_at`] is
+//! unchanged and still means "take the lock": that is what a runtime does
+//! (through [`EngineLock::hold_for_runtime`], which also announces it) and what
+//! a test asks when it wants to know whether anybody holds it.
+//! [`EngineLock::take_turn_at`] is what a guarded *pass* asks: inside the
+//! process that already holds the lock it takes an in-process **gate** instead,
+//! one pass at a time, which is exactly the invariant #0116 needs and without a
+//! second description to contend with; everywhere else it is `try_acquire_at`
+//! verbatim.
+//!
 //! Unix only. Windows is targeted through WSL, where this is a Linux binary.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 use log::{debug, warn};
+
+/// The lock paths this process holds for a runtime's lifetime, each with the
+/// gate that serialises the passes it runs.
+///
+/// Keyed by path rather than by account name because that is what the lock is:
+/// two data roots may configure an account of the same name, and a test points
+/// one at a tempdir.
+static PROCESS_ENGINES: LazyLock<Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The gate for a path this process is the engine for, if it is.
+fn gate_for(path: &Path) -> Option<Arc<AtomicBool>> {
+    PROCESS_ENGINES
+        .lock()
+        .ok()?
+        .get(path)
+        .map(Arc::clone)
+}
 
 /// A held advisory lock on an account's `store.lock`. The engine may drain the
 /// `pending_ops` queue for as long as it holds this; dropping it (on exit, or
@@ -48,7 +88,15 @@ use log::{debug, warn};
 /// `close(2)`, so the lock lives exactly as long as this value.
 #[derive(Debug)]
 pub struct EngineLock {
-    _file: File,
+    /// The open description the `flock` lives on, `None` for a lock taken
+    /// through the in-process gate of a runtime this process is already
+    /// running.
+    _file: Option<File>,
+    /// The gate this lock holds, released on drop.
+    gate: Option<Arc<AtomicBool>>,
+    /// The path this lock registered as a process engine, deregistered on
+    /// drop. `Some` only for a runtime's long-lived hold.
+    registered: Option<PathBuf>,
     account: String,
 }
 
@@ -70,7 +118,45 @@ impl EngineLock {
         Self::try_acquire_at(&dir.join("store.lock"), account)
     }
 
+    /// Take a turn at running one guarded pass for `account`.
+    ///
+    /// What every drain and every guarded sync asks for, and the same question
+    /// [`Self::try_acquire`] answers unless **this** process is already the
+    /// account's engine (P5-U8): a daemon runtime holds its lock for its whole
+    /// lifetime, and `flock` is per open file description, so a second
+    /// description opened here would contend with it and refuse the daemon its
+    /// own drains. The in-process gate answers the same question the lock does
+    /// - is anybody running a pass over this account - one pass at a time.
+    pub fn take_turn(account: &str) -> Result<Option<Self>> {
+        let dir = crate::config::account_dir(account);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating the account directory for {account}"))?;
+        Self::take_turn_at(&dir.join("store.lock"), account)
+    }
+
     /// The mechanism, split out so a test can point it at a tempdir.
+    pub fn take_turn_at(path: &Path, account: &str) -> Result<Option<Self>> {
+        let Some(gate) = gate_for(path) else {
+            return Self::try_acquire_at(path, account);
+        };
+        if gate
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            debug!("[engine] {account} is already running a pass in this process");
+            return Ok(None);
+        }
+        debug!("[engine] took this process's engine turn for {account}");
+        Ok(Some(EngineLock {
+            _file: None,
+            gate: Some(gate),
+            registered: None,
+            account: account.to_string(),
+        }))
+    }
+
+    /// The mechanism behind [`Self::try_acquire`], split out so a test can
+    /// point it at a tempdir.
     pub fn try_acquire_at(path: &Path, account: &str) -> Result<Option<Self>> {
         let file = OpenOptions::new()
             .create(true)
@@ -87,7 +173,9 @@ impl EngineLock {
         if rc == 0 {
             debug!("[engine] took the engine lock for {account}");
             return Ok(Some(EngineLock {
-                _file: file,
+                _file: Some(file),
+                gate: None,
+                registered: None,
                 account: account.to_string(),
             }));
         }
@@ -105,6 +193,26 @@ impl EngineLock {
         }
     }
 
+    /// Take the lock for as long as this value lives, and announce that this
+    /// process is the account's engine (P5-U8).
+    ///
+    /// What an account runtime holds. The announcement is the difference from
+    /// [`Self::try_acquire_at`]: every guarded call inside this process now
+    /// takes a turn at the gate instead of opening a second description that
+    /// would contend with this one. Nothing is registered when the lock could
+    /// not be taken, so a daemon whose account is somebody else's engine keeps
+    /// refusing itself exactly as any other process does.
+    pub fn hold_for_runtime(path: &Path, account: &str) -> Result<Option<Self>> {
+        let Some(mut held) = Self::try_acquire_at(path, account)? else {
+            return Ok(None);
+        };
+        if let Ok(mut engines) = PROCESS_ENGINES.lock() {
+            engines.insert(path.to_path_buf(), Arc::new(AtomicBool::new(false)));
+            held.registered = Some(path.to_path_buf());
+        }
+        Ok(Some(held))
+    }
+
     /// The account this lock guards.
     pub fn account(&self) -> &str {
         &self.account
@@ -113,9 +221,18 @@ impl EngineLock {
 
 impl Drop for EngineLock {
     fn drop(&mut self) {
-        // `close(2)` (when `_file` drops) releases the advisory lock; this is
-        // only a log line for the trace. An explicit `flock(LOCK_UN)` would be
-        // redundant and could race the fd close.
+        // The gate and the registration are this process's own bookkeeping and
+        // have to be undone by hand; `close(2)` (when `_file` drops) releases
+        // the advisory lock, so an explicit `flock(LOCK_UN)` would be redundant
+        // and could race the fd close.
+        if let Some(path) = self.registered.take() {
+            if let Ok(mut engines) = PROCESS_ENGINES.lock() {
+                engines.remove(&path);
+            }
+        }
+        if let Some(gate) = self.gate.take() {
+            gate.store(false, Ordering::SeqCst);
+        }
         debug!("[engine] released the engine lock for {}", self.account);
     }
 }
@@ -131,7 +248,7 @@ pub fn with_engine_lock<T>(
     account: &str,
     f: impl FnOnce() -> Result<T>,
 ) -> Result<Option<T>> {
-    match EngineLock::try_acquire(account) {
+    match EngineLock::take_turn(account) {
         Ok(Some(_lock)) => f().map(Some),
         Ok(None) => Ok(None),
         Err(e) => {
@@ -195,6 +312,62 @@ mod tests {
             let _held = EngineLock::try_acquire_at(&path, "alice").unwrap().unwrap();
         }
         assert!(path.exists(), "the lock file should outlive the lock");
+    }
+
+    /// A process that is the account's engine serves its own guarded calls
+    /// one at a time instead of contending with itself (P5-U8).
+    ///
+    /// `flock` is per open file description, so before this a daemon holding a
+    /// runtime's lock refused every drain it started itself and left, among
+    /// other things, the Sent copy of a message it had just sent unfiled.
+    #[test]
+    fn a_process_that_holds_a_runtime_lock_serves_its_own_passes_in_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.lock");
+
+        let runtime = EngineLock::hold_for_runtime(&path, "alice")
+            .unwrap()
+            .expect("a free lock");
+
+        let pass = EngineLock::take_turn_at(&path, "alice")
+            .unwrap()
+            .expect("this process is the engine, so its own pass gets a turn");
+        assert!(
+            EngineLock::take_turn_at(&path, "alice").unwrap().is_none(),
+            "one pass at a time, which is the invariant #0116 needs"
+        );
+        assert!(
+            EngineLock::try_acquire_at(&path, "alice").unwrap().is_none(),
+            "and taking the lock itself is still refused, gate or no gate"
+        );
+        drop(pass);
+        assert!(
+            EngineLock::take_turn_at(&path, "alice").unwrap().is_some(),
+            "the turn comes free when the pass ends"
+        );
+
+        drop(runtime);
+        let after = EngineLock::take_turn_at(&path, "alice").unwrap();
+        assert!(
+            after.is_some(),
+            "a stopped runtime deregisters, so the plain flock path is back"
+        );
+    }
+
+    /// A runtime whose lock is somebody else's registers nothing, so the
+    /// daemon keeps refusing itself exactly as any other process does.
+    #[test]
+    fn a_contended_runtime_lock_announces_no_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.lock");
+        let elsewhere = EngineLock::try_acquire_at(&path, "alice").unwrap().unwrap();
+
+        assert!(EngineLock::hold_for_runtime(&path, "alice").unwrap().is_none());
+        drop(elsewhere);
+        assert!(
+            EngineLock::try_acquire_at(&path, "alice").unwrap().is_some(),
+            "and nothing was left registered behind it"
+        );
     }
 
     /// `with_engine_lock` runs the closure when the lock is free and skips it

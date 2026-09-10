@@ -12,7 +12,7 @@
 //! `usize` to `u64`, canonicalises `non_converging` once so both formatters are
 //! a straight walk over it, and decides the severity so no client has to.
 
-use mp_protocol::events::{Severity, SyncCompleted};
+use mp_protocol::events::{Arrival, Severity, SyncCompleted};
 
 use crate::sync::SyncResult;
 
@@ -26,12 +26,14 @@ use crate::sync::SyncResult;
 /// by the configured name; every other field travels verbatim, `severity`
 /// included, so a test can pin a severity no fake sync could produce.
 ///
-/// Inert unless
-/// [`ACCOUNT_RUNTIMES_ENV`](crate::daemon::lifecycle::ACCOUNT_RUNTIMES_ENV) is
-/// set too: without a runtime there is no tick, and a hook that fired anyway
-/// would report on an engine that is not running. Unset, empty or unparseable
-/// it does nothing, exactly as the other four hooks behave. No flag exposes it,
-/// so `mp --help` never moves; documented in `docs/daemon-operations.md`.
+/// Unset, empty or unparseable it does nothing, exactly as the other four
+/// hooks behave. No flag exposes it, so `mp --help` never moves; documented in
+/// `docs/daemon-operations.md`.
+///
+/// It had a second gate until P5-U8, the account-runtimes opt-in, because a
+/// hook that fired without a runtime would have reported on an engine that was
+/// not running. Runtimes are on by default now, so the gate is gone with the
+/// variable.
 pub const FAKE_SYNC_OUTCOME_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME";
 
 /// The payload for one finished tick.
@@ -74,18 +76,24 @@ pub fn from_sync_result(
         non_converging,
         failed_mutations,
         error,
+        // The list the engine already keeps, widened onto the wire (P5-U8):
+        // the runtime's tick is the only carrier the desktop notification of
+        // #0009 has left, because nobody asked for it and nobody reads its
+        // answer.
+        new_inbox_mail: result
+            .new_inbox_mail
+            .iter()
+            .map(|mail| Arrival {
+                from: mail.from.clone(),
+                subject: mail.subject.clone(),
+            })
+            .collect(),
     }
 }
 
 /// The outcomes [`FAKE_SYNC_OUTCOME_ENV`] arms, in array order, or an empty
 /// vector when the hook is inert.
-///
-/// Both opt-ins are checked here rather than at the call site, so "armed" is
-/// one question with one answer and no caller can forget half of it.
 pub fn fake_sync_outcomes() -> Vec<SyncCompleted> {
-    if !crate::daemon::lifecycle::env_flag(crate::daemon::lifecycle::ACCOUNT_RUNTIMES_ENV) {
-        return Vec::new();
-    }
     let raw = match std::env::var(FAKE_SYNC_OUTCOME_ENV) {
         Ok(raw) => raw,
         Err(_) => return Vec::new(),
@@ -113,11 +121,9 @@ pub fn fake_sync_outcomes() -> Vec<SyncCompleted> {
 mod tests {
     use super::*;
 
-    /// Unset is inert, and so is every shape that is not a payload. The
-    /// account-runtimes opt-in is absent in a unit test, which is the first
-    /// gate this crosses.
+    /// Unset is inert, and so is every shape that is not a payload.
     #[test]
-    fn the_hook_is_inert_unless_both_opt_ins_are_present() {
+    fn the_hook_is_inert_until_it_is_armed() {
         assert_eq!(
             FAKE_SYNC_OUTCOME_ENV,
             "MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME"

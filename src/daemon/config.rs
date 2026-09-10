@@ -495,12 +495,33 @@ pub async fn start_account(
     if !account_runtimes {
         return;
     }
+    // An account with no store has never been synced, and a runtime would
+    // *create* one: `ReadPool::open` opens SQLite read-write, which
+    // materialises an empty database. That would turn "<account> has no local
+    // store yet, so no received mail can be addressed; run `mp sync` first"
+    // into an empty list on every read method, for an account the user has not
+    // set up yet, which is a refusal the pre-daemon binary gives and the parity
+    // gate compares against (P5-U8). It comes up blocked instead, with the
+    // sentence that says what to do; the first `mp sync` creates the store
+    // through the guarded path, and the runtime comes up with the next daemon
+    // start (`BACKLOG.md`).
+    if !crate::config::store_path(&cfg.name).exists() {
+        let reason = format!(
+            "{} has no local store yet; run `mp sync` to create one",
+            cfg.name
+        );
+        info!("[daemon] {reason}");
+        canonical.apply(blocked_by_failure(runtimes, &cfg.name, reason));
+        return;
+    }
     let account = cfg.name.clone();
+    let cfg_for_watch = cfg.clone();
     let started =
         tokio::task::spawn_blocking(move || AccountRuntime::start(cfg, DEFAULT_READ_POOL_SIZE))
             .await;
     let change = match started {
         Ok(Ok(runtime)) => {
+            let ready = matches!(runtime.readiness(), Readiness::Ready);
             let change = match runtime.readiness() {
                 Readiness::Blocked { reason } => {
                     info!("[daemon] {account} is blocked: {reason}");
@@ -517,6 +538,17 @@ pub async fn start_account(
                 }
             };
             runtimes.insert(Arc::new(runtime));
+            // The watch the TUI used to run per client (P5-U8), started after
+            // the table holds the runtime so its first round cannot find
+            // nothing there and stop. A blocked runtime does not watch: the
+            // engine holding the lock is watching the same mailbox.
+            if ready {
+                super::runtime::watcher::spawn(
+                    Arc::clone(runtimes),
+                    Arc::clone(canonical),
+                    cfg_for_watch,
+                );
+            }
             change
         }
         // A start that failed and a start whose thread died read the same way

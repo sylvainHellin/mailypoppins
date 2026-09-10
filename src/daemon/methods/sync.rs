@@ -57,10 +57,10 @@
 //!
 //! The runtime's tick carries neither a mailbox subset nor `--dry-run`, so a
 //! request that names either takes the guarded path even when a runtime is
-//! live, and is then answered `blocked` by this daemon's own lock. Account
-//! runtimes are behind `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` until Phase 5, so
-//! no default run reaches that corner; it is recorded in
-//! `docs/lessons-learned.md`.
+//! live, and is then answered `blocked` by this daemon's own lock. Since P5-U8
+//! every account has a runtime, so `mp sync --mailbox` and `mp sync --dry-run`
+//! reach that corner on a daemon that is the account's engine; it is recorded
+//! in `docs/lessons-learned.md` and in `BACKLOG.md`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -323,14 +323,21 @@ async fn run_pass(
             None => handle.succeed(blocked_result()),
             Some(outcome) => match outcome.error {
                 Some(error) => handle.fail(DomainError::internal(error)),
-                // The runtime's tick keeps no arrival list, so a pass that went
-                // through it reports none: a client's desktop notification is
-                // the event stream's business once P5-U8 lands.
-                None => handle.succeed(json!({
-                    "blocked": false,
-                    "outcome": outcome.sync,
-                    "new_inbox_mail": [],
-                })),
+                // The arrivals ride the outcome itself since P5-U8, so a pass
+                // through the tick reports the same list a guarded pass does
+                // and the answer carries it in the same place.
+                None => {
+                    let arrivals = outcome
+                        .sync
+                        .as_ref()
+                        .map(|sync| json!(sync.new_inbox_mail))
+                        .unwrap_or_else(|| json!([]));
+                    handle.succeed(json!({
+                        "blocked": false,
+                        "outcome": outcome.sync,
+                        "new_inbox_mail": arrivals,
+                    }))
+                }
             },
         };
     }
