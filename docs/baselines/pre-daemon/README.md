@@ -109,6 +109,28 @@ two fixture messages, paints, repaints, moves the cursor, and asserts the span w
 body build and not at all on a memo hit. The owner takes the log measurement on a machine with an
 account, against the workloads P0-U6 records in `workloads.md`.
 
+## The oracle binary
+
+Phase 4 gates every migrated command on byte parity with the pre-daemon binary, so that binary is a build artifact the test suite needs rather than a memory. `tests/support/parity.rs` resolves it in three steps:
+
+1. `$MP_ORACLE_BIN`, when it names an existing file.
+2. `~/.cache/mp-oracle/pre-daemon/mp`, when it is already there.
+3. A build of the `pre-daemon` tag into that path.
+
+The cache lives outside the repository because it holds a second checkout and a release target directory, about 1.5 GB, which a `git clean` in the work tree must not throw away.
+
+```sh
+mkdir -p ~/.cache/mp-oracle/pre-daemon
+git worktree add --detach ~/.cache/mp-oracle/src pre-daemon
+cd ~/.cache/mp-oracle/src
+CARGO_TARGET_DIR=~/.cache/mp-oracle/target cargo build --release --offline --locked
+cp ~/.cache/mp-oracle/target/release/mp ~/.cache/mp-oracle/pre-daemon/mp
+```
+
+That is exactly what step 3 runs, each command under `timeout(1)` and the whole sequence under an exclusive `flock` on `~/.cache/mp-oracle/build.lock`, so a parallel suite builds the oracle once and the rest wait for it. When `~/.cache/mp-oracle/src` already exists, the worktree step is replaced by `git archive pre-daemon | tar -x -C ~/.cache/mp-oracle/src`: a worktree can only be registered once, and an export of the tag is just as good a build source since nothing ever commits from it.
+
+`--locked` matters here for the same reason it matters above. The build takes about 75 s on a warm registry (measured on the host in the provenance table) and produces `mailypoppins 0.9.0`, the same version string the working tree carries, which is what lets `mp --version` be one of the parity commands rather than a normalised-away exception.
+
 ## What is deliberately absent
 
 No interactive TUI numbers: preview latency, cold first paint, mutation propagation and the frame

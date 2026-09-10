@@ -1596,3 +1596,18 @@ Called while a task is parked in `notified().await`, it wakes that task and leav
 The fix is a second `notify_one` issued with no waiter registered, which is the call that actually stores a permit for the body that has not started yet.
 
 A gate meant to be opened N times is a `Semaphore` with N permits, or a channel; `Notify` is a wake-up, not a counter.
+
+## A `pgrep` set difference cannot prove a fixture leaked nothing
+
+`cargo test` runs the `#[test]` functions of one binary on several threads, so a sibling test's daemon is legitimately in `pgrep -af '[m]p daemon'` while this one checks, and so is a daemon the developer started by hand.
+The first cut of `tests/daemon_parity_harness.rs` took a `pgrep` snapshot before the fixture started and diffed it against one taken after `stop`; the assertion and its own failure message called `pgrep` twice and disagreed, because a sibling fixture appeared between the two calls (`no daemon this test started is still listed: []`).
+
+The property a hygiene test can actually assert is about one pid: `pgrep -af` prints it first on the line, so `pgrep_line_for(pid)` is exact, race-free against siblings, and unaffected by anything the test did not start.
+Whole-list emptiness is a statement about the host, not about the fixture.
+
+## `tests/support/` is a module directory only while it has no `main.rs`
+
+Cargo autodiscovers `tests/*.rs` **and** `tests/*/main.rs` as integration-test targets.
+A shared helper module therefore lives at `tests/support/mod.rs`, reached by `mod support;` from each test binary that wants it; adding `tests/support.rs` or `tests/support/main.rs` turns it into a test binary of its own with no `#[test]` in it.
+
+The cost of the arrangement is that each test binary compiles its own copy of the module and warns about every item it does not use, which is what the `#![allow(dead_code)]` at the top of `tests/support/mod.rs` and `tests/support/parity.rs` is for.

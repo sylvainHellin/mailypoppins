@@ -1,0 +1,13 @@
+//! Shared support code for the root integration tests.
+//!
+//! This is a **module directory**, not a test target. Cargo autodiscovers
+//! `tests/*.rs` and `tests/*/main.rs`; `tests/support/` has neither, so nothing
+//! here is compiled unless a test binary writes `mod support;`. Do not add a
+//! `tests/support.rs` or a `tests/support/main.rs`: either one turns this into
+//! a test binary of its own with no `#[test]` in it.
+//!
+//! [`parity`] is the Phase 4 parity harness (plan unit P4-U1).
+
+#![allow(dead_code)]
+
+pub mod parity;

@@ -287,6 +287,17 @@ No user sets this one.
 The four flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number, and the sync-outcome hook unless its value parses as a payload.
 A test that runs `mp` as a subprocess should `env_remove` every hook it does not want, or an exported one in the developer's shell will change what the test observes.
 
+## The parity harness
+
+Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
+
+`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears all ten environment hooks above so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
+`fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
+`stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.
+
+The oracle binary is `$MP_ORACLE_BIN`, else `~/.cache/mp-oracle/pre-daemon/mp`, else a build of the `pre-daemon` tag into that path; the procedure and the cache layout are in [baselines/pre-daemon/README.md](baselines/pre-daemon/README.md#the-oracle-binary).
+Build it once by hand before the first suite run, or the run that finds the cache empty pays 75 s for it under a lock every parallel test then waits on.
+
 ## Login mode
 
 Not implemented.
