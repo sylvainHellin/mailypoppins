@@ -1462,6 +1462,107 @@ mod tests {
         assert!(draft_file_says(&two, "status: approved"));
     }
 
+    // -----------------------------------------------------------------------
+    // The operations, and the poll that stands in for the event (P5-U8)
+    // -----------------------------------------------------------------------
+
+    /// An operation is followed from its `{operation_id}` to its terminal
+    /// state and answers with the `result` it settled with.
+    ///
+    /// `calendar.rebuild` is the cheapest real operation the fixture can run:
+    /// it folds the stored replies onto the stored invitations of an account
+    /// with neither, which is a walk over an empty mailbox and a settled
+    /// operation. What is pinned is the machinery every sync, send-approved
+    /// and RSVP arm now rides on, not the fold.
+    #[test]
+    fn an_operation_is_polled_to_the_state_it_settled_in() {
+        let daemon = Daemon::new();
+        let settled = run_operation(&daemon, "calendar.rebuild", json!({"account": ACCOUNT}))
+            .expect("the rebuild settled");
+        assert_eq!(settled["account"], json!(ACCOUNT));
+        assert_eq!(settled["invites_seen"], json!(0));
+    }
+
+    /// A refused operation is the daemon's own sentence, and it reaches the
+    /// caller as the `Err` the arm's `BgResult` has always carried.
+    ///
+    /// An account with no server configured is refused by `sync.quick` before
+    /// an operation is created at all, which is the branch a sync over a
+    /// local-only account takes and the one whose wording lands on the status
+    /// line as `Fetch failed (<account>): …`.
+    #[test]
+    fn a_refused_sync_is_the_sentence_the_daemon_gave() {
+        let daemon = Daemon::new();
+        let (result, arrivals) = run_sync(&daemon, "sync.quick", ACCOUNT);
+        let error = result.expect_err("an account with no server has nothing to sync");
+        assert!(
+            error.contains("configures no server"),
+            "the daemon's own refusal, verbatim: {error}"
+        );
+        assert!(arrivals.is_empty(), "a refused pass reported no arrivals");
+    }
+
+    /// The local search pass answers the rows the index holds, addressed by
+    /// the query rendered back into the grammar `message.search` parses.
+    ///
+    /// The round trip is what this pins beyond `search::to_query_string`'s own
+    /// tests: the overlay's AST, rendered, sent, re-parsed daemon-side and run
+    /// against the FTS index, finds the row a store-backed `search_ast` found.
+    /// The body travels with the hit, because the overlay renders it from the
+    /// `fetched` payload rather than from a second read.
+    #[test]
+    fn the_local_pass_finds_the_row_the_index_holds() {
+        let daemon = Daemon::new();
+        let store = crate::store::Store::open(crate::config::store_path(ACCOUNT)).unwrap();
+        let blobs = crate::store::BlobStore::for_account(ACCOUNT);
+        let email = crate::parse::FetchedEmail {
+            from: "Sender <s@example.com>".into(),
+            to: "me@example.com".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: "Quarterly zolvertrix".into(),
+            date: "Mon, 20 Jul 2026 09:00:00 +0000".into(),
+            body_text: "The zolvertrix is in the ledger.".into(),
+            html_body: None,
+            has_attachments: false,
+            message_id: Some("<hit-1@example.com>".into()),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        crate::ingest::ingest_message(
+            &store,
+            &blobs,
+            &crate::ingest::IngestInput {
+                account: ACCOUNT,
+                mailbox: "inbox",
+                uid: 1,
+                email: &email,
+                raw: None,
+            },
+        )
+        .unwrap();
+        drop(store);
+
+        let query = crate::search::parse("zolvertrix").unwrap();
+        let hits = local_search(&daemon, ACCOUNT, &query, Some("inbox"), 50);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].entry.subject, "Quarterly zolvertrix");
+        assert_eq!(hits[0].source_label, "inbox");
+        assert!(
+            hits[0].fetched.body_text.contains("zolvertrix"),
+            "the hit carries its body: {:?}",
+            hits[0].fetched.body_text
+        );
+
+        // A query nothing matches is an empty pass, not a failure: the server
+        // leg is what answers next either way.
+        let miss = crate::search::parse("nothingmatchesthis").unwrap();
+        assert!(local_search(&daemon, ACCOUNT, &miss, None, 50).is_empty());
+    }
+
     /// True when the draft file `id` names contains `needle`.
     fn draft_file_says(id: &str, needle: &str) -> bool {
         let path = crate::config::drafts_dir(ACCOUNT).join(format!("{id}.md"));

@@ -237,9 +237,21 @@ impl Session {
     /// (a call on a handle whose session has closed fails like any other), and
     /// it is what keeps the mailbox walk of #0003 off the draw thread now that
     /// the walk is a daemon call.
+    ///
+    /// **A weak sender**, and that is load-bearing (P5-U6): [`Session::close`]
+    /// drops the strong one and then *joins* the session thread, whose loop
+    /// ends when the last sender goes. A worker holding a strong clone would
+    /// therefore keep the thread alive and make quitting block on it, which a
+    /// sync arm polling `operation.status` to a terminal state can do for as
+    /// long as the mailbox takes. Weak, the channel closes on quit, the
+    /// worker's next call fails with the closed-session error every other
+    /// refusal uses, and it ends.
     pub fn handle(&self) -> QueryHandle {
         QueryHandle {
-            calls: self.calls.clone(),
+            calls: self
+                .calls
+                .as_ref()
+                .map(async_mpsc::UnboundedSender::downgrade),
         }
     }
 
@@ -283,8 +295,9 @@ impl Drop for Session {
 /// UI thread. See [`Session::handle`].
 #[derive(Clone, Debug)]
 pub struct QueryHandle {
-    /// `None` for a handle taken from a session that was already closed.
-    calls: Option<async_mpsc::UnboundedSender<Call>>,
+    /// `None` for a handle taken from a session that was already closed;
+    /// weak, so holding one cannot keep the session thread alive past a quit.
+    calls: Option<async_mpsc::WeakUnboundedSender<Call>>,
 }
 
 impl QueryHandle {
@@ -301,9 +314,13 @@ impl QueryHandle {
     }
 
     /// Call one method and wait for its answer, on whatever thread holds this.
+    ///
+    /// A session that has closed since this handle was taken is the same
+    /// refusal as no session at all, which is what lets a worker's poll loop
+    /// end on a quit rather than outlive the process's terminal.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        match self.calls.as_ref() {
-            Some(calls) => call_on(calls, method, params),
+        match self.calls.as_ref().and_then(|calls| calls.upgrade()) {
+            Some(calls) => call_on(&calls, method, params),
             None => Err(anyhow!("{method}: the daemon session is closed")),
         }
     }

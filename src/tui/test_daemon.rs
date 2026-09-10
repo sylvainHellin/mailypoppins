@@ -125,17 +125,26 @@ impl Queries for TestDaemon {
     }
 }
 
-/// A current-thread runtime whose every thread resolves paths under `root`.
+/// A runtime whose every thread resolves paths under `root`.
 ///
-/// See the module header: the override is thread-local, the guard is forgotten
-/// because the thread dies with the runtime.
+/// **Multi-threaded, and that is load-bearing.** An operation method answers
+/// `{operation_id}` and runs its work on a `tokio::spawn`ed task; on a
+/// current-thread runtime that task is only driven while something is blocked
+/// on it, and a caller polling `operation.status` in a loop never is, so the
+/// operation would sit in `running` for ever. Two workers is enough for the
+/// one operation a test drives.
+///
+/// `on_thread_start` for the reason in the module header: the override is
+/// thread-local, and the guard is forgotten because the thread dies with the
+/// runtime.
 fn new_runtime(root: &std::path::Path) -> tokio::runtime::Runtime {
     let root = root.to_path_buf();
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .on_thread_start(move || {
             std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
         })
         .build()
-        .expect("a current-thread runtime")
+        .expect("a multi-thread runtime")
 }
