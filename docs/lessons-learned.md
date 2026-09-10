@@ -1581,3 +1581,13 @@ The seam is two-phase instead: `mint_id` returns an id no live handle holds, the
 
 So `release` is a plain removal, and "an expired handle is not releasable" is true because the caller reaps first (`reap(&table, Utc::now())` at the top of every handle method) rather than because `release` checked.
 Once one method of a type takes its clock as a parameter, every method of that type has to.
+
+## A `notify_one` consumed by a registered waiter stores no permit
+
+`tokio::sync::Notify` holds at most one permit, and `notify_one` only stores it when no waiter is registered.
+Called while a task is parked in `notified().await`, it wakes that task and leaves the permit count at zero, so a gate opened once releases exactly one waiter however many arrive afterwards.
+
+`a_second_tick_joins_the_running_one_and_the_body_runs_once` in `tests/daemon_account_runtime.rs` gated three tick bodies on one `Notify` and notified it once: the first body was already waiting, consumed the wake-up, and the third body parked until the test's 20 s deadline.
+The fix is a second `notify_one` issued with no waiter registered, which is the call that actually stores a permit for the body that has not started yet.
+
+A gate meant to be opened N times is a `Semaphore` with N permits, or a channel; `Notify` is a wake-up, not a counter.

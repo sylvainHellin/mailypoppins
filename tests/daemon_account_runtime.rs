@@ -263,9 +263,11 @@ fn a_pooled_read_is_a_connection(read: &PooledRead) -> &rusqlite::Connection {
 /// lock, and every test drives the body through a hook, so no credential and no
 /// host is ever needed.
 fn account_config(name: &str, body_fetch_deadline_secs: u64) -> AccountConfig {
-    let mut cfg = AccountConfig::default();
-    cfg.name = name.to_string();
-    cfg.default_from = format!("{name}@example.com");
+    let mut cfg = AccountConfig {
+        name: name.to_string(),
+        default_from: format!("{name}@example.com"),
+        ..Default::default()
+    };
     cfg.imap.body_fetch_deadline_secs = body_fetch_deadline_secs;
     cfg
 }
@@ -1062,7 +1064,7 @@ server = "INBOX"
             .clone();
         accounts
             .iter()
-            .find(|entry| entry["name"] == Value::from(ACCOUNT))
+            .find(|entry| entry["name"] == ACCOUNT)
             .map(|entry| {
                 entry["state"]
                     .as_str()
