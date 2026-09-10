@@ -1058,12 +1058,22 @@ impl DraftStatusFilter {
 fn received_store(account: &str) -> Result<Store> {
     let path = mailypoppins::config::store_path(account);
     if !path.exists() {
-        return Err(anyhow!(
-            "{account} has no local store yet, so no received mail can be addressed; \
-             run `mp sync` first"
-        ));
+        return Err(no_received_store(account));
     }
     Store::open(&path).with_context(|| format!("opening the store of {account}"))
+}
+
+/// The refusal of a read against an account with nothing to read.
+///
+/// One sentence for the two routes: [`received_store`] raises it when it finds
+/// no store file, and a routed command raises the identical one when the daemon
+/// answers `account_not_ready`, because a user may not be able to tell which
+/// process looked.
+fn no_received_store(account: &str) -> anyhow::Error {
+    anyhow!(
+        "{account} has no local store yet, so no received mail can be addressed; \
+         run `mp sync` first"
+    )
 }
 
 /// Open the account's store and refresh its drafts index.
@@ -1193,6 +1203,10 @@ fn resolve_mailbox_key(account: &AccountConfig, want: &str) -> Result<String> {
 /// `--mailbox` matches a role id or a sidebar label case-insensitively, the
 /// same rule `mp dump-mailbox` applies, and an unknown name is an error naming
 /// what it could have been rather than an empty listing.
+// Unused from P4-U4, when `mp list-messages` started answering from the daemon,
+// and deleted with the rest of the direct engine paths by P4-U15. Kept until
+// then so one unit moves the callers and another removes what they left.
+#[allow(dead_code)]
 fn list_message_groups(
     store: &Store,
     account: &AccountConfig,
@@ -1275,18 +1289,50 @@ async fn daemon_call(
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
-    match tokio::time::timeout(DAEMON_TIMEOUT, connection.call(method, params)).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(mp_client::ClientError::Rpc(error))) => {
+    match daemon_try_call(connection, method, params).await {
+        Ok(result) => result,
+        Err(error) => {
             eprintln!("{} {}", "\u{2717}".red(), error.message);
             std::process::exit(1);
         }
+    }
+}
+
+/// One call whose refusal the caller answers for.
+///
+/// A daemon that stops answering is still exit 4 here, the same code as one that
+/// was never there, because that is a fact about the daemon rather than about
+/// the command. Everything the daemon spelled out comes back typed, so a
+/// migrated command can raise the error its pre-daemon self raised instead of
+/// printing a refusal in a shape no user has seen before.
+async fn daemon_try_call(
+    connection: &mut mp_client::Connection,
+    method: &str,
+    params: serde_json::Value,
+) -> std::result::Result<serde_json::Value, mp_protocol::RpcError> {
+    match tokio::time::timeout(DAEMON_TIMEOUT, connection.call(method, params)).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(mp_client::ClientError::Rpc(error))) => Err(error),
         Ok(Err(e)) => daemon_unavailable(&format!("{method}: {e}")),
         Err(_) => daemon_unavailable(&format!(
             "{method} went unanswered for {}s",
             DAEMON_TIMEOUT.as_secs()
         )),
     }
+}
+
+/// A refusal the daemon spelled out, as the error the command raises.
+///
+/// The bytes a user sees may not depend on which process did the looking, so
+/// `account_not_ready` becomes the sentence a store-less read has always
+/// produced and everything else travels as the daemon worded it. Both leave
+/// through `main`'s own error path, which is where the pre-daemon binary
+/// reported them.
+fn refusal(account: &str, error: mp_protocol::RpcError) -> anyhow::Error {
+    if error.code == mp_protocol::ErrorCode::AccountNotReady.code() {
+        return no_received_store(account);
+    }
+    anyhow!("{}", error.message)
 }
 
 /// The exit-4 diagnostic of a routed command: why, where, and how to fix it.
@@ -1329,20 +1375,24 @@ async fn routed_account_list() -> Vec<mailypoppins::daemon::methods::account::Ac
         .unwrap_or_default()
 }
 
-/// `mp --daemon list-messages`: which messages, in which order, and how many
-/// the mailbox holds all come from the daemon.
+/// `mp list-messages`: which messages, in which order, and how many the mailbox
+/// holds all come from the daemon.
 ///
 /// One `message.list` per listed mailbox, because the method answers about one
-/// mailbox and the grouping is the client's presentation.
+/// mailbox and the grouping is the client's presentation. The mailbox name is
+/// resolved here, through the same [`select_mailboxes`] the in-process listing
+/// used, so an unknown one is refused in the words it has always been refused
+/// in and without a round trip.
 async fn routed_list_messages(
     account: &AccountConfig,
     mailbox: Option<&str>,
     limit: usize,
 ) -> Result<()> {
+    let selected = select_mailboxes(account, mailbox)?;
     let mut connection = daemon_connection().await;
     let mut groups = Vec::new();
-    for info in select_mailboxes(account, mailbox)? {
-        let result = daemon_call(
+    for info in selected {
+        let result = daemon_try_call(
             &mut connection,
             "message.list",
             serde_json::json!({
@@ -1351,7 +1401,8 @@ async fn routed_list_messages(
                 "limit": limit,
             }),
         )
-        .await;
+        .await
+        .map_err(|e| refusal(&account.name, e))?;
         let total = result["total"].as_u64().unwrap_or_default() as usize;
         let rows = result["messages"]
             .as_array()
@@ -1420,6 +1471,125 @@ fn row_from_wire(
         thread_id: None,
         is_invite: false,
     }
+}
+
+/// `mp show`: the record the daemon read, which is the record `--json` prints
+/// and the record the text layout renders.
+///
+/// The selector crosses the socket unresolved, because resolving one needs the
+/// store the client no longer has; which *account* it names stays a client-side
+/// decision, since `Selector::parse` needs no store.
+async fn routed_show(
+    account: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+) -> Result<mailypoppins::read_cmd::ShownMessage> {
+    let mut params = serde_json::json!({"account": account, "selector": selector});
+    if let Some(mailbox) = mailbox {
+        params["mailbox"] = serde_json::json!(mailbox);
+    }
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call(&mut connection, "message.get", params)
+        .await
+        .map_err(|e| refusal(account, e))?;
+    serde_json::from_value(result).context("reading the daemon's message.get answer")
+}
+
+/// `mp dump-mailbox --json`: every selected account's envelope records, in the
+/// dump's own order.
+///
+/// The accounts are called in ascending name order, which is the client's only
+/// ordering duty: the dump's sort key opens with the account name, so
+/// concatenating the answers reproduces the whole order. An account the daemon
+/// cannot read contributes nothing rather than failing the run, exactly as
+/// `dump::collect_records` skipped a store it could not open.
+async fn routed_dump(
+    accounts: &[AccountConfig],
+    filter: &[String],
+) -> Result<Vec<mailypoppins::dump::EnvelopeRecord>> {
+    let mut names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+    names.sort_unstable();
+    let mailbox = if filter.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(filter)
+    };
+
+    let mut connection = daemon_connection().await;
+    let mut records = Vec::new();
+    for name in names {
+        let params = serde_json::json!({
+            "account": name,
+            "projection": "envelope",
+            "mailbox": mailbox,
+        });
+        match daemon_try_call(&mut connection, "message.list", params).await {
+            Ok(result) => {
+                let answered: Vec<mailypoppins::dump::EnvelopeRecord> =
+                    serde_json::from_value(result["records"].clone())
+                        .context("reading the daemon's envelope records")?;
+                records.extend(answered);
+            }
+            Err(e) if e.code == mp_protocol::ErrorCode::AccountNotReady.code() => continue,
+            Err(e) => return Err(refusal(name, e)),
+        }
+    }
+    Ok(records)
+}
+
+/// `mp search --local`: the ranked hits of the daemon's index read, as the rows
+/// the search listing prints.
+///
+/// The flags travel as the user typed them and the daemon builds the query with
+/// `search::from_cli`, so one parser serves every backend. `body` is `--full`;
+/// `body_query` is `--body`, because one key may not mean two things.
+async fn routed_search(
+    account: &str,
+    query: &str,
+    mailbox: Option<&str>,
+    flags: &mailypoppins::search::Flags,
+    limit: usize,
+    full: bool,
+) -> Result<Vec<(mailypoppins::store::read::MessageRow, Option<String>)>> {
+    let mut params = serde_json::json!({
+        "account": account,
+        "query": query,
+        "limit": limit,
+        "body": full,
+        "has_attachment": flags.has_attachment,
+    });
+    for (key, value) in [
+        ("mailbox", mailbox.map(str::to_string)),
+        ("from", flags.from.clone()),
+        ("to", flags.to.clone()),
+        ("cc", flags.cc.clone()),
+        ("subject", flags.subject.clone()),
+        ("body_query", flags.body.clone()),
+        ("filename", flags.filename.clone()),
+        ("after", flags.after.clone()),
+        ("before", flags.before.clone()),
+    ] {
+        if let Some(value) = value {
+            params[key] = serde_json::json!(value);
+        }
+    }
+
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call(&mut connection, "message.search", params)
+        .await
+        .map_err(|e| refusal(account, e))?;
+    Ok(result["hits"]
+        .as_array()
+        .map(|hits| {
+            hits.iter()
+                .map(|hit| {
+                    let mailbox = hit["mailbox"].as_str().unwrap_or_default();
+                    let body = hit["body"].as_str().map(str::to_string);
+                    (row_from_wire(hit, mailbox), body)
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 fn resolve_received_arg(
@@ -2068,6 +2238,7 @@ async fn main() -> Result<()> {
                     },
                 )
                 .await?;
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
 
@@ -2120,6 +2291,7 @@ async fn main() -> Result<()> {
 
             if !yes && !prompt_confirmation("Send this email?") {
                 println!("Cancelled.");
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
 
@@ -2395,11 +2567,13 @@ async fn main() -> Result<()> {
             )?;
             if rows.is_empty() && skipped.is_empty() {
                 println!("No drafts for {}", account_config.name);
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
             if rows.is_empty() {
                 println!("No listable drafts for {}", account_config.name);
                 print_skipped_drafts(&skipped);
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
 
@@ -2453,6 +2627,7 @@ async fn main() -> Result<()> {
             };
             if targets.is_empty() {
                 println!("No drafts to validate for {}", account_config.name);
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
 
@@ -3021,12 +3196,8 @@ async fn main() -> Result<()> {
         // cross-account selector opens the right store (the #0073 follow-up).
         Some(Commands::Show { selector, mailbox, json }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = received_store(&account_config.name)?;
-            let (row, _) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
             let message =
-                mailypoppins::read_cmd::shown_message(&store, &blobs, &account_config.name, &row);
+                routed_show(&account_config.name, &selector, mailbox.as_deref()).await?;
             if json {
                 println!("{}", mailypoppins::read_cmd::to_json(&message)?);
             } else {
@@ -3035,25 +3206,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::ListMessages { mailbox, limit }) => {
-            if cli.daemon {
-                routed_list_messages(&account_config, mailbox.as_deref(), limit).await?;
-                // An early return leaves the check at the bottom of `main`
-                // unrun, so it happens here instead. Every early return out of
-                // a routed command owes this line.
-                mailypoppins::daemon::client::enforce_routing(&command_label);
-                return Ok(());
-            }
-            let store = received_store(&account_config.name)?;
-            let groups = list_message_groups(
-                &store,
-                &account_config,
-                mailbox.as_deref(),
-                limit,
-            )?;
-            print!(
-                "{}",
-                mailypoppins::read_cmd::render_list(&account_config.name, &groups)
-            );
+            routed_list_messages(&account_config, mailbox.as_deref(), limit).await?;
         }
 
         Some(Commands::Search {
@@ -3093,39 +3246,31 @@ async fn main() -> Result<()> {
             let mailbox_name = mailbox.or_else(|| query_ast.in_mailbox.clone());
 
             if local {
-                let store = received_store(&account_config.name)?;
+                // The mailbox is resolved here, as it was before the daemon
+                // answered the search: the names come from the configuration
+                // the client already holds, so an unknown one is refused in the
+                // same words and without a round trip.
                 let mailbox_key = match mailbox_name.as_deref() {
                     Some(want) => Some(resolve_mailbox_key(&account_config, want)?),
                     None => None,
                 };
-                let span = mailypoppins::timing::TimingSpan::with_context(
-                    "search-local",
-                    account_config.name.clone(),
-                );
-                let hits = mailypoppins::store::search::search_ast(
-                    &store,
+                let rows = routed_search(
                     &account_config.name,
-                    &query_ast,
+                    &query,
                     mailbox_key.as_deref(),
+                    &flags,
                     limit,
-                )?;
-                drop(span);
-                let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-                let rows: Vec<_> = hits
-                    .into_iter()
-                    .map(|hit| {
-                        let body = full
-                            .then(|| {
-                                mailypoppins::store::read::load_body(&store, &blobs, hit.row.id)
-                            })
-                            .flatten();
-                        (hit.row, body)
-                    })
-                    .collect();
+                    full,
+                )
+                .await?;
                 print!(
                     "{}",
                     mailypoppins::read_cmd::render_search(&account_config.name, &query, &rows)
                 );
+                // An early return leaves the check at the bottom of `main`
+                // unrun, so it happens here instead. Every early return out of
+                // a routed command owes this line.
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
 
@@ -3315,7 +3460,7 @@ async fn main() -> Result<()> {
                 return Err(anyhow!("No account to dump (check `mp config show`)"));
             }
             let filter = mailbox.unwrap_or_default();
-            let records = mailypoppins::dump::collect_records(&accounts, &filter);
+            let records = routed_dump(&accounts, &filter).await?;
             let stdout = io::stdout();
             let mut out = stdout.lock();
             out.write_all(mailypoppins::dump::to_ndjson(&records).as_bytes())?;

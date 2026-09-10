@@ -113,7 +113,7 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.list`, `operation.status`, `state.bootstrap`, `config.get` and `config.validate` are the queries this build serves.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.get`, `message.list`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `config.get` and `config.validate` are the queries this build serves.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account` and `config.init` are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. No method of this build declares it: the long-running work is sync, authentication and the rebuilds, all of which arrive in Phase 5, and until then the only operation is the one the `test.operation` hook registers. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
@@ -205,8 +205,9 @@ Bootstrapping twice on one connection is allowed and is what a client does after
 
 ### Read-only methods
 
-`account.list`, `mailbox.list` and `message.list` are the read-only domain methods.
-All three take the store path the CLI takes (`store::read`) and none acquires the account's `EngineLock`: the daemon does not become an account's engine before Phase 5, so a running TUI or `mp sync` keeps the lock while the daemon answers listings beside it.
+`account.list`, `mailbox.list`, `message.get`, `message.list` and `message.search` are the read-only domain methods.
+All of them take the store path the CLI takes (`store::read`) and none acquires the account's `EngineLock`: the daemon does not become an account's engine before Phase 5, so a running TUI or `mp sync` keeps the lock while the daemon answers reads beside it.
+No read result names a file: a client that cannot open the store must not be handed a path into it, which is the dump's own contract (`docs/dump-allow-list.md`) applied to every one of them.
 
 `account.list` takes `{}` and returns:
 
@@ -274,7 +275,97 @@ The two dates are both carried because neither can be derived from the other: `d
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
 An empty mailbox of a ready account is an empty listing, not an error.
 
-`mp --daemon list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
+`mp list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
+
+`projection` selects what a listing carries. It is `"list"` by default, which is the shape above; anything other than `"list"` or `"envelope"` is `-32602`.
+
+`projection: "envelope"` takes `{"account": str, "mailbox": str|[str]|null}` and returns the envelope records `mp dump-mailbox --json` prints:
+
+```json
+{
+  "account": "work",
+  "records": [{
+    "account": "work",
+    "mailbox": "inbox",
+    "message_id": "<Bericht@example.com>",
+    "from": "Ivana <ivana@example.com>",
+    "to": "alice@example.com",
+    "cc": null,
+    "subject": "Bericht",
+    "date_sort": "2026-07-02T11:57:30",
+    "flags": ["answered", "seen"],
+    "attachments": [{"name": "notes.pdf", "size": 14}],
+    "invite": false,
+    "thread": "<Bericht@example.com>"
+  }]
+}
+```
+
+The records are `dump::EnvelopeRecord`, so the client re-serialises them with `dump::to_ndjson` and the NDJSON ordering contract, the field order and the null handling stay in the one module that already owns them.
+The projection is per account and covers every selected mailbox in one answer, because the dump's sort key is `(account, mailbox, date_sort, message_id, subject, uid)` and a client that merged per-mailbox answers would be re-implementing it; the client's only ordering duty is to call the accounts in ascending name order.
+`mailbox` accepts a name, an array of names (the repeatable `--mailbox`) or `null`/absent for every listable mailbox, matched against the mailbox id and its sidebar label case-insensitively.
+A name that is not one of the account's mailboxes selects nothing rather than failing, exactly as `dump::collect_records` treats an unmatched filter: a filter narrows a dump, it does not assert anything about it.
+A storeless account is `account_not_ready` here as everywhere else, and the *client* turns that into "no records" for the dump, because `collect_records` skips an account it cannot open rather than refusing the run.
+
+`message.get` takes `{"account": str, "id": str}` or `{"account": str, "selector": str, "mailbox": str|null}`, plus `body: bool`, and returns the record `mp show --json` prints (`read_cmd::ShownMessage`):
+
+```json
+{
+  "selector": "mp://work/inbox/Bericht@example.com",
+  "account": "work",
+  "mailbox": "inbox",
+  "message_id": "<Bericht@example.com>",
+  "from": "Ivana <ivana@example.com>",
+  "to": "alice@example.com",
+  "cc": null,
+  "subject": "Bericht",
+  "date": "Thu, 2 Jul 2026 13:57:30 +0200",
+  "flags": ["read", "answered"],
+  "invite": false,
+  "attachments": [{"name": "notes.pdf", "size": 14}],
+  "body": "der quarterly ledger ist beigefügt\n"
+}
+```
+
+The result *is* that record, field for field, and the text answer is `read_cmd::render_show` over the same one, so a client that received the payload prints either answer without opening a store and the JSON answer is the payload re-serialised rather than a second projection that could drift from it.
+HTML-only mail reads as the flattened text ingest derived, never as markup.
+
+A message is addressed either by `id` or by `selector`, never by both and never by neither; both mistakes are `-32602`.
+`id` is the `"<mailbox>/<uid>"` of the handle methods, taken literally, because a GUI holding a listed row has no selector to spell.
+`selector` is the grammar `mp show` takes from a user (`<message-id>`, `<mailbox>/<message-id>`, `mp://<account>/<mailbox>/<message-id>`), resolved daemon-side the way `resolve_received_arg` resolves it, with the optional `mailbox` narrowing it exactly as `mp show --mailbox` does: the resolution needs the store the client no longer has.
+Which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
+An unknown uid, a malformed id, a mailbox the account does not have and a selector that resolves to nothing are all `-32602`, in the resolution's own words, so a routed `mp show` reports what the pre-daemon one reported.
+
+`body` defaults to `true` and its absence is not its nullity: with `body: false` the key is gone from the result, and with the default it is present and `null` when the store holds no readable body for the row.
+`mp show` prints its "no stored body" sentence for exactly that `null`, so collapsing the two would make a bodyless answer indistinguishable from an evicted blob.
+
+`message.search` takes `{"account": str, "query": str}` plus `mailbox`, `limit`, `body`, and the field filters `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after`, `before`, and returns:
+
+```json
+{
+  "account": "work",
+  "query": "ledger",
+  "hits": [{
+    "uid": 3,
+    "mailbox": "inbox",
+    "message_id": "<markup@example.com>",
+    "from": "designer@example.com",
+    "subject": "Ledger in HTML",
+    "date_sort": "2026-06-30T06:15:00",
+    "date_display": "Tue, 30 Jun 2026 08:15:00 +0200",
+    "flags": {"seen": true, "answered": false, "forwarded": false},
+    "has_attachments": false
+  }]
+}
+```
+
+The params mirror `mp search --local`'s flags and the daemon builds the query with `search::from_cli`, so one parser serves every backend and the client sends what the user typed.
+`body_query` is the wire name of the `--body` flag, because `body` is already the "send me the bodies" switch (`--full`) and one key may not mean two things; `body` defaults to `false` here and to `true` in `message.get`, deliberately, since `mp show` always prints a body and `mp search` prints one only under `--full`.
+Hits come back in the store's ranking order, which is what `mp search --local` prints under "best match first", and each hit is a `message.list` row plus the `mailbox` it was found in, which is what `Selector::for_message` needs to render the line.
+`mailbox` is resolved as `message.list` resolves it and falls back to the query's own `in:` directive; an unknown one is `-32602`.
+An absent `limit` means every hit.
+A query the search layer cannot use, a lone quote or bare punctuation, is `-32602` and not `-32603`: the parameter is wrong, not the store.
+A query nothing matches is an empty `hits` array, not an error.
 
 ### Materialised handles
 
@@ -619,7 +710,8 @@ The advertised capability list is the two lifecycle methods followed by the disp
 The error table above, codes `-32000` to `-32010`.
 
 **Methods.**
-The read-only `account.list`, `mailbox.list` and `message.list`, all behind the handshake and none taking an engine lock.
+The read-only `account.list`, `mailbox.list`, `message.get`, `message.list` and `message.search`, all behind the handshake and none taking an engine lock.
+`message.get` addresses one message by `"<mailbox>/<uid>"` or by the `mp show` selector grammar, exactly one of the two, and returns the `mp show --json` record with `body` omitted when it was not asked for and `null` when the store cannot produce one; `message.search` mirrors the `mp search --local` flags, names `--body` `body_query` on the wire, and answers in the store's ranking order; `message.list` gained `projection`, whose `envelope` value returns the `mp dump-mailbox --json` records of one account across every selected mailbox, `mailbox` accepting a name, an array or `null`.
 `account.list` reports the account states `ready` and `blocked` from a read-only store probe; `mailbox.list` returns the sidebar hierarchy of one account with the three counts `total`, `unread` and `badge` per mailbox; `message.list` spells an unlimited listing as `null`, refuses a mailbox the account does not have with `-32602`, and carries both dates per row, the derived `date_sort` and the stored `date_display`, so a listing renders from the wire alone.
 The `state.bootstrap` method, whose result carries the negotiated `capabilities` of the calling connection, a `revision` that is never `0`, and a snapshot of `accounts`, `mailboxes`, `drafts`, `outbox`, `holds`, `operations` and `diagnostics`, with one key per account in the three maps.
 Its `operations` array lists the daemon's unsettled operations in start order, each rendered as an `operation.status` result.

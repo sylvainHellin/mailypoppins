@@ -1,8 +1,21 @@
-//! `message.list`, and the three methods that turn a stored message into a file
-//! a client can open: `message.materialise_attachment`,
-//! `message.materialise_html` and `message.release_handle` (P3b-U12).
+//! The read slice (`message.get`, `message.list`, `message.search`, P4-U4), and
+//! the three methods that turn a stored message into a file a client can open:
+//! `message.materialise_attachment`, `message.materialise_html` and
+//! `message.release_handle` (P3b-U12).
 //!
-//! `message.list`: one mailbox of one account, newest first.
+//! `message.get`: one message, addressed by `id` (`"<mailbox>/<uid>"`) or by the
+//! selector grammar `mp show` takes from a user, which the daemon resolves
+//! because resolving one needs the store the client no longer has. The result is
+//! the record `mp show --json` prints ([`crate::read_cmd::ShownMessage`]), so the
+//! client renders either answer from the payload alone.
+//!
+//! `message.search`: the ranked hits of the local index, with the params of
+//! `mp search --local`'s flags. `body_query` is the wire name of `--body`,
+//! because `body` is already the "send me the bodies" switch (`--full`).
+//!
+//! `message.list`: one mailbox of one account, newest first, or - under
+//! `projection: "envelope"` - the whole account as the envelope records
+//! `mp dump-mailbox --json` prints.
 //!
 //! The rows are [`crate::store::read::list_mailbox`]'s, so the daemon answers
 //! from the same query, in the same order (`date_sort DESC, id DESC`), as
@@ -29,7 +42,7 @@ use serde_json::{json, Value};
 use mp_protocol::RpcError;
 
 use crate::config::AccountConfig;
-use crate::selector::DRAFTS_MAILBOX;
+use crate::selector::{Namespace, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
 use crate::tui::app::{build_mailboxes, resolve_date};
@@ -42,15 +55,33 @@ use super::super::handles::{
 };
 use super::{internal, invalid_params, string_param};
 
-/// `message.list` as the dispatcher serves it.
-pub struct MessageList {
-    /// The live configuration, so a reload is visible to the next listing.
+/// The three read methods, in method-name order.
+///
+/// All three are queries: they read the store and change nothing, so their
+/// answers carry no revision and invalidate no resource. All three are durable,
+/// which is what a method that never thought about cancellation means; a read
+/// that finishes in milliseconds has no reason to be torn down.
+pub const MESSAGE_READ_METHOD_SPECS: [MethodSpec; 3] = [
+    MethodSpec::new("message.get", MethodKind::Query, 1),
+    MethodSpec::new("message.list", MethodKind::Query, 1),
+    MethodSpec::new("message.search", MethodKind::Query, 1),
+];
+
+/// One of the three, selected by its own [`MethodSpec`].
+///
+/// One type for three methods because they share their one dependency and
+/// differ only in which of the three bodies below they run; the dispatcher
+/// registers three instances, so each still declares itself separately.
+pub struct MessageReadMethod {
+    /// Which of [`MESSAGE_READ_METHOD_SPECS`] this instance serves.
+    pub spec: MethodSpec,
+    /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
 }
 
-impl Method for MessageList {
+impl Method for MessageReadMethod {
     fn spec(&self) -> MethodSpec {
-        MethodSpec::new("message.list", MethodKind::Query, 1)
+        self.spec
     }
 
     fn call<'a>(
@@ -64,15 +95,41 @@ impl Method for MessageList {
         // the daemon schedules work, not to how it dispatches, so it belongs
         // with the account runtimes of Phase 5.
         Box::pin(async move {
-            list(&params, &self.config.accounts())
-                .map(Outcome::query)
-                .map_err(DomainError::from)
+            let accounts = self.config.accounts();
+            let result = match self.spec.name {
+                "message.get" => get(&params, &accounts),
+                "message.list" => list(&params, &accounts),
+                _ => search(&params, &accounts),
+            };
+            result.map(Outcome::query).map_err(DomainError::from)
         })
     }
 }
 
-/// The `result` of `message.list`.
+/// Register the three read methods on `dispatcher`.
+pub fn register_reads(dispatcher: &mut Dispatcher, config: Arc<super::super::config::ConfigStore>) {
+    for spec in MESSAGE_READ_METHOD_SPECS {
+        dispatcher.register(Arc::new(MessageReadMethod {
+            spec,
+            config: Arc::clone(&config),
+        }));
+    }
+}
+
+/// The `result` of `message.list`, in whichever projection was asked for.
 pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    match params.get("projection") {
+        None | Some(Value::Null) => list_rows(params, accounts),
+        Some(Value::String(name)) if name == "list" => list_rows(params, accounts),
+        Some(Value::String(name)) if name == "envelope" => envelopes(params, accounts),
+        Some(other) => Err(invalid_params(format!(
+            "projection {other} is neither \"list\" nor \"envelope\""
+        ))),
+    }
+}
+
+/// The `list` projection: one mailbox of one account, newest first.
+fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let wanted = string_param(params, "mailbox")?;
     let limit = limit_param(params)?;
@@ -129,6 +186,165 @@ pub fn to_json(row: &MessageRow) -> Value {
         },
         "has_attachments": row.has_attachments,
     })
+}
+
+/// The `envelope` projection: `mp dump-mailbox --json` for one account.
+///
+/// Per account and across every selected mailbox in one answer, because the
+/// dump's sort key is `(account, mailbox, date_sort, message_id, subject, uid)`
+/// and a client that merged per-mailbox answers would be re-implementing it.
+/// The records are [`crate::dump::EnvelopeRecord`], so the client re-serialises
+/// them with `dump::to_ndjson` and the NDJSON ordering contract, the field order
+/// and the null handling stay in the one place that already owns them.
+///
+/// A mailbox name that is not one of the account's selects nothing rather than
+/// failing, exactly as [`crate::dump::collect_records`] treats an unmatched
+/// filter: the dump answers about what it found, and a filter is a narrowing
+/// rather than an assertion.
+fn envelopes(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?;
+    let filter = mailbox_filter(params)?;
+    let records = crate::dump::collect_records(std::slice::from_ref(account), &filter);
+    Ok(json!({"account": name, "records": records}))
+}
+
+/// The `result` of `message.get`: the record `mp show --json` prints.
+///
+/// `body` defaults to `true` and its absence is not its nullity: with
+/// `body: false` the key is gone, and with the default it is present and `null`
+/// when the store holds no readable body for the row. `mp show` prints its "no
+/// stored body" sentence for exactly that `null`, so collapsing the two would
+/// make a bodyless answer indistinguishable from an evicted blob.
+pub fn get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    super::account::ready_account(accounts, &name)?;
+    let wants_body = flag_param(params, "body", true)?;
+
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let row = address(params, &store, &name)?;
+    let blobs = BlobStore::new(crate::config::blobs_dir(&name));
+    let shown = crate::read_cmd::shown_message(&store, &blobs, &name, &row);
+
+    let mut result = serde_json::to_value(&shown).map_err(|e| {
+        internal(format!(
+            "serialising {name}:{}/{}: {e}",
+            row.mailbox, row.uid
+        ))
+    })?;
+    if !wants_body {
+        if let Some(object) = result.as_object_mut() {
+            object.remove("body");
+        }
+    }
+    Ok(result)
+}
+
+/// The row `id` or `selector` names: exactly one of them, always.
+///
+/// Neither is a caller who forgot and both is a caller who may disagree with
+/// themselves, so both are `-32602`. So is every way of naming nothing: an
+/// unknown uid, a malformed id, a mailbox the account does not have and a
+/// selector that resolves to no message are all the caller's parameter being
+/// wrong rather than the store failing.
+fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, RpcError> {
+    let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
+    match (addressed("id"), addressed("selector")) {
+        (true, true) => Err(invalid_params(
+            "id and selector are two addresses; send exactly one",
+        )),
+        (false, false) => Err(invalid_params(
+            "a message is addressed by id or by selector; send exactly one",
+        )),
+        (true, false) => {
+            let (mailbox, uid) = message_param(params)?;
+            let id = read::find_row_by_uid(store, account, &mailbox, uid)
+                .map_err(|e| internal(format!("looking up {account}:{mailbox}/{uid}: {e:#}")))?
+                .ok_or_else(|| {
+                    invalid_params(format!("{account} holds no message {mailbox}/{uid}"))
+                })?;
+            read::find_by_id(store, id)
+                .map_err(|e| internal(format!("reading message {id}: {e:#}")))?
+                .ok_or_else(|| {
+                    invalid_params(format!("{account} holds no message {mailbox}/{uid}"))
+                })
+        }
+        (false, true) => {
+            // The grammar `mp show` takes from a user, resolved the way
+            // `resolve_received_arg` resolves it, with `mailbox` narrowing it
+            // exactly as `mp show --mailbox` does. The refusals are that
+            // resolution's own sentences, so a routed `mp show` reports what the
+            // pre-daemon one reported.
+            let selector = string_param(params, "selector")?;
+            let mailbox = params.get("mailbox").and_then(Value::as_str);
+            let query = crate::selector::parse_in(&selector, Namespace::Received, account, mailbox)
+                .map_err(|e| invalid_params(format!("{e:#}")))?;
+            crate::selector::resolve_received(store, &query)
+                .map(|(row, _)| row)
+                .map_err(|e| invalid_params(format!("{e:#}")))
+        }
+    }
+}
+
+/// The `result` of `message.search`: the ranked hits of the local index.
+///
+/// The params mirror `mp search --local`'s flags and the query is built with
+/// [`crate::search::from_cli`], so one parser serves every backend and the
+/// client sends what the user typed. A query the search layer cannot use is
+/// `-32602`, not `-32603`: the parameter is wrong, not the store.
+pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?;
+    let query = string_param(params, "query")?;
+
+    let flags = crate::search::Flags {
+        from: opt_string_param(params, "from")?,
+        to: opt_string_param(params, "to")?,
+        cc: opt_string_param(params, "cc")?,
+        subject: opt_string_param(params, "subject")?,
+        // `body_query` is the wire name of `--body`: `body` is already the
+        // "send me the bodies" switch, and one key may not mean two things.
+        body: opt_string_param(params, "body_query")?,
+        filename: opt_string_param(params, "filename")?,
+        has_attachment: flag_param(params, "has_attachment", false)?,
+        after: opt_string_param(params, "after")?,
+        before: opt_string_param(params, "before")?,
+    };
+    let ast = crate::search::from_cli(&query, &flags).map_err(invalid_params)?;
+
+    // `--mailbox` first, then the query's own `in:` directive, which is the
+    // precedence `mp search` applies.
+    let wanted = opt_string_param(params, "mailbox")?.or_else(|| ast.in_mailbox.clone());
+    let mailbox = match wanted {
+        Some(wanted) => Some(resolve_mailbox(account, &wanted)?),
+        None => None,
+    };
+    // Absent means every hit, spelled as a number the store binds rather than
+    // as a sentinel the SQL would have to know about.
+    let limit = limit_param(params)?.unwrap_or(i64::MAX as usize);
+
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let hits = crate::store::search::search_ast(&store, &name, &ast, mailbox.as_deref(), limit)
+        .map_err(|e| invalid_params(format!("{e:#}")))?;
+
+    let wants_body = flag_param(params, "body", false)?;
+    let blobs = BlobStore::new(crate::config::blobs_dir(&name));
+    let hits: Vec<Value> = hits
+        .iter()
+        .map(|hit| {
+            // A listing row plus the mailbox it was found in, which is what
+            // `Selector::for_message` needs to render the line.
+            let mut wire = to_json(&hit.row);
+            wire["mailbox"] = json!(hit.row.mailbox);
+            if wants_body {
+                wire["body"] = json!(read::load_body(&store, &blobs, hit.row.id));
+            }
+            wire
+        })
+        .collect();
+    Ok(json!({"account": name, "query": query, "hits": hits}))
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +635,40 @@ fn release_handle(params: &Value, handles: &HandleTable) -> Result<Value, RpcErr
     // cannot be steered by a caller's string.
     remove_handle_dir(&id);
     Ok(json!({}))
+}
+
+/// The dump's mailbox filter: a name, an array of names (the repeatable
+/// `--mailbox`), or `null`/absent for every listable mailbox of the account.
+fn mailbox_filter(params: &Value) -> Result<Vec<String>, RpcError> {
+    let malformed =
+        || invalid_params("mailbox is a name, an array of names, or null for every mailbox");
+    match params.get("mailbox") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(name)) => Ok(vec![name.clone()]),
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|name| name.as_str().map(str::to_string).ok_or_else(malformed))
+            .collect(),
+        Some(_) => Err(malformed()),
+    }
+}
+
+/// An optional boolean parameter, absent and `null` both meaning `default`.
+fn flag_param(params: &Value, name: &str, default: bool) -> Result<bool, RpcError> {
+    match params.get(name) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(invalid_params(format!("{name} is a boolean"))),
+    }
+}
+
+/// An optional string parameter, absent and `null` both meaning `None`.
+fn opt_string_param(params: &Value, name: &str) -> Result<Option<String>, RpcError> {
+    match params.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(invalid_params(format!("{name} is a string"))),
+    }
 }
 
 /// `limit`, which is optional and unsigned; anything else is `-32602`.

@@ -61,12 +61,29 @@ The daemon owns configuration and secrets, so an init that wrote `config.toml` b
 The policy is one pure function, `mailypoppins::daemon::client::needs_daemon(command, subcommand)`, taking the names as they are typed, so the list can be asserted without running anything.
 The single door to the daemon is `mailypoppins::daemon::client::client_session()`; from P4-U4 on every migrated command goes through it and nothing else opens a connection.
 
+## What routes today
+
+The migration moves the CLI one slice at a time, and a command routes the moment its slice lands:
+
+| command | methods | slice |
+|---|---|---|
+| `mp show [--json] [--mailbox]` | `message.get` | P4-U4 |
+| `mp list-messages [--mailbox] [-n]` | `message.list` | P4-U4 |
+| `mp dump-mailbox --json [--mailbox ...]` | `message.list` with `projection: "envelope"` | P4-U4 |
+| `mp search --local` | `message.search` | P4-U4 |
+| `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
+
+Every other command still answers in process and will until its own slice.
+A routed command produces the pre-daemon binary's bytes, refusals included: `tests/daemon_read_slice.rs` compares stdout, stderr and the exit code against `~/.cache/mp-oracle/pre-daemon/mp` over one seeded root, for every flag combination and every error case.
+That is why a refusal the daemon spelled out comes back typed rather than printed at the call site: `account_not_ready` becomes the sentence a store-less read has always produced, and the rest leaves through `main`'s ordinary error path, which is where the pre-daemon binary reported it.
+The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.
+
 ## Exit codes
 
 `0` is success, and for `status` it means a daemon answered.
 
 `1` is a generic failure, and for `status` it means no daemon is running.
-A routed `mp --daemon` command also exits 1 when the daemon refuses the call for a reason it spelled out, an unknown account or a mailbox the account does not have, since that is an ordinary command failure that happens to have travelled over a socket.
+A routed command also exits 1 when the daemon refuses the call for a reason it spelled out, an unknown account or a mailbox the account does not have, since that is an ordinary command failure that happens to have travelled over a socket.
 
 `3` is reserved for an incompatible daemon and prints the `mp daemon restart` command.
 No Phase 2 path emits it: the lifecycle commands negotiate no protocol version, and a routed command that fails the handshake reports the reason and exits 4.

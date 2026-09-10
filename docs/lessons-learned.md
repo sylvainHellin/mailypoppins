@@ -1635,3 +1635,37 @@ The check runs at the bottom of `main`, so any handler that `return Ok(())`s bef
 
 The proof that does not depend on the guard is `mp_no_daemon(args, root)`: with nothing listening and auto-start off, a command with no in-process path left cannot answer at all and exits 4.
 `tests/daemon_read_slice.rs::no_read_command_can_still_answer_without_a_daemon` is that assertion for the read slice, and it is what a T unit should reach for whenever "did this really route" matters.
+
+## A routed refusal must come back typed, or parity breaks on every error row
+
+`daemon_call` printed `✗ {message}` and exited 1, which is right for a debug surface and wrong for a migrated command: the pre-daemon binary reported the same failure as an `anyhow` error, so `main` printed `Error: {message}` on stderr.
+Two shapes for one failure is a byte difference in every parity row that refuses, and the read slice has nine of them.
+
+`daemon_try_call` hands the `RpcError` back instead, and `refusal(account, error)` turns it into the error the command has always raised: `account_not_ready` becomes `received_store`'s own sentence, which the client owns because the daemon's wording is about a store rather than about received mail, and everything else travels as the daemon worded it.
+Both then leave through `main`'s error path, which is where the oracle reported them.
+The general rule for the remaining slices: a refusal the user sees may not depend on which process did the looking, so the client maps codes back to the sentences the command already had rather than inventing a routed dialect.
+
+## Field order survives a round trip through the daemon because the struct owns it
+
+`mp show --json` and `mp dump-mailbox --json` are pinned byte for byte, and both now cross a socket, which raises the question of whether `serde_json`'s map ordering can move a key.
+It cannot, and the reason is worth writing down: the daemon serialises the struct into a `Value`, and the client deserialises that `Value` back into the same struct and serialises *it*.
+Whatever order the intermediate map had, the printed order is the struct's declaration order at both ends, so the wire format is free to sort keys and the output still cannot drift.
+That is also why `message.get` returns `read_cmd::ShownMessage` verbatim rather than a projection of it: one owner for the shape, one place where a new field appears.
+
+## An absent `limit` is `i64::MAX`, not `usize::MAX`
+
+`store::search::search_ast` binds `limit as i64`, so `usize::MAX` arrives as `-1` and SQLite reads a negative `LIMIT` as "no limit".
+It happens to produce the right answer, by two bugs cancelling, and it would stop doing so the moment the bind changed.
+`message.search` spells "every hit" as `i64::MAX as usize`, which the store binds as the number it is.
+
+## A legacy CLI suite starts leaking daemons the moment its command routes
+
+`tests/cli_read_surface_integration.rs` and `tests/dump_mailbox_integration.rs` invoke `mp` as a subprocess against their own temp root and assert on its bytes.
+They keep passing after P4-U4, because auto-start does its job: no daemon is listening, the client starts one, the output is identical.
+What they do not do is stop it, and `mp daemon run` detaches into its own session, so each such test leaves one daemon alive against a `TempDir` that is deleted a moment later, and `pgrep -af '[m]p daemon'` is no longer empty after a test run (7 from the first file, 4 from the second, measured per suite).
+
+The daemon has no idle shutdown (`daemon.status` advertises `idle_shutdown_seconds: null`), so a stray never collects itself.
+Only the P4 harness cleans up: `DaemonFixture` kills its child in `Drop`, and `support::parity::stop_daemon` ends a daemon an auto-start produced, which is not this process's child.
+
+Every remaining slice inherits this the moment it migrates a command a pre-daemon suite runs as a subprocess.
+The two fixes are to give those suites a fixture (or `stop_daemon`), or to teach the daemon an idle shutdown; until one lands, a full `cargo test --workspace` needs `pkill -f 'target/debug/mp daemon run'` afterwards.

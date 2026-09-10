@@ -1,4 +1,5 @@
-//! The read-only method family: `account.list` and `message.list` (P2-U11).
+//! The read-only method family: `account.list`, `mailbox.list` and the
+//! `message.*` read slice (P2-U11, P4-U4).
 //!
 //! These are the first domain methods the daemon serves, and they are reads
 //! only. Both go through the same store path the CLI takes
@@ -69,9 +70,7 @@ pub fn register(
     dispatcher.register(Arc::new(mailbox::MailboxList {
         config: Arc::clone(&config),
     }));
-    dispatcher.register(Arc::new(message::MessageList {
-        config: Arc::clone(&config),
-    }));
+    message::register_reads(dispatcher, Arc::clone(&config));
     message::register_handles(dispatcher, Arc::clone(&config), handles);
     self::draft::register(
         dispatcher,

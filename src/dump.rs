@@ -67,7 +67,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::AccountConfig;
 use crate::store::read::{self, MessageRow};
@@ -75,7 +75,7 @@ use crate::store::{open_store, Store};
 use crate::tui::app::{build_mailboxes, resolve_date};
 
 /// One attachment, name and size only.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AttachmentRecord {
     pub name: String,
     /// Byte length on disk, `null` when the file is not present.
@@ -83,7 +83,12 @@ pub struct AttachmentRecord {
 }
 
 /// One message envelope, normalised and free of filesystem paths.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+///
+/// It deserialises because it is also the `records` of `message.list`'s
+/// envelope projection (P4-U4): a routed `mp dump-mailbox --json` re-serialises
+/// the records the daemon read with [`to_ndjson`], so the ordering contract, the
+/// field order and the null handling stay in this module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnvelopeRecord {
     pub account: String,
     pub mailbox: String,

@@ -47,6 +47,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### Status vocabulary
 
 - `not started`: inventoried here, no daemon or GUI work done.
+- `routed (<unit>)`: the CLI surface answers from the daemon, byte-identically to the pre-daemon binary, with the unit that moved it named.
 - `retired`: the capability was removed from the product; the identifier stays reserved.
 - `deferred`: parity is agreed but scheduled out of the first GUI release, with the deferral recorded in the backlog.
 
@@ -243,11 +244,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp list-messages [--mailbox] [-n]`, `src/main.rs`, `list_mailbox` (`src/store/read.rs:178`)
-- Daemon surface: `message.list`
+- Daemon surface: `message.list`, one call per listed mailbox
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_read_surface_integration.rs`
-- Status: not started
-- Note: the mailbox argument accepts a role, a slug, or the sidebar label, and the default lists every mailbox of the account.
+- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
+- Status: routed (P4-U4); GUI not started
+- Note: the mailbox argument accepts a role, a slug, or the sidebar label, and the default lists every mailbox of the account. The name is resolved client-side against the configuration, so an unknown one is refused without a round trip and in the words it has always been refused in.
 
 ### LST-02 Navigate a list with per-item movement, top and bottom jumps, and half-page scrolling
 
@@ -300,10 +301,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp search --local`, `src/store/search.rs`, `tests/store_search_integration.rs`
-- Daemon surface: `message.search` with the local backend
+- Daemon surface: `message.search`, whose params mirror the command's flags and whose hits come back in the store's ranking order
 - GUI location: TBD (Phase 9)
-- Validation: `tests/store_search_integration.rs`
-- Status: not started
+- Validation: `tests/store_search_integration.rs`, `tests/daemon_read_slice.rs`
+- Status: routed (P4-U4); GUI not started
+- Note: `--body` is `body_query` on the wire, because `body` is already the `--full` switch; the client sends what the user typed and the daemon builds the query with `search::from_cli`, so one parser still serves every backend.
 
 ### LST-08 Merged search in the TUI
 
@@ -347,11 +349,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: CLI automation
 - Source anchor: `mp dump-mailbox --json [--mailbox ...]`, `src/dump.rs`, `docs/dump-allow-list.md`, `tests/dump_mailbox_integration.rs`
-- Daemon surface: `message.dump`, whose output must stay byte-identical to the direct read
+- Daemon surface: `message.list` with `projection: "envelope"`, whose output must stay byte-identical to the direct read
 - GUI location: TBD (Phase 9)
-- Validation: `tests/dump_mailbox_integration.rs`
-- Status: not started
-- Note: three contracts survive the move to an RPC data source: two runs over an unchanged store are byte-identical, `--json` stays required, and no filesystem path appears in the output.
+- Validation: `tests/dump_mailbox_integration.rs`, `tests/daemon_read_slice.rs`
+- Status: routed (P4-U4); GUI not started
+- Note: three contracts survive the move to an RPC data source: two runs over an unchanged store are byte-identical, `--json` stays required, and no filesystem path appears in the output. P4-U4 shipped the dump as a projection of `message.list` rather than the `message.dump` this row first proposed: the records answer the same question a listing does, one answer per account covers every selected mailbox in the dump's own sort order, and the client re-serialises `dump::EnvelopeRecord` with `dump::to_ndjson`, so the ordering contract and the field order stay in the module that owns them.
 
 ### LST-13 Coalesce queued input before repainting
 
@@ -369,19 +371,21 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp show <selector> [--mailbox]`, `src/read_cmd.rs`, `tests/cli_read_surface_integration.rs`
-- Daemon surface: `message.get`
+- Daemon surface: `message.get`, addressed by `"<mailbox>/<uid>"` or by the selector the daemon resolves
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_read_surface_integration.rs`
-- Status: not started
+- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
+- Status: routed (P4-U4); GUI not started
+- Note: the selector crosses the socket unresolved, because resolving one needs the store the client no longer has; which account it names stays a client-side decision.
 
 ### RD-02 Emit one message as a single JSON object with headers, attachments, and body
 
 - Classification: CLI automation
 - Source anchor: `mp show --json`, `src/main.rs`, `src/read_cmd.rs`
-- Daemon surface: `message.get` with the JSON projection
+- Daemon surface: `message.get`, whose result *is* this record
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_read_surface_integration.rs`
-- Status: not started
+- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
+- Status: routed (P4-U4); GUI not started
+- Note: there is no second JSON projection. `message.get` returns `read_cmd::ShownMessage` field for field and `--json` prints it re-serialised, so the machine-facing answer cannot drift from the one the text layout renders.
 
 ### RD-03 Read HTML-dominant mail as the plain text flattened out of the markup
 
@@ -389,8 +393,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `wrap_and_style_body` (`src/tui/ui/preview.rs:522`) over the body `parse::html_to_plain` (`src/parse.rs:199`) produced at ingest
 - Daemon surface: `message.get` returns the flattened body
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/tui/ui/preview.rs`, `src/parse.rs`
-- Status: not started
+- Validation: unit tests in `src/tui/ui/preview.rs`, `src/parse.rs`, `tests/daemon_read_slice.rs`
+- Status: routed for `mp show` (P4-U4); GUI not started
 - Note: #0111 retired the html2text rich render #0091 had added, so links, emphasis, tables, and lists arrive as a wrapped block and `b` / `tb` is the styled view; a richer GUI rendering stays derived content rather than an embedded raw remote HTML document.
 
 ### RD-04 Headers pane with Bcc, Reply-To, the attachment marker, and clamped scrolling

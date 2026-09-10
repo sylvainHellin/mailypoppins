@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use colored::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::selector::Selector;
 use crate::store::read::{self, MessageRow};
@@ -26,7 +26,12 @@ const RULE: usize = 72;
 /// oracle* whose shape is pinned against the file era and must stay
 /// byte-stable, so hanging a body off it would make one contract serve two
 /// masters. This record is free to carry what a reader of one message wants.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+///
+/// It is also the `result` of `message.get` (P4-U4), which is why it
+/// deserialises: a routed `mp show` renders either answer from the payload
+/// alone, and the JSON answer is that payload re-serialised rather than a
+/// second projection that could drift from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ShownMessage {
     pub selector: String,
     pub account: String,
@@ -44,11 +49,15 @@ pub struct ShownMessage {
     /// for the row: an evicted blob, or a message ingested without one. A
     /// reader can tell that from an empty body, which is a message that was
     /// sent empty.
+    ///
+    /// `#[serde(default)]` because `message.get` omits the key entirely for a
+    /// caller that asked for no body, which is not the same answer as `null`.
+    #[serde(default)]
     pub body: Option<String>,
 }
 
 /// One attachment of a shown message.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShownAttachment {
     pub name: String,
     pub size: u64,
