@@ -72,6 +72,20 @@
 //! - [`stop_daemon`] ends whatever the auto-start left behind. It has to be a
 //!   command rather than a kill, because a daemon this process did not spawn
 //!   is nobody's child: `mp daemon run` detaches into its own session.
+//! - [`SandboxRoot`] is that same stop, tied to a temporary tree's lifetime,
+//!   for a suite that never asked for a daemon and got one anyway.
+//!
+//! # Suites that auto-start a daemon without meaning to
+//!
+//! A suite written before Phase 4 runs `mp` against a temp tree and drops the
+//! tree when the test ends. Since P4-U2 that same `mp` starts a daemon on
+//! demand, and the daemon outlives the test, the tree and the test binary: a
+//! full `cargo test --workspace` left eleven of them behind, each holding a
+//! deleted directory open. [`SandboxRoot`] owns the [`TempDir`] instead and
+//! stops that daemon on the way out, so the suites keep their assertions and
+//! stop leaking processes.
+//!
+//! [`TempDir`]: tempfile::TempDir
 //!
 //! [`DaemonFixture::start_in`] and [`DaemonFixture::mp_in`] give the daemon
 //! and the client different working directories, which is how a test proves
@@ -395,6 +409,72 @@ pub fn stop_daemon(root: &Path) -> Output {
         std::thread::sleep(TICK);
     }
     out
+}
+
+/// A temporary tree that stops whatever daemon ran against it.
+///
+/// The data directory is kept separately from the tree root because the legacy
+/// suites use a split layout (`<root>/data`, `<root>/config`) while the parity
+/// suites point everything at one root, and the socket lives under the *data*
+/// directory either way.
+///
+/// [`Drop`] is best-effort by construction: it spawns `mp daemon stop` only
+/// when a socket is there to stop, and it never asserts, because a panic while
+/// another panic unwinds aborts the process and would hide the assertion the
+/// test was actually about.
+pub struct SandboxRoot {
+    data: PathBuf,
+    tmp: tempfile::TempDir,
+}
+
+impl SandboxRoot {
+    /// A tree whose data directory is somewhere under it.
+    pub fn new(tmp: tempfile::TempDir, data: impl Into<PathBuf>) -> SandboxRoot {
+        SandboxRoot {
+            data: data.into(),
+            tmp,
+        }
+    }
+
+    /// A tree that is its own data directory, the one-root layout
+    /// [`sandbox_env`] sets up.
+    pub fn single(tmp: tempfile::TempDir) -> SandboxRoot {
+        let data = tmp.path().to_path_buf();
+        SandboxRoot::new(tmp, data)
+    }
+
+    /// A fresh one-root tree.
+    pub fn fresh() -> SandboxRoot {
+        SandboxRoot::single(tempfile::TempDir::new().expect("a temporary sandbox root"))
+    }
+
+    /// The tree root, which is what `TempDir::path` returned before the guard
+    /// was introduced.
+    pub fn path(&self) -> &Path {
+        self.tmp.path()
+    }
+
+    /// The directory the daemon's runtime lives under.
+    pub fn data_dir(&self) -> &Path {
+        &self.data
+    }
+}
+
+impl Drop for SandboxRoot {
+    fn drop(&mut self) {
+        if !socket_path(&self.data).exists() {
+            return;
+        }
+        let mut cmd = Command::new(MP);
+        cmd.env("HOME", self.tmp.path())
+            .env("MAILYPOPPINS_DATA_DIR", &self.data)
+            .env(AUTOSTART_ENV, "0")
+            .args(["daemon", "stop"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = cmd.status();
+    }
 }
 
 /// Whether anything currently accepts a connection on `root`'s socket.

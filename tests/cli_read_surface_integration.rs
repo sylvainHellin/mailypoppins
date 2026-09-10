@@ -8,8 +8,14 @@
 //! erroring when the store cannot answer.
 //!
 //! `HOME`, `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` point at a
-//! temporary tree, so nothing here reads the real mailstore or config, and no
-//! path in either command opens a socket.
+//! temporary tree, so nothing here reads the real mailstore or config.
+//!
+//! Since P4-U2 both commands start a daemon on demand, and that daemon outlives
+//! the temp tree it was reading. The fixture is therefore a
+//! [`support::parity::SandboxRoot`], which stops it when the test ends;
+//! everything else about the suite is unchanged.
+
+mod support;
 
 use std::fs;
 use std::path::Path;
@@ -19,6 +25,8 @@ use mailypoppins::ingest::{ingest_message, IngestInput};
 use mailypoppins::parse::{AttachmentData, FetchedEmail};
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
+
+use support::parity::SandboxRoot;
 
 const MP: &str = env!("CARGO_BIN_EXE_mp");
 
@@ -62,7 +70,7 @@ fn ingest(data: &Path, account: &str, mailbox: &str, uid: i64, message: &Fetched
 }
 
 /// Two accounts, so the account-from-selector rule has something to get wrong.
-fn fixture_tree() -> TempDir {
+fn fixture_tree() -> SandboxRoot {
     let tmp = TempDir::new().expect("tempdir");
     let data = tmp.path().join("data");
 
@@ -123,11 +131,11 @@ default_from = "beta@example.com"
         &email("someone@example.com", "Only-In-Beta", "Fri, 1 May 2026 05:00:00 +0000", "beta body\n"),
     );
 
-    tmp
+    SandboxRoot::new(tmp, data)
 }
 
 /// Run `mp` against the fixture tree; returns `(status ok, stdout, stderr)`.
-fn run(tmp: &TempDir, args: &[&str]) -> (bool, String, String) {
+fn run(tmp: &SandboxRoot, args: &[&str]) -> (bool, String, String) {
     let out = Command::new(MP)
         .args(args)
         .env("HOME", tmp.path())

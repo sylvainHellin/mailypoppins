@@ -19,6 +19,13 @@
 //! `HOME`, `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` point at a
 //! temporary tree, so the test never reads the real mailstore or the real
 //! config and never touches the network.
+//!
+//! Since P4-U2 `mp dump-mailbox` starts a daemon on demand, and that daemon
+//! outlives the temp tree it was reading. The fixture is therefore a
+//! [`support::parity::SandboxRoot`], which stops it when the test ends;
+//! everything else about the suite is unchanged.
+
+mod support;
 
 use std::fs;
 use std::path::Path;
@@ -28,6 +35,8 @@ use mailypoppins::ingest::{ingest_message, IngestInput};
 use mailypoppins::parse::{AttachmentData, FetchedEmail};
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
+
+use support::parity::SandboxRoot;
 
 const MP: &str = env!("CARGO_BIN_EXE_mp");
 
@@ -78,7 +87,7 @@ fn ingest(data: &Path, account: &str, mailbox: &str, uid: i64, message: &Fetched
 
 /// Lay down a config with two accounts and an ingested store for each, and
 /// return the temp dir holding both.
-fn fixture_tree() -> TempDir {
+fn fixture_tree() -> SandboxRoot {
     let tmp = TempDir::new().expect("tempdir");
     let home = tmp.path();
     let data = home.join("data");
@@ -222,7 +231,7 @@ default_from = "beta@example.com"
     // indexes them. The file build dumped two draft records here; that is the
     // documented stop-gate state, not a lost record.
 
-    tmp
+    SandboxRoot::new(tmp, data)
 }
 
 fn write(path: &Path, content: &str) {
@@ -233,7 +242,7 @@ fn write(path: &Path, content: &str) {
 /// Run `mp` against the fixture tree and return stdout. Only stdout is the
 /// contract: stderr carries config/secrets warnings that depend on the
 /// environment.
-fn dump(tmp: &TempDir, args: &[&str]) -> String {
+fn dump(tmp: &SandboxRoot, args: &[&str]) -> String {
     let out = Command::new(MP)
         .args(args)
         .env("HOME", tmp.path())
