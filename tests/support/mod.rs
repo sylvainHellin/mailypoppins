@@ -7,7 +7,10 @@
 //! a test binary of its own with no `#[test]` in it.
 //!
 //! [`parity`] is the Phase 4 parity harness (plan unit P4-U1).
+//! [`read_fixture`] is the seeded store the read slice is measured against
+//! (plan unit P4-U3).
 
 #![allow(dead_code)]
 
 pub mod parity;
+pub mod read_fixture;

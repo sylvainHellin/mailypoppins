@@ -1626,3 +1626,12 @@ Deriving them from a 40-arm match over the `Commands` enum would restate every `
 
 `flock`ing `<root>/runtime/daemon.start.lock` from the test body is the other case.
 The client's auto-start cannot take the lock, concludes another starter is ahead of it, and waits out its whole bound for a readiness nobody will deliver, which is what makes `elapsed >= budget` assertable at 800 ms instead of at the five-second default.
+
+## `MAILYPOPPINS_DAEMON_REQUIRE` cannot see a command that returns early
+
+The check runs at the bottom of `main`, so any handler that `return Ok(())`s before it is invisible to the guard.
+`mp search --local` does exactly that (`src/main.rs`, the `if local` branch), and a routed-vs-oracle comparison of it passes byte-identically while the command is still answering in process: the parity assertion is honest and the routing proof is vacuous.
+`mp list-messages --daemon` avoids it because its early return calls `enforce_routing` by hand, and the comment there says every early return owes that line.
+
+The proof that does not depend on the guard is `mp_no_daemon(args, root)`: with nothing listening and auto-start off, a command with no in-process path left cannot answer at all and exits 4.
+`tests/daemon_read_slice.rs::no_read_command_can_still_answer_without_a_daemon` is that assertion for the read slice, and it is what a T unit should reach for whenever "did this really route" matters.
