@@ -30,6 +30,15 @@
 //! suite, so a suite that quietly stops being daemon-backed fails a test
 //! instead of a paragraph.
 //!
+//! The roll-up needs the `pre-daemon` oracle and **fails** when there is
+//! none: a gate row that returns green because it found nothing to compare
+//! against is worse than no row at all, since the summary line then says the
+//! parity gate passed. It does not build one either (a 30-minute build inside
+//! a gate run is indistinguishable from a hang), so the failure message names
+//! `MP_ORACLE_BIN`, the cache path and `docs/baselines/pre-daemon/README.md`.
+//! `MP_PARITY_ALLOW_NO_ORACLE=1` turns that failure back into a skip, for the
+//! machine that genuinely cannot host an oracle; a gate run does not set it.
+//!
 //! Seven rows are byte-parity rows. The eighth, `engine_lock_ingest_cli`,
 //! cannot be one and says so in its own row: the property that suite pins is
 //! *"another process holds the engine lock, so `mp sync` skips"*, and since
@@ -151,13 +160,17 @@ fn suites() -> Vec<Suite> {
     ]
 }
 
+/// The escape hatch for a machine that cannot host an oracle: set it to `1`
+/// and the roll-up skips instead of failing.
+const ALLOW_NO_ORACLE_ENV: &str = "MP_PARITY_ALLOW_NO_ORACLE";
+
 /// The oracle binary, if one is already available, without building one.
 ///
 /// `support::parity::oracle_bin` builds the `pre-daemon` tag when the cache is
 /// cold, which is right for a slice suite that cannot mean anything without an
 /// oracle and wrong for a gate roll-up: a 30-minute build inside a gate run is
-/// indistinguishable from a hang. So this row skips with a message instead, and
-/// the message says how to get one.
+/// indistinguishable from a hang. So the caller fails with a message that says
+/// how to get one, unless [`ALLOW_NO_ORACLE_ENV`] says to skip.
 fn oracle_if_present() -> Option<PathBuf> {
     if let Some(from_env) = std::env::var_os(ORACLE_BIN_ENV) {
         let path = PathBuf::from(from_env);
@@ -203,13 +216,19 @@ fn the_roll_up_names_every_suite_the_phase_four_gate_named() {
 #[test]
 fn the_eight_legacy_suites_answer_through_a_live_daemon() {
     let Some(bin) = oracle_if_present() else {
-        eprintln!(
-            "skipping the eight-suite roll-up: no `{ORACLE_TAG}` oracle at {} and {ORACLE_BIN_ENV} \
-             is unset. Build one with the procedure in docs/baselines/pre-daemon/README.md, or \
-             run any Phase 4 slice suite once, which builds it into the cache.",
+        let complaint = format!(
+            "no `{ORACLE_TAG}` oracle at {} and {ORACLE_BIN_ENV} is unset, so the eight-suite \
+             roll-up has nothing to compare against. Build one with the procedure in \
+             docs/baselines/pre-daemon/README.md, or run any Phase 4 slice suite once, which \
+             builds it into the cache. Set {ALLOW_NO_ORACLE_ENV}=1 to skip this row instead, \
+             which a gate run may not do.",
             oracle_cache_dir().join(ORACLE_TAG).join("mp").display()
         );
-        return;
+        if std::env::var(ALLOW_NO_ORACLE_ENV).as_deref() == Ok("1") {
+            eprintln!("skipping the eight-suite roll-up: {complaint}");
+            return;
+        }
+        panic!("{complaint}");
     };
     assert!(bin.is_file(), "the oracle resolved to {}", bin.display());
 
