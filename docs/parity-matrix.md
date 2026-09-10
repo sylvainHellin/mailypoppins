@@ -461,10 +461,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`src/tui/app/keymap.rs:613`)
-- Daemon surface: `message.archive`, addressed by `"<mailbox>/<uid>"` or by the selector the daemon resolves; the daemon commits the row move and drains the owed server op before it answers
+- Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false` it queues the pair for the next sync tick, which is the TUI's contract (P5-U6)
 - GUI location: TBD (Phase 9)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames
-- Status: routed (P4-U8); GUI not started
+- Status: routed (P4-U8, TUI P5-U6); GUI not started
 - Note: over an account with no credentials the backend refuses before the store is touched, which is the half the fixture reaches; the successful drain and its rollback wait on a fake IMAP backend.
 
 ### MSG-02 Delete a received message or a local draft
@@ -474,7 +474,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.delete` for received mail, `draft.discard` for a draft and for the `--sent` sweep, which is a parameter of the same method rather than one of its own
 - GUI location: TBD (Phase 9)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`
-- Status: routed (P4-U8); GUI not started
+- Status: routed (P4-U8, TUI P5-U6); GUI not started
 - Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
 - Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
 
@@ -482,38 +482,42 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `u` (`src/tui/app/keymap.rs:615`)
-- Daemon surface: `message.set_read`
+- Daemon surface: `message.set_read` `{account, row_id, read, settle}`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: `src/tui/actions_tests.rs`, TUI golden frames
+- Status: routed (P5-U6); GUI not started
+- Note: the daemon takes the new state rather than a toggle, and the TUI sends `settle: false`, so the row change and the owed `SetRead` commit together and the next sync tick drains them (#0039).
 
 ### MSG-04 Toggle the `\Flagged` star
 
 - Classification: GUI parity
 - Source anchor: TUI `*` (`src/tui/app/keymap.rs:616`)
-- Daemon surface: `message.set_flag`
+- Daemon surface: `message.set_flag` `{account, row_id, flagged, settle}`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
-- Note: on a batch, flagging wins whenever any selected message is unflagged.
+- Validation: `src/tui/actions_tests.rs`, TUI golden frames
+- Status: routed (P5-U6); GUI not started
+- Note: on a batch, flagging wins whenever any selected message is unflagged; the decision stays client-side, because it is a property of the selection the user can see.
+- Note: flagging leaves the read bit alone, which is what a shared "set flags" method would get wrong.
 
 ### MSG-05 Move a message to another mailbox through a fuzzy picker
 
 - Classification: GUI parity
 - Source anchor: TUI `M`, `Action::MoveToMailbox` (`src/tui/app/types.rs:1571`)
-- Daemon surface: `message.move`, plus the mailbox list from `state.bootstrap`
+- Daemon surface: `message.move` `{account, row_id, destination, settle}`, plus the mailbox list from `state.bootstrap`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: `src/tui/actions_tests.rs`, TUI golden frames
+- Status: routed (P5-U6); GUI not started
+- Note: `destination` is a role, slug or sidebar label, resolved by the daemon; the client no longer checks the sidebar's `server_name`, because `find_server_name_for_role` is the same mapping read on the side that owns it.
 
 ### MSG-06 Multi-select and batch actions
 
 - Classification: GUI parity
 - Source anchor: TUI `v` (`src/tui/app/keymap.rs:653`), `Ctrl+a` (`src/tui/app/keymap.rs:654`), the batch actions in `src/tui/app/types.rs`
-- Daemon surface: batch forms of `message.set_read`, `message.set_flag`, `message.archive`, `message.delete`, `draft.delete`, `draft.approve`, `draft.demote`; selection stays client-side
+- Daemon surface: one call per selected message, in the selection's order, over `message.set_read`, `message.set_flag`, `message.archive`, `message.delete`, `draft.discard`, `draft.approve` and `draft.demote`; selection stays client-side
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: `src/tui/actions_tests.rs`, TUI golden frames
+- Status: routed (P5-U6); GUI not started
+- Note: the plain form rather than the plural address this row sketched: a reference to a row that is gone is skipped with a log line while the rest of the selection proceeds, which one call per row gives for free and a plural address would have to re-invent as a partial-failure shape. A plural address is worth taking the day a selection's round trips show up in a measurement.
 
 ### MSG-07 Confirmation dialogs guarding destructive actions
 
@@ -528,10 +532,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mark_open_read` (`src/tui/actions.rs:3339`), reached from the received-row branch of `Action::EditCurrent` and from `Action::MarkAsRead`, which `queue_mark_open_read` (defined at `src/tui/app/mod.rs:1179`, pushed from `src/tui/app/keys.rs:305`) queues on a focus move into the body pane
-- Daemon surface: `message.set_read` carrying the opened `MessageRef`
+- Daemon surface: `message.set_read` carrying the opened `MessageRef` as `row_id`
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/tui/actions.rs`
-- Status: not started
+- Validation: `src/tui/commands.rs` unit tests, `src/tui/actions_tests.rs`
+- Status: routed (P5-U6); GUI not started
 - Note: #0110 retired the #0087 trigger that fired on every cursor move, so walking the list marks nothing and the GUI marks on the open rather than on selection; the action carries the `MessageRef` the open resolved, so a coalesced key batch marks the row that was opened.
 
 ### MSG-09 Optimistic local mutation state reconciled against the server

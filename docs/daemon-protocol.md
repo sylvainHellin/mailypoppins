@@ -93,7 +93,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `state.*` for bootstrap and state diagnostics.
 - `account.*` for listing, selection metadata, sync health, and account operations.
 - `mailbox.*` for listings, counts, and mailbox metadata.
-- `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation.
+- `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation. This build serves five mutations: `message.archive`, `message.delete`, `message.move`, `message.set_flag` and `message.set_read`.
 - `draft.*` for creation, parsing status, validation, recipient editing, reply, reply-all, forward, approval, discard, and attachment changes. This build serves the ten methods of the draft slice and the mutation slice.
 - `send.*` for immediate send, approved batches, invitations, outbox recovery, and, from Phase 6, hold countdowns and their cancellation. This build serves the six methods of the send slice: `send.approved`, `send.draft`, `send.invite`, `send.outbox_discard`, `send.outbox_list` and `send.outbox_retry`, whose result types are `mp_protocol::send`.
 - `sync.*` for quick sync, full sync, progress, and errors.
@@ -113,7 +113,7 @@ Every method registered on the dispatcher declares a kind, and the kind fixes wh
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.list_server`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `contact.search`, `contact.stats`, `config.get` and `config.validate` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, `message.archive`, `message.delete`, `send.outbox_discard` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -384,18 +384,30 @@ A query nothing matches is an empty `hits` array, not an error.
 
 ### Message mutations
 
-Two methods change a received message, and each of them owes the server an operation.
+Five methods change a received message, and each of them owes the server an operation.
 
 | method | kind | params | result |
 |---|---|---|---|
-| `message.archive` | command | `{account, id\|selector, mailbox?}` | `{account, id, selector, mailbox, moved_to: {mailbox, selector}}` |
-| `message.delete` | command | `{account, id\|selector, mailbox?}` | `{account, id, selector, mailbox}` |
+| `message.archive` | command | `{account, row_id\|id\|selector, mailbox?, settle?}` | `{account, id, selector, mailbox, moved_to: {mailbox, selector}}` |
+| `message.delete` | command | `{account, row_id\|id\|selector, mailbox?, settle?}` | `{account, id, selector, mailbox}` |
+| `message.move` | command | `{account, row_id\|id\|selector, mailbox?, destination, settle?}` | `{account, id, selector, mailbox, moved_to: {mailbox, selector}}` |
+| `message.set_flag` | command | `{account, row_id\|id\|selector, mailbox?, flagged, settle?}` | `{account, id, selector, mailbox, flagged}` |
+| `message.set_read` | command | `{account, row_id\|id\|selector, mailbox?, read, settle?}` | `{account, id, selector, mailbox, read}` |
 
-Two methods rather than two flavours of one: archiving moves a row and owes a `Move`, deleting drops a row and owes a `Delete`, and only the first has anything to roll back when the server refuses.
-Both are commands, because each moves the daemon's revision and invalidates `message:<account>/<mailbox>/<uid>`, and both are `durable`: the daemon commits the row change and the owed server op in one transaction and then drains that op synchronously (#0039), and a drain torn down because the calling socket went away would leave the op queued while its caller was told nothing.
-The answer is therefore the settled outcome rather than an acknowledgement, which is what preserves the blocking UX `mp archive` and `mp delete` have always had.
+Five methods rather than flavours of one: archiving and moving move a row and owe a `Move`, deleting drops a row and owes a `Delete`, and the two flag setters rewrite one axis each and owe a `SetRead` or a `SetFlagged`.
+Only the movers have anything to roll back when the server refuses.
+All five are commands, because each moves the daemon's revision and invalidates `message:<account>/<mailbox>/<uid>`, and all five are `durable`: a caller that asked to settle may not have the drain torn down because its socket went away.
 
-**A message is addressed exactly as `message.get` addresses one**: `id` is `"<mailbox>/<uid>"`, `selector` is the grammar the user types, `mailbox` narrows a selector the way `--mailbox` does, and neither or both is `-32602`.
+`destination` is the mailbox a move lands in, resolved by role, slug or sidebar label exactly as `message.list`'s `mailbox` is, and Drafts is not one of them.
+It is not spelled `mailbox` because that key already narrows a selector address on the same method, and one key may not mean two things.
+`flagged` and `read` are the *new* state and are required booleans: the daemon does not toggle, because a toggle over a row a client has not re-read is a race with the last sync.
+
+**`settle` decides whether the answer is the settled outcome or the queued one**, and it defaults to `true`.
+With `settle: true` the order of the four steps is the pre-daemon command's, and it is the whole safety property of the slice: resolve the account, resolve the message, **resolve the backend**, and only then commit the row change and drain the op it owes.
+An account with no credentials therefore refuses with the secret store's own sentence (`-32603` with `{account}`) and leaves the row exactly where it was, which is what preserves the blocking UX `mp archive` and `mp delete` have always had.
+With `settle: false` the daemon commits the row change and the owed server op in one transaction and answers, leaving the op for the next sync tick's drain (#0039), and resolves no credential at all: an interactive client has never waited for a server on a keystroke, and one that had to resolve credentials could not mutate an account whose password is not in the keyring yet.
+
+**A message is addressed exactly as `message.get` addresses one**: `row_id` is the `id` a `message.list` row carries, `id` is `"<mailbox>/<uid>"`, `selector` is the grammar the user types, `mailbox` narrows a selector the way `--mailbox` does, and none or more than one is `-32602`.
 The refusals are that resolution's own sentences, ambiguity included, so a routed command reports what the pre-daemon one reported.
 
 **The backend is resolved before the store is touched.**
@@ -890,3 +902,9 @@ A `message.list` row gained `id` (`messages.id`, and the `row_id` address below)
 `message.get` gained `row_id` as a third address beside `id` and `selector`, still exactly one of the three.
 `draft.list`'s row gained `cc` and `date`, the index's own columns, for a client that lists drafts beside received mail.
 The fixtures and the key lists that pin these shapes moved with them (`crates/mp-protocol/fixtures/message.list.response.json`, `tests/daemon_read_only_methods.rs`, `tests/daemon_protocol_fixtures.rs`, `tests/daemon_draft_slice.rs`), which is what a protocol change costs.
+
+P5-U6 added three methods and one parameter, additively; no field was renamed, none was dropped, and no command's output moved.
+`message.move`, `message.set_flag` and `message.set_read` are the daemon surfaces of `MSG-03`, `MSG-04` and `MSG-05`, durable commands in the shape `message.archive` already had.
+They are declared in a spec array of their own (`MESSAGE_QUEUE_METHOD_SPECS`) rather than in `MESSAGE_MUTATION_METHOD_SPECS`, whose length is pinned at two by `tests/daemon_mutation_slice.rs`; `MESSAGE_SERVER_METHOD_SPECS` is the precedent, and the split is a Rust-side fact that changes nothing on the wire.
+All five mutations gained `settle`, defaulting to `true`, so every existing caller is byte-identical and the three shapes the CLI prints did not move.
+The capability list a handshake advertises grew by those three names, which is the derivation working rather than a change to it.

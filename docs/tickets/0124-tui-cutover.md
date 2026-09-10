@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U5 have landed; P5-U6 is next.
+Status: in-progress. P5-U1 to P5-U5 have landed; P5-U6 is half landed (the mutations; the ten residue sites below are open).
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -24,7 +24,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U3 | T | this commit | the query layer contract | done (tests) |
 | P5-U4 | I | this commit | the query layer | done |
 | P5-U5 | T | this commit | actions to commands, the contract | done (tests) |
-| P5-U6 | I | | actions to commands | open |
+| P5-U6 | I | `d0c0049` | actions to commands | part 1 of 2: the mutations |
 | P5-U7 | T | | events replace watcher threads, the contract | open |
 | P5-U8 | I | | events replace watcher threads | open |
 | P5-U9 | T | | the parity-gate oracle suite | open |
@@ -477,3 +477,77 @@ It cost, in that worktree: `route` as a copy of the table, a `dispatch` over the
 - The three unbuilt renditions behind the residue table (`RD-06`'s Markdown rendition, `LST-09`'s `message.fetch`, `RD-07`'s selector) are what stands between this gate and the zero P5-U10 needs when `src/tui/` becomes a crate that cannot link the store.
 - A plural address for the batch mutations, if a selection's round trips ever show up in a measurement.
 - `src/tui/mutations.rs`'s eight unit tests, which follow its four functions wherever P5-U6 puts them.
+
+## P5-U6: actions to commands (part 1, the mutations)
+
+`src/tui/commands.rs` (699 lines, 434 before its tests) is the module the contract names.
+`src/mutations.rs` (175 lines before its tests) is `src/tui/mutations.rs` moved out of the TUI, and `src/daemon/methods/message.rs` grew the three methods and the `settle` parameter (+269 / -67).
+`src/tui/actions.rs` lost 447 lines: the fifteen arms, the five mutation helpers, the four draft helpers and the two refresh helpers all moved.
+
+**This unit is not finished.** 21 of the 22 rows of `src/tui/actions_tests.rs` pass; `the_actions_that_could_be_routed_were` does not, and the ten sites it names are part 2's. They are listed under "What is left" below.
+
+### The three methods, and why they are not in `MESSAGE_MUTATION_METHOD_SPECS`
+
+`message.move`, `message.set_flag` and `message.set_read` are `MESSAGE_QUEUE_METHOD_SPECS`, an array of their own.
+
+`tests/daemon_mutation_slice.rs` holds `const _: () = assert!(MESSAGE_MUTATION_METHOD_SPECS.len() == MUTATION_METHODS.len());` over a two-name list, checked while the tree compiles.
+That array is P4-U8's slice, the assertion says what that slice declares, and growing it would have edited a pinned test to say something it was not written to say.
+`MESSAGE_SERVER_METHOD_SPECS` is the in-tree precedent, and its own doc gives the same reason ("that array is pinned at three").
+The split is a Rust-side fact: one `MessageMutationMethod` serves all five, `register_mutations` chains the two arrays, and the wire, the capability list and the dispatcher see five methods in one family.
+
+### Decisions
+
+**`settle`, defaulting to `true`.** The T unit left the spelling open between a parameter, a separate durability and a client-scoped variant. A parameter is the one that leaves `mp archive` byte-identical: every existing caller sends nothing and gets the settled outcome, and the interactive contract is one key. With `settle: false` the daemon commits the row change and the owed server op in one transaction and resolves **no credential at all**, which is what lets the TUI mutate an account whose password is not in the keyring yet, exactly as the store-backed path did.
+
+**All five mutations go through `crate::mutations::queue_*`.** The daemon had a second copy of the pairing (`pending_ops::apply_move` plus a hand-built `ServerOp`) beside the TUI's; now there is one, and `Queued {row_id, op_id}` is what a settling caller hands to `run_and_settle`. The four functions are keyed by `messages.id` rather than by `MessageRef`, so the module sits below both clients, and its eight unit tests came with it (two of them adapted: `refs` is a list of ids and the two `assert_eq!(moved, vec![MessageRef::new(id)])` compare row ids).
+
+**The server folder a queued op names is the row's, not the open mailbox's.** `find_server_name_for_role(account, &row.mailbox)`, which is what `message.archive` has done since P4-U8; the TUI used `App::active_server_mailbox()`, which is the *open* mailbox and is wrong for a batch that spans mailboxes. For an account with no `[[mailboxes]]` mapping the role name is the folder name, so a default fixture now queues `inbox` where the TUI queued `INBOX`; a configured account is unchanged, and this is the CLI's behaviour already.
+
+**"Already approved" is read off the row the user is looking at.** `draft.approve` answers with the status it wrote, not the status it found, so the library sentence the TUI branched on does not cross the socket. The list column is the same source the frame renders, so the line cannot disagree with the screen it is printed under; a second press before the reload lands says "Approved" twice instead of "Already approved", which is the one wording this unit moves and the reason it is recorded here.
+
+**A refusal is a log line and a skip, and the "nothing to …" lines stay.** The store-backed path skipped a row that was gone with a log line and let the rest of the selection proceed (`mutations::message_id_of`); a daemon refusal does the same. A selection where every call refused prints the line it printed before ("Archive failed: nothing to archive" and its two neighbours) with the daemon's sentences in the log, rather than promoting one refusal to the status line and moving the wording.
+
+**The destination check moved to the daemon.** `Action::MoveToMailbox` refused a mailbox whose sidebar row carried no `server_name`; the daemon resolves the folder from the account's mapping itself, so the client-side refusal (and its status line) is gone. It was unreachable for every configured account and refused moves the daemon can name a folder for.
+
+### Approved test edits
+
+- `src/daemon/session.rs`'s `the_advertised_capabilities_are_the_lifecycle_methods_and_the_table`: three names added to the literal list, in method-name order. The list is the assertion; a method served and not advertised is what it exists to catch.
+- `tests/fixtures/tui-engine-imports.txt`: three rows gone, re-recorded through the documented `UPDATE_TUI_ENGINE_IMPORTS=1`, because `src/tui/mutations.rs` is not in `src/tui/` any more.
+- `src/tui/actions.rs`'s own test module: five tests moved to `src/tui/commands.rs` with the code they test (the #0110 mark, the invite-rebuild predicate and the three draft flips), against an in-process daemon fixture instead of a bare store. `approve_and_mark_draft_flip_the_indexed_status` restores its row with the status the flip left, which is where "Already approved" now comes from.
+- No line of `src/tui/actions_tests.rs`, `src/tui/app/queries_tests.rs` or the golden frames was touched.
+
+### What is left (part 2)
+
+The residue gate names ten sites, each needing a method call where a store call is:
+
+| site | needle | what it needs |
+|---|---|---|
+| the `use super::helpers` line | `lib_do_sync` | drops with the three sync arms |
+| `handle_action` (`Fetch`, `FetchAccount`, `Sync`) | `lib_do_sync` | `sync.quick` / `sync.full`, then `operation.status` polled off the draw thread |
+| `handle_action` (`SendApproved`) | `send_draft(` | `send.approved`, the same wait |
+| `handle_action` (`Rsvp`) | `send_rsvp(` | `calendar.rsvp`, the same wait |
+| `handle_action` (`ServerSearch`, the local pass) | `open_store(` | `message.search` with `body: true` |
+| `source_for_msg` | `store_for_mutation(` | `draft.reply` / `draft.forward`, **which need a `row_id` address** on their `source`: they take `"<mailbox>/<uid>"` or a selector, and the TUI holds a `MessageRef` |
+| `forward_subject` | `open_store(` | `message.get` with `body: false` |
+| `lookup_draft_path` | `Store::open(` | `draft.path` |
+| `row_attachment_files` | `store_for_mutation(` | `message.get` for the part list, then `message.materialise_attachment` per part; the files land in the daemon's handle directory instead of the per-row materialisation directory |
+| `html_rendition_for_row` | `store_for_mutation(` | `message.materialise_html` |
+
+Two things part 2 has to settle that part 1 did not have to:
+
+**An operation's answer.** `sync.*`, `send.approved` and `calendar.rsvp` answer `{operation_id}` and finish later, and the finish is a `state.event` the session thread does not read (P5-U2 left the stream connected and drained by nobody). `operation.status` is a registered query and the registry prunes nothing, so a worker thread can poll it to a terminal state and post the `BgResult` its arm already posts; P5-U8 replaces the poll with the subscription. Nothing else in the tree awaits an operation without events.
+
+**About fifteen of `src/tui/actions.rs`'s 39 remaining unit tests** exercise those helpers directly and will need the in-process daemon fixture `src/tui/commands.rs` now has.
+
+### Validation
+
+`timeout 1200 cargo test --workspace --offline --no-fail-fast` -> **1 303 lib tests pass, 1 fails** (`the_actions_that_could_be_routed_were`, above), and every `tests/` suite is green, `daemon_mutation_slice` (41), `daemon_draft_slice` (34), `daemon_read_only_methods` (22), `daemon_send_slice` (50), `daemon_sync_slice` (38), `daemon_admin_slice` (44) and `architecture_boundaries` (6) among them. `pgrep -af '[m]p daemon'` empty afterwards.
+
+`cargo test --offline --lib actions_tests` -> 21 passed, 1 failed, three times over, the same row each time.
+`--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, unmoved, no snapshot re-approved. `--lib queries_tests` -> 18.
+
+`cargo clippy --workspace --offline --all-targets` -> 33 warnings, none of them in `src/tui/commands.rs`, `src/mutations.rs` or any line this unit wrote. (The 39-warning baseline the earlier units quote is not comparable while the lib test target does not compile: at `17b1b65` clippy stops before it lints the test code and reports 23.)
+
+`rustfmt --edition 2021` on `src/tui/commands.rs`, `src/daemon/methods/message.rs`, `src/daemon/session.rs` and `src/tui/session.rs`, all four rustfmt-clean at `17b1b65`; `src/lib.rs`, `src/tui/mod.rs`, `src/tui/actions.rs` and `src/mutations.rs` were not and were left alone.
+
+Not run, because they gate the finished unit rather than this half: the help walk, `mp dump-keys --json`, the pty smoke and `cargo install --path .`.

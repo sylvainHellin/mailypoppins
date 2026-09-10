@@ -1862,3 +1862,15 @@ tokio::runtime::Builder::new_current_thread()
 ```
 
 `on_thread_start` runs for the blocking pool too, and the guard is forgotten rather than held because the thread it belongs to dies with the runtime, which dies with the fixture. `src/tui/actions_tests.rs` is the first fixture that needed it; any future one that drives a command rather than a query needs it too.
+
+## A YAML value with a colon in it is a draft file that does not parse
+
+A test fixture that writes a draft by hand and then asks the daemon for it by id gets `no match for <id> in the drafts index of <account>/drafts`, which reads like a resolution bug and is not one: `subject: Re: Hello` is not YAML, the frontmatter fails to parse, `index_dir` returns the file under `skipped` instead of `rows`, and no id resolves to it.
+
+`crate::store::drafts::index_dir(&crate::config::drafts_dir(account))` returns `(rows, collisions, skipped)`; a fixture that is not finding its draft should print `skipped.len()` before it looks anywhere else. Real drafts are written by `create_draft_from_source`, which quotes the subject; only hand-written fixtures hit this.
+
+## A spec array pinned by a compile-time assertion is a wall, and there is a door beside it
+
+`tests/daemon_mutation_slice.rs` holds `const _: () = assert!(MESSAGE_MUTATION_METHOD_SPECS.len() == MUTATION_METHODS.len());` over its own two-name list, and `tests/daemon_draft_slice.rs` does the same for ten. Adding a method to such a family fails to *compile* the test, naming the constant, which is the assertion working.
+
+Do not grow the pinned array and do not edit the list. Declare the new slice in an array of its own and register both: `MESSAGE_SERVER_METHOD_SPECS` (P4-U10) and `MESSAGE_QUEUE_METHOD_SPECS` (P5-U6) are both that, and both say so in their doc comment. One method type can serve every array, the dispatcher sees one family, and the wire cannot tell there were ever two arrays. What the pinned test keeps saying is what its own slice declared, which is what it was written to say.

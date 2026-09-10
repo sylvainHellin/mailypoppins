@@ -2806,7 +2806,6 @@ fn fetch_search_hit(app: &mut App, bg_tx: &mpsc::Sender<BgResult>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::EmailEntry;
 
     /// Every `edit_file` call site in this file must be reachable only from an
     /// action that `Action::suspends_terminal` returns true for (#0108): the
@@ -2839,28 +2838,6 @@ mod tests {
         );
     }
 
-    fn entry(subject: &str, id: i64, is_invite: bool) -> EmailEntry {
-        EmailEntry {
-            msg: Some(MessageRef::new(id)),
-            draft_id: None,
-            skip: None,
-            from: "Sender <s@example.com>".to_string(),
-            to: "me@example.com".to_string(),
-            cc: None,
-            reply_to: None,
-            bcc: None,
-            subject: subject.to_string(),
-            status: "inbox".to_string(),
-            date_display: "2026-07-01".to_string(),
-            date_sort: "2026-07-01T00:00:00".to_string(),
-            has_attachments: false,
-            read: false,
-            answered: false,
-            forwarded: false,
-            flagged: false,
-            is_invite,
-        }
-    }
 
     // -----------------------------------------------------------------------
     // Parking a sync: one announcement, and a release that matches the gate
