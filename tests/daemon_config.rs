@@ -321,13 +321,21 @@ const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
 /// substring match cannot hit anything else the daemon writes.
 const SECRET: &str = "s3cr3t-vodka-2f7a-never-logged";
 
-/// The wire names of the six methods, in the order
-/// [`CONFIG_METHOD_SPECS`] declares them.
-const CONFIG_METHODS: [&str; 6] = [
+/// The wire names of the family, in the order [`CONFIG_METHOD_SPECS`] declares
+/// them.
+///
+/// Six when this suite was written (P3b-U8); nine since the admin slice
+/// (P4-U14) added `config.cutover`, `config.oauth2_login` and
+/// `config.reset_secrets`, whose own contract is `tests/daemon_admin_slice.rs`.
+/// Only the list moved: every assertion below is about the six this suite owns.
+const CONFIG_METHODS: [&str; 9] = [
     "config.add_account",
+    "config.cutover",
     "config.get",
     "config.init",
+    "config.oauth2_login",
     "config.reload",
+    "config.reset_secrets",
     "config.set_password",
     "config.validate",
 ];
@@ -449,7 +457,7 @@ fn the_six_methods_declare_their_name_kind_since_and_cancel_scope() {
     assert_eq!(
         names,
         CONFIG_METHODS.to_vec(),
-        "the six methods the plan names, in the name order the dispatcher's table keeps"
+        "the methods the plan names, in the name order the dispatcher's table keeps"
     );
 
     let kind_of = |name: &str| {
@@ -1225,7 +1233,7 @@ async fn the_capability_list_is_exactly_the_declared_config_family() {
     assert_eq!(
         served,
         CONFIG_METHODS.to_vec(),
-        "the handshake advertises the six methods CONFIG_METHOD_SPECS declares, and no other \
+        "the handshake advertises the methods CONFIG_METHOD_SPECS declares, and no other \
          member of the config family: the capability list is derived from the dispatcher's \
          table, so this is what is actually served"
     );

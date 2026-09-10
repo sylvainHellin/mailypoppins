@@ -99,6 +99,16 @@ impl BlobKind {
             BlobKind::Body => "body",
         }
     }
+
+    /// The kind a wire word names. Anything else is a body, which is what an
+    /// eviction line says about a blob it cannot classify: the alternative is
+    /// refusing to render a report the daemon already produced.
+    pub fn from_wire(value: &str) -> BlobKind {
+        match value {
+            "attachment" => BlobKind::Attachment,
+            _ => BlobKind::Body,
+        }
+    }
 }
 
 /// One evicted (or would-be-evicted, under `--dry-run`) blob.

@@ -419,3 +419,35 @@ pub fn send_approved_summary(outcome: &ApprovedOutcome) -> String {
         outcome.account, outcome.sent, outcome.failed
     )
 }
+
+// ---------------------------------------------------------------------------
+// The admin slice (P4-U14)
+// ---------------------------------------------------------------------------
+
+/// The line `mp config oauth2-login` prints before the flow starts.
+///
+/// `graph` picks the transport the token is for, which is the only thing the
+/// user can tell the two flows apart by.
+pub fn oauth2_start_line(account: &str, graph: bool) -> String {
+    format!(
+        "\u{2139} Starting OAuth2 device code flow for account '{account}' ({})",
+        if graph { "Graph API" } else { "IMAP/SMTP" }
+    )
+}
+
+/// The block a device-code login shows a human, blank lines included.
+///
+/// A pure function of the two values `config.oauth2_login` reports as its first
+/// `operation.progress`, so a GUI reproduces the terminal's block without
+/// knowing anything about the flow that produced it.
+pub fn oauth2_device_code_lines(verification_uri: &str, user_code: &str) -> String {
+    format!(
+        "\n  To sign in, open a browser and go to:\n\n    {verification_uri}\n\n  \
+         Enter the code: {user_code}\n\n"
+    )
+}
+
+/// The line a finished login prints.
+pub fn oauth2_stored_line(account: &str) -> String {
+    format!("\u{2713} OAuth2 token acquired and cached for account '{account}'")
+}

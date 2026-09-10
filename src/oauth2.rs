@@ -149,6 +149,36 @@ pub async fn device_code_flow(
     account_name: &str,
     scopes: &str,
 ) -> Result<TokenCache> {
+    device_code_flow_reporting(client_id, tenant_id, account_name, scopes, &|uri, code| {
+        print!("{}", crate::oauth2::device_code_block(uri, code));
+    })
+    .await
+}
+
+/// The block the device-code instructions are printed as, kept here so the
+/// in-process flow and `mp_client::format::oauth2_device_code_lines` cannot
+/// drift apart.
+pub fn device_code_block(verification_uri: &str, user_code: &str) -> String {
+    format!(
+        "\n  To sign in, open a browser and go to:\n\n    {verification_uri}\n\n  \
+         Enter the code: {user_code}\n\n"
+    )
+}
+
+/// The device-code flow with the user code and the verification URL handed to
+/// `on_device_code` instead of printed (P4-U14).
+///
+/// A daemon has no terminal, so the two values a human has to read are reported
+/// rather than rendered: `config.oauth2_login` turns them into one
+/// `operation.progress`, and the client that asked prints the block and opens
+/// the browser (`INT-04`).
+pub async fn device_code_flow_reporting(
+    client_id: &str,
+    tenant_id: &str,
+    account_name: &str,
+    scopes: &str,
+    on_device_code: &(dyn Fn(&str, &str) + Send + Sync),
+) -> Result<TokenCache> {
     let client = reqwest::Client::new();
 
     // Step 1: Request device code
@@ -166,14 +196,8 @@ pub async fn device_code_flow(
 
     let dc: DeviceCodeResponse = resp.json().await.context("Failed to parse device code response")?;
 
-    // Step 2: Display instructions to user
-    println!();
-    println!("  To sign in, open a browser and go to:");
-    println!();
-    println!("    {}", dc.verification_uri);
-    println!();
-    println!("  Enter the code: {}", dc.user_code);
-    println!();
+    // Step 2: hand the instructions to whoever can show them.
+    on_device_code(&dc.verification_uri, &dc.user_code);
 
     // Step 3: Poll for token
     let poll_interval = Duration::from_secs(dc.interval.max(5));

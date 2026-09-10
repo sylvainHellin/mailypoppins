@@ -13,6 +13,10 @@ use colored::*;
 /// from the `invite.ics` blobs of the account's rows (#0038 scope item 6), so
 /// there is no cached copy left to rebuild and the command exists to show what
 /// the fold sees. Safe to run repeatedly by construction.
+// Unused from P4-U14, when `mp calendar rebuild` started answering from
+// `calendar.rebuild`. Deleted with the rest of the direct engine paths by
+// P4-U15; the rendering below is shared with the routed client.
+#[allow(dead_code)]
 pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Result<()> {
     let accounts: Vec<&AccountConfig> = match account_name {
         Some(name) => vec![config
@@ -29,19 +33,48 @@ pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Re
     };
 
     for account in accounts {
-        println!(
-            "{} Reconciling calendar replies for {} …",
-            "ℹ".blue(),
-            account.name.yellow()
-        );
+        print_header(&account.name);
         let path = store_path(&account.name);
         if !path.exists() {
-            println!("{} no store yet for {}", "•".blue(), account.name);
+            print_no_store(&account.name);
             continue;
         }
         let store = Store::open(&path)?;
         let blobs = BlobStore::for_account(&account.name);
         let report = reconcile_account(&store, &blobs, &account.name);
+        print_report(
+            report.resolved,
+            report.invites_seen,
+            report.replies_seen,
+            report.cancelled,
+        );
+    }
+    Ok(())
+}
+
+/// The line printed before one account's fold.
+pub fn print_header(account: &str) {
+    println!(
+        "{} Reconciling calendar replies for {} …",
+        "ℹ".blue(),
+        account.yellow()
+    );
+}
+
+/// What an account with no store gets: a note, and the walk carries on.
+pub fn print_no_store(account: &str) {
+    println!("{} no store yet for {}", "•".blue(), account);
+}
+
+/// What the fold resolved, and the cancellations it saw.
+pub fn print_report(resolved: usize, invites_seen: usize, replies_seen: usize, cancelled: usize) {
+    {
+        let report = ReportCounts {
+            resolved,
+            invites_seen,
+            replies_seen,
+            cancelled,
+        };
         println!(
             "{} {} attendee status(es) resolved across {} invite(s) / {} reply(ies)",
             "✓".green(),
@@ -57,5 +90,12 @@ pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Re
             );
         }
     }
-    Ok(())
+}
+
+/// The four counts one fold reports, named so the block above reads as it did.
+struct ReportCounts {
+    resolved: usize,
+    invites_seen: usize,
+    replies_seen: usize,
+    cancelled: usize,
 }

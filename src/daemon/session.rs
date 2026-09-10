@@ -480,12 +480,21 @@ mod tests {
                 "daemon.status".to_string(),
                 "daemon.stop".to_string(),
                 "account.list".to_string(),
+                "calendar.rebuild".to_string(),
+                "calendar.rsvp".to_string(),
                 "config.add_account".to_string(),
+                "config.cutover".to_string(),
                 "config.get".to_string(),
                 "config.init".to_string(),
+                "config.oauth2_login".to_string(),
                 "config.reload".to_string(),
+                "config.reset_secrets".to_string(),
                 "config.set_password".to_string(),
                 "config.validate".to_string(),
+                "contact.rebuild".to_string(),
+                "contact.search".to_string(),
+                "contact.stats".to_string(),
+                "diagnostic.store_gc".to_string(),
                 "draft.approve".to_string(),
                 "draft.create".to_string(),
                 "draft.demote".to_string(),
@@ -531,7 +540,7 @@ mod tests {
         assert!(session.client_ctx().is_none());
         session
             .initialize(
-                &params_with(1, 1, &["account.list"], &["message.list", "calendar.rsvp"]),
+                &params_with(1, 1, &["account.list"], &["message.list", "signature.list"]),
                 &state(),
             )
             .expect("ok");

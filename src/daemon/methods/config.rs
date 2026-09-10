@@ -55,16 +55,37 @@ use super::super::dispatch::{
 /// leak something about the value they stand in for.
 pub const REDACTED: &str = "<redacted>";
 
-/// The six methods this family serves, in the name order the dispatcher's table
-/// keeps.
-pub const CONFIG_METHOD_SPECS: [MethodSpec; 6] = [
+/// The nine methods this family serves, in the name order the dispatcher's
+/// table keeps.
+///
+/// The admin slice (P4-U14) added the last three: `config.cutover`, because
+/// `docs/parity-matrix.md` MIG-01 offers exactly two homes for `mp cutover` and
+/// the client-side one is gone once the daemon owns the data directory and the
+/// drafts index the import writes into; `config.oauth2_login`, because a
+/// device-code flow is authentication against the configured account; and
+/// `config.reset_secrets`, because unlinking the secrets file and the token
+/// caches is one committed change with nothing to watch.
+pub const CONFIG_METHOD_SPECS: [MethodSpec; 9] = [
     MethodSpec::new("config.add_account", MethodKind::Command, 1),
+    MethodSpec::new("config.cutover", MethodKind::Operation, 1),
     MethodSpec::new("config.get", MethodKind::Query, 1),
     MethodSpec::new("config.init", MethodKind::Command, 1),
+    MethodSpec::new("config.oauth2_login", MethodKind::Operation, 1),
     MethodSpec::new("config.reload", MethodKind::Command, 1),
+    MethodSpec::new("config.reset_secrets", MethodKind::Command, 1),
     MethodSpec::new("config.set_password", MethodKind::Command, 1),
     MethodSpec::new("config.validate", MethodKind::Query, 1),
 ];
+
+/// The phase `config.oauth2_login` reports the verification URL and the user
+/// code under.
+///
+/// The payload is the progress shape every operation shares,
+/// `{operation_id, phase, done, total, message}`, with the two values in the
+/// one free-text field separated by the single space neither of them can
+/// contain. Inventing a field for this one operation would move the frame shape
+/// every other operation shares; a two-token message does not.
+pub const DEVICE_CODE_PHASE: &str = "device_code";
 
 /// Which credential a secret belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +205,8 @@ pub struct ConfigFamily {
     pub canonical: Arc<CanonicalState>,
     /// The draft watcher, whose roots a swap re-derives.
     pub watch: Arc<crate::daemon::watch::DraftWatch>,
+    /// The registry the family's two operations are started in.
+    pub operations: Arc<crate::daemon::operations::OperationRegistry>,
 }
 
 /// One served method of the family, dispatched by the name its spec declares.
@@ -192,7 +215,7 @@ pub struct ConfigMethod {
     family: Arc<ConfigFamily>,
 }
 
-/// Register the six methods from the one array that declares them.
+/// Register the nine methods from the one array that declares them.
 pub fn register(dispatcher: &mut Dispatcher, family: Arc<ConfigFamily>) {
     for spec in CONFIG_METHOD_SPECS {
         dispatcher.register(Arc::new(ConfigMethod {
@@ -209,7 +232,7 @@ impl Method for ConfigMethod {
 
     fn call<'a>(
         &'a self,
-        _ctx: &'a ClientCtx,
+        ctx: &'a ClientCtx,
         params: Value,
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
@@ -225,6 +248,15 @@ impl Method for ConfigMethod {
                 "config.set_password" => set_password(&family, &params).await,
                 "config.add_account" => add_account(&family, &params).await,
                 "config.init" => init(&family, &params).await,
+                "config.reset_secrets" => reset_secrets(&family, &params),
+                "config.cutover" => {
+                    let work = plan_cutover(&family, &params)?;
+                    Ok(self.operation(ctx, move |handle| cutover(work, handle)))
+                }
+                "config.oauth2_login" => {
+                    let work = plan_oauth2(&family, &params)?;
+                    Ok(self.operation(ctx, move |handle| oauth2_login(work, handle)))
+                }
                 other => Err(DomainError::method_not_found(other)),
             }
         })
@@ -594,6 +626,264 @@ fn refuse(family: &ConfigFamily, path: &Path, diagnostic: Diagnostic) -> DomainE
     )
 }
 
+// ---------------------------------------------------------------------------
+// The admin slice: cutover, secrets reset, device-code login (P4-U14)
+// ---------------------------------------------------------------------------
+
+impl ConfigMethod {
+    /// Start one operation of this family and answer with its id and nothing
+    /// else, exactly as `send.*` and `sync.*` do.
+    fn operation<F, Fut>(&self, ctx: &ClientCtx, work: F) -> Outcome
+    where
+        F: FnOnce(crate::daemon::operations::OperationHandle) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (id, handle) = self.family.operations.start(
+            crate::daemon::state::ConnectionId(ctx.connection_id),
+            self.spec.cancel_scope,
+            self.spec.name,
+        );
+        tokio::spawn(work(handle));
+        Outcome::query(json!({"operation_id": id.as_str()}))
+    }
+}
+
+/// One validated cutover pass.
+struct CutoverWork {
+    account: String,
+    dry_run: bool,
+}
+
+/// Validate `config.cutover`: a configured account with a store on disk, and
+/// nothing else. The all-accounts loop is the client's, in configuration order.
+fn plan_cutover(family: &ConfigFamily, params: &Value) -> Result<CutoverWork, DomainError> {
+    guard("config.cutover", params, &["account", "dry_run"])?;
+    let name = string_param(params, "account")?;
+    let snapshot = family.store.snapshot();
+    super::account::ready_account(&snapshot.accounts, &name).map_err(DomainError::from)?;
+    Ok(CutoverWork {
+        account: name,
+        dry_run: params
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// `MIG-01`: give every file-era draft an `id:` and name what is left of the
+/// file-era mailstore. It deletes nothing, ever, and `dry_run` writes not even
+/// the `id:` field.
+async fn cutover(work: CutoverWork, handle: crate::daemon::operations::OperationHandle) {
+    handle.set_running();
+    let name = work.account.clone();
+    match tokio::task::spawn_blocking(move || cutover_blocking(&work)).await {
+        Ok(Ok(result)) => handle.succeed(result),
+        Ok(Err(e)) => handle.fail(DomainError::internal(format!("{e:#}"))),
+        Err(e) => handle.fail(DomainError::internal(format!("the cutover of {name} {e}"))),
+    }
+}
+
+/// The blocking half of a cutover.
+fn cutover_blocking(work: &CutoverWork) -> anyhow::Result<Value> {
+    let account = &work.account;
+    let store = crate::store::Store::open(crate::config::store_path(account))?;
+    let report = crate::cutover::cutover_account(
+        &store,
+        account,
+        &crate::config::account_dir(account),
+        &crate::config::drafts_dir(account),
+        work.dry_run,
+    )?;
+    Ok(json!({
+        "account": account,
+        "dry_run": work.dry_run,
+        "drafts": {
+            "imported": report
+                .drafts
+                .imported
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+            "already_indexed": report.drafts.already_indexed,
+            // Rendered here rather than structured: both are `Display` types
+            // the CLI prints verbatim, and a client that re-worded them would
+            // be inventing a second spelling of one fact.
+            "skipped": report
+                .drafts
+                .skipped
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            "collisions": report
+                .drafts
+                .collisions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        },
+        "remnants": report
+            .remnants
+            .iter()
+            .map(|remnant| json!({
+                "path": remnant.path.display().to_string(),
+                "md_files": remnant.md_files,
+                "bytes": remnant.bytes,
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// `ACC-07`: unlink the encrypted secrets file and every OAuth2 token cache,
+/// and name what went.
+///
+/// The secrets file first, then the token caches in path order, which is the
+/// order `mp config reset-secrets` prints them; the pre-daemon binary walked
+/// `read_dir` unsorted, which was only ever deterministic because a real
+/// installation has one cache per account. Idempotent: a second reset removes
+/// nothing and says so.
+fn reset_secrets(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainError> {
+    guard("config.reset_secrets", params, &[])?;
+    let mut removed: Vec<String> = Vec::new();
+
+    let secrets_file = crate::secrets::secrets_path();
+    if secrets_file.exists() {
+        fs::remove_file(&secrets_file).map_err(|e| {
+            DomainError::internal(format!("removing {}: {e}", secrets_file.display()))
+        })?;
+        removed.push(secrets_file.display().to_string());
+    }
+
+    let token_dir = crate::config::tokens_dir();
+    if token_dir.exists() {
+        let mut caches: Vec<std::path::PathBuf> = fs::read_dir(&token_dir)
+            .map_err(|e| DomainError::internal(format!("reading {}: {e}", token_dir.display())))?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("enc"))
+            .collect();
+        caches.sort();
+        for path in caches {
+            fs::remove_file(&path)
+                .map_err(|e| DomainError::internal(format!("removing {}: {e}", path.display())))?;
+            removed.push(path.display().to_string());
+        }
+    }
+
+    // The backend is reopened so the next `config.set_password` writes a fresh
+    // file under the current machine key rather than reusing the handle on the
+    // one just unlinked.
+    let snapshot = family.store.snapshot();
+    let _ = crate::config::init_secrets_backend(&snapshot.config);
+    info!("[daemon] reset secrets: removed {} file(s)", removed.len());
+
+    Ok(command(
+        family,
+        json!({"removed": removed}),
+        vec![ResourceId::new("config:secrets")],
+    ))
+}
+
+/// One validated device-code login.
+struct OAuth2Work {
+    account: String,
+    client_id: String,
+    tenant_id: String,
+    scopes: &'static str,
+    kind: &'static str,
+}
+
+/// Validate `config.oauth2_login`, in the three refusals `src/config_cmd/oauth2.rs`
+/// makes and in its own sentences: an unknown account, an account that does not
+/// authenticate this way, and an OAuth2 account with no usable client.
+///
+/// The unknown-account message is the command's rather than
+/// [`super::account::configured_account`]'s, because it is the sentence the user
+/// reads and a routed command may not reword it.
+fn plan_oauth2(family: &ConfigFamily, params: &Value) -> Result<OAuth2Work, DomainError> {
+    guard("config.oauth2_login", params, &["account"])?;
+    let name = string_param(params, "account")?;
+    let snapshot = family.store.snapshot();
+    let account = snapshot
+        .accounts
+        .iter()
+        .find(|account| account.name == name)
+        .ok_or_else(|| {
+            DomainError::new(
+                ErrorCode::AccountUnknown,
+                format!("Account '{name}' not found in config"),
+                Some(json!({"account": name})),
+            )
+        })?;
+
+    let auth = &account.auth_method;
+    if *auth != crate::config::AuthMethod::OAuth2 && *auth != crate::config::AuthMethod::Graph {
+        return Err(DomainError::invalid_params(format!(
+            "Account '{name}' uses auth_method = \"password\", not \"oauth2\" or \"graph\". \
+             Set auth_method = \"oauth2\" or \"graph\" in config.toml to use OAuth2."
+        )));
+    }
+    let settings = account.oauth2.as_ref().ok_or_else(|| {
+        DomainError::invalid_params(format!(
+            "Account '{name}' requires an [accounts.oauth2] section with client_id and tenant_id."
+        ))
+    })?;
+    if settings.client_id.is_empty() || settings.tenant_id.is_empty() {
+        return Err(DomainError::invalid_params(format!(
+            "OAuth2 client_id and tenant_id must be set for account '{name}'"
+        )));
+    }
+
+    Ok(OAuth2Work {
+        account: name,
+        client_id: settings.client_id.clone(),
+        tenant_id: settings.tenant_id.clone(),
+        scopes: crate::oauth2::scopes_for_auth_method(auth),
+        kind: match auth {
+            crate::config::AuthMethod::Graph => "graph",
+            _ => "oauth2",
+        },
+    })
+}
+
+/// `ACC-06`: the device-code flow, with the verification URL and the user code
+/// reported as the operation's first progress so the client can render them and
+/// open a browser (`INT-04`).
+async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::OperationHandle) {
+    handle.set_running();
+    let report = |uri: &str, code: &str| {
+        handle.report(crate::daemon::operations::Progress {
+            phase: DEVICE_CODE_PHASE.to_string(),
+            done: 0,
+            total: None,
+            message: Some(format!("{uri} {code}")),
+        });
+    };
+    let acquired = crate::oauth2::device_code_flow_reporting(
+        &work.client_id,
+        &work.tenant_id,
+        &work.account,
+        work.scopes,
+        &report,
+    )
+    .await;
+    match acquired {
+        Ok(_) => handle.succeed(json!({
+            "stored": true,
+            "account": work.account,
+            "kind": work.kind,
+            "key": format!("oauth2-token-{}", work.account),
+        })),
+        // The value is never rendered: the failure is about the provider, and
+        // the one thing that must not travel with it is anything it handed back.
+        Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+    }
+}
+
+/// [`super::only_params`] in this family's error type.
+fn guard(method: &str, params: &Value, allowed: &[&str]) -> Result<(), DomainError> {
+    super::only_params(method, params, allowed).map_err(DomainError::from)
+}
+
 /// A required string parameter, or `-32602` naming it.
 fn string_param(params: &Value, name: &str) -> Result<String, DomainError> {
     params
@@ -609,14 +899,14 @@ fn string_param(params: &Value, name: &str) -> Result<String, DomainError> {
 mod tests {
     use super::*;
 
-    /// The six specs are the six names, in the order the dispatcher keeps.
+    /// The nine specs are the nine names, in the order the dispatcher keeps.
     #[test]
     fn the_specs_are_declared_in_name_order() {
         let names: Vec<&str> = CONFIG_METHOD_SPECS.iter().map(|spec| spec.name).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 9);
     }
 
     /// The rendered block parses back into the account it described, quoting

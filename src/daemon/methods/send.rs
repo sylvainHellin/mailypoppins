@@ -663,7 +663,10 @@ fn context_for(
 
 /// The SMTP configuration, or the placeholder the fake transport needs: it *is*
 /// the transport, so it has no credentials to load (P4-U12).
-fn smtp_config(account: &AccountConfig) -> anyhow::Result<SmtpConfig> {
+///
+/// Shared with `calendar.rsvp` (P4-U14), which submits an iMIP reply over the
+/// same transport and needs the same fake-transport escape hatch.
+pub(crate) fn smtp_config(account: &AccountConfig) -> anyhow::Result<SmtpConfig> {
     match SmtpConfig::load(account) {
         Ok(config) => Ok(config),
         Err(_) if crate::daemon::fake_transport::armed() => Ok(SmtpConfig {

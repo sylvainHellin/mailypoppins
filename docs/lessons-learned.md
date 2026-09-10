@@ -1756,3 +1756,21 @@ A retry that passed `unix_now()` would therefore re-arm the row, open the drain 
 `send::resume_outbox_at` and `drain_account_at` take that clock, and `send.outbox_retry` hands them `unix_now() + BACKOFF_MAX_SECS`: an operator who names one row means now, and the periodic drivers keep waiting because they still pass the real clock.
 `drain_guarded_at` already took a `now` for exactly this reason and `max`es it against the wall clock per sweep, so an injected future timestamp stays authoritative.
 
+
+## A client that follows an operation has to subscribe first
+
+`operation.progress` and `operation.finished` are `state.event` notifications, and the daemon fans them out to subscribers.
+A connection becomes one by calling `state.bootstrap`; a connection that never did receives nothing, and `await_operation`'s `connection.next_notification()` then blocks until the test's timeout rather than failing.
+Every routed command of the admin slice waits on an operation, and five of them hung on exactly this before `operation_session` (connect, then bootstrap) replaced the bare `daemon_connection`.
+
+The symptom is a command that produces its first line and then never returns, with the daemon idle and the operation already `succeeded` in `operation.status`.
+Polling would have hidden it, which is the reason the subscription is easy to forget: nothing in the call sequence says the answer arrives on a different channel than the request.
+
+## Move the renderer before you move the caller
+
+`mp contacts search` prints Nerd Font glyphs, `mp cutover` prints five more, and `mp store gc` prints a byte-count formatter that differs from the one three modules away.
+Routing any of those commands means a second process holds the data, and the tempting shape is a second copy of the `println!` block beside the first.
+
+The copy is where a byte-parity slice dies: a glyph retyped from a terminal render is not the glyph in the file, and nobody sees the difference until the oracle does.
+So the renderers were extracted first - `contacts_cmd::print_search`, `calendar_cmd::print_report`, `cutover::print_report` - taking plain data rather than a store handle, with the direct path calling them with data it read and the routed path calling them with data off the wire.
+The extraction diff is deletions and re-indentation; not one literal was retyped.

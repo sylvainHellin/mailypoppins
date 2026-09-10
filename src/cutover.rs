@@ -266,7 +266,49 @@ pub fn cutover_account(
     })
 }
 
-fn human_bytes(bytes: u64) -> String {
+/// What one account's cutover report carries, whichever process produced it.
+///
+/// [`AccountCutover`] with the two `Display` types already rendered: since
+/// P4-U14 the report comes off the wire as `config.cutover`'s settled result,
+/// and a client that re-worded a skipped draft or a collision would be
+/// inventing a second spelling of one fact.
+#[derive(Debug, Clone, Default)]
+pub struct CutoverReport {
+    pub account: String,
+    pub imported: Vec<PathBuf>,
+    pub already_indexed: usize,
+    pub skipped: Vec<String>,
+    pub collisions: Vec<String>,
+    pub remnants: Vec<LegacyRemnant>,
+}
+
+impl CutoverReport {
+    /// Bytes the human would reclaim by removing every remnant.
+    pub fn reclaimable_bytes(&self) -> u64 {
+        self.remnants.iter().map(|r| r.bytes).sum()
+    }
+}
+
+impl From<&AccountCutover> for CutoverReport {
+    fn from(report: &AccountCutover) -> CutoverReport {
+        CutoverReport {
+            account: report.account.clone(),
+            imported: report.drafts.imported.clone(),
+            already_indexed: report.drafts.already_indexed,
+            skipped: report.drafts.skipped.iter().map(ToString::to_string).collect(),
+            collisions: report
+                .drafts
+                .collisions
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            remnants: report.remnants.clone(),
+        }
+    }
+}
+
+/// A byte count the way `mp cutover` reports directory sizes.
+pub fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -305,50 +347,77 @@ pub fn handle_cutover(
     };
 
     if dry_run {
-        println!("{} dry run: nothing will be written", "ℹ".blue());
+        print_dry_run_notice();
     }
 
     let mut reports = Vec::new();
     for account in accounts {
         let path = store_path(&account.name);
         let dir = account_dir(&account.name);
-        println!("{} {}", "ℹ".blue(), account.name.yellow().bold());
+        print_account_header(&account.name);
         if !path.exists() {
-            println!("  {} no store yet; run `mp sync` first", "•".blue());
+            print_no_store();
             continue;
         }
         let store = Store::open(&path)?;
-        let report = cutover_account(
+        let report = CutoverReport::from(&cutover_account(
             &store,
             &account.name,
             &dir,
             &drafts_dir(&account.name),
             dry_run,
-        )?;
+        )?);
+        print_report(&report, &dir, dry_run);
+        reports.push(report);
+    }
 
+    let remnants: Vec<&LegacyRemnant> = reports.iter().flat_map(|r| &r.remnants).collect();
+    print_footer(&remnants);
+    Ok(())
+}
+
+/// The one line a `--dry-run` pass opens with.
+pub fn print_dry_run_notice() {
+    println!("{} dry run: nothing will be written", "ℹ".blue());
+}
+
+/// One account's own heading.
+pub fn print_account_header(account: &str) {
+    println!("{} {}", "ℹ".blue(), account.yellow().bold());
+}
+
+/// What an account with no store gets: a note, and the walk carries on.
+pub fn print_no_store() {
+    println!("  {} no store yet; run `mp sync` first", "•".blue());
+}
+
+/// Both halves of one account's report: what the drafts import did, and what
+/// is left of the file-era mailstore.
+pub fn print_report(report: &CutoverReport, dir: &Path, dry_run: bool) {
+    {
         let verb = if dry_run { "would get" } else { "got" };
-        if report.drafts.imported.is_empty() {
+        if report.imported.is_empty() {
             println!(
                 "  {} drafts: nothing to import ({} already carry an id)",
                 "✓".green(),
-                report.drafts.already_indexed
+                report.already_indexed
             );
         } else {
             println!(
                 "  {} drafts: {} {} an id: field ({} already carried one)",
                 "✓".green(),
-                report.drafts.imported.len().to_string().bold(),
+                report.imported.len().to_string().bold(),
                 verb,
-                report.drafts.already_indexed
+                report.already_indexed
             );
-            for p in &report.drafts.imported {
+            for p in &report.imported {
                 println!("      {}", p.display());
             }
         }
-        for skip in &report.drafts.skipped {
+        for skip in &report.skipped {
             println!("  {} unreadable draft left untouched: {skip}", "!".yellow());
         }
-        for collision in &report.drafts.collisions {
+        for collision in &report.collisions {
             println!("  {} {collision}", "!".yellow());
         }
 
@@ -369,10 +438,11 @@ pub fn handle_cutover(
                 );
             }
         }
-        reports.push(report);
     }
+}
 
-    let remnants: Vec<&LegacyRemnant> = reports.iter().flat_map(|r| &r.remnants).collect();
+/// The `rm -rf` block, printed once for every remnant every account named.
+pub fn print_footer(remnants: &[&LegacyRemnant]) {
     if !remnants.is_empty() {
         println!();
         println!(
@@ -382,7 +452,7 @@ pub fn handle_cutover(
         println!("  once you are happy the store has everything you want (mail comes back from");
         println!("  the server; drafts do not, and they are not in these directories):");
         println!();
-        for remnant in &remnants {
+        for remnant in remnants {
             let flags = if remnant.path.is_dir() { "-rf" } else { "-f" };
             println!("    rm {flags} {}", shell_quote(&remnant.path));
         }
@@ -393,7 +463,6 @@ pub fn handle_cutover(
             "mp cutover".bold()
         );
     }
-    Ok(())
 }
 
 /// Single-quote a path for the `rm -rf` line we print, so a space or a quote

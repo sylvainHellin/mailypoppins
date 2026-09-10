@@ -139,3 +139,40 @@ Both would be fixed by a change to the test file - rejecting `ivana@example.com`
 
 Both were fixed afterwards, under the two "Approved test edits" entries above, and neither by rejecting `ivana@example.com`: the fixture's approved draft got a second recipient instead, so the partial outcome is a property of the draft rather than of a refusal aimed at the only address it had. The first row also hid a third contradiction behind the panic - `appends() == 1` counts the whole ledger, and a send drains the outbox - which the same edit reconciles.
 
+
+## P4-U14: the admin slice on the daemon
+
+Eight methods land: `contact.{rebuild,search,stats}`, `calendar.{rebuild,rsvp}`, `diagnostic.store_gc`, and `config.{cutover,oauth2_login,reset_secrets}`, which take the config family from six to nine.
+Every one is `since: 1` and `CancelScope::Durable`, every one takes a required `account` and none takes an `all_accounts`: the "default account" and every all-accounts loop are the client's, over the configured accounts in configuration order.
+`mp config {init,add-account,show,set-password,oauth2-login,reset-secrets}`, `mp contacts {search,rebuild,stats}`, `mp calendar rebuild`, `mp invite accept|tentative|decline`, `mp store gc` and `mp cutover` all route by default; `mp config path` stays on the no-daemon list and is now the parity harness's only unmigrated control row.
+
+Implementation is 1 386 inserted / 173 deleted lines across 18 files, of which 13 are the deletions and re-indentations of the renderer extraction below.
+
+### Decisions this unit had to take
+
+- **The renderers moved before the callers did.** `mp contacts search` prints three Nerd Font glyphs, `mp cutover` prints five, and retyping any of them into a second copy is how a parity row dies. So `contacts_cmd`, `calendar_cmd` and `cutover` grew `print_*` functions that take plain data, the direct handlers call them with data read from the store, and the routed client calls them with data read off the wire. One copy of every literal, whichever process did the reading.
+- **`contact.rebuild` does not refuse a storeless account**, though `contact.search` and `contact.stats` do. `build_index_for_account` treats an account with no store as an empty index and `mp contacts rebuild` with no `--account` has always walked every configured account including those; refusing would have ended the walk at the first one.
+- **`mp contacts search` and `mp contacts stats` against a storeless account now fail** where they printed an empty index. `tests/daemon_admin_slice.rs` pins `-32006` for both, no parity row covers the case, and the alternative was a method that answered about an account `account.list` calls not ready. The behaviour change is here rather than hidden.
+- **`config.reset_secrets` sorts the token-cache walk.** The pre-daemon binary printed `read_dir` order, which is only deterministic because a real installation has one cache per account; sorting is one line and makes the answer reproducible. It cannot move a parity byte on any fixture with fewer than two caches, and the admin fixture has one.
+- **`mp config reset-secrets` calls `config.get` before it prints its banner**, which is what lets the declined branch satisfy `MAILYPOPPINS_DAEMON_REQUIRE`, and it is the account list the walk needs anyway. `mp config init` and `mp config add-account` call it for the same reason and for the two facts their first line prints.
+- **`mp config show` renders `config.get`'s effective configuration**, deserialised back into a `GlobalConfig`. The secret probes, the token-cache status and the signature listing are still read in the client; they are the last local reads on this command's path and they go with the rest in P4-U15.
+- **`mp config oauth2-login` no longer runs its post-login connection tests.** They need the access token, which the daemon now holds and the settled result deliberately does not carry, and `tests/daemon_admin_slice.rs` records them as the account slice's subject. Nothing pinned them; the three lines the command prints are pinned, in `mp_client::format`.
+- **The browser is still not launched.** `INT-04` puts the launch in the client, and the client is where it would go, but the pre-daemon binary only ever printed the block: adding a launch would be a behaviour change with no parity row to catch it. The rendering is a pure function of the progress payload, so a GUI can do both.
+
+### Approved test edit
+
+`tests/daemon_config.rs` (P3b-U8) enumerated the config family as six names in a `[&str; 6]`, which `tests/daemon_admin_slice.rs` contradicts by construction (`const _: () = assert!(CONFIG_METHOD_SPECS.len() == 9)`).
+The constant grew to nine and two assertion messages dropped the word "six"; no assertion of that suite changed. `git diff --stat e633d45..HEAD -- tests/` is that one file, 13 insertions and 5 deletions.
+
+### Follow-ups
+
+- The client still opens the secrets backend for `mp config show`'s `(not set)` / `****` column, and still writes `config.toml` itself in both wizards. Both are P4-U15's.
+- `mp config oauth2-login`'s IMAP, SMTP and Graph checks want a home in the account slice.
+
+### Validation
+
+`timeout 1800 cargo test --workspace --offline` -> 2 068 passed, 0 failed, 1 ignored (2 020 + the 44 of `tests/daemon_admin_slice.rs` + four new unit tests).
+`--test daemon_admin_slice` -> 44 passed three times running.
+The help walk (`touch src/main.rs && cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt`) is empty.
+`timeout 600 cargo clippy --workspace --offline --all-targets` reports nothing on any touched file.
+`pgrep -af '[m]p daemon'` is empty after the full run.

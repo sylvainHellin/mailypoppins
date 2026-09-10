@@ -1,7 +1,7 @@
 mod helpers;
 mod init;
 mod oauth2;
-mod password;
+pub mod password;
 mod reset;
 mod show;
 

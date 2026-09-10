@@ -1960,6 +1960,10 @@ async fn release_handle(connection: &mut mp_client::Connection, handle: &str) {
     }
 }
 
+// Unused from P4-U14, when `mp invite` was the last command to resolve a
+// received selector in this process. Deleted with the rest of the direct engine
+// paths by P4-U15.
+#[allow(dead_code)]
 fn resolve_received_arg(
     store: &Store,
     selector: &str,
@@ -2740,6 +2744,10 @@ fn fetched_from_wire(message: &serde_json::Value) -> FetchedEmail {
 ///
 /// A store file that does not exist yet has nothing to sweep, which is the
 /// common case for a freshly configured or drafts-only account.
+// Unused from P4-U14, when `mp store gc` started answering from
+// `diagnostic.store_gc`. Deleted with the rest of the direct engine paths by
+// P4-U15.
+#[allow(dead_code)]
 fn run_store_gc(
     global_config: &GlobalConfig,
     account: &AccountConfig,
@@ -2879,6 +2887,595 @@ fn report_sweep_outcome(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The admin slice, routed (P4-U14)
+// ---------------------------------------------------------------------------
+
+/// The account a `--account` flag names, or the first configured one.
+///
+/// The default and the lookup are the client's, because every all-accounts loop
+/// of this slice is too: a method that quietly served "the first configured
+/// account" would make the CLI's default and the GUI's default two rules that
+/// can drift. The two sentences are the ones these commands have always
+/// refused with.
+fn pick_account_named<'a>(
+    global: &'a GlobalConfig,
+    name: Option<&str>,
+) -> Result<&'a AccountConfig> {
+    match name {
+        Some(wanted) => global
+            .accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(wanted))
+            .ok_or_else(|| anyhow!("no account named '{}'", wanted)),
+        None => global
+            .accounts
+            .first()
+            .ok_or_else(|| anyhow!("no accounts configured")),
+    }
+}
+
+/// The accounts one pass walks: the named one, or every configured one in
+/// configuration order.
+fn accounts_for(global: &GlobalConfig, name: Option<&str>) -> Result<Vec<String>> {
+    match name {
+        Some(_) => Ok(vec![pick_account_named(global, name)?.name.clone()]),
+        None => {
+            if global.accounts.is_empty() {
+                return Err(anyhow!("no accounts configured"));
+            }
+            Ok(global.accounts.iter().map(|a| a.name.clone()).collect())
+        }
+    }
+}
+
+/// One contact row off the wire.
+fn contact_row(value: &serde_json::Value) -> mailypoppins::contacts_cmd::ContactRow {
+    let count = |key: &str| value[key].as_u64().unwrap_or_default() as u32;
+    mailypoppins::contacts_cmd::ContactRow {
+        address: wire_str(&value["address"]).to_string(),
+        display_name: wire_str(&value["display_name"]).to_string(),
+        sent_to: count("sent_to"),
+        sent_cc: count("sent_cc"),
+        received: count("received"),
+    }
+}
+
+/// Every contact row of one answer.
+fn contact_rows(value: &serde_json::Value) -> Vec<mailypoppins::contacts_cmd::ContactRow> {
+    value
+        .as_array()
+        .map(|rows| rows.iter().map(contact_row).collect())
+        .unwrap_or_default()
+}
+
+/// `mp contacts search`: the ranking is the daemon's, the glyphs are this
+/// process's.
+async fn routed_contacts_search(
+    account: &str,
+    query: Option<&str>,
+    parsable: bool,
+    limit: usize,
+) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let query = query.unwrap_or_default();
+    let result = daemon_try_call(
+        &mut connection,
+        "contact.search",
+        serde_json::json!({"account": account, "query": query, "limit": limit}),
+    )
+    .await
+    .map_err(|error| refusal(account, error))?;
+    mailypoppins::contacts_cmd::print_search(&contact_rows(&result["contacts"]), query, parsable);
+    Ok(())
+}
+
+/// `mp contacts stats`.
+async fn routed_contacts_stats(account: &str) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call(
+        &mut connection,
+        "contact.stats",
+        serde_json::json!({"account": account}),
+    )
+    .await
+    .map_err(|error| refusal(account, error))?;
+    let number = |key: &str| result[key].as_u64().unwrap_or_default();
+    mailypoppins::contacts_cmd::print_stats(
+        account,
+        number("total") as usize,
+        number("sent_to"),
+        number("sent_cc"),
+        number("received"),
+        wire_str(&result["cache_path"]),
+        wire_str(&result["built_at"]),
+        &contact_rows(&result["top"]),
+    );
+    Ok(())
+}
+
+/// `mp contacts rebuild`: one operation per account, in configuration order,
+/// with the header printed before each so a batch is legible while it runs.
+async fn routed_contacts_rebuild(accounts: &[String]) -> Result<()> {
+    use mailypoppins::contacts::CacheSave;
+
+    let mut connection = operation_session().await;
+    for account in accounts {
+        mailypoppins::contacts_cmd::print_rebuild_header(account);
+        let result = run_admin_operation(
+            &mut connection,
+            "contact.rebuild",
+            serde_json::json!({"account": account}),
+            account,
+        )
+        .await?;
+        let contacts = result["contacts"].as_u64().unwrap_or_default() as usize;
+        let kept = result["kept"].as_u64().unwrap_or_default() as usize;
+        let saved = match wire_str(&result["saved"]) {
+            "refused_empty" => CacheSave::RefusedEmpty { kept },
+            "refused_shrunk" => CacheSave::RefusedShrunk {
+                kept,
+                rebuilt: contacts,
+            },
+            _ => CacheSave::Written,
+        };
+        mailypoppins::contacts_cmd::print_rebuild_outcome(
+            &saved,
+            contacts,
+            std::path::Path::new(wire_str(&result["cache_path"])),
+        );
+    }
+    Ok(())
+}
+
+/// `mp calendar rebuild`: the organiser-side fold, one account at a time, and
+/// an account with no store is a note rather than the end of the pass.
+async fn routed_calendar_rebuild(accounts: &[String]) -> Result<()> {
+    let mut connection = operation_session().await;
+    for account in accounts {
+        mailypoppins::calendar_cmd::print_header(account);
+        let started = daemon_try_call(
+            &mut connection,
+            "calendar.rebuild",
+            serde_json::json!({"account": account}),
+        )
+        .await;
+        let started = match started {
+            Ok(started) => started,
+            Err(error) if is_storeless(&error) => {
+                mailypoppins::calendar_cmd::print_no_store(account);
+                continue;
+            }
+            Err(error) => return Err(anyhow!("{}", error.message)),
+        };
+        let result = settle(&mut connection, &started).await?;
+        let count = |key: &str| result[key].as_u64().unwrap_or_default() as usize;
+        mailypoppins::calendar_cmd::print_report(
+            count("resolved"),
+            count("invites_seen"),
+            count("replies_seen"),
+            count("cancelled"),
+        );
+    }
+    Ok(())
+}
+
+/// `mp invite accept|tentative|decline`: the reply is built, submitted and
+/// filed by the daemon; the one line it prints is this process's.
+async fn routed_rsvp(
+    account: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+    response: &str,
+) -> Result<()> {
+    let mut connection = operation_session().await;
+    let params = serde_json::json!({
+        "account": account,
+        "selector": selector,
+        "mailbox": mailbox,
+        "response": response,
+    });
+    let result = run_admin_operation(&mut connection, "calendar.rsvp", params, account).await?;
+    let organizer = wire_str(&result["organizer"]).to_string();
+    if !result["delivered"].as_bool().unwrap_or(false) {
+        return Err(anyhow!("Failed to send the RSVP to {organizer}"));
+    }
+    println!(
+        "{} {} \u{2014} replied to {}",
+        "\u{2713}".green(),
+        wire_str(&result["subject"]),
+        organizer
+    );
+    Ok(())
+}
+
+/// `mp store gc`: the sweep is the daemon's, the report is
+/// [`report_sweep_outcome`]'s, and an account with no store is a note.
+async fn routed_store_gc(account: &str, dry_run: bool, force: bool) -> Result<()> {
+    use mailypoppins::store::sweep::{BlobKind, EvictedBlob, SweepDecision, SweepOutcome};
+
+    let mut connection = operation_session().await;
+    let params = serde_json::json!({"account": account, "dry_run": dry_run, "force": force});
+    let started = daemon_try_call(&mut connection, "diagnostic.store_gc", params).await;
+    let started = match started {
+        Ok(started) => started,
+        Err(error) if is_storeless(&error) => {
+            println!(
+                "  {} {} has no store yet; nothing to sweep",
+                "\u{b7}".dimmed(),
+                account
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(anyhow!("{}", error.message)),
+    };
+    let result = settle(&mut connection, &started).await?;
+    let number = |key: &str| result[key].as_u64().unwrap_or_default();
+    let decision = &result["decision"];
+    let outcome = SweepOutcome {
+        cap_bytes: number("cap_bytes"),
+        before_bytes: number("before_bytes"),
+        after_bytes: number("after_bytes"),
+        evicted: result["evicted"]
+            .as_array()
+            .map(|blobs| {
+                blobs
+                    .iter()
+                    .map(|blob| EvictedBlob {
+                        hash: wire_str(&blob["hash"]).to_string(),
+                        kind: BlobKind::from_wire(wire_str(&blob["kind"])),
+                        size: blob["size"].as_u64().unwrap_or_default(),
+                        newest_date: blob["newest_date"].as_i64().unwrap_or_default(),
+                        past_horizon: blob["past_horizon"].as_bool().unwrap_or(false),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        decision: match wire_str(&decision["kind"]) {
+            "warned_first_breach" => SweepDecision::WarnedFirstBreach,
+            "refused_too_much" => SweepDecision::RefusedTooMuch {
+                would_evict_bytes: decision["would_evict_bytes"].as_u64().unwrap_or_default(),
+            },
+            "evicted" => SweepDecision::Evicted,
+            _ => SweepDecision::UnderCap {
+                cleared_marker: decision["cleared_marker"].as_bool().unwrap_or(false),
+            },
+        },
+        dry_run: result["dry_run"].as_bool().unwrap_or(dry_run),
+    };
+    report_sweep_outcome(account, &outcome, true);
+    Ok(())
+}
+
+/// `mp cutover`: the drafts import and the file-era scan are the daemon's, and
+/// the `rm -rf` block is printed once for every account that named a remnant.
+async fn routed_cutover(accounts: &[String], dry_run: bool) -> Result<()> {
+    use mailypoppins::cutover::{CutoverReport, LegacyRemnant};
+
+    let mut connection = operation_session().await;
+    if dry_run {
+        mailypoppins::cutover::print_dry_run_notice();
+    }
+    let mut reports: Vec<CutoverReport> = Vec::new();
+    for account in accounts {
+        mailypoppins::cutover::print_account_header(account);
+        let started = daemon_try_call(
+            &mut connection,
+            "config.cutover",
+            serde_json::json!({"account": account, "dry_run": dry_run}),
+        )
+        .await;
+        let started = match started {
+            Ok(started) => started,
+            Err(error) if is_storeless(&error) => {
+                mailypoppins::cutover::print_no_store();
+                continue;
+            }
+            Err(error) => return Err(anyhow!("{}", error.message)),
+        };
+        let result = settle(&mut connection, &started).await?;
+        let strings = |value: &serde_json::Value| -> Vec<String> {
+            value
+                .as_array()
+                .map(|rows| rows.iter().map(|row| wire_str(row).to_string()).collect())
+                .unwrap_or_default()
+        };
+        let report = CutoverReport {
+            account: account.clone(),
+            imported: strings(&result["drafts"]["imported"])
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            already_indexed: result["drafts"]["already_indexed"]
+                .as_u64()
+                .unwrap_or_default() as usize,
+            skipped: strings(&result["drafts"]["skipped"]),
+            collisions: strings(&result["drafts"]["collisions"]),
+            remnants: result["remnants"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| LegacyRemnant {
+                            path: PathBuf::from(wire_str(&row["path"])),
+                            md_files: row["md_files"].as_u64().unwrap_or_default() as usize,
+                            bytes: row["bytes"].as_u64().unwrap_or_default(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        mailypoppins::cutover::print_report(
+            &report,
+            &mailypoppins::config::account_dir(account),
+            dry_run,
+        );
+        reports.push(report);
+    }
+    let remnants: Vec<&LegacyRemnant> = reports.iter().flat_map(|r| &r.remnants).collect();
+    mailypoppins::cutover::print_footer(&remnants);
+    Ok(())
+}
+
+/// The configuration as the daemon holds it: where it lives, whether there is
+/// one, and what it says.
+///
+/// `mp config init` and `mp config add-account` ask this **before** they
+/// prompt, which is how the client learns the two facts each command's first
+/// line prints, and what lets the declined branch satisfy
+/// `MAILYPOPPINS_DAEMON_REQUIRE`.
+async fn routed_config_state() -> Result<(PathBuf, bool, GlobalConfig)> {
+    let mut connection = daemon_connection().await;
+    let result = daemon_call(&mut connection, "config.get", serde_json::json!({})).await;
+    let config: GlobalConfig = serde_json::from_value(result["config"].clone())
+        .context("reading the effective configuration the daemon reported")?;
+    Ok((
+        PathBuf::from(wire_str(&result["path"])),
+        wire_str(&result["state"]) != "absent",
+        config,
+    ))
+}
+
+/// Tell the daemon to re-read a `config.toml` a wizard just wrote.
+///
+/// Best-effort and silent: the wizard's own output is what the user reads, and
+/// a reload that failed leaves the daemon on the previous snapshot, which the
+/// next command reports for itself.
+async fn reload_config_quietly() {
+    let mut connection = daemon_connection().await;
+    if let Err(e) = daemon_try_call(&mut connection, "config.reload", serde_json::json!({})).await {
+        warn!("[client] the daemon could not reload the new configuration: {}", e.message);
+    }
+}
+
+/// `mp config show`: the effective configuration, rendered from `config.get`.
+async fn routed_config_show() -> Result<()> {
+    let (path, _, config) = routed_config_state().await?;
+    cmd_config_show(&config, &path)
+}
+
+/// `mp config set-password`: the prompt is this process's terminal's, the value
+/// crosses the socket once, and nothing else about it is written here.
+async fn routed_set_password(which: &str, account: &str) -> Result<()> {
+    mailypoppins::config_cmd::password::check_kind(which);
+    let value = mailypoppins::config_cmd::password::prompt(which, account)?;
+    let mut connection = daemon_connection().await;
+    daemon_try_call(
+        &mut connection,
+        "config.set_password",
+        serde_json::json!({"account": account, "kind": which, "value": value}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+    println!(
+        "{}",
+        mailypoppins::config_cmd::password::stored_line(which, account)
+    );
+    Ok(())
+}
+
+/// `mp config reset-secrets`: the confirmation and every password prompt are
+/// this process's; the unlinking and the writes are the daemon's.
+async fn routed_reset_secrets() -> Result<()> {
+    let (_, _, config) = routed_config_state().await?;
+    let secrets_file = mailypoppins::secrets::secrets_path();
+    let token_dir = mailypoppins::config::tokens_dir();
+
+    println!("{}", "=== Reset Secrets ===".bold().cyan());
+    println!();
+    println!("This will:");
+    println!("  - Delete {}", secrets_file.display());
+    println!("  - Delete {}/*.enc", token_dir.display());
+    println!("  - Prompt you to re-enter SMTP/IMAP passwords for each account");
+    println!("  - For OAuth2/Graph accounts, you will need to re-run `mp config oauth2-login`");
+    println!();
+    print!("Continue? [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+        println!("{}", mp_client::format::CANCELLED_LINE);
+        return Ok(());
+    }
+
+    let mut connection = daemon_connection().await;
+    let removed = daemon_try_call(
+        &mut connection,
+        "config.reset_secrets",
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+    for path in removed["removed"].as_array().unwrap_or(&Vec::new()) {
+        println!("{} Removed {}", "\u{2713}".green(), wire_str(path));
+    }
+
+    if config.accounts.is_empty() {
+        println!();
+        println!(
+            "{} No accounts configured. Run `mp config init` to create one.",
+            "\u{26a0}".yellow()
+        );
+        return Ok(());
+    }
+
+    println!();
+    for account in &config.accounts {
+        match account.auth_method {
+            AuthMethod::Password => {
+                println!(
+                    "{} Account '{}' (Password auth)",
+                    "\u{25b6}".cyan(),
+                    account.name.bold()
+                );
+                let smtp_pw = dialoguer::Password::new()
+                    .with_prompt(format!("  SMTP password for '{}'", account.name))
+                    .interact()
+                    .context("SMTP password input cancelled")?;
+                store_password(&mut connection, &account.name, "smtp", &smtp_pw).await?;
+                println!("    {} SMTP password stored", "\u{2713}".green());
+
+                print!("  Use a separate IMAP password? [y/N] ");
+                io::stdout().flush()?;
+                let mut sep = String::new();
+                io::stdin().read_line(&mut sep)?;
+                if matches!(sep.trim().to_lowercase().as_str(), "y" | "yes") {
+                    let imap_pw = dialoguer::Password::new()
+                        .with_prompt(format!("  IMAP password for '{}'", account.name))
+                        .interact()
+                        .context("IMAP password input cancelled")?;
+                    store_password(&mut connection, &account.name, "imap", &imap_pw).await?;
+                    println!("    {} IMAP password stored", "\u{2713}".green());
+                }
+            }
+            AuthMethod::OAuth2 | AuthMethod::Graph => {
+                println!(
+                    "{} Account '{}' ({:?} auth) -- run `mp config oauth2-login --account {}` to re-acquire token",
+                    "\u{2139}".blue(),
+                    account.name.bold(),
+                    account.auth_method,
+                    account.name
+                );
+            }
+        }
+    }
+
+    println!();
+    println!("{} Secrets reset complete.", "\u{2713}".green().bold());
+    Ok(())
+}
+
+/// One password across the socket, and nothing about it anywhere else.
+async fn store_password(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    kind: &str,
+    value: &str,
+) -> Result<()> {
+    daemon_try_call(
+        connection,
+        "config.set_password",
+        serde_json::json!({"account": account, "kind": kind, "value": value}),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| anyhow!("{}", error.message))
+}
+
+/// `mp config oauth2-login`: the daemon runs the device flow and reports the
+/// verification URL and the user code; this process renders them (`INT-04`).
+async fn routed_oauth2_login(global: &GlobalConfig, account: Option<&str>) -> Result<()> {
+    // The default is the client's, exactly as it was: the first OAuth2 or Graph
+    // account, else the first account at all.
+    let name = match account {
+        Some(name) => name.to_string(),
+        None => global
+            .accounts
+            .iter()
+            .find(|a| a.auth_method == AuthMethod::OAuth2 || a.auth_method == AuthMethod::Graph)
+            .or_else(|| global.accounts.first())
+            .ok_or_else(|| anyhow!("No accounts configured"))?
+            .name
+            .clone(),
+    };
+
+    let mut connection = operation_session().await;
+    let started = daemon_try_call(
+        &mut connection,
+        "config.oauth2_login",
+        serde_json::json!({"account": name}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+
+    let graph = global
+        .accounts
+        .iter()
+        .find(|a| a.name == name)
+        .is_some_and(|a| a.auth_method == AuthMethod::Graph);
+    println!("{}", paint(&mp_client::format::oauth2_start_line(&name, graph)));
+
+    let id = wire_str(&started["operation_id"]).to_string();
+    let settled = await_operation(&mut connection, &id, |payload| {
+        if payload["phase"].as_str() == Some(mailypoppins::daemon::methods::config::DEVICE_CODE_PHASE)
+        {
+            if let Some((uri, code)) = payload["message"].as_str().and_then(|m| m.split_once(' ')) {
+                print!("{}", mp_client::format::oauth2_device_code_lines(uri, code));
+            }
+        }
+    })
+    .await;
+    match settled {
+        Settled::Done(_) => {
+            println!("{}", paint(&mp_client::format::oauth2_stored_line(&name)));
+            Ok(())
+        }
+        Settled::Failed(message) => Err(anyhow!("{message}")),
+    }
+}
+
+/// A daemon session that will follow an operation.
+///
+/// A client only receives `operation.progress` and `operation.finished` if it
+/// subscribed first, which `state.bootstrap` is: a session that skipped it
+/// waits forever for a notification nobody addressed to it.
+async fn operation_session() -> mp_client::Connection {
+    let mut connection = daemon_connection().await;
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+    connection
+}
+
+/// Start one operation of the admin slice and wait for its result, raising the
+/// refusal the daemon spelled out.
+async fn run_admin_operation(
+    connection: &mut mp_client::Connection,
+    method: &str,
+    params: serde_json::Value,
+    account: &str,
+) -> Result<serde_json::Value> {
+    let started = daemon_try_call(connection, method, params)
+        .await
+        .map_err(|error| refusal(account, error))?;
+    settle(connection, &started).await
+}
+
+/// Wait for an operation this slice started, with no progress to render.
+async fn settle(
+    connection: &mut mp_client::Connection,
+    started: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let id = wire_str(&started["operation_id"]).to_string();
+    match await_operation(connection, &id, |_| {}).await {
+        Settled::Done(result) => Ok(result),
+        Settled::Failed(message) => Err(anyhow!("{message}")),
+    }
+}
+
+/// Whether a refusal is the daemon saying this account has no store at all,
+/// which several commands of this slice report as a note and walk past.
+fn is_storeless(error: &mp_protocol::RpcError) -> bool {
+    error.code == mp_protocol::ErrorCode::AccountNotReady.code()
+}
+
 /// The command and, where the no-daemon list distinguishes one, the
 /// subcommand, as they were typed.
 ///
@@ -2989,8 +3586,13 @@ async fn main() -> Result<()> {
         global_config.accounts.first().cloned().unwrap_or_default()
     };
 
-    // Load SMTP config from account config + keyring
-    let smtp_config = SmtpConfig::load(&account_config).unwrap_or_else(|e| {
+    // Load SMTP config from account config + keyring.
+    //
+    // Unused from P4-U14, when `mp invite` started submitting its reply through
+    // `calendar.rsvp`, and deleted with the rest of the direct engine paths by
+    // P4-U15. The call itself stays: the two warning lines it prints when there
+    // are no credentials are part of what every command has always printed.
+    let _smtp_config = SmtpConfig::load(&account_config).unwrap_or_else(|e| {
         eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
         eprintln!("  Some commands may not work without proper configuration.");
         SmtpConfig {
@@ -3230,55 +3832,22 @@ async fn main() -> Result<()> {
             println!("{}", created.selector);
         }
 
+        // The invitation, the reply it builds and the submission are the
+        // daemon's from P4-U14, `ANO-4`'s refusal included; the one line the
+        // command prints is still this process's.
         Some(Commands::Invite { action }) => {
-            let (selector, mailbox, rsvp) = match action {
-                InviteAction::Accept { selector, mailbox } => {
-                    (selector, mailbox, mailypoppins::invite::Rsvp::Accepted)
-                }
-                InviteAction::Tentative { selector, mailbox } => {
-                    (selector, mailbox, mailypoppins::invite::Rsvp::Tentative)
-                }
-                InviteAction::Decline { selector, mailbox } => {
-                    (selector, mailbox, mailypoppins::invite::Rsvp::Declined)
-                }
+            let (selector, mailbox, response) = match action {
+                InviteAction::Accept { selector, mailbox } => (selector, mailbox, "accept"),
+                InviteAction::Tentative { selector, mailbox } => (selector, mailbox, "tentative"),
+                InviteAction::Decline { selector, mailbox } => (selector, mailbox, "decline"),
             };
-            if account_config.auth_method == AuthMethod::Graph {
-                return Err(anyhow!(
-                    "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)"
-                ));
-            }
-            // The RSVP goes out over this account's SMTP transport, already
-            // bound; a cross-account selector fails loudly rather than replying
-            // from the wrong account.
-            ensure_selector_account_matches(&selector, &account_config)?;
-
-            let store = received_store(&account_config.name)?;
-            let (row, canonical) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            // The invitation's own iMIP payload is the source of truth for the
-            // reply, and it is a blob on the row (#0038 item 6).
-            let ics = mailypoppins::store::read::load_invite_ics(&store, &blobs, row.id)
-                .ok_or_else(|| anyhow!("{canonical} carries no invitation to reply to"))?;
-            drop(store);
-
-            let outcome = mailypoppins::send::send_rsvp(
-                &ics,
-                &account_config,
-                &account_config.default_from,
-                rsvp,
-                &smtp_config,
+            routed_rsvp(
+                &account_config.name,
+                &selector,
+                mailbox.as_deref(),
+                response,
             )
             .await?;
-            if !outcome.send_result.any_succeeded() {
-                return Err(anyhow!("Failed to send the RSVP to {}", outcome.organizer));
-            }
-            println!(
-                "{} {} \u{2014} replied to {}",
-                "\u{2713}".green(),
-                outcome.subject,
-                outcome.organizer
-            );
         }
 
         Some(Commands::ListMailboxes) => {
@@ -3686,25 +4255,29 @@ async fn main() -> Result<()> {
             }
         }
 
+        // The index, the ranking and the cache are all the daemon's from
+        // P4-U14; the glyphs, the tab-delimited projection and the
+        // all-accounts loop stay here.
         Some(Commands::Contacts { action }) => {
             match action {
                 ContactsAction::Search { query, parsable, limit, account } => {
                     let acct = account.or_else(|| cli.account.clone());
-                    mailypoppins::contacts_cmd::handle_search(
-                        &global_config,
-                        query,
-                        parsable,
-                        limit,
-                        acct,
-                    )?;
+                    let name = pick_account_named(&global_config, acct.as_deref())?
+                        .name
+                        .clone();
+                    routed_contacts_search(&name, query.as_deref(), parsable, limit).await?;
                 }
                 ContactsAction::Rebuild { account } => {
                     let acct = account.or_else(|| cli.account.clone());
-                    mailypoppins::contacts_cmd::handle_rebuild(&global_config, acct)?;
+                    routed_contacts_rebuild(&accounts_for(&global_config, acct.as_deref())?)
+                        .await?;
                 }
                 ContactsAction::Stats { account } => {
                     let acct = account.or_else(|| cli.account.clone());
-                    mailypoppins::contacts_cmd::handle_stats(&global_config, acct)?;
+                    let name = pick_account_named(&global_config, acct.as_deref())?
+                        .name
+                        .clone();
+                    routed_contacts_stats(&name).await?;
                 }
             }
         }
@@ -3712,7 +4285,7 @@ async fn main() -> Result<()> {
         Some(Commands::Calendar { action }) => match action {
             CalendarAction::Rebuild { account } => {
                 let acct = account.or_else(|| cli.account.clone());
-                mailypoppins::calendar_cmd::handle_rebuild(&global_config, acct)?;
+                routed_calendar_rebuild(&accounts_for(&global_config, acct.as_deref())?).await?;
             }
         },
 
@@ -3738,13 +4311,13 @@ async fn main() -> Result<()> {
                 if accounts.len() > 1 {
                     println!("\n{}", format!("\u{2500}\u{2500} {} \u{2500}\u{2500}", account.name).bold());
                 }
-                run_store_gc(&global_config, account, dry_run, force)?;
+                routed_store_gc(&account.name, dry_run, force).await?;
             }
         }
 
         Some(Commands::Cutover { account, dry_run }) => {
             let acct = account.or_else(|| cli.account.clone());
-            mailypoppins::cutover::handle_cutover(&global_config, acct, dry_run)?;
+            routed_cutover(&accounts_for(&global_config, acct.as_deref())?, dry_run).await?;
         }
 
         Some(Commands::DumpKeys { json }) => {
@@ -3779,23 +4352,36 @@ async fn main() -> Result<()> {
 
         Some(Commands::Config { action }) => {
             match action {
-                ConfigAction::Init => cmd_config_init()?,
-                ConfigAction::Show => cmd_config_show()?,
+                // Both wizards ask the daemon where the configuration is and
+                // whether there is one *before* they prompt, which is the pair
+                // of facts their first line prints and what lets the declined
+                // branch prove it routed (P4-U14).
+                ConfigAction::Init => {
+                    let (path, exists, _) = routed_config_state().await?;
+                    cmd_config_init(&path, exists)?;
+                    reload_config_quietly().await;
+                }
+                ConfigAction::Show => routed_config_show().await?,
                 ConfigAction::SetPassword { which, account } => {
                     let acct_name = account
                         .or_else(|| cli.account.clone())
                         .or_else(|| global_config.accounts.first().map(|a| a.name.clone()))
                         .unwrap_or_else(|| "main".to_string());
-                    cmd_set_password(&which, &acct_name)?;
+                    routed_set_password(&which, &acct_name).await?;
                 }
-                ConfigAction::AddAccount => cmd_config_add_account()?,
+                ConfigAction::AddAccount => {
+                    let (path, exists, config) = routed_config_state().await?;
+                    let names: Vec<String> =
+                        config.accounts.iter().map(|a| a.name.clone()).collect();
+                    cmd_config_add_account(&path, exists, &names)?;
+                    reload_config_quietly().await;
+                }
                 ConfigAction::Oauth2Login { account } => {
-                    let acct_name = account
-                        .or_else(|| cli.account.clone());
-                    cmd_oauth2_login(acct_name.as_deref()).await?;
+                    let acct_name = account.or_else(|| cli.account.clone());
+                    routed_oauth2_login(&global_config, acct_name.as_deref()).await?;
                 }
 
-                ConfigAction::ResetSecrets => cmd_reset_secrets()?,
+                ConfigAction::ResetSecrets => routed_reset_secrets().await?,
                 ConfigAction::Path => cmd_config_path(),
             }
         }

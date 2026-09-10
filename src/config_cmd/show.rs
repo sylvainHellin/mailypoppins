@@ -1,9 +1,11 @@
+use std::path::Path;
+
 use anyhow::Result;
 use colored::*;
 
 use crate::config::{
-    all_configured_mailboxes, blobs_dir, config_path, drafts_dir, get_secret, load_global_config,
-    mailypoppins_data_dir, retention_for, store_path, AuthMethod,
+    all_configured_mailboxes, blobs_dir, config_path, drafts_dir, get_secret, mailypoppins_data_dir,
+    retention_for, store_path, AuthMethod, GlobalConfig,
 };
 use crate::store::sweep::human_bytes;
 
@@ -22,11 +24,14 @@ pub fn cmd_config_path() {
 }
 
 /// Display the resolved config with masked passwords.
-pub fn cmd_config_show() -> Result<()> {
-    let config = load_global_config()?;
-
+///
+/// The configuration and the path it came from are the caller's, because since
+/// P4-U14 they come off the wire: `mp config show` renders `config.get`'s
+/// effective configuration, which is the loaded document after serde defaults
+/// (`docs/daemon-protocol.md`), rather than re-reading the file the daemon owns.
+pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
     println!("{}", "=== mailypoppins configuration ===".bold().cyan());
-    println!("{}: {}", "Config file".bold(), config_path().display());
+    println!("{}: {}", "Config file".bold(), path.display());
     println!("{}: {}", "Data dir".bold(), mailypoppins_data_dir().display());
 
     let theme_name = if config.theme.is_empty() {
@@ -167,7 +172,7 @@ pub fn cmd_config_show() -> Result<()> {
         // Retention is enforced as of #0060: the sweep runs after every sync
         // and via `mp store gc`. This block used to (and must no longer) label
         // it unenforced.
-        match retention_for(&config, account) {
+        match retention_for(config, account) {
             Ok(policy) => {
                 println!("\n  {}", "[retention]".bold());
                 println!("    enforced             = {}", "yes (sweep after sync + `mp store gc`)".green());

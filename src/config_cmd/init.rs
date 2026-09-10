@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 
 use crate::config::{
-    account_dir, blobs_dir, config_path, drafts_dir, load_global_config,
+    account_dir, blobs_dir, drafts_dir,
     mailypoppins_data_dir, set_secret, store_path, tokens_dir,
 };
 use crate::imap_client::list_mailboxes;
@@ -50,10 +50,16 @@ pub(super) fn print_account_data_paths(account_name: &str) {
 }
 
 /// Interactive setup wizard for creating the config file.
-pub fn cmd_config_init() -> Result<()> {
-    let path = config_path();
+///
+/// `path` and `exists` come from `config.get` since P4-U14: the daemon owns the
+/// configuration, so whether one is there and where it lives are its facts, and
+/// asking it before the first prompt is what lets the declined branch satisfy
+/// `MAILYPOPPINS_DAEMON_REQUIRE`. The prompts themselves stay here, because a
+/// daemon has no stdin.
+pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
+    let path = path.to_path_buf();
 
-    if path.exists() {
+    if exists {
         print!(
             "{} Config file already exists at {}. Overwrite? [y/N] ",
             "\u{26a0}".yellow(),
@@ -458,18 +464,23 @@ pub fn cmd_config_init() -> Result<()> {
 }
 
 /// Add a new account to an existing config file.
-pub fn cmd_config_add_account() -> Result<()> {
-    let path = config_path();
-    if !path.exists() {
+///
+/// `path`, `exists` and `existing_names` come from `config.get` (P4-U14), for
+/// the reason [`cmd_config_init`] states.
+pub fn cmd_config_add_account(
+    path: &std::path::Path,
+    exists: bool,
+    existing_names: &[String],
+) -> Result<()> {
+    let path = path.to_path_buf();
+    if !exists {
         return Err(anyhow::anyhow!(
             "Config file not found at {}. Run `mp config init` first.",
             path.display()
         ));
     }
 
-    // Load existing config to check for name conflicts
-    let existing = load_global_config()?;
-    let existing_names: Vec<&str> = existing.accounts.iter().map(|a| a.name.as_str()).collect();
+    let existing_names: Vec<&str> = existing_names.iter().map(String::as_str).collect();
     println!(
         "{} Existing accounts: {}",
         "\u{2139}".blue(),

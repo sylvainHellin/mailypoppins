@@ -95,12 +95,25 @@ The migration moves the CLI one slice at a time, and a command routes the moment
 | `mp outbox list` | `send.outbox_list` | P4-U12 |
 | `mp outbox retry <id>` | `send.outbox_list`, then `send.outbox_retry` | P4-U12 |
 | `mp outbox discard <id>` | `send.outbox_list`, then `send.outbox_discard` | P4-U12 |
+| `mp contacts search [query] [-n] [--parsable] [--account]` | `contact.search` | P4-U14 |
+| `mp contacts stats [--account]` | `contact.stats` | P4-U14 |
+| `mp contacts rebuild [--account]` | one `contact.rebuild` per account, in configuration order | P4-U14 |
+| `mp calendar rebuild [--account]` | one `calendar.rebuild` per account, in configuration order | P4-U14 |
+| `mp invite accept\|tentative\|decline <selector> [--mailbox]` | `calendar.rsvp` | P4-U14 |
+| `mp store gc [--dry-run] [--force] [--all-accounts]` | one `diagnostic.store_gc` per account | P4-U14 |
+| `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
+| `mp config show` | `config.get` | P4-U14 |
+| `mp config init`, `mp config add-account` | `config.get` before the first prompt, `config.reload` after the wizard writes | P4-U14 |
+| `mp config set-password <smtp\|imap> [--account]` | `config.set_password`, with the `dialoguer` prompt in the client | P4-U14 |
+| `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
+| `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 
-Every other command still answers in process and will until its own slice.
+`mp config path` is the one domain command that never contacts a daemon, and after the admin slice it is the only command in the product that answers in process at all: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
 A routed command produces the pre-daemon binary's bytes, refusals included: `tests/daemon_read_slice.rs` compares stdout, stderr and the exit code against `~/.cache/mp-oracle/pre-daemon/mp` over one seeded root, for every flag combination and every error case.
 That is why a refusal the daemon spelled out comes back typed rather than printed at the call site: `account_not_ready` becomes the sentence a store-less read has always produced, and the rest leaves through `main`'s ordinary error path, which is where the pre-daemon binary reported it.
 `tests/daemon_draft_slice.rs` is the same gate for the draft slice, over a fixture whose drafts directories are stashed and restored between the two binaries, because half of those commands write.
+`tests/daemon_admin_slice.rs` is the gate for the admin slice, and it masks nothing: the two values that would have forced a mask are removed at the fixture instead, the contact index's `built_at` by building the cache once before either binary runs, and an RSVP's `Message-ID` by keeping every row that actually sends one on the routed side.
 `tests/daemon_mutation_slice.rs` is the gate for `mp archive`, `mp delete`, `mp open` and `mp save`, with one row deliberately not byte-identical: `mp open` prints the path it handed the opener, and a daemon-materialised file lives under `<data_dir>/runtime/handles/<handle>/` rather than in the client's own temp directory, so that row is compared with the two directories masked.
 `mp save` is the mirror image of it: the absolute destination is what crosses the socket, and the spelling the user typed is what the `✓` lines print.
 The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.

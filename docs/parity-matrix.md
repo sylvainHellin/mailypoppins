@@ -57,30 +57,34 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp config init`, `src/main.rs`, `src/config_cmd/init.rs`
-- Daemon surface: `config.init`, `config.set_password`, `operation.*` for the multi-step pass, `state.event` once the account exists
+- Daemon surface: `config.get` before the first prompt, then `config.reload` once the wizard has written; `config.init`, `config.set_password`, `operation.*` for the multi-step pass, `state.event` once the account exists
 - GUI location: TBD (Phase 9)
-- Validation: manual, no automated coverage today
-- Status: not started
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_init_prompts_in_the_client`), otherwise manual
+- Status: routed (P4-U14)
 - Note: the wizard writes `config.toml` and one secret in a single pass, so the GUI drives it through `config.*` rather than spawning the CLI.
+  P4-U14 routed the branch a parity test can reach - the overwrite question, which the client asks after `config.get` has told it whether a configuration exists and where - and left the wizard's own writes in the client, which reload the daemon when they finish; the pass past the first prompt dials a mail server and is pinned by nothing.
 
 ### ACC-02 Add a further account to an existing configuration
 
 - Classification: GUI parity
 - Source anchor: `mp config add-account`, `src/config_cmd/init.rs`
-- Daemon surface: `config.add_account`, `state.event`
+- Daemon surface: `config.get` before the first prompt, then `config.reload`; `config.add_account`, `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: manual
-- Status: not started
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_add_account_refuses_without_a_configuration`), otherwise manual
+- Status: routed (P4-U14)
+- Note: the refusal when there is no configuration to add to is the daemon's answer, rendered here; the wizard past it is `ACC-01`'s note.
 
 ### ACC-03 Show the effective configuration
 
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config show`, `src/config_cmd/show.rs`
-- Daemon surface: `config.show`
+- Daemon surface: `config.get`
 - GUI location: TBD (Phase 9)
-- Validation: manual
-- Status: not started
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_show_matches_the_oracle`)
+- Status: routed (P4-U14)
 - Note: the output is redacted, and after the cutover the daemon is the only reader of the underlying file.
+  One divergence from the `pre-daemon` binary is deliberate and older than this slice: `config.get` reports the effective configuration, which `docs/daemon-protocol.md` defines as the document *after serde defaults*, so `mp config show` prints `smtp.port = 465` and `imap.port = 993` for a configuration that omits them where the oracle printed `0`.
+  The `ACC-03` parity row names every port in its fixture, which takes the difference out of the comparison and leaves the row measuring what it is about.
 
 ### ACC-04 Print the configuration file path
 
@@ -88,8 +92,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp config path`, `src/config_cmd/mod.rs`
 - Daemon surface: client-side; the path is computed, so the command must keep running with no daemon
 - GUI location: TBD (Phase 9)
-- Validation: manual
-- Status: not started
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_path_never_contacts_a_daemon`)
+- Status: client-side, confirmed (P4-U14)
+- Note: on `needs_daemon`'s no-daemon list for good, and from P4-U14 the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`: after the admin slice it is the only command in the product a daemon-era binary answers in process.
 
 ### ACC-05 Store an SMTP or IMAP password in the active secrets backend
 
@@ -97,8 +102,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp config set-password <smtp|imap> [--account]`, `src/main.rs`, `src/config_cmd/password.rs`
 - Daemon surface: `config.set_password`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/secrets_integration.rs` for the backend
-- Status: not started
+- Validation: `tests/secrets_integration.rs` for the backend, `tests/daemon_admin_slice.rs` (`mp_config_set_password_reads_the_password_in_the_client`)
+- Status: routed (P4-U14)
 - Note: secret values travel only on the local socket and never appear in logs, diagnostics, or protocol errors.
 
 ### ACC-06 OAuth2 device-code login
@@ -107,19 +112,22 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp config oauth2-login [--account]`, `src/config_cmd/oauth2.rs`, `src/oauth2.rs`
 - Daemon surface: `config.oauth2_login` as an `operation.*` with the user code and verification URL on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: manual, requires a live provider
-- Status: not started
+- Validation: `tests/daemon_admin_slice.rs` pins the three refusals and the rendering; the flow itself is manual and requires a live provider
+- Status: routed (P4-U14)
 - Note: the client renders the code and opens the browser as a client-side integration (`INT-04`).
+  The progress payload is `{phase: "device_code", done: 0, total: null, message: "<verification_uri> <user_code>"}`, and `mp_client::format::{oauth2_start_line, oauth2_device_code_lines, oauth2_stored_line}` are the three lines a GUI reproduces.
+  The IMAP, SMTP and Graph connection tests the command ran after acquiring a token are not on the routed path: they need the token the daemon now holds, and they belong to the account slice.
 
 ### ACC-07 Reset secrets, wiping the encrypted file and the OAuth token caches
 
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config reset-secrets`, `src/config_cmd/reset.rs`
-- Daemon surface: `config.reset_secrets`
+- Daemon surface: `config.reset_secrets`, then one `config.set_password` per re-entered credential
 - GUI location: TBD (Phase 9)
-- Validation: manual
-- Status: not started
+- Validation: `tests/daemon_admin_slice.rs` (declined and confirmed)
+- Status: routed (P4-U14)
 - Note: the recovery path after a restore onto a new machine, where the machine-uid derived key no longer decrypts the file.
+  The confirmation and every password prompt stay in the client; the answer names the secrets file first and then the token caches, in path order, where the pre-daemon binary walked `read_dir` unsorted.
 
 ### ACC-08 Secrets backend, keyring plus a ChaCha20-Poly1305 file keyed through HKDF from the machine uid
 
@@ -868,8 +876,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp store gc [--dry-run] [--force] [--all-accounts]`, `src/main.rs`, `src/store/sweep.rs`
 - Daemon surface: `diagnostic.store_gc`, plus the automatic sweep the daemon runs after every sync
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/store/sweep.rs`
-- Status: not started
+- Validation: unit tests in `src/store/sweep.rs`, `tests/daemon_admin_slice.rs` (`mp_store_gc_matches_the_oracle`)
+- Status: routed (P4-U14)
 - Note: two safety rules a daemon or GUI port reproduces rather than relaxing (`ANO-5`): the first over-cap run warns and records a marker while the second evicts, and a plan reclaiming more than half the store's blob bytes is refused without `--force`.
   The sweep skips blobs backing a materialized handle a client still holds (`ANO-6`).
 
@@ -964,8 +972,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp contacts search [query] [-n] [--account]` (`src/main.rs`), the TUI contacts view `/`, `src/contacts/matcher.rs`
 - Daemon surface: `contact.search`
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/contacts/matcher.rs`
-- Status: not started
+- Validation: unit tests in `src/contacts/matcher.rs`, `tests/daemon_admin_slice.rs`
+- Status: routed (P4-U14)
 
 ### CON-02 Tab-delimited `email` and `name` output for mutt, aerc, and vim
 
@@ -973,9 +981,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp contacts search --parsable`, `src/main.rs`
 - Daemon surface: `contact.search` with the parsable projection
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_help_snapshot.rs`
-- Status: not started
+- Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_admin_slice.rs` (`mp_contacts_search_parsable_is_tab_delimited`)
+- Status: routed (P4-U14)
 - Note: a stable shape other tools already consume, so the daemon migration must not reformat it (`ANO-8`).
+  `contact.search` answers rows named `{address, display_name, sent_to, sent_cc, received, score}`, so the tab-delimited line is a projection of the wire row rather than a translation of it.
 
 ### CON-03 Rebuild or refresh the contact index from the local message store
 
@@ -983,9 +992,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp contacts rebuild [--account]` (`src/main.rs`), the TUI contacts view `r`
 - Daemon surface: `contact.rebuild` as an `operation.*`
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/contacts/`
-- Status: not started
+- Validation: unit tests in `src/contacts/`, `tests/daemon_admin_slice.rs`
+- Status: routed (P4-U14)
 - Note: the all-accounts default of the CLI form is automation, while the single-account refresh is the user-facing capability.
+  The loop is the client's, over the configured accounts in configuration order; the method takes one required `account` and no `all_accounts`.
 
 ### CON-04 Contact index statistics
 
@@ -993,8 +1003,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp contacts stats [--account]`, `src/main.rs`
 - Daemon surface: `contact.stats`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_help_snapshot.rs`
-- Status: not started
+- Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_admin_slice.rs`
+- Status: routed (P4-U14)
 
 ### CON-05 Compose to a contact from the contacts view
 
@@ -1030,8 +1040,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: daemon-internal, with `state.event` when the index changes
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/contacts/rank.rs`, `src/contacts/extractor.rs`
-- Status: not started
+- Status: routed (P4-U14)
 - Note: implicit workflow that keeps the index current as mail arrives.
+  Since the admin slice the extraction, the ranking and the cache guard (#0067) all run in the daemon; no client opens the index.
 
 ## Calendar and iMIP
 
@@ -1039,11 +1050,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp invite accept|tentative|decline <selector> [--mailbox]` (`src/main.rs`), TUI `tv` in the message context and `V` in the calendar view, `src/invite.rs`, `tests/imip_integration.rs`
-- Daemon surface: `calendar.rsvp`
+- Daemon surface: `calendar.rsvp` as an `operation.*`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/imip_integration.rs`
-- Status: not started
+- Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, and the successful reply through the daemon's fake transport)
+- Status: routed (P4-U14)
 - Note: whole-series only in v1, the reply travels as iMIP over SMTP, and the target message must carry an `invite.ics` blob.
+  The Graph refusal (`ANO-4`) is made before anything about the selector is examined, so a surface that shows the RSVP buttons disabled can say why without naming a resolvable message.
 
 ### CAL-02 Agenda view with an upcoming and past toggle and a refresh
 
@@ -1069,8 +1081,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp calendar rebuild [--account]`, `src/main.rs`, `src/calendar_cmd.rs`
 - Daemon surface: `calendar.rebuild`, which reports and writes nothing
 - GUI location: TBD (Phase 9)
-- Validation: `tests/imip_integration.rs`
-- Status: not started
+- Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_calendar_rebuild_matches_the_oracle`)
+- Status: routed (P4-U14)
 - Note: attendee status is derived from the `invite.ics` payloads wherever it is displayed, so there is no cached copy to rebuild.
 
 ### CAL-05 Invitation rendering with derived attendee statuses
@@ -1311,10 +1323,11 @@ Every capability in this group is new in this plan and has no current source anc
 
 - Classification: migration-only
 - Source anchor: `mp cutover [--account] [--dry-run]`, `src/main.rs`, `src/cutover.rs`
-- Daemon surface: `config.cutover`, or the command stays client-side over the filesystem
+- Daemon surface: `config.cutover` as an `operation.*`
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/cutover.rs`
-- Status: not started
+- Validation: unit tests in `src/cutover.rs`, `tests/daemon_admin_slice.rs` (`mp_cutover_matches_the_oracle`)
+- Status: routed (P4-U14)
+- Note: P4-U14 took the first of the two options this row offered; the client-side one is gone, because after the cutover the daemon owns the data directory and the drafts index the import writes into.
 - Note: assigns an `id:` field to any draft lacking one so it becomes addressable by selector, names the dead mailbox directories, prints the command that removes them, and deletes nothing itself, while `--dry-run` writes not even the `id:` field.
 
 ### MIG-02 Signature migration from the `[accounts.signatures]` TOML block into signature files

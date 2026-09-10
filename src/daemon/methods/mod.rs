@@ -21,7 +21,10 @@
 //! with the state that owns it.
 
 pub mod account;
+pub mod calendar;
 pub mod config;
+pub mod contact;
+pub mod diagnostic;
 pub mod draft;
 pub mod mailbox;
 pub mod message;
@@ -100,6 +103,9 @@ pub fn register(
         Arc::clone(&canonical),
         Arc::clone(&operations),
     );
+    self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
+    self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
+    self::diagnostic::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::config::register(
         dispatcher,
         Arc::new(self::config::ConfigFamily {
@@ -107,6 +113,7 @@ pub fn register(
             runtimes,
             canonical: Arc::clone(&canonical),
             watch,
+            operations: Arc::clone(&operations),
         }),
     );
     dispatcher.register(Arc::new(self::state::StateBootstrap::new(
@@ -134,6 +141,26 @@ fn string_param(params: &Value, name: &str) -> Result<String, RpcError> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| invalid_params(format!("{name} is a required string parameter")))
+}
+
+/// Refuse a call carrying a parameter the method does not take.
+///
+/// The admin slice needs this on every method: `contact.rebuild`,
+/// `diagnostic.store_gc` and `config.cutover` all have an `--all-accounts`
+/// form on the command line whose loop stays in the client, and a method that
+/// quietly ignored an `all_accounts` it was sent would let that loop drift into
+/// the daemon one release later.
+fn only_params(method: &str, params: &Value, allowed: &[&str]) -> Result<(), RpcError> {
+    let Some(object) = params.as_object() else {
+        return Ok(());
+    };
+    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(unexpected) => Err(invalid_params(format!(
+            "{method} has no {unexpected} parameter; it takes {}",
+            allowed.join(", ")
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// `-32602`, with a message the caller can act on.

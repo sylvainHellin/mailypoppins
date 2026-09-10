@@ -1,4 +1,10 @@
-//! CLI handlers for `mp contacts …`.
+//! CLI handlers for `mp contacts …`, and the rendering both they and the
+//! routed client (P4-U14) print through.
+//!
+//! Since the admin slice the index itself is the daemon's: `contact.search`,
+//! `contact.stats` and `contact.rebuild` answer with [`ContactRow`]s and the
+//! verdict a rebuild reached, and every literal below is printed once, here,
+//! whichever process did the reading.
 
 use crate::config::{account_dir, AccountConfig, GlobalConfig};
 use crate::contacts::{
@@ -8,6 +14,33 @@ use crate::contacts::{
 use anyhow::{anyhow, Result};
 use colored::*;
 use std::path::{Path, PathBuf};
+
+/// One ranked contact, as the listing renders it.
+///
+/// The field names of [`Contact`], because `contact.search` carries them under
+/// those names and `mp contacts search --parsable` prints `address\tname`: a
+/// renamed pair would make the tab-delimited line a translation rather than a
+/// projection (`ANO-8`).
+#[derive(Clone, Debug, Default)]
+pub struct ContactRow {
+    pub address: String,
+    pub display_name: String,
+    pub sent_to: u32,
+    pub sent_cc: u32,
+    pub received: u32,
+}
+
+impl From<&Contact> for ContactRow {
+    fn from(contact: &Contact) -> ContactRow {
+        ContactRow {
+            address: contact.address.clone(),
+            display_name: contact.display_name.clone(),
+            sent_to: contact.sent_to,
+            sent_cc: contact.sent_cc,
+            received: contact.received,
+        }
+    }
+}
 
 pub fn handle_search(
     config: &GlobalConfig,
@@ -21,37 +54,48 @@ pub fn handle_search(
     let index = load_or_build(account, &root)?;
 
     let q = query.unwrap_or_default();
-    let results = search(&index, &q, limit);
+    let results: Vec<ContactRow> = search(&index, &q, limit)
+        .iter()
+        .map(|m| ContactRow::from(m.contact))
+        .collect();
+    print_search(&results, &q, parsable);
+    Ok(())
+}
 
+/// Every line `mp contacts search` prints, in order.
+pub fn print_search(results: &[ContactRow], q: &str, parsable: bool) {
     if parsable {
         // Mutt/aerc/himalaya-vim compatibility format: first line is a header,
         // then `email\tname` lines. Mutt discards the first line by protocol.
         println!("{} results for '{}'", results.len(), q);
         for r in results {
-            println!("{}\t{}", r.contact.address, r.contact.display_name);
+            println!("{}\t{}", r.address, r.display_name);
         }
     } else if results.is_empty() {
         println!("{} No matches", "ℹ".blue());
     } else {
         for (i, r) in results.iter().enumerate() {
-            let tier_mark = tier_indicator(r.contact);
-            let name = if r.contact.display_name.is_empty() {
+            let tier_mark = tier_indicator(r);
+            let name = if r.display_name.is_empty() {
                 "(no name)".dimmed()
             } else {
-                r.contact.display_name.as_str().yellow()
+                r.display_name.as_str().yellow()
             };
             println!(
                 "{:>3}. {} {} {}",
                 i + 1,
                 tier_mark,
                 name,
-                format!("<{}>", r.contact.address).cyan(),
+                format!("<{}>", r.address).cyan(),
             );
         }
     }
-    Ok(())
 }
 
+// Unused from P4-U14, when `mp contacts rebuild` started answering from
+// `contact.rebuild`. Deleted with the rest of the direct engine paths by
+// P4-U15.
+#[allow(dead_code)]
 pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Result<()> {
     let accounts: Vec<&AccountConfig> = match account_name {
         Some(name) => vec![pick_account(config, Some(&name))?],
@@ -64,75 +108,118 @@ pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Re
     };
     for account in accounts {
         let root = account_root(account)?;
-        println!(
-            "{} Rebuilding contacts for {} …",
-            "ℹ".blue(),
-            account.name.yellow()
-        );
+        print_rebuild_header(&account.name);
         let index = build_index_for_account(account)?;
         let count = index.contacts.len();
-        match save_rebuilt_cache(&root, &index)? {
+        print_rebuild_outcome(
+            &save_rebuilt_cache(&root, &index)?,
+            count,
+            &cache_path(&root),
+        );
+    }
+    Ok(())
+}
+
+/// The line a rebuild prints before it starts, which names the account so a
+/// batch of five is legible while it runs.
+pub fn print_rebuild_header(account: &str) {
+    println!(
+        "{} Rebuilding contacts for {} …",
+        "ℹ".blue(),
+        account.yellow()
+    );
+}
+
+/// The verdict `save_rebuilt_cache` reached, in the words it has always been
+/// reported in, including the two refusals that keep a good cache (#0067).
+pub fn print_rebuild_outcome(saved: &CacheSave, count: usize, root: &Path) {
+    {
+        match saved {
             CacheSave::Written => println!(
                 "{} {} contacts cached at {}",
                 "✓".green(),
                 count.to_string().bold(),
-                cache_path(&root).display()
+                root.display()
             ),
             CacheSave::RefusedEmpty { kept } => println!(
                 "{} Rebuild found no contacts; kept the {} already cached at {}",
                 "⚠".yellow(),
                 kept.to_string().bold(),
-                cache_path(&root).display()
+                root.display()
             ),
             CacheSave::RefusedShrunk { kept, rebuilt } => println!(
                 "{} Rebuild found only {} contacts against {} cached; kept the cache at {}",
                 "⚠".yellow(),
                 rebuilt.to_string().bold(),
                 kept.to_string().bold(),
-                cache_path(&root).display()
+                root.display()
             ),
         }
     }
-    Ok(())
 }
 
+// Unused from P4-U14, when `mp contacts stats` started answering from
+// `contact.stats`. Deleted with the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 pub fn handle_stats(config: &GlobalConfig, account_name: Option<String>) -> Result<()> {
     let account = pick_account(config, account_name.as_deref())?;
     let root = account_root(account)?;
     let index = load_or_build(account, &root)?;
 
-    let total = index.contacts.len();
-    let sent_to_total: u32 = index.contacts.values().map(|c| c.sent_to).sum();
-    let sent_cc_total: u32 = index.contacts.values().map(|c| c.sent_cc).sum();
-    let received_total: u32 = index.contacts.values().map(|c| c.received).sum();
+    let top: Vec<ContactRow> = search(&index, "", 10)
+        .iter()
+        .map(|m| ContactRow::from(m.contact))
+        .collect();
+    print_stats(
+        &account.name,
+        index.contacts.len(),
+        index.contacts.values().map(|c| u64::from(c.sent_to)).sum(),
+        index.contacts.values().map(|c| u64::from(c.sent_cc)).sum(),
+        index.contacts.values().map(|c| u64::from(c.received)).sum(),
+        &cache_path(&root).display().to_string(),
+        &index.built_at,
+        &top,
+    );
+    Ok(())
+}
 
-    println!("{} Contacts for {}", "ℹ".blue(), account.name.yellow());
+/// Every line `mp contacts stats` prints, in order.
+#[allow(clippy::too_many_arguments)]
+pub fn print_stats(
+    account: &str,
+    total: usize,
+    sent_to_total: u64,
+    sent_cc_total: u64,
+    received_total: u64,
+    cache: &str,
+    built_at: &str,
+    top: &[ContactRow],
+) {
+    println!("{} Contacts for {}", "ℹ".blue(), account.yellow());
     println!("  Total contacts:  {}", total.to_string().bold());
     println!("  Sent-to hits:    {}", sent_to_total);
     println!("  Sent-cc hits:    {}", sent_cc_total);
     println!("  Received hits:   {}", received_total);
-    println!("  Cache path:      {}", cache_path(&root).display());
-    println!("  Built at:        {}", index.built_at);
+    println!("  Cache path:      {}", cache);
+    println!("  Built at:        {}", built_at);
     println!();
     println!("{}", "Top 10:".bold());
-    let top = search(&index, "", 10);
     for (i, r) in top.iter().enumerate() {
-        let name = if r.contact.display_name.is_empty() {
+        let name = if r.display_name.is_empty() {
             "(no name)".to_string()
         } else {
-            r.contact.display_name.clone()
+            r.display_name.clone()
         };
         println!(
             "  {:>2}. {} <{}> (sent_to={}, sent_cc={}, received={})",
             i + 1,
             name,
-            r.contact.address,
-            r.contact.sent_to,
-            r.contact.sent_cc,
-            r.contact.received,
+            r.address,
+            r.sent_to,
+            r.sent_cc,
+            r.received,
         );
     }
-    Ok(())
 }
 
 // --- helpers ---
@@ -176,7 +263,7 @@ fn load_or_build(account: &AccountConfig, root: &Path) -> Result<ContactIndex> {
     }
 }
 
-fn tier_indicator(c: &Contact) -> colored::ColoredString {
+fn tier_indicator(c: &ContactRow) -> colored::ColoredString {
     // Nerd Font icons (NOT emojis): nf-md-account_check, nf-md-account, nf-md-email.
     if c.sent_to > 0 {
         "󰁞".green()
