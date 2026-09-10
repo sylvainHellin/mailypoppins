@@ -15,10 +15,13 @@
 //! *executed* tests would disappear along with the tests it is meant to
 //! defend.
 //!
-//! The three floors are the counts on the pre-workspace tree. They are floors,
-//! not equalities: adding tests must never fail CI. To lower one deliberately
-//! (a module genuinely deleted), edit the constant in the same commit that
-//! deletes the tests, and say so in the commit message.
+//! The three floors started as the counts on the pre-workspace tree and are
+//! raised to the actual counts as the tree grows: a floor left far below what
+//! the tree carries stops defending anything, because a whole file of tests
+//! can vanish without crossing it. They are floors, not equalities: adding
+//! tests must never fail CI. To lower one deliberately (a module genuinely
+//! deleted), edit the constant in the same commit that deletes the tests, and
+//! say so in the commit message.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,13 +36,15 @@ const SNAPSHOT_DIR: &str = "src/tui/ui/snapshots";
 
 /// `#[test]` / `#[tokio::test]` attributes under [`TUI_ROOT`].
 ///
-/// The plan's floor is 367; the tree carries 368, so the higher, actual count
-/// is the constant CI defends.
-const MIN_TUI_TESTS: usize = 368;
+/// The plan's floor was 367 and the pre-workspace tree carried 368; the Phase
+/// 5 tree carries 464, which is the count CI defends.
+const MIN_TUI_TESTS: usize = 464;
 /// `#[test]` functions in [`GOLDEN_FRAMES`]. Plan floor and actual both 20.
 const MIN_GOLDEN_FRAME_TESTS: usize = 20;
-/// `.snap` files in [`SNAPSHOT_DIR`]. Plan floor and actual both 18.
-const MIN_SNAPSHOT_FILES: usize = 18;
+/// `.snap` files in [`SNAPSHOT_DIR`]. Plan floor and pre-workspace actual both
+/// 18; the daemon-backed frames of P5-U1 added the two `…_daemon.snap` scenes
+/// that have no hand-built pair, so the actual is 20.
+const MIN_SNAPSHOT_FILES: usize = 20;
 
 /// The sentence every failure here must contain, so that a CI log search for
 /// it finds the guard regardless of which of the three counts moved.
