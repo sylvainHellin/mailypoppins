@@ -1800,3 +1800,13 @@ The second is the one a later phase can act on.
 `CLI_ENGINE_RESIDUE`'s scan looks for literal substrings (`Store::open`, `get_secret(`, `imap_client::`) rather than parsing Rust, because a boundary test that needed a front end would be a second compiler to maintain.
 
 Two things make it hold. Line comments are stripped first, so a doc comment saying "the error surfaces later when `SmtpConfig::load` is called" is not a call. And `#[cfg(test)] mod … { … }` blocks are stripped whole with matched braces, because a unit test that opens a store is the engine's own test living in that file for want of anywhere better, not a CLI handler. `src/read_cmd.rs` and `src/cutover.rs` both have one, and both would otherwise be permanent false rows.
+
+## `current_dir()` in library code is a bug the moment a daemon calls it
+
+`send::resolve_attachment_paths` absolutised a draft's relative `attachments:` entries against `std::env::current_dir()`, which was right for exactly as long as the process that sent the mail was the process the user typed in.
+
+After P4-U12 every send runs inside the daemon, `daemon::lifecycle::spawn_detached` sets no `current_dir`, and an auto-started daemon therefore inherits whichever directory the first client happened to be standing in and keeps it for its whole life. `attachments: [report.pdf]` resolved there.
+
+The client could not fix it either: no attachment path crosses the wire, because `send.draft` carries a selector and the daemon reads the draft file itself, so there was nothing for `client::absolutise` to rewrite short of editing the user's draft on disk. The anchor became the draft file's own directory, which is the one location both processes agree on, and it is a *parameter* of the function now. That is the general shape: a library function that resolves a relative path takes the anchor from its caller, and only the outermost client-side layer is allowed to ask the environment where it is standing.
+
+The grep that finds the rest is `rg 'current_dir\(\)' src/` outside `src/daemon/client.rs` and `src/main.rs`.

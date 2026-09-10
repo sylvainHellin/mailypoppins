@@ -320,7 +320,7 @@ mod tests {
         fs::create_dir(dir.path().join("sub")).unwrap();
 
         let entries = vec![dir.path().to_string_lossy().to_string()];
-        let resolved = resolve_attachment_paths(&entries).unwrap();
+        let resolved = resolve_attachment_paths(&entries, Path::new("/nowhere")).unwrap();
 
         let names: Vec<String> = resolved
             .iter()
@@ -341,10 +341,47 @@ mod tests {
             file.to_string_lossy().to_string(),
             "/no/such/file.pdf".to_string(),
         ];
-        let resolved = resolve_attachment_paths(&entries).unwrap();
+        let resolved = resolve_attachment_paths(&entries, Path::new("/nowhere")).unwrap();
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0], file);
         assert_eq!(resolved[1], PathBuf::from("/no/such/file.pdf"));
+    }
+
+    #[test]
+    fn test_resolve_attachment_paths_anchors_relative_entries_to_the_draft_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("report.pdf");
+        fs::write(&file, b"%PDF-1.4").unwrap();
+
+        // A relative entry resolves next to the draft, not next to whichever
+        // process happens to be running the send: the daemon's cwd is nobody's
+        // choice, so the anchor is passed in rather than read from the
+        // environment.
+        let resolved =
+            resolve_attachment_paths(&["report.pdf".to_string()], dir.path()).unwrap();
+        assert_eq!(resolved, vec![file.clone()]);
+        assert!(resolved.iter().all(|p| p.is_absolute()));
+
+        // An absolute entry ignores the anchor entirely.
+        let absolute =
+            resolve_attachment_paths(&[file.display().to_string()], Path::new("/nowhere")).unwrap();
+        assert_eq!(absolute, vec![file]);
+    }
+
+    #[test]
+    fn test_attachment_anchor_is_the_drafts_own_directory() {
+        let draft_at = |path: &str| EmailDraft {
+            path: PathBuf::from(path),
+            frontmatter: serde_yaml::from_str("subject: x\nstatus: draft\n").unwrap(),
+            body_markdown: String::new(),
+        };
+        assert_eq!(
+            attachment_anchor(&draft_at("/home/user/mail/alpha/drafts/note.md")),
+            Path::new("/home/user/mail/alpha/drafts")
+        );
+        // A bare file name has no parent; `.` keeps the degenerate case where
+        // it was rather than inventing a root.
+        assert_eq!(attachment_anchor(&draft_at("note.md")), Path::new("."));
     }
 
     #[test]
@@ -1891,27 +1928,49 @@ fn parse_graph_recipients(field: Option<&str>) -> Vec<(String, String)> {
     }
 }
 
+/// The directory a draft's relative `attachments:` entries are anchored to:
+/// the draft file's own directory.
+///
+/// A bare file name has no directory component - `Path::parent` answers
+/// `Some("")` for it, not `None` - and only a hand-built `EmailDraft` has one,
+/// since every draft the daemon reads comes off a full path. That degenerate
+/// case falls back to `.`, which leaves the entry relative exactly as the
+/// pre-daemon binary left it.
+fn attachment_anchor(draft: &EmailDraft) -> &Path {
+    match draft.path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    }
+}
+
 /// Expand a draft's `attachments:` frontmatter entries into concrete files.
 ///
-/// Each entry is tilde-expanded and then made absolute against this process's
-/// working directory. A directory entry contributes every regular file
-/// directly inside it (non-recursive, sorted by file name, dotfiles skipped);
-/// any other entry contributes itself. This lets a draft name one folder
-/// instead of listing every file in it. A path that is neither a readable
-/// directory nor an existing file is passed through, so the later `fs::read`
-/// reports the missing path the same way it always has.
+/// Each entry is tilde-expanded and then made absolute against `anchor`. A
+/// directory entry contributes every regular file directly inside it
+/// (non-recursive, sorted by file name, dotfiles skipped); any other entry
+/// contributes itself. This lets a draft name one folder instead of listing
+/// every file in it. A path that is neither a readable directory nor an
+/// existing file is passed through, so the later `fs::read` reports the
+/// missing path the same way it always has.
 ///
-/// The absolutisation is the client-side path rule of P4-U2: a relative entry
-/// still means what it means today, "below where the sender is standing", and
-/// making it absolute here is what keeps that true once the send crosses the
-/// socket to a daemon whose own working directory is somewhere else entirely.
-/// The only visible change is in a failure: a missing `report.pdf` is now
+/// `anchor` is the draft's own directory ([`attachment_anchor`]), not the
+/// process's working directory. Every send runs inside the daemon now, and the
+/// daemon is started from wherever the machine happened to start it
+/// (`spawn_detached` sets no `current_dir`), so a `cwd`-anchored entry would
+/// resolve somewhere nobody chose. No attachment path crosses the wire - the
+/// client sends a selector - so the client cannot rewrite the entry either
+/// without editing the draft file. The draft's directory is the one location
+/// both processes agree on. This is an accepted divergence from the pre-daemon
+/// binary, which anchored to the sender's cwd; see
+/// `docs/tickets/0123-cli-cutover.md`.
+///
+/// The other visible change is in a failure: a missing `report.pdf` is now
 /// reported by its full path.
-pub fn resolve_attachment_paths(entries: &[String]) -> Result<Vec<PathBuf>> {
+pub fn resolve_attachment_paths(entries: &[String], anchor: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in entries {
         let expanded = shellexpand::tilde(entry);
-        let path = crate::daemon::client::absolutise(Path::new(expanded.as_ref()));
+        let path = crate::daemon::client::absolutise_in(Path::new(expanded.as_ref()), anchor);
         if path.is_dir() {
             let mut dir_files = Vec::new();
             for dent in fs::read_dir(&path)
@@ -1968,7 +2027,7 @@ fn draft_attachments(draft: &EmailDraft) -> Result<Vec<(String, Vec<u8>, String)
         return Ok(Vec::new());
     };
     let mut data = Vec::new();
-    for path in resolve_attachment_paths(attachments)? {
+    for path in resolve_attachment_paths(attachments, attachment_anchor(draft))? {
         data.push(read_attachment(&path)?);
     }
     Ok(data)
@@ -2674,7 +2733,7 @@ pub fn build_draft_message(
         let mut mixed =
             build_invite_mime_body(&plain_text_body(&draft.body_markdown), body_html, ics);
         if let Some(attachments) = &draft.frontmatter.attachments {
-            for path in resolve_attachment_paths(attachments)? {
+            for path in resolve_attachment_paths(attachments, attachment_anchor(draft))? {
                 let (filename, file_content, content_type) = read_attachment(&path)?;
                 let content_type_parsed = content_type.parse().unwrap_or_else(|_| {
                     "application/octet-stream".parse().expect("static MIME type")
@@ -2684,7 +2743,7 @@ pub fn build_draft_message(
         }
         builder.multipart(mixed).context("Failed to build invite message")?
     } else if let Some(attachments) = &draft.frontmatter.attachments {
-        let files = resolve_attachment_paths(attachments)?;
+        let files = resolve_attachment_paths(attachments, attachment_anchor(draft))?;
         if !files.is_empty() {
             let mut mixed = MultiPart::mixed().multipart(body_multipart);
 

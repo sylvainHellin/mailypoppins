@@ -684,12 +684,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ATT-03 Attach a file to a draft
 
 - Classification: GUI parity
-- Source anchor: TUI `ta` in the drafts mailbox (`src/tui/app/keymap.rs:659`), `resolve_attachment_paths` (`src/send.rs:1902`)
+- Source anchor: TUI `ta` in the drafts mailbox (`src/tui/app/keymap.rs:659`), `resolve_attachment_paths` (`src/send.rs:1964`)
 - Daemon surface: `draft.attach` with an absolute path
 - GUI location: TBD (Phase 9)
 - Validation: `tests/draft_integration.rs`
 - Status: not started
-- Note: appends to the `attachments:` frontmatter list and verifies the path at the prompt, so the GUI file picker applies the same verification; a relative entry resolves against the process working directory, so the same absolutisation rule applies at the prompt and a hand-written relative entry keeps resolving where its author expects.
+- Note: appends to the `attachments:` frontmatter list and verifies the path at the prompt, so the GUI file picker applies the same verification.
+- Accepted divergence (P4-U15 review): a relative entry resolves against **the draft file's own directory**, where the pre-daemon binary resolved it against the sending process's working directory. No attachment path crosses the wire - `send.draft` carries a selector and the daemon reads the draft itself - so the client has nothing to rewrite, and the daemon's cwd is whichever directory happened to start it (`daemon::lifecycle::spawn_detached` sets no `current_dir`). The draft's directory is the one anchor both processes agree on; `send::resolve_attachment_paths` takes it explicitly and reads no `current_dir()`. Pinned by `tests/daemon_send_attachments.rs` and the unit rows in `src/send.rs` and `tests/daemon_autostart.rs`. A `~`-relative or absolute entry is unaffected, which is what the TUI's attach prompt stores.
 
 ### ATT-04 Open a draft's own attachment
 

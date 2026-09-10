@@ -77,6 +77,7 @@ These are the edits approved so far in Phase 4.
 - **`tests/daemon_send_slice.rs` `a_routed_send_delivers_retires_the_draft_and_files_the_copy`** (after P4-U12) is reconciled with `draft::settle_sent_draft`, which retires a fully delivered draft by *deleting* the file rather than by leaving `status: sent` behind it. The row now asserts the pair the deletion rests on: the file is gone, and the outbox holds exactly one row the send minted, in `done`. Its ledger assertion moves with it, from `appends() == 1` to `appends_of(minted Message-ID) == 1`: a send drains the account's outbox on its way out, so the seeded row waiting on its APPEND (`APPENDING_ROW`) files its copy in the same run and a total of two is the drain doing its job. SND-09 is about this message's copy, and counting by Message-ID says so. The row is routed-side only, so no parity expectation moves.
 - **`tests/support/send_fixture.rs`** (after P4-U12) gives the approved draft a second recipient, so `a_routed_send_whose_recipient_is_refused_is_partly_delivered` has a partial outcome to reach: a draft with one recipient is delivered whole or refused whole, and the fake transport refuses exactly `REJECTED` (`carol@example.com`), which no draft carried. `seed` rewrites `freigabe.md` in place with `cc: carol@example.com`, restoring the modification time afterwards because the drafts index orders by `mtime DESC, id ASC`. The `to:` line stays `ivana@example.com`, so `mp send-approved`'s `freigabe.md -> ivana@example.com` does not move, and the rewrite lives in the send slice's own fixture rather than in `draft_fixture`, so no other slice sees it. The fixture also gains `APPROVED_FILE`, `SEEDED_ROWS` and `all_rows`, the last because `unfinished_rows` hides a row that reached `done`.
 - **`tests/daemon_autostart.rs` `mp_save_writes_into_the_clients_cwd_with_the_daemon_started_from_root`** (P4-U8) is no longer `#[ignore]`d. It could not pass as written: it ran against a bare temporary root with no configuration and no store and asked for `mp://alpha/inbox/msg@example.com`, which nothing seeds. It now seeds `support::mutation_fixture::seed` into that root and asks for `mp://alpha/inbox/bericht@example.com`; the daemon-started-from-`/` half is unchanged, and so is the assertion.
+- **`tests/daemon_autostart.rs` `resolve_attachment_paths_yields_absolute_paths_for_relative_entries`** (the P4-U15 review, approved in writing) is reconciled with the accepted divergence below: `resolve_attachment_paths` takes its anchor as a parameter now, so the row asserts the draft's own directory where it asserted `std::env::current_dir()`. The three properties it pinned are all kept - a relative entry comes back absolute, an absolute entry is untouched, and a folder entry expands after the anchoring rather than instead of it - and the absolute and folder halves are passed a deliberately irrelevant anchor, which says out loud that the anchor cannot reach them. The file header moves with it: the `attachments:` example leaves the client-absolutisation sentence and gets a paragraph of its own.
 
 ## P4-U6 follow-ups
 
@@ -288,3 +289,26 @@ The help walk (`touch src/main.rs && cargo build --offline && MP=./target/debug/
 `timeout 900 cargo install --path . --offline` -> replaced.
 `pgrep -af 'mp daemon'` empty after the full run and after the measurement run.
 `git diff --stat 4d8349e..HEAD -- tests/` is `tests/architecture_boundaries.rs` only.
+
+## Accepted divergences
+
+One place where the daemon-era binary deliberately does not reproduce the pre-daemon binary's behaviour, found by the P4-U15 review rather than by a parity row.
+
+### A draft's relative `attachments:` entries anchor to the draft, not to the cwd
+
+`send::resolve_attachment_paths` absolutised each entry against `std::env::current_dir()` (through `daemon::client::absolutise`), which was the P4-U2 client-side path rule applied one layer too deep.
+All three of its callers run **inside the daemon**: `send.draft`, `send.approved` and `send.invite` reach it through `send_draft` -> `build_draft_message`, and the Graph leg through `draft_attachments`.
+`daemon::lifecycle::spawn_detached` sets no `current_dir`, so an auto-started daemon inherits whichever directory the first client stood in and keeps it for its whole life; `attachments: [report.pdf]` resolved there rather than where the sender was standing.
+
+The pre-daemon cwd semantics **cannot be kept**, and this was checked before the anchor was changed: no attachment path crosses the wire.
+`send.draft` carries `{account, selector}`, the daemon reads the draft file itself, and `crates/mp-protocol/` mentions attachments nowhere, so there is nothing for the client to resolve and rewrite short of editing the user's draft on disk, which a send may not do.
+
+So the anchor is the draft file's own directory (`draft.path.parent()`, `send::attachment_anchor`), the one deterministic location both processes agree on, and `resolve_attachment_paths` takes it as an explicit parameter: no `current_dir()` remains anywhere in library code (`rg 'current_dir\(\)' src/` outside `src/daemon/client.rs` and `src/main.rs` is empty).
+
+- Unaffected: an absolute entry, a `~`-relative entry, a folder entry given absolutely, and everything the TUI's `ta` prompt stores, which is the path the user picked or a `~`-relative one.
+- Affected: a bare relative entry in a hand-written draft. It now means the file beside the draft.
+- Recorded in `docs/parity-matrix.md` (ATT-03), `docs/daemon-protocol.md`, `docs/daemon-operations.md`, `docs/lessons-learned.md`, `BACKLOG.md` and the CHANGELOG's Phase 4 entry.
+- Pinned by `tests/daemon_send_attachments.rs` (two routed rows: the client stands in a third directory and the daemon is started from `/`, so a cwd-anchored resolution on either side fails), by two unit rows in `src/send.rs`, and by the reconciled `tests/daemon_autostart.rs` row above.
+
+Still open, and deliberately not fixed here: `draft::validate_draft` checks an entry's existence with no anchor at all, so `mp validate` and the send preview report `Attachment not found: report.pdf` for a draft that sends perfectly well.
+It is the same anchor question in a different function, it moves bytes on `mp validate`, and it is a line in `BACKLOG.md`.

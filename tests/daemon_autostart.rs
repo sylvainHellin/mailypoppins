@@ -43,8 +43,14 @@
 //! any relative path reached it, the answer would depend on that. The client
 //! is the process with a meaningful working directory, so it absolutises every
 //! user-supplied path before the path crosses the socket, and this file
-//! asserts that rule at the seam (`mp save`'s destination, a draft's
-//! `attachments:` entries) and end to end where it can.
+//! asserts that rule at the seam (`mp save`'s destination) and end to end
+//! where it can.
+//!
+//! A draft's `attachments:` entries are the one path that cannot follow that
+//! rule: no attachment path crosses the wire (the client sends a selector), so
+//! there is nothing for the client to rewrite. They are anchored to the draft
+//! file's own directory instead, which is the one location both processes
+//! agree on, and that seam is asserted here too.
 //!
 //! # Process hygiene
 //!
@@ -394,34 +400,39 @@ fn the_save_destination_is_anchored_to_the_clients_working_directory() {
     );
 }
 
-/// A draft's `attachments:` entries resolve against the sending client's cwd,
-/// and leave it as absolute paths. The semantics do not change: a relative
-/// entry still means the same file it meant before. What changes is that the
-/// path which will cross the socket no longer depends on who reads it.
+/// A draft's `attachments:` entries resolve against the draft file's own
+/// directory, and leave it as absolute paths.
+///
+/// The anchor is explicit rather than read from `current_dir()`, because every
+/// send runs inside the daemon now and the daemon's cwd is nobody's choice.
+/// This is the accepted divergence from the pre-daemon binary, which anchored
+/// to the sender's cwd; see `docs/tickets/0123-cli-cutover.md`.
 #[test]
 fn resolve_attachment_paths_yields_absolute_paths_for_relative_entries() {
     let dir = root();
     let file = dir.path().join("report.pdf");
     fs::write(&file, b"%PDF-1.4").expect("write the attachment");
 
-    let cwd = std::env::current_dir().expect("a working directory");
-    let resolved = resolve_attachment_paths(&["report.pdf".to_string()]).expect("resolve");
+    let resolved =
+        resolve_attachment_paths(&["report.pdf".to_string()], dir.path()).expect("resolve");
     assert_eq!(
         resolved,
-        vec![cwd.join("report.pdf")],
-        "a relative entry is anchored to the client's cwd and comes back absolute"
+        vec![file.clone()],
+        "a relative entry is anchored to the draft's directory and comes back absolute"
     );
 
-    let absolute = resolve_attachment_paths(&[file.display().to_string()]).expect("resolve");
+    let absolute = resolve_attachment_paths(&[file.display().to_string()], Path::new("/nowhere"))
+        .expect("resolve");
     assert_eq!(
         absolute,
         vec![file.clone()],
-        "an absolute entry is untouched"
+        "an absolute entry is untouched, whatever the anchor"
     );
 
     // A folder entry expands to its files, and every one of them is absolute
     // too: the expansion happens after the anchoring, not instead of it.
-    let expanded = resolve_attachment_paths(&[dir.path().display().to_string()]).expect("resolve");
+    let expanded = resolve_attachment_paths(&[dir.path().display().to_string()], Path::new("/"))
+        .expect("resolve");
     assert_eq!(expanded, vec![file]);
     assert!(
         expanded.iter().all(|p| p.is_absolute()),

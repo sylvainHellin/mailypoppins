@@ -440,7 +440,7 @@ Nothing is canonicalised: a destination that does not exist yet is the normal ca
 Two places carry user paths today and both apply the rule from P4-U2 on, before either command routes:
 
 - `mp save -o`, whose default is the current directory. `mp save` with no `-o` therefore prints absolute paths where it used to print `./name`; the files land exactly where they always did.
-- A draft's `attachments:` entries, resolved by `send::resolve_attachment_paths`. A relative entry still means the same file it meant before, anchored to the sending client's working directory; the only visible change is that a missing attachment is now reported by its full path.
+- A draft's `attachments:` entries are the exception, resolved by `send::resolve_attachment_paths` **inside the daemon** against the draft file's own directory. No attachment path crosses the wire - `send.draft` carries a selector and the daemon reads the draft itself - so there is nothing for the client to absolutise, and the daemon's own cwd is whichever directory happened to start it. A relative entry is therefore anchored to the draft rather than to the sender, which is an accepted divergence from the pre-daemon binary (`docs/parity-matrix.md` ATT-03); the anchor is a parameter of the function, so no library code reads `current_dir()`. The other visible change is that a missing attachment is reported by its full path.
 
 ## Login mode
 
