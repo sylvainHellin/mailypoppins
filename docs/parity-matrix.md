@@ -1096,10 +1096,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `t` and `r` in the calendar view, `src/tui/app/calendar_view.rs`, `src/tui/ui/calendar.rs`
-- Daemon surface: `calendar.agenda`
+- Daemon surface: `calendar.events` (the name `calendar.agenda` this row carried until P5-U10; the served method is `calendar.events`)
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/tui/app/calendar_view.rs`, TUI golden frames
-- Status: not started
+- Validation: unit tests in `src/tui/app/calendar_view.rs`, TUI golden frames, `src/tui/app/invites_tests.rs`
+- Status: routed (P5-U10) - the TUI's agenda is built by the daemon; the view itself is still GUI-parity work
 
 ### CAL-03 Open the source email of an agenda entry
 
@@ -1124,10 +1124,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `src/invite.rs`
-- Daemon surface: `calendar.agenda` and `message.get` carry the derived statuses
+- Daemon surface: `calendar.events` and `message.invite` carry the derived statuses; `message.ics` hands out the raw payload an RSVP is built from
 - GUI location: TBD (Phase 9)
-- Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`
-- Status: not started
+- Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`, `src/tui/app/invites_tests.rs`
+- Status: routed (P5-U10) - the fold crosses the socket; the rendering is still GUI-parity work
 
 ### CAL-06 Invitation updates and cancellations reflected in the agenda and the reader
 

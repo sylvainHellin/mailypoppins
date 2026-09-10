@@ -1904,3 +1904,15 @@ An account with no store therefore gets no runtime and is reported `blocked` wit
 The TUI's session thread waits for a daemon to come back with `select! { call = inbox.recv() => …, _ = sleep(gap) => reconnect() }`. Written that way the `sleep` future is constructed fresh on every iteration, so every refused call - and the UI thread polls its session while it waits - resets the timer and the reconnect branch is never reached. It looks exactly like a reconnect that does not work, for as long as anything is asking.
 
 `tokio::time::sleep_until(deadline)` with the deadline computed *outside* the loop fixes it: the future is rebuilt each iteration and still expires at the same instant. Any `select!` whose other arm is hot needs a deadline rather than a duration.
+
+## A test module widening an architecture allow-list is the architecture widening
+
+`tests/architecture_boundaries.rs` walks every `.rs` file under `src/tui/` for engine imports, `#[cfg(test)]` modules included, and its doc comment says why: "an import inside a `#[cfg(test)] mod tests` block is still a dependency of the client crate on the engine". A daemon-versus-store equality test needs a seeded store, so the obvious `use crate::store::{BlobStore, Store};` at the top of a new TUI test module took the allow-list from 11 rows to 13 and turned the gate red (P5-U10).
+
+Putting the fixture in the module the *engine* side owns fixes it: `reconcile::tests::AmbientFixture` seeds the store, answers the store-backed oracles, and the TUI test module imports one non-engine path. The rule is general: when a boundary gate counts imports rather than call sites, the fixture belongs on the far side of the boundary, not in the file that asserts across it.
+
+## The daemon migration's hard part is the modules the engine allow-list does not scan
+
+`ENGINE_MODULES` is eleven names (`store`, `sync`, `send`, `imap_client`, …) and the file says the shared modules are "deliberately absent". That is right for measuring the *engine* boundary and misleading about the cost of a crate move: `src/tui/` reaches twenty root-crate modules, and the fourteen the gate does not scan (`config`, `parse`, `types`, `selector`, `search`, `draft`, `contacts`, …) are the ones that stop `crates/mp-tui` compiling. Their closure is ~15 000 lines across sixteen modules, six of which need splitting (`selector` and `reconcile` read the store, `search` calls `imap_client`, `draft` writes through `outbox`).
+
+An allow-list at zero therefore does not mean a crate can be extracted. If a plan unit says "move X to its own crate", price the *whole* `crate::` reference set of X first, not the subset a boundary test happens to record.

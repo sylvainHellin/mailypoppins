@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U8 have landed; P5-U9 is next.
+Status: in-progress. P5-U1 to P5-U9 have landed; P5-U10 landed its first third (the three invitation reads) and split the rest into P5-U10a/b/c, recorded in its section below.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -27,8 +27,8 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U6 | I | `d0c0049`, `b51b3fa`, `723ba60`, `e3055e7` | actions to commands | done |
 | P5-U7 | T | this commit | events replace watcher threads, the contract | done (tests) |
 | P5-U8 | I | `115aef0`, `33e42aa`, `e28ed30`, `bca8413` | events replace watcher threads | done |
-| P5-U9 | T | | the parity-gate oracle suite | open |
-| P5-U10 | I | | the crate boundary for the TUI | open |
+| P5-U9 | T | `9f6757b` | the parity-gate oracle suite | done (tests) |
+| P5-U10 | I | `83cc594` | the crate boundary for the TUI | partial: the three invitation reads landed, the crate did not (see below) |
 | P5-U11 | I | | the gate run, the report, the docs | open |
 
 ## P5-U1: the daemon-backed golden frames
@@ -1097,3 +1097,97 @@ That is P5-U8's 2 179 plus this unit's 13, minus the one intended failure above.
 `cargo test --offline --test phase5_parity_gate` -> 10 passed, 1 failed (the checklist row).
 `cargo test --offline --test phase5_undo_send_hold` -> 2 passed, in 5.2 s, of which 5 s is the deliberate wait past the hold window.
 `rustfmt --edition 2021` on both new files, which are this unit's own and therefore clean by construction.
+
+## P5-U10: the crate boundary for the TUI
+
+**This unit did not land the crate.** It landed the first of the three things the crate needs, and it found that the other two are a phase rather than a unit. The evidence is below, because a number nobody wrote down is a number the next unit has to rediscover.
+
+### What landed
+
+Three additive daemon queries and the `TUI_APP_STORE_RESIDUE` sites routed through them.
+
+`crates/mp-protocol/src/calendar.rs` (176 lines, 63 before its tests) holds `EventFrontmatter` and `EventAttendee`, moved out of `src/types.rs`, plus `AgendaEvent`. The two moved types are pure serde structs with no engine dependency that both ends of the socket need, which is the brief's option (2); `src/types.rs` re-exports them, so `crate::types::EventFrontmatter` still resolves everywhere and the YAML frontmatter they also serialise did not move a byte.
+
+`src/reconcile.rs` gained `event_for_message` (33 lines), the invitation-card fold lifted out of `App::load_message_invite` so that the daemon method and the store-backed reader run one function rather than two copies of one.
+
+`src/daemon/methods/calendar.rs` gained `calendar.events` (+80) and `src/daemon/methods/message.rs` gained `message.ics` and `message.invite` (+106). Both new arrays are their own (`CALENDAR_QUERY_METHOD_SPECS`, `MESSAGE_INVITE_METHOD_SPECS`), the P5-U6 pattern, because `tests/daemon_admin_slice.rs` pins `CALENDAR_METHOD_SPECS` at two with a `const _: () = assert!` and growing it would edit a pinned test to say something it was not written to say.
+
+`src/tui/queries.rs` gained the three decoders (+73) and `src/tui/app/mod.rs` routes `load_calendar_events`, `load_message_invite` and `load_message_ics` through them when the `App` holds a session (+69/-24).
+
+`src/tui/app/invites_tests.rs` (228 lines) is eight equality rows: every daemon-backed answer compared against the store-backed one over one seeded store in one process, in the shape `queries_tests.rs` established.
+
+### Decisions
+
+**The store-backed readers stayed, and the residue table did not move.** The three sites keep the `open_store(` they had, behind the sessionless branch, for the reason `src/tui/app/store_rows.rs` gives for every one of them: an `App` with no session is a wedged `Session::connect` and it is every one of the ~370 TUI unit tests. `TUI_APP_STORE_RESIDUE` therefore still names the same three functions, and it names them truthfully: the scan attributes a call to its enclosing function, so the store branch was left inline in `load_calendar_events` rather than extracted into a helper the table does not know.
+
+**The agenda fixture lives in `reconcile::tests`, not in the TUI test module.** `AmbientFixture` seeds a store at the ambient data root and answers the three store-backed oracles. It is there because a `use crate::store::…` in a file under `src/tui/` widens `tests/fixtures/tui-engine-imports.txt`, and the first draft of this unit did exactly that: the allow-list went from 11 rows to 13 and `architecture_boundaries` failed. A test module widening the boundary is the boundary widening.
+
+**`calendar.events` calls `crate::tui::app::calendar_view::load_events_for_account`.** The dedup, the `(sequence, dtstamp, sent-copy, mailbox, uid)` tiebreak and the sort live in one place and a second copy in the daemon would be a second answer to "which copy of this event is the row". The module is still under `src/tui/`, which the crate move has to resolve; see the follow-ups.
+
+**The blob is base64 and the card is JSON.** `message.ics` hands out bytes, and a JSON string cannot carry a byte that is not valid UTF-8; `message.invite` hands out the folded `EventFrontmatter`, which is a serde struct and travels as itself. Both answer `null` for a row with no iMIP payload rather than refusing, because a non-invite is the ordinary case and the preview has always shown no card for one.
+
+### Why the crate did not move: the dependency closure
+
+The brief's shape is `crates/mp-tui` depending on `mp-client` and `mp-protocol` and on nothing else. The obstacle is not the engine residue the allow-list records; it is the **shared** modules, which the allow-list deliberately does not scan (`ENGINE_MODULES` is eleven names, and `types`, `config`, `parse`, `search`, `selector` and the rest are "deliberately absent" by that file's own doc comment).
+
+`src/tui/`'s production code reaches twenty root-crate modules. Fourteen of them are not engine modules and are therefore invisible to the gate this phase drives to zero: `config` (94 references), `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`.
+
+Their own closure, read off `crate::` references across `src/`:
+
+| module | its dependencies | engine-free? |
+|---|---|---|
+| `types`, `timing`, `notify`, `sync_health` | none | yes |
+| `calendar` | `types` | yes |
+| `parse` | `calendar`, `types` | yes |
+| `config` | `oauth2`, `parse`, `secrets`, `signatures`, `types` | yes, with `{config, oauth2, secrets, signatures, app_state}` as one strongly connected component |
+| `search` | `imap_client` (three pure string helpers) | after a small split |
+| `selector` | `store` | needs splitting: the `Selector` type and its grammar are pure, the resolution is a store read |
+| `invite` | `calendar`, `config`, `parse`, `send` | needs splitting: the TUI uses `Rsvp` and nothing else |
+| `reconcile` | `calendar`, `ingest`, `parse`, `store`, `types` | needs splitting: `load_invites` is a store read |
+| `contacts` | `config`, `ingest`, `parse`, `store`, `sync`, `types` | needs splitting |
+| `draft` | `config`, `outbox`, `parse`, `selector`, `send`, `store`, `types` | needs splitting |
+
+So a `crates/mp-tui` that compiles needs a shared crate holding, at minimum, the eleven-module engine-free closure (`app_state`, `calendar`, `config`, `notify`, `oauth2`, `parse`, `secrets`, `signatures`, `sync_health`, `timing`, `types`, roughly 7 000 lines) plus the engine-free half of five more modules that have to be split first (`selector`, `search`, `invite`, `reconcile`, `contacts`, `draft`, another 8 000 lines to triage). That is a move of roughly 15 000 lines across sixteen modules, six of which need a genuine split, before one line of `src/tui/` can move.
+
+None of it is new production code, which is why the unit's line budget did not catch it; all of it is a tree that does not compile between the first `git mv` and the last. Doing it inside this unit would have meant committing a broken workspace, and the brief's own validation (`cargo test --workspace` green but for one row, on every step) forbids that.
+
+### What still stands between the allow-list and zero
+
+Independent of the shared crate, `tests/fixtures/tui-engine-imports.txt` is 11 rows and each needs a surface that does not exist:
+
+| row | what it needs |
+|---|---|
+| `app/mod.rs store`, `app/calendar_view.rs store` | the sessionless store-backed readers, which die when `queries_tests.rs` and the ~370 sessionless-`App` tests move to the root crate (that is the crate move, not a method) |
+| `app/store_rows.rs store` | the same: it is the oracle those tests compare against |
+| `app/types.rs store`, `app/types.rs ingest`, `queries.rs store` | `MessageRow` / `DraftRow` / `SkippedDraft` as protocol types, so `entry_from_row` takes a wire row; `src/main.rs`'s duplicate `row_from_wire` dies with them |
+| `actions.rs store` | `RD-06`'s Markdown rendition, `RD-07`'s selector on a listing, `LST-09`'s `message.fetch` |
+| `actions.rs send` | the undo-send hold's fire path (`SND-04`), which the plan holds in the TUI until P6-U1/U2 |
+| `helpers.rs store`, `helpers.rs imap_client`, `mod.rs store` | `LST-08`'s server leg through `message.list_server` |
+
+The three this unit built are the ones with no such blocker, which is why they are the ones it built.
+
+### A proposed sequencing
+
+Three units where the plan wrote one, each of which leaves `cargo test --workspace` green:
+
+1. **P5-U10a** - the shared crate. Move the eleven-module engine-free closure into `crates/mp-core`, split `selector`, `search` and `invite` (small, mechanical), and re-export everything from the root crate under its old path so no call site outside the crate moves. No behaviour changes; the proof is that `git diff` outside `crates/mp-core` and the `pub use` lines is empty.
+2. **P5-U10b** - the last surfaces. `RD-06`, `RD-07`, `LST-08`, `LST-09` and the wire-row types, which is what drives the allow-list to zero for everything except the undo-send hold; split `reconcile`, `contacts` and `draft` on the way past.
+3. **P5-U10c** - the move itself. `git mv src/tui crates/mp-tui/src`, the test modules that link the engine (`test_daemon.rs`, `store_rows.rs`, `queries_tests.rs`, `actions_tests.rs`, `events_tests.rs`, `golden_frames_daemon.rs`, `invites_tests.rs`) to the root crate's `tests/` or to `#[cfg(test)]` modules under `src/` importing `mp_tui::*`, and the P2-U1a guard's scan roots re-pointed.
+
+### Follow-ups
+
+- `src/tui/app/calendar_view.rs`'s loader is called by a daemon method now, so the crate move has to lift it out of `src/tui/` (into the root crate, keeping the ~35 tests the P2-U1a guard counts, or into `mp-tui` with the daemon reaching it through the crate).
+- `App::load_draft_body` opens a store with `Store::open` rather than `open_store(`, so `TUI_APP_STORE_RESIDUE`'s scan does not see it. It is a fourth site with the same shape as the three, and `draft.path` plus a client-side parse is what it becomes.
+- `docs/parity-matrix.md`'s `CAL-02` and `CAL-05` named `calendar.agenda`, a method nothing served. They name `calendar.events` now.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline --no-fail-fast` -> **2 202 passed, 1 failed, 5 ignored**, `pgrep -af '[m]p daemon'` empty afterwards. That is P5-U9's 2 191 plus this unit's 11 (8 in `src/tui/app/invites_tests.rs`, 3 in `crates/mp-protocol/src/calendar.rs`), with the one failure the intended P5-U9 red row, `the_phase_five_manual_checklist_is_complete_and_carries_no_failure`.
+
+`--test architecture_boundaries` -> 6 passed, the allow-list unmoved at 11 rows. `--test phase5_parity_gate` -> 10 passed, 1 failed (that row). `--lib queries_tests` -> 18, `--lib actions_tests` -> 22, `--lib events_tests` -> 20, `--lib 'ui::golden_frames::'` -> 20, `--lib golden_frames_daemon` -> 22, no snapshot re-approved. `--test tui_daemon_recovery` -> 3, `--test phase5_undo_send_hold` -> 2.
+
+`mp --help` recursive and `mp dump-keys --json` byte-identical to the Phase 0 captures, from a binary rebuilt in the same run.
+
+`cargo clippy --workspace --offline --all-targets` -> **34 distinct warnings**, the P5-U8 baseline, none of them on a line this unit wrote.
+
+`rustfmt --edition 2021` on `crates/mp-protocol/src/calendar.rs`, `src/tui/app/invites_tests.rs`, `src/daemon/methods/calendar.rs`, `src/daemon/methods/message.rs`, `src/daemon/session.rs` and `src/tui/queries.rs`, all clean; `crates/mp-protocol/src/lib.rs`, `src/types.rs`, `src/reconcile.rs`, `src/daemon/methods/mod.rs`, `src/tui/app/mod.rs` and `src/tui/app/types.rs` were not rustfmt-clean at `9f6757b` and were left alone.
