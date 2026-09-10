@@ -1,3 +1,4 @@
+mod bootstrap;
 pub(crate) mod calendar_view;
 pub(crate) mod jump_date;
 mod keymap;
@@ -196,6 +197,16 @@ pub struct App {
 
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
+
+    /// The daemon session this TUI runs on (P5-U2), or `None` for an `App`
+    /// built without one: every unit test, every golden frame, and
+    /// `App::from_bootstrap`, which is handed a snapshot someone else fetched.
+    ///
+    /// Owned by the `App` rather than by `run_loop` so the query layer
+    /// (P5-U3/U4) can issue a call from wherever it already has `&mut App`,
+    /// which is everywhere. Dropping it closes the socket, so quitting the TUI
+    /// ends the session without a teardown path having to remember to.
+    pub session: Option<super::session::Session>,
 }
 
 impl Default for App {
@@ -246,7 +257,39 @@ impl App {
             .map(|ac| AccountState::new(ac.clone(), &global_config.email))
             .collect();
 
-        let mut app = Self {
+        let mut app = Self::shell(global_config, accounts);
+
+        app.load_from_account(0);
+        // The active mailbox is NOT loaded here (#0003 two-phase startup):
+        // `load_emails` opens the store, and the first open runs the full
+        // `PRAGMA integrity_check`, which is exactly the ~240 ms this ticket
+        // moves off the first-paint path. `run_loop` opens every account's
+        // store on a background thread after the first `terminal.draw`;
+        // `BgResult::AccountOpened` for the active account then triggers this
+        // load against the already-validated store. The list starts empty and
+        // fills in a beat later, which is the whole point.
+
+        if let Some(warning) = theme_warning {
+            app.push_status(warning, StatusLevel::Warning);
+        }
+
+        app
+    }
+
+    /// Everything an `App` is besides its accounts: the frozen defaults of a
+    /// freshly started TUI.
+    ///
+    /// Extracted from [`App::new`] for [`App::from_bootstrap`], which builds
+    /// its accounts from a daemon snapshot rather than from `config.toml` and
+    /// must not diverge from `new` in any of the ~90 fields that have nothing
+    /// to do with either. It opens nothing, walks nothing and mirrors nothing:
+    /// the caller runs `load_from_account` once it has decided which account is
+    /// active.
+    pub(super) fn shell(
+        global_config: crate::config::GlobalConfig,
+        accounts: Vec<AccountState>,
+    ) -> Self {
+        Self {
             focus: Focus::List,
             view: View::Mail,
             mail_view: MailView::default(),
@@ -316,23 +359,8 @@ impl App {
             server_search_scope_label: "All".to_string(),
             server_search_generation: 0,
             global_config,
-        };
-
-        app.load_from_account(0);
-        // The active mailbox is NOT loaded here (#0003 two-phase startup):
-        // `load_emails` opens the store, and the first open runs the full
-        // `PRAGMA integrity_check`, which is exactly the ~240 ms this ticket
-        // moves off the first-paint path. `run_loop` opens every account's
-        // store on a background thread after the first `terminal.draw`;
-        // `BgResult::AccountOpened` for the active account then triggers this
-        // load against the already-validated store. The list starts empty and
-        // fills in a beat later, which is the whole point.
-
-        if let Some(warning) = theme_warning {
-            app.push_status(warning, StatusLevel::Warning);
+            session: None,
         }
-
-        app
     }
 
     /// Bare App for unit tests: no config load, no directory walks, no
@@ -410,6 +438,7 @@ impl App {
             server_search_scope_label: "All".to_string(),
             server_search_generation: 0,
             global_config: crate::config::GlobalConfig::default(),
+            session: None,
         }
     }
 
