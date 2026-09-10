@@ -338,7 +338,15 @@ fn engine_imports_reads_every_use_form_and_ignores_shared_modules() {
 /// records its residue meanwhile. The daemon (`src/daemon/`) and the engine
 /// modules themselves are absent for the opposite reason: opening a store is
 /// their job.
-const CLIENT_SOURCES: [&str; 3] = ["src/main.rs", "src/cutover.rs", "src/config_cmd"];
+const CLIENT_SOURCES: [&str; 7] = [
+    "src/main.rs",
+    "src/calendar_cmd.rs",
+    "src/contacts_cmd.rs",
+    "src/cutover.rs",
+    "src/draft_cmd.rs",
+    "src/read_cmd.rs",
+    "src/config_cmd",
+];
 
 /// The symbols that open a store, a secret backend, a network backend or an
 /// engine lock, as they are spelled in the tree.
@@ -385,11 +393,15 @@ const ENGINE_SYMBOLS: [&str; 23] = [
 /// to "why is the Phase 4 gate not at literal zero": four groups, each with a
 /// cause that outlives this unit.
 const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 17] = [
-    // (d) The two wizards. `config.init` and `config.add_account` exist and are
-    //     what `mp config init` asks for its path and its account list, but the
-    //     prompting, the connection tests between the prompts and the write are
-    //     one interactive transaction; splitting it needs a wizard protocol,
-    //     which no unit of Phase 4 contracted.
+    // (d) The two wizards. They call `config.get` (`routed_config_state` in
+    //     `src/main.rs`) for the path, whether the file exists and the account
+    //     names, and do the rest themselves: the prompting, the connection
+    //     tests between the prompts, the password writes and the file write are
+    //     one interactive transaction. Splitting it needs a wizard protocol,
+    //     which no unit of Phase 4 contracted. `config.init` and
+    //     `config.add_account` are served and are what such a protocol would
+    //     build on, but no wizard calls either; only `tests/daemon_config.rs`
+    //     exercises them (`BACKLOG.md`).
     (
         "src/config_cmd/helpers.rs",
         "SmtpTransport::",

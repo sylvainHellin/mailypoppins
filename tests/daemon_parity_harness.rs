@@ -6,13 +6,19 @@
 //! be honest, so this file pins three properties of `tests/support/parity.rs`
 //! before any command has moved:
 //!
-//! 1. **It agrees where it must.** Three commands that Phase 4 has not touched
-//!    (`mp --version`, `mp config path`, `mp list-mailboxes`) answer
-//!    identically from the current binary and from the `pre-daemon` oracle,
-//!    with a daemon running beside them. Nothing routes to the daemon yet, so
-//!    the diff is empty by construction, which is exactly the point: a harness
-//!    that could not produce an empty diff here would report a difference for
-//!    every slice and prove nothing about any of them.
+//! 1. **It agrees where it must.** The agreement rows are *no-daemon-list*
+//!    commands only: `mp --version` and `mp config path` ([`UNMIGRATED`]). Both
+//!    answer identically from the current binary and from the `pre-daemon`
+//!    oracle, with a daemon running beside them, because neither routes - the
+//!    diff is empty by construction, which is exactly the point. A harness that
+//!    could not produce an empty diff here would report a difference for every
+//!    slice and prove nothing about any of them.
+//!
+//!    So these rows say nothing about a command that *does* route, and are not
+//!    meant to: the honesty of a routed-eligible comparison is carried by the
+//!    six slice suites (`tests/daemon_{read,draft,mutation,sync,send,admin}_slice.rs`),
+//!    whose `mp_routed` rows set `MAILYPOPPINS_DAEMON_REQUIRE=1` and therefore
+//!    fail rather than pass when the command answered in its own process.
 //! 2. **It disagrees when it must, readably.** A doctored [`Output`] compared
 //!    against a real one must fail, and the failure must name the stream, carry
 //!    both values and show a diff. A harness whose failure says only
@@ -25,11 +31,14 @@
 //! # Why these three commands
 //!
 //! The plan (P4-U2) fixes a no-daemon list - `mp daemon *`, `mp dump-keys`,
-//! `mp --help`, `mp --version`, `mp config path` - so two of these three stay
-//! oracle-comparable for the whole migration. `mp list-mailboxes` is the third
-//! kind: a store-reading command that Phase 4 does migrate, sampled here while
-//! it still runs in process, so the same assertion re-run after the migration
-//! is a real gate rather than a tautology.
+//! `mp --help`, `mp --version`, `mp config path` - and both agreement rows are
+//! drawn from it, so both stay oracle-comparable for the whole migration
+//! without ever becoming a tautology about routing. The list started with a
+//! store-reading command sampled while it still ran in process
+//! (`mp list-mailboxes`, then `mp outbox list`, then `mp contacts stats`), and
+//! every one of those was routed by a later slice; `mp config path` is where
+//! that walk ends, because it is the only command left in the product that a
+//! client answers in process.
 //!
 //! Their output on an empty sandbox is fixture-relative (it names the config
 //! file that is not there) and deterministic, and both binaries are told the

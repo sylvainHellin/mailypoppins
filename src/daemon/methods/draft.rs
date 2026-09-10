@@ -89,10 +89,10 @@ pub const DRAFT_METHOD_SPECS: [MethodSpec; 10] = [
     MethodSpec::new("draft.validate", MethodKind::Query, 1),
 ];
 
-/// One of the nine, selected by its own [`MethodSpec`].
+/// One of the ten, selected by its own [`MethodSpec`].
 ///
 /// One type for the family because they share every dependency and differ only
-/// in which body below they run; the dispatcher registers nine instances, so
+/// in which body below they run; the dispatcher registers ten instances, so
 /// each still declares itself separately.
 pub struct DraftMethod {
     /// Which of [`DRAFT_METHOD_SPECS`] this instance serves.

@@ -350,10 +350,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: diagnostics and maintenance
 - Source anchor: `mp fetch [--from --to --cc --subject --body --since --before -n --full --mailbox]`, `src/main.rs`
-- Daemon surface: `sync.fetch_legacy`
+- Daemon surface: `message.list_server`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/cli_help_snapshot.rs`
-- Status: not started
+- Status: routed (P4-U10); GUI not started
 - Note: superseded by `sync` plus `search`, kept because the migration preserves command surfaces; the deprecation decision is deferred to `BACKLOG.md` (`ANO-3`).
 
 ### LST-12 Dump message envelopes as NDJSON

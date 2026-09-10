@@ -56,7 +56,7 @@ It was the last store `mp sync` opened.
 `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs` is the allow-list, seventeen `(file, symbol, reason)` rows in four groups.
 The gate asked for zero; four causes stand between here and zero, and none of them can be removed without editing a T unit's test file, which an implementer may not do.
 
-**(a) The server leg of `mp search`** - 6 rows in `src/main.rs` (`GraphClient::`, `GraphConfig::load`, `ImapConfig::load`, `imap_client::`, `Store::open`).
+**(a) The server leg of `mp search`** - 5 rows in `src/main.rs` (`GraphClient::`, `GraphConfig::load`, `ImapConfig::load`, `imap_client::`, `Store::open`).
 `docs/parity-matrix.md` LST-06 is `not started`: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, and no `message.search_server` exists.
 `MESSAGE_READ_METHOD_SPECS` is pinned at three by `tests/daemon_read_slice.rs` and `MESSAGE_SERVER_METHOD_SPECS` at one by `tests/daemon_sync_slice.rs`, so the method the leg needs cannot be added in this unit.
 The `Store::open` in the group is the plain-IMAP `has:attachment` post-filter, which reads the local index to decide which server hits carry an attachment.
@@ -71,9 +71,12 @@ They run before any socket, and they run on the no-daemon list too (`mp config p
 `tests/daemon_config.rs` contracts `config.get` **not** to look a secret up, in as many words, and pins its result at four top-level keys; `tests/daemon_admin_slice.rs` pins the config family at nine methods with a compile-time assertion.
 So neither a field on `config.get` nor a tenth `config.*` method can carry the `(not set)` / `****` column and the token-cache line, and the alternative - a second family - is a contract change, not an implementation.
 
-**(d) The two `config.toml` wizards** - 5 rows in `src/config_cmd/{helpers,init}.rs` (`SmtpTransport::`, `imap_client::` twice, `GraphClient::`, `device_code_flow(`, `set_secret(`).
-`mp config init` and `mp config add-account` ask the daemon where the configuration is and what accounts it has, then prompt, test the connection the user just described, prompt again on the result, and write.
+**(d) The two `config.toml` wizards** - 6 rows in `src/config_cmd/{helpers,init}.rs` (`SmtpTransport::`, `imap_client::` twice, `GraphClient::`, `device_code_flow(`, `set_secret(`).
+`mp config init` and `mp config add-account` ask the daemon where the configuration is and what accounts it has - one `config.get`, through `routed_config_state` in `src/main.rs` - then prompt, test the connection the user just described, prompt again on the result, store the password and write the file.
 That is one interactive transaction whose intermediate results steer the next prompt; splitting it needs a wizard protocol, which no unit of Phase 4 contracted.
+`config.init` and `config.add_account` are served and are what such a protocol would build on, but **no wizard calls either**: only `tests/daemon_config.rs` exercises them (`BACKLOG.md`).
+The `set_secret(` row is the one place a client still writes a secret itself: the wizards call `secrets::set_secret` directly (`src/config_cmd/init.rs:227,286,633,673`) for the passwords they prompt for, rather than the `config.set_password` the daemon serves.
+It is the exception `docs/daemon-protocol.md`'s `config.*` section and `docs/daemon-operations.md`'s residue list both name.
 
 The TUI is **out of scope of this list until Phase 5** (#0124), which is the unit that takes it off the direct path.
 Its own residue is the first half of the same file, `tests/fixtures/tui-engine-imports.txt`, unchanged by this unit.
@@ -216,7 +219,7 @@ Installs the daemon-backed `mp`.
 ## What Phase 4 does not answer
 
 - The server leg of `mp search` (LST-06) still runs in the client. It is the one command surface Phase 4 leaves on the direct path, and the largest single item Phase 5 or a slice of its own inherits.
-- The two wizards still write `config.toml` themselves. `config.init` and `config.add_account` exist and are called; what has no wire shape is the prompting loop between them.
+- The two wizards still write `config.toml` themselves, and still store the passwords they prompt for through `secrets::set_secret`. They call `config.get` for the path and the account list and nothing else; `config.init` and `config.add_account` exist and are served, but no wizard calls either, and what has no wire shape is the prompting loop between them.
 - `mp config show`'s secret column and token line are still local reads, by `config.get`'s own contract.
 - The two interactive measurements escalated out of Phases 0, 1a, 2, 3a and 3b (W1 and W5) are still open, and Phase 5's gate needs both.
 - The macOS half of Phase 2's crash and stale-socket recovery line is unchanged and still escalated.

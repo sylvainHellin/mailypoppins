@@ -86,7 +86,7 @@ There is no `UPDATE_` switch for it: an entry is added by hand, with its reason,
 
 ### The hidden CLI surfaces
 
-Three surfaces exist under the feature and carry `hide = true` on top of it, so `mp --help` is byte-identical to `docs/baselines/pre-daemon/cli-help.txt` in both builds.
+Three surfaces carry `hide = true`, so `mp --help` is byte-identical to `docs/baselines/pre-daemon/cli-help.txt`.
 
 - `mp daemon run | start | status | stop | restart`, the lifecycle commands.
 - `mp --daemon`, a global flag that routes a command through the daemon instead of answering it in process. It never falls back; a routed command that cannot reach a daemon exits 4.

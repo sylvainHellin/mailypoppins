@@ -75,7 +75,7 @@ The directory pair is compared canonically, so a symlinked path is not a mismatc
 An application-version difference alone is diagnostic and does not refuse the connection.
 
 A capability identifier names a method family or a behaviour the daemon will serve, and a client requires only what it cannot work without.
-This build advertises `daemon.status`, `daemon.stop`, `account.list`, `mailbox.list`, `message.list`, `operation.cancel`, `operation.status` and `state.bootstrap`, which are exactly the methods it serves: the list is the two lifecycle methods followed by every method registered on the dispatcher, in method-name order, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
+The list a build advertises is exactly the methods it serves: the two lifecycle methods followed by every method registered on the dispatcher, in method-name order, derived at handshake time rather than written out, so a method cannot be served without being advertised or advertised without being served.
 A daemon started with the `test.operation` hook of `docs/daemon-operations.md` advertises that method too, which is the derivation working rather than an exception to it.
 Requiring one this build does not have is a `capability_missing` at the handshake rather than a `-32601` at the first call, and an *optional* capability the daemon lacks is dropped from the connection's agreed set instead of refusing it.
 
@@ -112,8 +112,8 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.list_server`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `send.outbox_list`, `contact.search`, `contact.stats`, `config.get` and `config.validate` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, `message.archive`, `message.delete`, `send.outbox_discard` and the five `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.list_server`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `contact.search`, `contact.stats`, `config.get` and `config.validate` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, `message.archive`, `message.delete`, `send.outbox_discard` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -444,17 +444,26 @@ Those last three are one answer on purpose: all of them mean "you are not holdin
 
 ### The `config.*` family
 
-The daemon owns the configuration: it is the only component that parses a complete `config.toml`, and `config.*` is how a client reads it, checks an edit, swaps it, adds an account and stores a password.
-Six methods, all of them `durable`, because a configuration swap undone by a disconnect would leave the daemon serving a configuration nobody chose.
+The daemon owns the configuration: it is the only component that parses a complete `config.toml`, and `config.*` is how a client reads it, checks an edit, swaps it, adds an account, stores a password, logs in, resets the secrets and migrates a file-era account.
+Nine methods, all of them `durable`, because a configuration swap undone by a disconnect would leave the daemon serving a configuration nobody chose.
 
 | method | kind | params | result |
 |---|---|---|---|
 | `config.add_account` | command | `{account: {…}}` | `{added, updated, removed}` |
+| `config.cutover` | operation | `{account, dry_run}` | `{account, dry_run, drafts: {imported: [path], already_indexed, skipped: [line], collisions: [line]}, remnants: [{path, md_files, bytes}]}` |
 | `config.get` | query | `{}` | `{revision, path, state, config}` |
 | `config.init` | command | `{account: {…}, secrets_backend?, theme?, notifications?}` | `{added, updated, removed, path}` |
+| `config.oauth2_login` | operation | `{account}` | `{stored, account, kind, key}` |
 | `config.reload` | command | `{}` | `{added, updated, removed}` |
+| `config.reset_secrets` | command | `{}` | `{removed: [path]}` |
 | `config.set_password` | command | `{account, kind, value}` | `{stored, account, kind, key}` |
 | `config.validate` | query | `{toml}` | `{ok}` or `{ok: false, errors: [{line, message}]}` |
+
+`config.oauth2_login` is the one method whose progress a user has to read: it publishes one `operation.progress` with `phase: "device_code"` and `message: "<url> <code>"`, which is the verification URL and the code, and the client renders the block from it. Nothing else about the login travels, the access token least of all.
+
+`config.cutover`'s `skipped` and `collisions` are rendered lines rather than structured rows, because both are `Display` types the CLI prints verbatim and a client that re-worded them would be inventing a second spelling of one fact.
+
+`config.reset_secrets` removes the encrypted secrets file first and then every OAuth2 token cache in path order, which is the order it lists them in `removed`.
 
 **The configuration revision.** `config.get` wraps the configuration rather than being it, because a client that reads one needs to know *which* one it read.
 `revision` starts at 0 for whatever the daemon loaded at startup, including "no configuration at all", and moves by one per successful swap; it is the same counter `config.changed` carries as `config_revision`, and it is not the state revision, which moves on every event from every source.
@@ -489,6 +498,8 @@ The previous snapshot stays live, its runtimes keep serving and keep their engin
 The candidate document is built in memory, validated, and only then written, so a refusal leaves `config.toml` byte-identical.
 `config.init` refuses an existing file with `-32602` naming it, because `mp config init` asks "Overwrite? [y/N]" and a daemon has nobody to ask; `config.add_account` refuses a missing file with `-32602` naming `config.init`, and a duplicate account name with `-32602` naming the name.
 The daemon-era equivalent of the wizard's password prompt is a second call to `config.set_password`: one path into the secrets backend is one path to audit.
+
+The two wizards are the exception, and the one place a client still writes a secret itself: `src/config_cmd/init.rs` calls `secrets::set_secret` directly (lines 227, 286, 633 and 673) for the passwords it prompts for, because the prompting loop has no wire shape and its intermediate answers steer the next prompt. It is one of the seventeen residue rows `tests/architecture_boundaries.rs` records, and it goes when the wizard protocol lands.
 
 **`config.set_password` publishes no event.**
 A stored password changes nothing a client can observe, because `config.get` said `<redacted>` before and says `<redacted>` after; its `affected` names `account:<name>` so a client holding a per-account view re-reads what depends on credentials.
