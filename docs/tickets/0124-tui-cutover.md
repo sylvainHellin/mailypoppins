@@ -546,7 +546,7 @@ Two things part 2 has to settle that part 1 did not have to:
 `cargo test --offline --lib actions_tests` -> 21 passed, 1 failed, three times over, the same row each time.
 `--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, unmoved, no snapshot re-approved. `--lib queries_tests` -> 18.
 
-`cargo clippy --workspace --offline --all-targets` -> 33 warnings, none of them in `src/tui/commands.rs`, `src/mutations.rs` or any line this unit wrote. (The 39-warning baseline the earlier units quote is not comparable while the lib test target does not compile: at `17b1b65` clippy stops before it lints the test code and reports 23. **Closed in part 2**: with the lib test target compiling again the count is back to **39**, the baseline every unit before this one quoted, and the 33 was never a real reduction.)
+`cargo clippy --workspace --offline --all-targets` -> 33 warnings, none of them in `src/tui/commands.rs`, `src/mutations.rs` or any line this unit wrote. (The 39-warning baseline the earlier units quote is not comparable while the lib test target does not compile: at `17b1b65` clippy stops before it lints the test code and reports 23. **Closed in part 2**: the two numbers are two counts of one tree, not two trees. 33 is the distinct warnings (`--message-format short`, one line each); 39 is what `grep -c '^warning'` reports on the default format, which is those 33 plus the six per-target `generated N warnings` summary lines. Part 2 measured both on a tree whose lib test target compiles and got the same pair, so nothing moved either way and 33/39 is the baseline.)
 
 `rustfmt --edition 2021` on `src/tui/commands.rs`, `src/daemon/methods/message.rs`, `src/daemon/session.rs` and `src/tui/session.rs`, all four rustfmt-clean at `17b1b65`; `src/lib.rs`, `src/tui/mod.rs`, `src/tui/actions.rs` and `src/mutations.rs` were not and were left alone.
 
@@ -724,7 +724,8 @@ Every `daemon_*_slice` suite green: read 22, draft 34, mutation 35, send 50, syn
 `git diff --stat 3dfb184..HEAD -- src/tui/actions_tests.rs src/tui/app/queries_tests.rs src/tui/ui/golden_frames*.rs tests/` is empty.
 
 `mp --help` recursive and `mp dump-keys --json` byte-identical to the Phase 0 captures, from a binary rebuilt in the same run.
-`cargo clippy --workspace --offline --all-targets` -> **39 warnings**, the baseline every unit before part 1 quoted, none of them on a line this unit wrote. Part 1's 33 is closed: it was clippy stopping short of a test target that did not compile.
+`cargo clippy --workspace --offline --all-targets` -> **33 distinct warnings**, which is **39** by the `grep -c '^warning'` count the units before part 1 used (the same 33 plus the six per-target `generated N warnings` summary lines). None of them is on a line this unit wrote, and the per-target totals are lib 14, lib test 21 (14 of them duplicates of the lib's), `daemon_draft_watch` 5, `mkfixture` 4, `daemon_config` 2, `daemon_mutation_slice` 1.
+Part 1's clippy note is closed with that reconciliation rather than with a new number: 33 and 39 were always two counts of one tree, and the caveat about the uncompilable lib test target was wrong about the cause.
 
 `cargo install --path . --offline` green.
 
