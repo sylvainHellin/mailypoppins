@@ -47,7 +47,9 @@
 //!     AccountReady   { account: String },
 //!     AccountBlocked { account: String, reason: String },
 //!     MailboxCounts  { account: String, mailbox: String, total: u64, unread: u64, badge: u64 },
-//!     DraftUpsert    { account: String, id: String, subject: String, status: String, valid: bool },
+//!     DraftUpsert    { account: String, id: String, path: String, to: Option<String>,
+//!                      subject: String, status: String, valid: bool, ready: bool },
+//!     DraftInvalid   { account: String, id: String, path: String, diagnostics: Vec<Diagnostic> },
 //!     DraftRemoved   { account: String, id: String },
 //!     OutboxCounts   { account: String, queued: u64, failed: u64 },
 //! }
@@ -335,11 +337,37 @@ fn reduce(snapshot: &mut Value, change: &Change) {
         Change::DraftUpsert {
             account,
             id,
+            path,
+            to,
             subject,
             status,
             valid,
+            ready,
         } => {
-            let draft = json!({"id": id, "subject": subject, "status": status, "valid": valid});
+            let draft = json!({
+                "id": id, "path": path, "to": to, "subject": subject,
+                "status": status, "valid": valid, "ready": ready,
+            });
+            let list = snapshot["drafts"][account]
+                .as_array_mut()
+                .unwrap_or_else(|| panic!("drafts has an array for {account}"));
+            match list.iter().position(|entry| entry["id"] == json!(id)) {
+                Some(at) => list[at] = draft,
+                None => list.push(draft),
+            }
+        }
+        // A draft that would not parse is still a row (#0080): the same
+        // resource, with nothing read out of the file.
+        Change::DraftInvalid {
+            account,
+            id,
+            path,
+            diagnostics: _,
+        } => {
+            let draft = json!({
+                "id": id, "path": path, "to": Value::Null, "subject": "",
+                "status": "invalid", "valid": false, "ready": false,
+            });
             let list = snapshot["drafts"][account]
                 .as_array_mut()
                 .unwrap_or_else(|| panic!("drafts has an array for {account}"));
@@ -827,9 +855,12 @@ fn a_reconstructed_client_state_equals_a_snapshot_taken_now() {
         state.apply(Change::DraftUpsert {
             account: "beta".to_string(),
             id: "d-1".to_string(),
+            path: "/tmp/beta/drafts/d-1.md".to_string(),
+            to: Some("robin@example.com".to_string()),
             subject: "Angebot".to_string(),
-            status: "parsed".to_string(),
+            status: "draft".to_string(),
             valid: true,
+            ready: true,
         });
 
         let mut tracker = StateTracker::new(revision.get(), instance.as_str());

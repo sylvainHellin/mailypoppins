@@ -1076,15 +1076,19 @@ fn every_change_maps_onto_the_event_the_contract_names() {
         Event::from_change(&Change::DraftUpsert {
             account: "alpha".to_string(),
             id: "d1".to_string(),
+            path: "/tmp/alpha/drafts/d1.md".to_string(),
+            to: Some("robin@example.com".to_string()),
             subject: "Re: lunch".to_string(),
             status: "draft".to_string(),
             valid: true,
+            ready: true,
         }),
         Event::Replace {
             kind: KIND_DRAFT_CHANGED,
             payload: json!({
-                "account": "alpha", "id": "d1",
-                "subject": "Re: lunch", "status": "draft", "valid": true,
+                "account": "alpha", "id": "d1", "path": "/tmp/alpha/drafts/d1.md",
+                "to": "robin@example.com", "subject": "Re: lunch", "status": "draft",
+                "valid": true, "ready": true,
             }),
         },
         "a draft is small enough to travel whole"
@@ -1114,9 +1118,12 @@ fn an_event_names_the_resource_it_addresses() {
         Event::from_change(&Change::DraftUpsert {
             account: "alpha".to_string(),
             id: "d1".to_string(),
+            path: "/tmp/alpha/drafts/d1.md".to_string(),
+            to: None,
             subject: String::new(),
             status: "draft".to_string(),
-            valid: false,
+            valid: true,
+            ready: false,
         })
         .resource(),
         Some(ResourceId::new("draft:alpha/d1")),
