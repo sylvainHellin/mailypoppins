@@ -17,6 +17,9 @@
 //! [`sync_fixture`] is the read fixture's accounts plus one that configures a
 //! server it has no credentials for, for the sync/watch slice (plan unit
 //! P4-U9).
+//! [`send_fixture`] is the draft fixture plus a Graph account, an
+//! SMTP-configured account, a seeded outbox and the fake transport, for the
+//! send slice (plan unit P4-U11).
 
 #![allow(dead_code)]
 
@@ -24,4 +27,5 @@ pub mod draft_fixture;
 pub mod mutation_fixture;
 pub mod parity;
 pub mod read_fixture;
+pub mod send_fixture;
 pub mod sync_fixture;
