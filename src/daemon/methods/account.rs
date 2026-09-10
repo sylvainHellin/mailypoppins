@@ -163,14 +163,7 @@ pub fn ready_account<'a>(
     accounts: &'a [AccountConfig],
     name: &str,
 ) -> Result<&'a AccountConfig, RpcError> {
-    let account = accounts
-        .iter()
-        .find(|account| account.name == name)
-        .ok_or_else(|| RpcError {
-            code: ErrorCode::AccountUnknown.code(),
-            message: format!("no account named {name} is configured"),
-            data: Some(json!({"account": name})),
-        })?;
+    let account = configured_account(accounts, name)?;
     let state = state_of(name);
     if state != STATE_READY {
         return Err(RpcError {
@@ -180,6 +173,27 @@ pub fn ready_account<'a>(
         });
     }
     Ok(account)
+}
+
+/// The configured account behind `name`, whatever is on disk for it.
+///
+/// The gate for a method whose whole job is to reach the *server*: a sync is
+/// what gives an account its store, so requiring one first would refuse every
+/// first sync, and a server-side listing needs credentials rather than rows.
+/// Unknown is `-32005` naming what was asked for, exactly as in
+/// [`ready_account`], which is this check plus the store probe.
+pub fn configured_account<'a>(
+    accounts: &'a [AccountConfig],
+    name: &str,
+) -> Result<&'a AccountConfig, RpcError> {
+    accounts
+        .iter()
+        .find(|account| account.name == name)
+        .ok_or_else(|| RpcError {
+            code: ErrorCode::AccountUnknown.code(),
+            message: format!("no account named {name} is configured"),
+            data: Some(json!({"account": name})),
+        })
 }
 
 /// One entry on the wire.

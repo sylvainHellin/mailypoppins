@@ -55,7 +55,13 @@ use support::parity::{
 
 /// The commands compared in the agreement test, with the name each assertion
 /// reports.
-const UNMIGRATED: [&[&str]; 3] = [&["--version"], &["config", "path"], &["list-mailboxes"]];
+///
+/// The third row is the point of the list: a command that *needs* a daemon and
+/// has not been migrated onto one, so the comparison proves the harness reports
+/// no difference by construction. It was `list-mailboxes` until the sync/watch
+/// slice routed it (P4-U10) and is now `outbox list`, which the send slice
+/// (P4-U12) has yet to take.
+const UNMIGRATED: [&[&str]; 3] = [&["--version"], &["config", "path"], &["outbox", "list"]];
 
 fn root() -> TempDir {
     TempDir::new().expect("a temporary parity root")

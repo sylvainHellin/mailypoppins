@@ -113,9 +113,9 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `message.get`, `message.list`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `config.get` and `config.validate` are the queries this build serves.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.list_server`, `message.search`, `message.release_handle`, `operation.status`, `state.bootstrap`, `config.get` and `config.validate` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `message.archive`, `message.delete` and the five `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. No method of this build declares it: the long-running work is sync, authentication and the rebuilds, all of which arrive in Phase 5, and until then the only operation is the one the `test.operation` hook registers. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full` and `sync.watch` are the operations this build serves; the remaining long-running work, authentication and the rebuilds, arrives with the admin slice, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
 A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
@@ -551,6 +551,52 @@ An unknown account is `-32005` with `{account}`; an account with no store is `-3
 An id nothing resolves to is `-32602` with `{account, id}`; a name `draft.create` would overwrite is `-32602` with `{account, name, path}`; a draft already `sent` is `-32602` with `{account, id, status}` for both mutators; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload.
 An invalid draft is not a refusal: `draft.validate` reports it and the exit code stays the client's.
 
+### The `sync.*` family
+
+Five methods carry the four commands that need a mail server: `sync.quick`, `sync.full` and `sync.watch` here, `mailbox.list_server` beside `mailbox.list`, and `message.list_server` beside the read slice's three.
+
+```text
+sync.quick          {account, limit?, mailbox?: [str], dry_run?}  -> {operation_id}
+sync.full           {account, mailbox?: [str], dry_run?}          -> {operation_id}
+sync.watch          {account, mailbox?}                           -> {operation_id}
+mailbox.list_server {account}
+        -> {account, source, mailboxes: [{name, delimiter, attributes, total, unread}]}
+message.list_server {account, mailbox, limit, criteria?}
+        -> {account, mailbox, messages: [{from, to, cc, subject, date, has_attachments, body}]}
+```
+
+`sync.quick` is the newest UIDs per mailbox and takes a `limit`; `sync.full` is everything the mailbox lists and takes none, because a bounded full pass is a quick pass under another name and a caller who sent one is told rather than quietly given a different pass.
+Both are operations rather than commands, and both are `durable`: a sync a GUI started must keep running, and stay watchable, from the CLI window beside it.
+`sync.watch` is the exception and is `client_scoped`, because a watch exists to answer one client's question and an interrupted `mp watch` must not leave the daemon holding an IDLE on its behalf.
+
+`account` is a required string on all three and there is no `all_accounts`: a client that syncs several accounts issues one operation per account, in configuration order, because the per-account header, the failure denominator and the exit code are all rendering of a per-account result.
+An account that configures neither IMAP nor SMTP is `-32006` with `{account, state: "local_only"}` rather than an operation that does nothing, and a client renders that as its skip line without changing the run's exit code.
+An unknown account is `-32005` with `{account}`.
+Neither pass requires a local store: a sync is what gives an account one.
+
+A `mailbox` a pass cannot resolve fails the **operation** with `-32602`, naming the account and listing the mailboxes it does know, so a client renders it beside every other per-account failure rather than through a second path.
+The refusal arrives before anything opens a socket, and before either drain runs.
+
+A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
+A pass that ran answers `{blocked: false, outcome: <sync.completed payload>}` and publishes the same payload as a `sync.completed` event, unless it was a dry run, whose counts describe mail that was not ingested and would read to every other client as mail that arrived.
+
+Each of the five slots of a tick is one `operation.progress` report whose `phase` is one of `head_outbox`, `head_mutations`, `body`, `tail_outbox`, `tail_mutations`, in that order (#0114).
+For the four drain phases, `done` is what the drain completed and `total` what it left behind - still-pending sends, or rolled-back mutations - and both are `null` when the drain had nothing a user would want told.
+`message` carries the reason a drain could not run at all, which is a warning and not a failure: the queue is retried on the next tick, so a drain that could not run may not turn a sync that worked into a failed command.
+A client that labels a tail report derives the label from the phase name and from nothing else.
+
+`mailbox.list_server` and `message.list_server` are queries against the server, so they take no engine lock and read no store.
+`source` is `imap` or `graph`, because the two transports report different things about a mailbox: Graph's folder list carries `total` and `unread`, and IMAP's `LIST` carries `delimiter` and `attributes` and no counts, so the members the server said nothing about are `null` rather than a number nobody measured.
+`message.list_server` requires `mailbox`: a server query with no mailbox names none, and a default is the client's business.
+Its `criteria` object takes `from`, `to`, `cc`, `subject`, `body`, `since`, `before` and `message_id`, all optional.
+Neither answer names a file, and `message.list_server` writes nothing: mail enters the store through a sync, which is the only path that fetches by UID and can key a row (#0037).
+
+This build's watcher is INBOX-only.
+`sync.watch` accepts `mailbox` absent or `INBOX` and refuses anything else with `-32602` and `{account, mailbox}`; a client narrows before it calls and says so.
+The watch is validated before an id is issued - the account, the mailbox, the transport, the credentials - so a refusal is the call's error rather than an operation that fails immediately, and it succeeds with `{mailbox, changed: true}` the first time the mailbox changes.
+A Graph account has no IDLE to offer and is `-32603`.
+No timeout crosses the socket: a client that wants to stop waiting calls `operation.cancel`.
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
@@ -568,10 +614,10 @@ The daemon serves one user's data directory, and a GUI that started a sync must 
 ```json
 {
   "operation_id": "8f2c…",
-  "method": "sync.run",
+  "method": "sync.quick",
   "state": "running",
   "scope": "durable",
-  "progress": {"phase": "fetching", "done": 42, "total": 214, "message": "inbox"},
+  "progress": {"phase": "body", "done": 42, "total": 214, "message": null},
   "result": null,
   "error": null
 }
@@ -718,6 +764,7 @@ The daemon decides the severity and the wire carries it; a client applies what i
 
 The payload carries no formatted string.
 The TUI's status line and `mp sync`'s lines are derived from it by `mp_client::format::sync_status_line` and `mp_client::format::sync_cli_lines`, which are pure functions over the payload and hold every wording in one place.
+The same module holds the drain report lines a pass's `operation.progress` reports render to, `outbox_drain_line`, `mutations_drain_line` and `drain_failed_line`, and the `TAIL_LABEL` a tail phase earns.
 
 `sync.completed` is a lifecycle event and coalesces with nothing.
 Two ticks are two facts about two moments: merging an earlier warning into a later clean tick would present that tick as clean, which is exactly what the severity exists to prevent.
@@ -795,3 +842,4 @@ The two message mutations, `message.archive` and `message.delete` `{account, id|
 The three handle methods, `message.materialise_attachment` `{account, id|selector, mailbox?, part}` and `message.materialise_html` `{account, id|selector, mailbox?}` -> `{handle, path, name, bytes, expires_at}`, and `message.release_handle` `{handle}` -> `{}`, with the `"<mailbox>/<uid>"` message id, the ten-minute default lifetime, the `<data_dir>/runtime/handles/<handle>/<name>` layout, and the pin that keeps the retention sweep off a blob a client has open; the `{selector, mailbox?}` addressing and the `name` field were added in P4-U8, both additive.
 The snapshot's draft row, `{id, path, to, subject, status, valid, ready}`, which a `draft.invalid` reduces into with `status: "invalid"` and `valid: false`.
 The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.
+The `sync.*` family, which is `sync.quick` and `sync.full` as durable operations over `{account, limit?, mailbox?, dry_run?}` (`limit` on the quick pass alone) and `sync.watch` as a client-scoped one over `{account, mailbox?}`, joined in P4-U10 by `mailbox.list_server` `{account}` and `message.list_server` `{account, mailbox, limit, criteria?}`; with them the five phase names `head_outbox`, `head_mutations`, `body`, `tail_outbox` and `tail_mutations` that an `operation.progress` of a pass carries, the `{blocked, outcome}` result, the `local_only` account state on `-32006`, and the INBOX-only refusal of `sync.watch` with `{account, mailbox}`.

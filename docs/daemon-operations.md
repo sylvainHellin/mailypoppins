@@ -85,6 +85,10 @@ The migration moves the CLI one slice at a time, and a command routes the moment
 | `mp delete --sent` | `draft.discard` with `sent: true` | P4-U8 |
 | `mp open <selector> [--mailbox]` | `message.get`, then `message.materialise_attachment` per part, opened in the client | P4-U8 |
 | `mp save <selector> [-o dir] [--mailbox]` | `message.get`, then `message.materialise_attachment` and `message.release_handle` per part, written in the client | P4-U8 |
+| `mp sync [-n] [--mailbox ...] [--dry-run] [--all-accounts]` | one `sync.quick` per account, in configuration order | P4-U10 |
+| `mp fetch [--from ...] [-n] [--mailbox] [--full]` | `message.list_server` | P4-U10 |
+| `mp list-mailboxes` | `mailbox.list_server` | P4-U10 |
+| `mp watch [--mailbox] [--timeout N]` | `sync.watch`, with the wait and the timeout in the client | P4-U10 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 
 Every other command still answers in process and will until its own slice.
@@ -95,7 +99,11 @@ That is why a refusal the daemon spelled out comes back typed rather than printe
 `mp save` is the mirror image of it: the absolute destination is what crosses the socket, and the spelling the user typed is what the `✓` lines print.
 The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.
 
-The daemon opens the secrets backend on first use, which from P4-U8 includes `message.archive` and `message.delete`: they load the account's IMAP or Graph credentials, and an account with none refuses with the `mp config set-password` sentence *before* the store is touched, so the row stays where it was.
+`tests/daemon_sync_slice.rs` is the gate for the sync/watch slice, with one sanctioned deviation: `mp watch --mailbox` naming anything but INBOX prints one extra line on stderr saying so, and that line is masked in that row alone.
+
+`mp sync` is the one routed command that follows an operation rather than a call. It bootstraps first, because `operation.progress` and `operation.finished` reach bootstrapped connections only, and it renders every line it prints from those payloads through `mp_client::format`: the drain reports from the progress events, the summary from the `sync.completed` payload the result carries. There is no client-side budget on the wait, exactly as there was no budget on the in-process pass.
+
+The daemon opens the secrets backend on first use, which from P4-U8 includes `message.archive` and `message.delete` and from P4-U10 the whole sync slice: they load the account's IMAP or Graph credentials, and an account with none refuses with the `mp config set-password` sentence *before* the store is touched, so the row stays where it was.
 
 ## Exit codes
 

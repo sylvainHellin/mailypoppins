@@ -351,6 +351,139 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
 }
 
 // ---------------------------------------------------------------------------
+// The server-side query
+// ---------------------------------------------------------------------------
+
+/// `mp fetch`'s method, in its own array (P4-U10).
+///
+/// A query, because `mp fetch` prints what the server has and writes nothing
+/// (#0037): messages enter the store through `mp sync`, which is the only path
+/// that fetches by UID and can key a row. It is not in
+/// [`MESSAGE_READ_METHOD_SPECS`] because those three read the *store* and this
+/// one opens a session, and because that array is pinned at three.
+pub const MESSAGE_SERVER_METHOD_SPECS: [MethodSpec; 1] =
+    [MethodSpec::new("message.list_server", MethodKind::Query, 1)];
+
+/// `message.list_server` as the dispatcher serves it.
+pub struct MessageListServer {
+    /// The live configuration, so a reload is visible to the next call.
+    pub config: Arc<super::super::config::ConfigStore>,
+}
+
+impl Method for MessageListServer {
+    fn spec(&self) -> MethodSpec {
+        MESSAGE_SERVER_METHOD_SPECS[0]
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            let snapshot = self.config.snapshot();
+            let name = string_param(&params, "account")?;
+            let account = super::account::configured_account(&snapshot.accounts, &name)?;
+            // `mp fetch --mailbox` defaults to INBOX in the client, so the wire
+            // always carries one: a server query with no mailbox names no
+            // mailbox at all rather than a default this daemon invented.
+            let mailbox = string_param(&params, "mailbox")?;
+            let limit = limit_param(&params)?.unwrap_or(10);
+            let criteria = fetch_criteria(&params)?;
+            super::open_secrets(&name, snapshot.config.secrets_backend)?;
+            list_server(account, &mailbox, limit, criteria)
+                .await
+                .map(Outcome::query)
+                .map_err(DomainError::from)
+        })
+    }
+}
+
+/// The IMAP search terms `mp fetch`'s filters carry, or the empty set.
+///
+/// `in_mailbox` and `text` are deliberately not read: the mailbox is a
+/// parameter of its own and `--text` belongs to `mp search`, which searches the
+/// local index.
+fn fetch_criteria(params: &Value) -> Result<crate::imap_client::FetchCriteria, RpcError> {
+    let criteria = match params.get("criteria") {
+        None | Some(Value::Null) => return Ok(Default::default()),
+        Some(Value::Object(_)) => &params["criteria"],
+        Some(_) => return Err(invalid_params("criteria is an object of search terms")),
+    };
+    let term = |key: &str| {
+        criteria
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    Ok(crate::imap_client::FetchCriteria {
+        from: term("from"),
+        to: term("to"),
+        cc: term("cc"),
+        subject: term("subject"),
+        body: term("body"),
+        since: term("since"),
+        before: term("before"),
+        text: None,
+        message_id: term("message_id"),
+        in_mailbox: None,
+    })
+}
+
+/// The `result` of `message.list_server`: the envelopes and the body text the
+/// listing prints, and no path of any kind.
+///
+/// `--full` never crosses the socket: it selects how much of `body` the client
+/// prints, which is a rendering decision over an answer that already carries it.
+async fn list_server(
+    account: &AccountConfig,
+    mailbox: &str,
+    limit: usize,
+    criteria: crate::imap_client::FetchCriteria,
+) -> Result<Value, RpcError> {
+    let name = account.name.clone();
+    let fetched = if account.auth_method == crate::config::AuthMethod::Graph {
+        let config = crate::config::GraphConfig::load(account)
+            .map_err(|e| super::server_error(&name, &e))?;
+        let client = crate::graph::GraphClient::new_async(&config)
+            .await
+            .map_err(|e| super::server_error(&name, &e))?;
+        client
+            .fetch_messages(mailbox, limit)
+            .await
+            .map_err(|e| super::server_error(&name, &e))?
+    } else {
+        let imap =
+            crate::config::ImapConfig::load(account).map_err(|e| super::server_error(&name, &e))?;
+        crate::imap_client::fetch_emails(&imap, &criteria, mailbox, Some(limit))
+            .await
+            .map_err(|e| super::server_error(&name, &e))?
+    };
+
+    let messages: Vec<Value> = fetched.iter().map(fetched_to_json).collect();
+    Ok(json!({"account": name, "mailbox": mailbox, "messages": messages}))
+}
+
+/// One fetched message on the wire: the six header fields the listing prints,
+/// the attachment bit, and the body text it previews.
+///
+/// The parsed attachments, the HTML alternative and the calendar part stay in
+/// the daemon: `mp fetch` prints none of them, and a fetch that writes nothing
+/// has nowhere to put them.
+fn fetched_to_json(email: &crate::parse::FetchedEmail) -> Value {
+    json!({
+        "from": email.from,
+        "to": email.to,
+        "cc": email.cc,
+        "subject": email.subject,
+        "date": email.date,
+        "has_attachments": email.has_attachments,
+        "body": email.body_text,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The mutations
 // ---------------------------------------------------------------------------
 

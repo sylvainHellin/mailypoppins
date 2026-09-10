@@ -497,10 +497,12 @@ mod tests {
                 "draft.reply".to_string(),
                 "draft.validate".to_string(),
                 "mailbox.list".to_string(),
+                "mailbox.list_server".to_string(),
                 "message.archive".to_string(),
                 "message.delete".to_string(),
                 "message.get".to_string(),
                 "message.list".to_string(),
+                "message.list_server".to_string(),
                 "message.materialise_attachment".to_string(),
                 "message.materialise_html".to_string(),
                 "message.release_handle".to_string(),
@@ -508,6 +510,9 @@ mod tests {
                 "operation.cancel".to_string(),
                 "operation.status".to_string(),
                 "state.bootstrap".to_string(),
+                "sync.full".to_string(),
+                "sync.quick".to_string(),
+                "sync.watch".to_string(),
             ]
         );
     }

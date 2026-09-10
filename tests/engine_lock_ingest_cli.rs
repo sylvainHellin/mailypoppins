@@ -22,6 +22,15 @@
 //! `Cargo.toml` while the daemon feature existed, to keep the split visible
 //! beside the gated targets; P4-U1 removed every stanza and Cargo autodiscovers
 //! `tests/*.rs`, so the split now lives only in this header.
+//!
+//! Since P4-U10 the `mp sync` this test spawns is a daemon client, so the child
+//! it forks starts a daemon of its own against the sandbox. The temporary tree
+//! is therefore a [`support::parity::SandboxRoot`], which stops that daemon when
+//! the tree goes: the assertions are untouched, and what changes is only that
+//! the suite no longer leaves a daemon holding a deleted directory (and, with
+//! it, an inherited copy of this test's engine lock).
+
+mod support;
 
 use std::fs;
 use std::net::TcpListener;
@@ -74,6 +83,10 @@ fn mp_sync_exits_zero_and_says_it_skipped_when_another_process_holds_the_lock() 
     let tmp = tempfile::tempdir().unwrap();
     let config_dir = tmp.path().join("config");
     let data_dir = tmp.path().join("data");
+    // Owns the tree from here, and stops the daemon the spawned `mp sync`
+    // starts. The paths above are unchanged: the guard only decides when the
+    // tree and the daemon go away.
+    let tmp = support::parity::SandboxRoot::new(tmp, &data_dir);
     let account_dir = data_dir.join("accounts").join("acct");
     fs::create_dir_all(&config_dir).unwrap();
     fs::create_dir_all(&account_dir).unwrap();

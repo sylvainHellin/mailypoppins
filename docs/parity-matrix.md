@@ -178,9 +178,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp list-mailboxes`, `src/main.rs`, `src/imap_client/mod.rs`
 - Daemon surface: `mailbox.list_server`
 - GUI location: TBD (Phase 9)
-- Validation: manual, requires a live server
-- Status: not started
-- Note: a live server call, distinct from the mailbox hierarchy the store already holds.
+- Validation: manual, requires a live server; refusals and routing in `tests/daemon_sync_slice.rs`
+- Status: routed (P4-U10); GUI not started
+- Note: a live server call, distinct from the mailbox hierarchy the store already holds. The result carries `source` (`imap` or `graph`) because the two transports report different things about a mailbox: Graph's folder list has the item counts this listing prints and IMAP's `LIST` has the attributes and the delimiter instead.
 
 ### MBX-02 Browse and select mailboxes in the sidebar
 
@@ -796,28 +796,29 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ss` (`src/tui/app/keymap.rs:593`) and `sS` (`src/tui/app/keymap.rs:594`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`
+- Status: routed (P4-U10); GUI not started
+- Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
 
 ### SYN-02 Sync command options
 
 - Classification: CLI automation
 - Source anchor: `mp sync [-n] [--mailbox ...] [--dry-run] [--all-accounts]`, `src/main.rs`, `src/sync/engine.rs`
-- Daemon surface: `sync.run` carrying the flag set
+- Daemon surface: `sync.quick` carrying `limit`, `mailbox` and `dry_run`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_help_snapshot.rs`
-- Status: not started
-- Note: `--all-accounts` conflicts with `-A` by construction so a cron line cannot silently sync accounts it never named, and that conflict is a contract to preserve (`ANO-9`).
+- Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_sync_slice.rs`
+- Status: routed (P4-U10); GUI not started
+- Note: `--all-accounts` conflicts with `-A` by construction so a cron line cannot silently sync accounts it never named, and that conflict is a contract to preserve (`ANO-9`). `--all-accounts` itself is not on the wire: the client issues one operation per account in configuration order, because the per-account header, the failure denominator and the exit code are all rendering of a per-account result. `mp sync` always calls `sync.quick`, since `-n` has a default and the command has no unbounded form.
 
 ### SYN-03 Watch a mailbox through IMAP IDLE
 
 - Classification: daemon administration
 - Source anchor: `mp watch [--mailbox] [--timeout N]` with exit code 2 on timeout, `src/main.rs`, `src/imap_client/watch.rs`, `imap_watch` (`src/tui/helpers.rs:45`)
-- Daemon surface: `sync.watch` as a subscription over the daemon's watcher
+- Daemon surface: `sync.watch` as a client-scoped operation over the daemon's watcher
 - GUI location: TBD (Phase 9)
-- Validation: manual, requires a live server
-- Status: not started
-- Note: the daemon's continuous watcher is INBOX-only, as `imap_watch` is today, so serving `--mailbox` for an arbitrary mailbox needs an on-demand client-scoped IDLE connection torn down when the client disconnects; that connection is a named Phase 4 unit, and if it is not built the narrowing of `mp watch --mailbox` to INBOX is recorded in `BACKLOG.md`.
+- Validation: manual, requires a live server; validation and narrowing in `tests/daemon_sync_slice.rs`
+- Status: routed (P4-U10); GUI not started
+- Note: the on-demand IDLE connection was **not** built and the narrowing of `mp watch --mailbox` to INBOX is recorded in `BACKLOG.md` (P4-U10 took the route the plan recommends). Both sides carry it: the client warns on stderr and rewrites the mailbox before it calls, and the daemon refuses anything but INBOX with `-32602`. `--timeout N` stays client-side (wait, `operation.cancel`, `ℹ Timed out.`, exit 2), because a daemon-side timer would be a second place that knows about one client's patience.
 
 ### SYN-04 Startup refresh, asynchronous store open, and background mailbox load
 
@@ -842,10 +843,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `src/pending_ops.rs`, `src/ops.rs`
-- Daemon surface: `state.event` for queue depth and outcomes
+- Daemon surface: `state.event` for queue depth and outcomes; the drains of a `sync.*` pass as `operation.progress`
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/pending_ops.rs`
-- Status: not started
+- Status: routed (P4-U10) for the sync tick's drains; GUI not started
 
 ### SYN-07 Store ingest, reconciliation, and drop-and-rebuild on an unreadable SQLite file
 
@@ -906,7 +907,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `state.event` progress carrying the deadline stop
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/imap_client/fetch.rs`, `src/tui/helpers.rs`
-- Status: not started
+- Status: routed (P4-U10) for `mp sync`, which passes no deadline; GUI not started
 - Note: default 30, `0` unbounded; bodies go out newest-first in chunks of 20 with the deadline checked between chunks and never inside a command, and the first chunk always goes out so an expired deadline still makes progress.
   A deadline stop returns `bodies_complete = false`, which defers the prune and the modseq like any other short pass and resumes on the next tick, and the client reports it as progress rather than failure (#0113).
 
@@ -914,11 +915,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity for its surfacing
 - Source anchor: `run_tick_with_drains` (`src/sync/tick.rs:25`), driven by both TUI tick paths and by `mp sync` (`src/main.rs:1405`); the non-fatal head-drain error at `src/main.rs:1348`
-- Daemon surface: the `sync.*` result carries the head and tail drain counts separately
+- Daemon surface: one `operation.progress` per phase, its `phase` naming which of the five slots reported
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/sync/tick.rs`
-- Status: not started
-- Note: tail report lines carry an " (after sync)" label so they cannot be read as the head's, and a head-drain error prints a warning and continues instead of aborting the sync; the daemon owns the tick after the cutover, so this ordering and this non-fatal error are contracts (#0114).
+- Validation: unit tests in `src/sync/tick.rs`; the wordings and the label in `tests/daemon_sync_slice.rs`
+- Status: routed (P4-U10); GUI not started
+- Note: tail report lines carry an " (after sync)" label so they cannot be read as the head's, and a head-drain error prints a warning and continues instead of aborting the sync; the daemon owns the tick after the cutover, so this ordering and this non-fatal error are contracts (#0114). The label is the client's and is derived from the phase name alone (`Phase::as_str`), so the daemon publishes facts and `mp_client::format` decides the words.
 
 ### SYN-14 Per-mailbox non-convergence detector
 

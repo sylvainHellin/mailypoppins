@@ -21,7 +21,9 @@ pub use sent::ImapSentMailbox;
 pub use search::{
     bracketed_message_id, normalize_message_id, retain_exact_message_id, FetchCriteria,
 };
-pub use store_sync::{list_mailboxes, sync_mailboxes, ImapBackend};
+pub use store_sync::{
+    list_mailboxes, list_mailboxes_detailed, sync_mailboxes, ImapBackend, ServerMailbox,
+};
 // The sync types moved to `crate::sync` with the engine (#0059); re-exported
 // here so the call sites that name them through this module keep compiling.
 pub use crate::sync::{FetchedRaw, FreshObservation, MailboxState, SyncResult, SyncTarget};

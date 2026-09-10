@@ -172,13 +172,39 @@ pub async fn sync_mailboxes(
 // ---------------------------------------------------------------------------
 
 pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
+    Ok(list_mailboxes_detailed(imap_config)
+        .await?
+        .into_iter()
+        .map(|mailbox| mailbox.name)
+        .collect())
+}
+
+/// One mailbox as the server's `LIST` describes it (P4-U10).
+///
+/// `total` and `unread` are not here: `LIST` reports neither, and a `STATUS`
+/// per mailbox would turn a listing into one round trip per row. The daemon's
+/// `mailbox.list_server` carries both members as `null` on this transport and
+/// fills them from Graph's folder list, which does report them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerMailbox {
+    /// The name as the server spells it, which is what `SELECT` takes.
+    pub name: String,
+    /// The hierarchy separator, `None` for a flat name.
+    pub delimiter: Option<String>,
+    /// The `LIST` attributes, as the `\Name` tokens they travel as.
+    pub attributes: Vec<String>,
+}
+
+/// Everything `LIST "" "*"` returns, with the attributes and the delimiter the
+/// name-only [`list_mailboxes`] drops.
+pub async fn list_mailboxes_detailed(imap_config: &ImapConfig) -> Result<Vec<ServerMailbox>> {
     use futures::TryStreamExt;
 
     let mut pooled = pool::checkout(imap_config).await?;
     let session = pooled.session();
 
     let listed = async {
-        let names: Vec<String> = session
+        let listed: Vec<ServerMailbox> = session
             .list(None, Some("*"))
             .await
             .map_err(|e| anyhow!("Failed to list mailboxes: {}", e))?
@@ -186,13 +212,34 @@ pub async fn list_mailboxes(imap_config: &ImapConfig) -> Result<Vec<String>> {
             .await
             .map_err(|e| anyhow!("Failed to collect mailboxes: {}", e))?
             .iter()
-            .map(|m| m.name().to_string())
+            .map(|m| ServerMailbox {
+                name: m.name().to_string(),
+                delimiter: m.delimiter().map(str::to_string),
+                attributes: m.attributes().iter().map(attribute_token).collect(),
+            })
             .collect();
-        Ok(names)
+        Ok(listed)
     }
     .await;
 
     pooled.check(listed)
+}
+
+/// One `LIST` attribute as the `\Name` token RFC 3501 and RFC 6154 spell it.
+///
+/// The catch-all is a `Debug` rendering rather than a panic: a server may send
+/// an attribute this build of the parser knows and this function does not, and
+/// a listing is not the place to refuse over it.
+fn attribute_token(attribute: &async_imap::types::NameAttribute<'_>) -> String {
+    use async_imap::types::NameAttribute;
+    match attribute {
+        NameAttribute::NoInferiors => "\\Noinferiors".to_string(),
+        NameAttribute::NoSelect => "\\Noselect".to_string(),
+        NameAttribute::Marked => "\\Marked".to_string(),
+        NameAttribute::Unmarked => "\\Unmarked".to_string(),
+        NameAttribute::Extension(name) => format!("\\{name}"),
+        other => format!("{other:?}"),
+    }
 }
 
 #[cfg(test)]

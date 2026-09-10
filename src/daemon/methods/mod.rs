@@ -26,6 +26,7 @@ pub mod draft;
 pub mod mailbox;
 pub mod message;
 pub mod state;
+pub mod sync;
 
 use std::sync::Arc;
 
@@ -70,9 +71,22 @@ pub fn register(
     dispatcher.register(Arc::new(mailbox::MailboxList {
         config: Arc::clone(&config),
     }));
+    dispatcher.register(Arc::new(mailbox::MailboxListServer {
+        config: Arc::clone(&config),
+    }));
     message::register_reads(dispatcher, Arc::clone(&config));
     message::register_mutations(dispatcher, Arc::clone(&config), Arc::clone(&canonical));
     message::register_handles(dispatcher, Arc::clone(&config), handles);
+    dispatcher.register(Arc::new(message::MessageListServer {
+        config: Arc::clone(&config),
+    }));
+    self::sync::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&runtimes),
+        Arc::clone(&canonical),
+        Arc::clone(&operations),
+    );
     self::draft::register(
         dispatcher,
         Arc::clone(&config),
@@ -131,4 +145,29 @@ fn internal(message: impl Into<String>) -> RpcError {
         message: message.into(),
         data: None,
     }
+}
+
+/// `-32603` naming the account whose server could not be reached (P4-U10).
+///
+/// Not `-32005` and not `-32006`: the account is configured, so either would
+/// contradict what `account.list` says about it. Not `-32602` either: the
+/// caller's parameters were right and the server or its credentials were not.
+/// The message is the error verbatim, because it is the sentence the user has
+/// always read and has to act on.
+fn server_error(account: &str, error: &anyhow::Error) -> RpcError {
+    RpcError {
+        code: INTERNAL_ERROR,
+        message: format!("{error}"),
+        data: Some(serde_json::json!({"account": account})),
+    }
+}
+
+/// The secrets backend, opened on first use rather than at startup: the same
+/// rule `config.set_password` and the mutation slice follow, because a first run
+/// has no configuration to select one from and the opener is idempotent.
+fn open_secrets(
+    account: &str,
+    kind: crate::secrets::SecretsBackendKind,
+) -> Result<(), RpcError> {
+    crate::secrets::init(kind).map_err(|e| server_error(account, &anyhow::anyhow!("{e}")))
 }

@@ -1324,6 +1324,29 @@ pub fn find_server_name_for_role(account: &AccountConfig, name: &str) -> String 
 ///
 /// `None` means the name matches no configured mailbox, which the caller
 /// reports rather than syncing a mailbox the rest of the product cannot see.
+/// The mailboxes an account is configured for, as the human-readable list the
+/// refusal a `--mailbox` typo earns carries.
+///
+/// A role whose name is its server name is printed once; anything else is
+/// `role (server)`, so a user reading the refusal can type either.
+pub fn configured_mailbox_names(account: &AccountConfig) -> String {
+    let names: Vec<String> = all_configured_mailboxes(account)
+        .iter()
+        .map(|(role, mapping)| {
+            if role.as_str().eq_ignore_ascii_case(&mapping.server) {
+                mapping.server.clone()
+            } else {
+                format!("{} ({})", role.as_str(), mapping.server)
+            }
+        })
+        .collect();
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
 pub fn find_sync_target(account: &AccountConfig, name: &str) -> Option<(MailboxRole, String)> {
     let requested = MailboxRole::from(name);
     all_configured_mailboxes(account)

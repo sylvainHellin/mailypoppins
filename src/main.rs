@@ -1280,6 +1280,12 @@ const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// finish, which is the one answer a mutation may never give.
 const DAEMON_MUTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How long a routed *server query* waits for the daemon: `mp list-mailboxes`
+/// and `mp fetch`, whose work is a session on the mail server rather than a
+/// store read (P4-U10). The pre-daemon binary waited as long as the server
+/// took; this is the same order of magnitude as a mutation's round trip.
+const DAEMON_SERVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Connect to the local daemon and complete the handshake, or end the run.
 ///
 /// One line, on purpose: the policy lives in
@@ -1950,25 +1956,21 @@ fn resolve_body_signature(
 
 /// The mailboxes an account is configured for, as a human-readable list for
 /// the error a `--mailbox` typo produces.
+///
+/// The list itself moved into the library with the refusal that carries it
+/// (P4-U10): the daemon resolves a sync's targets now, so the sentence has to be
+/// reachable from both processes.
+#[allow(dead_code)]
 fn configured_mailbox_names(account: &AccountConfig) -> String {
-    let names: Vec<String> = all_configured_mailboxes(account)
-        .iter()
-        .map(|(role, mapping)| {
-            if role.as_str().eq_ignore_ascii_case(&mapping.server) {
-                mapping.server.clone()
-            } else {
-                format!("{} ({})", role.as_str(), mapping.server)
-            }
-        })
-        .collect();
-    if names.is_empty() {
-        "none".to_string()
-    } else {
-        names.join(", ")
-    }
+    mailypoppins::config::configured_mailbox_names(account)
 }
 
 /// One end of a `mp sync` tick: the outbox, then the mutation queue (#0114).
+///
+/// Dead since P4-U10: `mp sync` drains inside the daemon's pass and renders the
+/// report lines from the `operation.progress` events it publishes. The direct
+/// path is deleted by P4-U15 with the rest of them.
+#[allow(dead_code)]
 ///
 /// The outbox goes first so a message that reached the server before the last
 /// crash gets its Sent copy before this sync reads the mailbox it belongs in
@@ -2026,6 +2028,10 @@ async fn drain_queues_cli(account_config: &AccountConfig, dry_run: bool, label: 
 /// Factored out of the `Sync` arm so `--all-accounts` is a loop over exactly
 /// the single-account body (#0071). `Err` is an account-level failure, a
 /// refused login above all; the caller names it and keeps going.
+///
+/// Dead since P4-U10: the pass is `sync.quick`'s and the rendering is
+/// [`sync_one_routed`]'s. Deleted by P4-U15.
+#[allow(dead_code)]
 async fn sync_one_account(
     account_config: &AccountConfig,
     limit: usize,
@@ -2192,6 +2198,455 @@ async fn sync_one_account(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The sync/watch slice, routed (P4-U10)
+// ---------------------------------------------------------------------------
+
+/// The only mailbox the daemon's watcher watches (BACKLOG.md).
+const WATCHED_MAILBOX: &str = mailypoppins::daemon::methods::sync::WATCHED_MAILBOX;
+
+/// What one operation settled as.
+enum Settled {
+    /// The `result` a succeeded operation produced.
+    Done(serde_json::Value),
+    /// The message a failed or cancelled operation stopped with.
+    Failed(String),
+}
+
+/// How one account's sync ended, which is all the caller's summary needs.
+enum Synced {
+    /// The account had nothing to sync and is out of the denominator.
+    Skipped,
+    /// A pass ran, or was left to the engine that holds the lock.
+    Ran,
+    /// It failed, in the daemon's own words.
+    Failed(String),
+}
+
+/// Follow one operation to its end, rendering the reports it publishes on the
+/// way.
+///
+/// Events rather than polling: a drain report lives on `operation.progress`, and
+/// a poll of `operation.status` only ever sees the newest one. Both kinds are
+/// lifecycle events, so neither is coalesced away nor dropped when a slow client
+/// overflows its queue. There is no budget: a full sync takes as long as the
+/// mailbox does, exactly as it did in process.
+async fn await_operation(
+    connection: &mut mp_client::Connection,
+    id: &str,
+    mut on_progress: impl FnMut(&serde_json::Value),
+) -> Settled {
+    use mailypoppins::daemon::operations::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
+    loop {
+        let Some(notification) = connection.next_notification().await else {
+            daemon_unavailable("the daemon closed the connection with an operation still running")
+        };
+        let params = notification.params;
+        if params["payload"]["operation_id"].as_str() != Some(id) {
+            continue;
+        }
+        match params["kind"].as_str() {
+            Some(KIND_OPERATION_PROGRESS) => on_progress(&params["payload"]),
+            Some(KIND_OPERATION_FINISHED) => {
+                let payload = &params["payload"];
+                return match payload["state"].as_str() {
+                    Some("succeeded") => Settled::Done(payload["result"].clone()),
+                    _ => Settled::Failed(wire_str(&payload["error"]["message"]).to_string()),
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One `operation.progress` report of a sync as the line `mp sync` prints for
+/// it, and whether that line belongs on stderr.
+///
+/// The tail label is derived from the phase name and from nothing else, which is
+/// why the five names are on the wire at all
+/// ([`Phase::as_str`](mailypoppins::daemon::runtime::account::Phase::as_str)).
+/// A phase with nothing to report carries a null `total` and prints no line, so
+/// a clean account is as quiet as it always was.
+fn drain_line(payload: &serde_json::Value) -> Option<(String, bool)> {
+    let phase = payload["phase"].as_str()?;
+    let tail = phase.starts_with("tail_");
+    if let Some(error) = payload["message"].as_str() {
+        return Some((mp_client::format::drain_failed_line(error), true));
+    }
+    let done = payload["done"].as_u64().unwrap_or_default();
+    let total = payload["total"].as_u64()?;
+    if phase.ends_with("_outbox") {
+        Some((mp_client::format::outbox_drain_line(tail, done, total), false))
+    } else if phase.ends_with("_mutations") {
+        Some((mp_client::format::mutations_drain_line(tail, done, total), false))
+    } else {
+        None
+    }
+}
+
+/// One rendered line with its glyph coloured the way this command has always
+/// coloured it.
+///
+/// `mp_client::format` is deliberately colourless - a glyph's colour is a
+/// terminal's business and a GUI has neither - so the CLI puts the colour back
+/// on. The glyph is the only thing that decides it, so this needs to know
+/// nothing about which line it is looking at.
+fn paint(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    let Some((glyph, rest)) = trimmed.split_once(' ') else {
+        return line.to_string();
+    };
+    let painted = match glyph {
+        "\u{2713}" => glyph.green(),
+        "\u{2139}" => glyph.blue(),
+        "\u{26a0}" => glyph.yellow(),
+        "\u{2717}" => glyph.red(),
+        "\u{21bb}" | "-" => glyph.dimmed(),
+        _ => return line.to_string(),
+    };
+    format!("{indent}{painted} {rest}")
+}
+
+/// Whether a refusal is the daemon saying this account has no server at all.
+fn is_local_only(error: &mp_protocol::RpcError) -> bool {
+    error.code == mp_protocol::ErrorCode::AccountNotReady.code()
+        && error
+            .data
+            .as_ref()
+            .map(|data| data["state"] == "local_only")
+            .unwrap_or(false)
+}
+
+/// `mp sync`: one operation per account, in configuration order.
+///
+/// `--all-accounts` stays a loop in the client (#0071): the per-account header,
+/// the denominator that counts only what was attempted and the exit code are all
+/// rendering of a per-account result, and a `^C` stops the account currently
+/// running rather than every account at once.
+async fn routed_sync(
+    global_config: &GlobalConfig,
+    accounts: &[AccountConfig],
+    limit: usize,
+    mailbox: Option<&[String]>,
+    dry_run: bool,
+) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    // A client that follows its own operation has to be a subscriber first: the
+    // progress and finished events reach bootstrapped connections only.
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+
+    // One account's failure does not abort the others: the run continues and
+    // every failure is named at the end (#0071). The seven-week outage in #0068
+    // was a failure nothing named.
+    let mut attempted = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for account_config in accounts {
+        if accounts.len() > 1 {
+            println!("\n{}", format!("── {} ──", account_config.name).bold());
+        }
+        match sync_one_routed(&mut connection, account_config, limit, mailbox, dry_run).await {
+            // A drafts-only account has nothing to sync and is not a failure;
+            // counting it as one exits 1 on every run of a config that
+            // legitimately holds one (#0071 review).
+            Synced::Skipped => {}
+            Synced::Ran => {
+                attempted += 1;
+                // The retention sweep rides on every real sync (#0060): a
+                // dry-run touches nothing, and a failed sync is not a moment to
+                // start deleting cached blobs. Still the client's, and the one
+                // store this handler still opens; P4-U15 owns moving it.
+                if !dry_run {
+                    retention_sweep_after_sync(global_config, account_config);
+                }
+            }
+            Synced::Failed(message) => {
+                attempted += 1;
+                error!("[sync] account '{}' failed: {message}", account_config.name);
+                eprintln!("{} {}: {}", "✗".red(), account_config.name, message);
+                failed.push(account_config.name.clone());
+            }
+        }
+    }
+
+    // Skipped accounts are out of the denominator too: "1 of 2" when the second
+    // was never synced would be a claim about an account this run said nothing
+    // about.
+    if let Some(summary) = mailypoppins::sync_health::failure_summary(attempted, &failed) {
+        eprintln!("{} {}", "✗".red(), summary);
+    }
+    let code = mailypoppins::sync_health::exit_code(&failed);
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// One account's pass: the operation, its reports, and the lines they render to.
+///
+/// `sync.quick` and not `sync.full`, always: `mp sync -n N` is a quick pass with
+/// an explicit bound, and `-n` has a default, so the CLI has no unbounded form.
+async fn sync_one_routed(
+    connection: &mut mp_client::Connection,
+    account: &AccountConfig,
+    limit: usize,
+    mailbox: Option<&[String]>,
+    dry_run: bool,
+) -> Synced {
+    let mut params = serde_json::json!({
+        "account": account.name,
+        "limit": limit,
+        "dry_run": dry_run,
+    });
+    if let Some(mailbox) = mailbox {
+        params["mailbox"] = serde_json::json!(mailbox);
+    }
+    let started = match daemon_try_call(connection, "sync.quick", params).await {
+        Ok(started) => started,
+        Err(error) if is_local_only(&error) => {
+            println!("{}", paint(&format!("- {}: local-only, skipped", account.name)));
+            return Synced::Skipped;
+        }
+        Err(error) => return Synced::Failed(error.message),
+    };
+
+    let id = wire_str(&started["operation_id"]).to_string();
+    let settled = await_operation(connection, &id, |payload| {
+        if let Some((line, stderr)) = drain_line(payload) {
+            if stderr {
+                eprintln!("{}", paint(&line));
+            } else {
+                println!("{}", paint(&line));
+            }
+        }
+    })
+    .await;
+    let result = match settled {
+        Settled::Done(result) => result,
+        Settled::Failed(message) => return Synced::Failed(message),
+    };
+
+    // Another process is this account's engine, so this run ingested nothing and
+    // opened no session (#0122). That is a success, not a failure: the holder is
+    // doing the work. Say so instead of printing a summary of a pass that never
+    // ran.
+    if result["blocked"].as_bool().unwrap_or(false) {
+        println!(
+            "{}",
+            paint(&format!(
+                "ℹ Sync skipped: another engine is syncing '{}'; leaving the ingest to it",
+                account.name
+            ))
+        );
+        return Synced::Ran;
+    }
+    if let Ok(outcome) =
+        serde_json::from_value::<mp_protocol::events::SyncCompleted>(result["outcome"].clone())
+    {
+        let lines = if dry_run {
+            mp_client::format::sync_cli_lines_dry_run(&outcome)
+        } else {
+            mp_client::format::sync_cli_lines(&outcome)
+        };
+        for line in lines {
+            println!("{}", paint(&line));
+        }
+    }
+    Synced::Ran
+}
+
+/// `mp watch`: the daemon holds the IDLE, the client holds the patience.
+///
+/// The narrowing to INBOX is announced before the call rather than discovered
+/// afterwards, so a user who typed `--mailbox Archive` and got INBOX is told the
+/// mailbox that was dropped, the reason and where the decision is recorded. The
+/// daemon refuses anything but INBOX as well, so a client that skipped the
+/// narrowing is told rather than quietly watched the wrong mailbox.
+async fn routed_watch(account: &AccountConfig, mailbox: &str, timeout: Option<u64>) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+
+    let watched = if mailbox.eq_ignore_ascii_case(WATCHED_MAILBOX) {
+        mailbox.to_string()
+    } else {
+        eprintln!(
+            "{} watching {WATCHED_MAILBOX} instead of '{mailbox}': the daemon's watcher is \
+             {WATCHED_MAILBOX}-only (BACKLOG.md, `mp watch --mailbox` is narrowed to \
+             {WATCHED_MAILBOX})",
+            "⚠".yellow()
+        );
+        WATCHED_MAILBOX.to_string()
+    };
+
+    let started = daemon_try_call(
+        &mut connection,
+        "sync.watch",
+        serde_json::json!({"account": account.name, "mailbox": watched}),
+    )
+    .await
+    .map_err(|e| refusal(&account.name, e))?;
+    let id = wire_str(&started["operation_id"]).to_string();
+    println!("Watching {} for changes...", mailbox);
+
+    let waited = match timeout {
+        None => Some(await_operation(&mut connection, &id, |_| {}).await),
+        Some(seconds) => tokio::time::timeout(
+            std::time::Duration::from_secs(seconds),
+            await_operation(&mut connection, &id, |_| {}),
+        )
+        .await
+        .ok(),
+    };
+    match waited {
+        Some(Settled::Done(_)) => {
+            println!("{} Mailbox changed.", "✓".green());
+            Ok(())
+        }
+        Some(Settled::Failed(message)) => Err(anyhow!("{message}")),
+        // The timeout stays client-side: a daemon-side timer would be a second
+        // place that knows about one client's patience. The watch is stopped
+        // rather than abandoned, so the daemon drops the IDLE with us.
+        None => {
+            let _ = daemon_try_call(
+                &mut connection,
+                "operation.cancel",
+                serde_json::json!({"operation_id": id}),
+            )
+            .await;
+            println!("{} Timed out.", "ℹ".blue());
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `mp list-mailboxes`: what the server says it holds.
+///
+/// The two transports report different things about a mailbox, so `source` says
+/// which answered: Graph carries the item counts this listing prints and IMAP's
+/// `LIST` carries none.
+async fn routed_list_mailboxes(account: &AccountConfig) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call_within(
+        &mut connection,
+        "mailbox.list_server",
+        serde_json::json!({"account": account.name}),
+        DAEMON_SERVER_TIMEOUT,
+    )
+    .await
+    .map_err(|e| refusal(&account.name, e))?;
+
+    let graph = wire_str(&result["source"]) == "graph";
+    println!(
+        "{} Available {}:",
+        "ℹ".blue(),
+        if graph { "folders" } else { "mailboxes" }
+    );
+    let empty = Vec::new();
+    for mailbox in result["mailboxes"].as_array().unwrap_or(&empty) {
+        let name = wire_str(&mailbox["name"]);
+        if !graph {
+            println!("  {}", name);
+            continue;
+        }
+        let unread = match mailbox["unread"].as_u64() {
+            Some(unread) if unread > 0 => format!(" ({})", format!("{unread} unread").yellow()),
+            _ => String::new(),
+        };
+        println!(
+            "  {} {} total{}",
+            name.green(),
+            mailbox["total"].as_u64().unwrap_or_default(),
+            unread,
+        );
+    }
+    Ok(())
+}
+
+/// The `mp fetch` filters that become IMAP search terms.
+struct FetchFilters {
+    from: Option<String>,
+    to: Option<String>,
+    cc: Option<String>,
+    subject: Option<String>,
+    body: Option<String>,
+    since: Option<String>,
+    before: Option<String>,
+}
+
+/// `mp fetch`: what the server has, printed and not written (#0037).
+///
+/// `--full` never crosses the socket: it selects how much of a body the listing
+/// prints, and the answer already carries all of it.
+async fn routed_fetch(
+    account: &AccountConfig,
+    mailbox: &str,
+    limit: usize,
+    filters: FetchFilters,
+    full: bool,
+) -> Result<()> {
+    let mut criteria = serde_json::Map::new();
+    for (key, value) in [
+        ("from", filters.from),
+        ("to", filters.to),
+        ("cc", filters.cc),
+        ("subject", filters.subject),
+        ("body", filters.body),
+        ("since", filters.since),
+        ("before", filters.before),
+    ] {
+        if let Some(value) = value {
+            criteria.insert(key.to_string(), serde_json::json!(value));
+        }
+    }
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call_within(
+        &mut connection,
+        "message.list_server",
+        serde_json::json!({
+            "account": account.name,
+            "mailbox": mailbox,
+            "limit": limit,
+            "criteria": criteria,
+        }),
+        DAEMON_SERVER_TIMEOUT,
+    )
+    .await
+    .map_err(|e| refusal(&account.name, e))?;
+
+    let emails: Vec<FetchedEmail> = result["messages"]
+        .as_array()
+        .map(|messages| messages.iter().map(fetched_from_wire).collect())
+        .unwrap_or_default();
+    display_fetched_emails(&emails, full);
+    Ok(())
+}
+
+/// One `message.list_server` entry as the record the listing renders.
+///
+/// The fields left empty are the ones a fetch listing never reads: it prints six
+/// headers, the attachment marker and the body, and it writes nothing, so there
+/// is nowhere for a parsed attachment or a calendar part to go.
+fn fetched_from_wire(message: &serde_json::Value) -> FetchedEmail {
+    let text = |key: &str| message[key].as_str().map(str::to_string);
+    FetchedEmail {
+        from: text("from").unwrap_or_default(),
+        to: text("to").unwrap_or_default(),
+        cc: text("cc"),
+        reply_to: None,
+        bcc: None,
+        subject: text("subject").unwrap_or_default(),
+        date: text("date").unwrap_or_default(),
+        body_text: text("body").unwrap_or_default(),
+        html_body: None,
+        has_attachments: message["has_attachments"].as_bool().unwrap_or(false),
+        message_id: None,
+        attachments: Vec::new(),
+        flags: Default::default(),
+        calendar_ics: None,
+        event: None,
+    }
 }
 
 /// Run the retention sweep for one account and report it, the body of
@@ -3030,34 +3485,10 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::ListMailboxes) => {
-            if account_config.auth_method == AuthMethod::Graph {
-                let graph_config = mailypoppins::config::GraphConfig::load(&account_config)?;
-                let client = mailypoppins::graph::GraphClient::new_async(&graph_config).await?;
-                let folders = client.list_folders().await?;
-
-                println!("{} Available folders:", "ℹ".blue());
-                for folder in &folders {
-                    let unread = if folder.unread_item_count > 0 {
-                        format!(" ({})", format!("{} unread", folder.unread_item_count).yellow())
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "  {} {} total{}",
-                        folder.display_name.green(),
-                        folder.total_item_count,
-                        unread,
-                    );
-                }
-            } else {
-                let imap_config = ImapConfig::load(&account_config)?;
-                let mailboxes = list_mailboxes(&imap_config).await?;
-
-                println!("{} Available mailboxes:", "ℹ".blue());
-                for name in &mailboxes {
-                    println!("  {}", name);
-                }
-            }
+            // Which transport answers, the credentials it needs and the session
+            // it opens are all the daemon's (P4-U10); what stays here is the
+            // wording of the listing.
+            routed_list_mailboxes(&account_config).await?;
         }
 
         Some(Commands::Fetch {
@@ -3072,14 +3503,15 @@ async fn main() -> Result<()> {
             full,
             mailbox,
         }) => {
-
-            let emails = if account_config.auth_method == AuthMethod::Graph {
-                let graph_config = GraphConfig::load(&account_config)?;
-                let client = graph::GraphClient::new_async(&graph_config).await?;
-                client.fetch_messages(&mailbox, limit).await?
-            } else {
-                let imap_config = ImapConfig::load(&account_config)?;
-                let criteria = FetchCriteria {
+            // `mp fetch` is a lookup, not an ingest: it prints what the server
+            // has and writes nothing. Messages enter the store through
+            // `mp sync` (#0037), which is the only path that fetches by UID
+            // and can key a row.
+            routed_fetch(
+                &account_config,
+                &mailbox,
+                limit,
+                FetchFilters {
                     from,
                     to,
                     cc,
@@ -3087,19 +3519,10 @@ async fn main() -> Result<()> {
                     body,
                     since,
                     before,
-                    text: None,
-                    message_id: None,
-                    in_mailbox: None,
-                };
-                fetch_emails(&imap_config, &criteria, &mailbox, Some(limit)).await?
-            };
-
-            display_fetched_emails(&emails, full);
-
-            // `mp fetch` is a lookup, not an ingest: it prints what the server
-            // has and writes nothing. Messages enter the store through
-            // `mp sync` (#0037), which is the only path that fetches by UID
-            // and can key a row.
+                },
+                full,
+            )
+            .await?;
         }
 
         Some(Commands::Sync { limit, mailbox, dry_run, all_accounts }) => {
@@ -3119,72 +3542,14 @@ async fn main() -> Result<()> {
             if accounts.is_empty() || accounts.iter().all(|a| a.name.is_empty()) {
                 return Err(anyhow!("No account to sync (check `mp config show`)"));
             }
-
-            // One account's failure does not abort the others: the run
-            // continues and every failure is named at the end (#0071). The
-            // seven-week outage in #0068 was a failure nothing named.
-            let mut attempted = 0usize;
-            let mut failed: Vec<String> = Vec::new();
-            for account_config in &accounts {
-                if accounts.len() > 1 {
-                    println!("\n{}", format!("── {} ──", account_config.name).bold());
-                }
-                // A drafts-only account has nothing to sync and is not a
-                // failure; counting it as one exits 1 on every run of a config
-                // that legitimately holds one (#0071 review).
-                if account_config.is_local_only() {
-                    println!("{} {}: local-only, skipped", "-".dimmed(), account_config.name);
-                    continue;
-                }
-                attempted += 1;
-                match sync_one_account(account_config, limit, mailbox.as_deref(), dry_run).await {
-                    Ok(()) => {
-                        // The retention sweep rides on every real sync (#0060):
-                        // a dry-run touches nothing, and a failed sync is not a
-                        // moment to start deleting cached blobs.
-                        if !dry_run {
-                            retention_sweep_after_sync(&global_config, account_config);
-                        }
-                    }
-                    Err(e) => {
-                        error!("[sync] account '{}' failed: {e:#}", account_config.name);
-                        eprintln!("{} {}: {:#}", "✗".red(), account_config.name, e);
-                        failed.push(account_config.name.clone());
-                    }
-                }
-            }
-
-            // Skipped accounts are out of the denominator too: "1 of 2" when
-            // the second was never synced would be a claim about an account
-            // this run said nothing about.
-            if let Some(summary) = mailypoppins::sync_health::failure_summary(attempted, &failed) {
-                eprintln!("{} {}", "✗".red(), summary);
-            }
-            let code = mailypoppins::sync_health::exit_code(&failed);
-            if code != 0 {
-                std::process::exit(code);
-            }
+            routed_sync(&global_config, &accounts, limit, mailbox.as_deref(), dry_run).await?;
         }
 
         Some(Commands::Watch { mailbox, timeout }) => {
-            if account_config.auth_method == AuthMethod::Graph {
-                return Err(anyhow!(
-                    "IMAP IDLE watch is not supported for Graph accounts. Use 'mp sync' instead."
-                ));
-            }
-            let imap_config = ImapConfig::load(&account_config)?;
-            println!("Watching {} for changes...", mailbox);
-            let exit_code = watch_mailbox(&imap_config, &mailbox, timeout).await?;
-
-            match exit_code {
-                0 => println!("{} Mailbox changed.", "✓".green()),
-                2 => println!("{} Timed out.", "ℹ".blue()),
-                _ => {}
-            }
-
-            if exit_code != 0 {
-                std::process::exit(exit_code);
-            }
+            // The Graph refusal moved into the daemon with the rest of the
+            // account knowledge; the timeout stayed here, because a client's
+            // patience is the client's (P4-U10).
+            routed_watch(&account_config, &mailbox, timeout).await?;
         }
 
         Some(Commands::Archive { selector, mailbox }) => {

@@ -72,8 +72,9 @@ use crate::sync::SyncResult;
 use super::pool::{PooledRead, ReadPool};
 
 /// How many of the newest UIDs per mailbox a [`TickKind::Quick`] tick
-/// downloads. The TUI's quick sync uses the same number.
-const QUICK_TICK_LIMIT: usize = 100;
+/// downloads. The TUI's quick sync uses the same number, and so does a
+/// `sync.quick` whose caller named no bound (P4-U10).
+pub const QUICK_TICK_LIMIT: usize = 100;
 
 /// Whether an account's runtime can serve.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +114,28 @@ pub enum Phase {
     TailOutbox,
     /// The tail drain's mutation-queue half.
     TailMutations,
+}
+
+impl Phase {
+    /// The name this slot travels under in an `operation.progress` report.
+    ///
+    /// The five names are wire surface (P4-U10): `mp sync` labels a drain
+    /// report line ` (after sync)` when the phase it came from is one of the
+    /// tail's, and derives that from this string and nothing else.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::HeadOutbox => "head_outbox",
+            Phase::HeadMutations => "head_mutations",
+            Phase::Body => "body",
+            Phase::TailOutbox => "tail_outbox",
+            Phase::TailMutations => "tail_mutations",
+        }
+    }
+
+    /// Whether this slot belongs to the drain that runs after the body.
+    pub fn is_tail(self) -> bool {
+        matches!(self, Phase::TailOutbox | Phase::TailMutations)
+    }
 }
 
 /// What one tick did.
@@ -595,7 +618,7 @@ static HOOK_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
 /// [`crate::sync::engine::run_sync`] return are not `Send` and cannot be a
 /// [`BoxFuture`]. `block_on` is called from a plain thread, never from a tokio
 /// worker, so it cannot nest one runtime inside another.
-async fn off_thread<T, Fut>(
+pub(crate) async fn off_thread<T, Fut>(
     label: &'static str,
     make: impl FnOnce() -> Fut + Send + 'static,
 ) -> Result<T>

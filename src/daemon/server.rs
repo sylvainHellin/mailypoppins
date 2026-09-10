@@ -298,16 +298,13 @@ impl DaemonState {
     /// one carry no outcome and commit nothing: the first ran no engine, and
     /// the second is reporting a tick whose runner commits it once.
     ///
-    /// Nothing calls this on a schedule yet. Phase 3b starts runtimes and holds
-    /// their engine locks; the periodic tick is the Phase 5/6 scheduler's, and
-    /// this is the seam it will call.
+    /// Nothing calls this on a schedule yet: the periodic tick is the Phase 5/6
+    /// scheduler's. Since P4-U10 `sync.quick` and `sync.full` reach the same
+    /// mechanism through [`tick_and_commit`], which is this method's body, held
+    /// apart so a dispatched method can call it without reaching back into the
+    /// state that owns the dispatcher.
     pub async fn tick_account(&self, account: &str, kind: TickKind) -> Option<TickOutcome> {
-        let runtime = self.runtimes.get(account)?;
-        let outcome = runtime.tick(kind).await;
-        if let Some(sync) = outcome.sync.clone() {
-            self.canonical.apply(Change::SyncCompleted(sync));
-        }
-        Some(outcome)
+        tick_and_commit(&self.runtimes, &self.canonical, account, kind).await
     }
 
     /// The `result` of `daemon.status`.
@@ -338,6 +335,32 @@ impl DaemonState {
                 .collect::<Vec<_>>(),
         })
     }
+}
+
+/// Run one tick on `account`'s runtime and commit what it did.
+///
+/// The one place a real `sync.completed` is published. A tick that ran carries a
+/// [`SyncCompleted`](mp_protocol::events::SyncCompleted) built from the engine's
+/// own `SyncResult` and the mutation drains' failure count, and it is committed
+/// through [`CanonicalState::apply`](super::state::CanonicalState::apply), which
+/// stamps it with a fresh revision and fans it out to every bootstrapped
+/// connection without reducing anything into the snapshot.
+///
+/// `None` for an account with no live runtime. A blocked tick and a joined one
+/// carry no outcome and commit nothing: the first ran no engine, and the second
+/// is reporting a tick whose runner commits it once.
+pub async fn tick_and_commit(
+    runtimes: &RuntimeTable,
+    canonical: &CanonicalState,
+    account: &str,
+    kind: TickKind,
+) -> Option<TickOutcome> {
+    let runtime = runtimes.get(account)?;
+    let outcome = runtime.tick(kind).await;
+    if let Some(sync) = outcome.sync.clone() {
+        canonical.apply(Change::SyncCompleted(sync));
+    }
+    Some(outcome)
 }
 
 /// Accept connections until `shutdown` fires, then return.

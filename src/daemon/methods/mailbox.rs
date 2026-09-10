@@ -41,7 +41,17 @@ use crate::tui::app::draft_count;
 use super::super::dispatch::{
     CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,
 };
-use super::{internal, string_param};
+use super::{internal, open_secrets, server_error, string_param};
+
+/// The family, in method-name order: the sidebar hierarchy this daemon derives
+/// from the configuration and the store, and the list the *server* has.
+///
+/// Both are queries and both are durable, which is what a method that never
+/// thought about cancellation means.
+pub const MAILBOX_METHOD_SPECS: [MethodSpec; 2] = [
+    MethodSpec::new("mailbox.list", MethodKind::Query, 1),
+    MethodSpec::new("mailbox.list_server", MethodKind::Query, 1),
+];
 
 /// `mailbox.list` as the dispatcher serves it.
 pub struct MailboxList {
@@ -51,7 +61,7 @@ pub struct MailboxList {
 
 impl Method for MailboxList {
     fn spec(&self) -> MethodSpec {
-        MethodSpec::new("mailbox.list", MethodKind::Query, 1)
+        MAILBOX_METHOD_SPECS[0]
     }
 
     fn call<'a>(
@@ -106,6 +116,97 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
         })
         .collect();
     Ok(json!({"account": name, "mailboxes": mailboxes}))
+}
+
+/// `mailbox.list_server`: what the account's server says it holds (P4-U10).
+///
+/// `mp list-mailboxes`' method, and the answer a `mp config init` run against a
+/// live server needs. It reads no store and takes no engine lock: what it needs
+/// is credentials, so an account with no local store is served and an account
+/// with no credentials is refused in the secret store's own sentence.
+pub struct MailboxListServer {
+    /// The live configuration, so a reload is visible to the next listing.
+    pub config: Arc<crate::daemon::config::ConfigStore>,
+}
+
+impl Method for MailboxListServer {
+    fn spec(&self) -> MethodSpec {
+        MAILBOX_METHOD_SPECS[1]
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            let snapshot = self.config.snapshot();
+            let name = string_param(&params, "account")?;
+            let account = super::account::configured_account(&snapshot.accounts, &name)?;
+            open_secrets(&name, snapshot.config.secrets_backend)?;
+            list_server(account)
+                .await
+                .map(Outcome::query)
+                .map_err(DomainError::from)
+        })
+    }
+}
+
+/// The `result` of `mailbox.list_server`.
+///
+/// `source` says which server answered, because the two transports report
+/// different things about a mailbox: Graph's folder list carries the item counts
+/// `mp list-mailboxes` prints, and IMAP's `LIST` carries the attributes and the
+/// hierarchy delimiter but no counts at all. Every member is present on both
+/// paths, `null` where the server said nothing, so a client renders from the
+/// shape rather than from a transport it has to know about.
+async fn list_server(account: &AccountConfig) -> Result<Value, RpcError> {
+    let name = account.name.clone();
+    if account.auth_method == crate::config::AuthMethod::Graph {
+        let config =
+            crate::config::GraphConfig::load(account).map_err(|e| server_error(&name, &e))?;
+        let client = crate::graph::GraphClient::new_async(&config)
+            .await
+            .map_err(|e| server_error(&name, &e))?;
+        let folders = client
+            .list_folders()
+            .await
+            .map_err(|e| server_error(&name, &e))?;
+        let mailboxes: Vec<Value> = folders
+            .iter()
+            .map(|folder| {
+                json!({
+                    "name": folder.display_name,
+                    "delimiter": Value::Null,
+                    "attributes": [],
+                    "total": folder.total_item_count,
+                    "unread": folder.unread_item_count,
+                })
+            })
+            .collect();
+        return Ok(json!({"account": name, "source": "graph", "mailboxes": mailboxes}));
+    }
+
+    let imap = crate::config::ImapConfig::load(account).map_err(|e| server_error(&name, &e))?;
+    let listed = crate::imap_client::list_mailboxes_detailed(&imap)
+        .await
+        .map_err(|e| server_error(&name, &e))?;
+    let mailboxes: Vec<Value> = listed
+        .iter()
+        .map(|mailbox| {
+            json!({
+                "name": mailbox.name,
+                "delimiter": mailbox.delimiter,
+                "attributes": mailbox.attributes,
+                // `LIST` reports neither; a `STATUS` per row would turn one
+                // round trip into one per mailbox.
+                "total": Value::Null,
+                "unread": Value::Null,
+            })
+        })
+        .collect();
+    Ok(json!({"account": name, "source": "imap", "mailboxes": mailboxes}))
 }
 
 /// Both counts of every mailbox of one account, from one open and one grouped

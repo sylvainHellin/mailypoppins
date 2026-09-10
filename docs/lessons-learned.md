@@ -1715,3 +1715,26 @@ That is a good assertion for the shape it pinned and it makes an additive field 
 The same shape bit `DRAFT_COMMANDS` in `tests/daemon_draft_slice.rs`, a five-name list beside a ten-name one, when `draft.discard` joined the family as a command.
 
 A contract test that means "these keys and no others" is worth writing; what it costs is that the unit adding a key has to reconcile it in the same commit, which the T unit that grows the contract should do rather than leave to the implementer.
+
+## A daemon that syncs an account is not the process that can be refused its own lock
+
+`sync.quick` and `sync.full` run the pass through `sync_mailboxes`, which takes the account's `store.lock` for the length of the call and answers `Ok(None)` when another engine holds it (#0122).
+That is exactly right for a daemon with no account runtime, which is every Phase 4 daemon, and exactly wrong for one that has started a runtime: the runtime holds `store.lock` for its whole lifetime, `flock` is per open file description rather than per process (`src/engine_lock.rs`), so the pass opens a second description of a file its own process already locked, contends with itself, and reports `blocked` for work nobody else is doing.
+
+So a pass routes through `tick_and_commit`, the runtime's own tick, when a live runtime exists, and through the guarded call only when none does.
+The tick carries neither a mailbox subset nor `--dry-run`, so a request that names either still takes the guarded path and is answered `blocked` by this daemon's own runtime; account runtimes are behind `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` until Phase 5, so nothing reaches that corner by default.
+The general shape: any daemon-side call to a `*_guarded` entry point has to ask first whether this process is already the engine.
+
+## A client that renders an operation has to bootstrap before it starts one
+
+`mp sync` prints its drain lines from `operation.progress` and its summary from what `operation.finished` carried, and both are `state.event` notifications that reach *bootstrapped* connections only.
+A client that calls `sync.quick` on a fresh connection and then waits for events waits forever, with the operation finishing behind its back.
+
+`state.bootstrap` first, then the call: the events queued between the two are released in revision order after the bootstrap's response frame, so nothing is missed and nothing arrives twice.
+Polling `operation.status` instead would have been simpler and would have lost every progress report but the newest, which is the one place a drain report lives.
+
+## `--dry-run` is not a prefix
+
+`mp sync --dry-run` prints `✓ [dry-run] Synced: 3 email(s) to download`, and the pre-daemon binary built that by threading a `prefix` variable through eleven `println!` calls *and* switching one verb.
+A client rendering the same lines from a payload has neither, so `mp_client::format` grew `sync_cli_lines_dry_run` beside `sync_cli_lines` rather than a caller-side string splice: the prefix goes after the glyph, not before it, and "ingested" becomes "to download" only on the branch where nothing was already present.
+Splicing at the call site would have put `[dry-run] ` in front of the glyph on every line and still got the verb wrong.
