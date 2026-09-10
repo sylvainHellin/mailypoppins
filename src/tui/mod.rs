@@ -9,6 +9,8 @@ mod helpers;
 pub mod queries;
 mod runtime;
 pub mod session;
+#[cfg(test)]
+mod test_daemon;
 pub mod theme;
 mod ui;
 

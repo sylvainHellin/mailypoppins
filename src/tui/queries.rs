@@ -220,6 +220,58 @@ fn row_from_wire(row: &Value, mailbox: &str) -> MessageRow {
 }
 
 // ---------------------------------------------------------------------------
+// The local search pass
+// ---------------------------------------------------------------------------
+
+/// The `hits` array of a `message.search` answer, as the search overlay's rows
+/// (#0105, P5-U6).
+///
+/// A hit carries its own `mailbox`, which a mailbox listing does not: the
+/// All-scope column says where the row lives, and the overlay's `source_label`
+/// is that key. The body travels with the row (`body: true`), because the
+/// overlay renders a hit out of the [`crate::parse::FetchedEmail`] it holds
+/// rather than out of a second read.
+///
+/// The row is decoded into a [`MessageRow`] and handed to `entry_from_row`,
+/// which is the same construction `decode_messages` uses and for the same
+/// reason: one mapper, so the overlay row and the list row cannot drift.
+pub fn decode_search_hits(answer: &Value) -> Vec<crate::tui::app::SearchResultEntry> {
+    answer["hits"]
+        .as_array()
+        .map(|hits| hits.iter().map(search_hit).collect())
+        .unwrap_or_default()
+}
+
+/// One `message.search` hit as an overlay row.
+fn search_hit(hit: &Value) -> crate::tui::app::SearchResultEntry {
+    let mailbox = hit["mailbox"].as_str().unwrap_or_default().to_string();
+    let row = row_from_wire(hit, &mailbox);
+    let fetched = crate::parse::FetchedEmail {
+        from: row.from.clone().unwrap_or_default(),
+        to: row.to.clone().unwrap_or_default(),
+        cc: row.cc.clone(),
+        reply_to: row.reply_to.clone(),
+        bcc: row.bcc.clone(),
+        subject: row.subject.clone().unwrap_or_default(),
+        date: row.date_display.clone().unwrap_or_default(),
+        body_text: hit["body"].as_str().unwrap_or_default().to_string(),
+        html_body: None,
+        has_attachments: row.has_attachments,
+        message_id: Some(row.message_id.clone()),
+        attachments: Vec::new(),
+        flags: row.flags(),
+        calendar_ics: None,
+        event: None,
+    };
+    let status = status_for_mailbox(&mailbox);
+    crate::tui::app::SearchResultEntry {
+        entry: entry_from_row(row, &status),
+        fetched,
+        source_label: mailbox,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The sidebar counts
 // ---------------------------------------------------------------------------
 

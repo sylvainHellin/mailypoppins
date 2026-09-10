@@ -156,6 +156,43 @@ impl Session {
         }
     }
 
+    /// A session served by something in this process rather than by a daemon
+    /// over a socket.
+    ///
+    /// The shape is the real one exactly: a thread of its own owns the
+    /// answering end, and the UI thread reaches it over the same call channel,
+    /// so a test drives the whole door (`Session::handle`, `QueryHandle::call`,
+    /// the 30 s ceiling) and not a shortcut around it.
+    ///
+    /// `build` runs **on the session thread** and hands back what answers
+    /// there, because the fixture has thread-local state to install first (the
+    /// data-root override of #0077) and because whatever it builds must not
+    /// have to be `Send` after that point.
+    #[cfg(test)]
+    pub fn serving<Q, B>(build: B) -> Session
+    where
+        Q: crate::tui::queries::Queries,
+        B: FnOnce() -> Q + Send + 'static,
+    {
+        let (calls, mut inbox) = async_mpsc::unbounded_channel::<Call>();
+        let thread = std::thread::Builder::new()
+            .name("mp-tui-session-test".to_string())
+            .spawn(move || {
+                let queries = build();
+                while let Some(call) = inbox.blocking_recv() {
+                    let answer = queries
+                        .call(&call.method, call.params)
+                        .map_err(|e| format!("{e:#}"));
+                    (call.then)(answer);
+                }
+            })
+            .expect("a test session thread");
+        Session {
+            calls: Some(calls),
+            thread: Some(thread),
+        }
+    }
+
     /// Post a call and hand its answer to `then`, on the session thread.
     ///
     /// Never blocks: this is what a paint-driven loop uses so that waiting for

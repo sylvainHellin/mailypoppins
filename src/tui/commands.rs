@@ -48,11 +48,17 @@
 //! partial-failure shape.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use mp_protocol::events::SyncCompleted;
+
 use super::app::{mailbox_key, Action, App, MailboxKind, MessageRef, StatusLevel};
+use super::helpers::SYNC_SKIPPED_MARKER;
 use super::queries::Queries;
+use crate::notify::NewMailMeta;
 use crate::selector::Selector;
 
 /// Where an [`Action`] does its work.
@@ -296,6 +302,359 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             true
         }
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The operations
+// ---------------------------------------------------------------------------
+
+/// How often a worker thread asks the daemon whether its operation finished.
+///
+/// A poll and not a subscription, because P5-U2 left the event stream connected
+/// and drained by nobody: `operation.status` is a registered query and the
+/// registry prunes nothing, so a worker can read the machine to its terminal
+/// state. **P5-U8 replaces this with the `operation.finished` event**, which is
+/// what the daemon already publishes and what `mp sync` already waits on
+/// (`await_operation`, `src/main.rs`).
+///
+/// 100 ms is a tenth of the one-second poll the TUI's own tick already runs at,
+/// so an operation that finishes instantly is reported within a frame and a
+/// sync that takes a minute costs six hundred round trips over a Unix socket,
+/// which is nothing beside the pass itself.
+pub(super) const OPERATION_POLL: Duration = Duration::from_millis(100);
+
+/// Start one operation and follow it to a terminal state.
+///
+/// `Ok` is the `result` a succeeded operation settled with; `Err` is the
+/// sentence a failed or cancelled one carries, or the transport error that
+/// stopped the client reaching it. Both are what the arm's `BgResult` has
+/// always carried, so nothing above this changes shape.
+///
+/// The wait is unbounded, which is the wait the arm has always had: a full sync
+/// takes as long as the mailbox does. Each individual call is bounded by
+/// `Session`'s own 30 s `CALL_TIMEOUT`, which is ample for a method that
+/// answers `{operation_id}` at once and for a status read.
+pub(super) fn run_operation(
+    commands: &dyn Queries,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    let started = commands
+        .call(method, params)
+        .map_err(|e| format!("{e:#}"))?;
+    let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
+        return Err(format!("{method} answered no operation id"));
+    };
+    loop {
+        let status = commands
+            .call("operation.status", json!({"operation_id": id}))
+            .map_err(|e| format!("{e:#}"))?;
+        match status["state"].as_str() {
+            Some("succeeded") => return Ok(status["result"].clone()),
+            Some("failed") | Some("cancelled") => return Err(operation_error(method, &status)),
+            // `queued` and `running` are the two it can still leave.
+            _ => std::thread::sleep(OPERATION_POLL),
+        }
+    }
+}
+
+/// The sentence a settled-badly operation carries, which is the engine's own
+/// error rendered by the daemon.
+fn operation_error(method: &str, status: &Value) -> String {
+    status["error"]["message"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{method} stopped without saying why"))
+}
+
+/// One sync pass through the daemon, as the status line and the arrival list
+/// [`BgResult::Fetch`](crate::tui::app::BgResult) carries.
+///
+/// `sync.quick` and `sync.full` cover both transports: the daemon's own pass
+/// body loads the Graph or the IMAP configuration itself, so the client-side
+/// fork the two arms had is gone and only the progress line still says which
+/// one it is.
+pub(super) fn run_sync(
+    commands: &dyn Queries,
+    method: &str,
+    account: &str,
+) -> (Result<String, String>, Vec<NewMailMeta>) {
+    match run_operation(commands, method, json!({"account": account})) {
+        Ok(settled) => (
+            Ok(sync_status_line(account, &settled)),
+            new_inbox_mail(&settled),
+        ),
+        Err(e) => (Err(e), Vec::new()),
+    }
+}
+
+/// The one line a finished pass shows.
+///
+/// [`mp_client::format::sync_status_line`] is the shared rendering of a
+/// [`SyncCompleted`], word for word what `tui::helpers::finish_sync` built and
+/// what its mutation-drain suffix appended; the blocked line is the one the
+/// same helper returned when another engine held the lock (#0122).
+fn sync_status_line(account: &str, settled: &Value) -> String {
+    if settled["blocked"].as_bool().unwrap_or(false) {
+        return format!("{SYNC_SKIPPED_MARKER} '{account}'; leaving the ingest to it");
+    }
+    match serde_json::from_value::<SyncCompleted>(settled["outcome"].clone()) {
+        Ok(outcome) => mp_client::format::sync_status_line(&outcome),
+        Err(e) => {
+            log::warn!("[commands] the sync outcome of {account} did not decode: {e}");
+            String::new()
+        }
+    }
+}
+
+/// The inbox arrivals a pass reported, for the desktop notification (#0009).
+fn new_inbox_mail(settled: &Value) -> Vec<NewMailMeta> {
+    settled["new_inbox_mail"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    NewMailMeta::new(
+                        row["from"].as_str().unwrap_or_default(),
+                        row["subject"].as_str().unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `send.approved`, as the line the arm has always posted: how many drafts went
+/// and how many did not.
+///
+/// An account with no approved draft is `0 sent, 0 failed`, which is the
+/// sentence the in-process batch printed for an empty scan.
+pub(super) fn run_send_approved(commands: &dyn Queries, account: &str) -> Result<String, String> {
+    let settled = run_operation(commands, "send.approved", json!({"account": account}))?;
+    let sent = settled["sent"].as_u64().unwrap_or_default();
+    let failed = settled["failed"].as_u64().unwrap_or_default();
+    if sent == 0 && failed == 0 {
+        return Ok("No approved emails found".to_string());
+    }
+    Ok(format!("{sent} sent, {failed} failed"))
+}
+
+/// `calendar.rsvp` for the row `row_id` names, as the line the arm has always
+/// posted.
+///
+/// A reply that reached nobody is a failure and not a green line, which is the
+/// `any_succeeded` check the arm made on the outcome it had in hand.
+pub(super) fn run_rsvp(
+    commands: &dyn Queries,
+    account: &str,
+    row_id: i64,
+    response: &str,
+) -> Result<String, String> {
+    let settled = run_operation(
+        commands,
+        "calendar.rsvp",
+        json!({"account": account, "row_id": row_id, "response": response}),
+    )?;
+    let organizer = settled["organizer"].as_str().unwrap_or_default();
+    if !settled["delivered"].as_bool().unwrap_or(false) {
+        return Err(format!("Failed to send RSVP to {organizer}"));
+    }
+    Ok(format!(
+        "{} — replied to {organizer}",
+        settled["subject"].as_str().unwrap_or_default()
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// The renditions a key materialises
+// ---------------------------------------------------------------------------
+
+/// The attachments of one row, materialised into files a picker can name
+/// (`RD-06`'s neighbour, `#0052` scope item 8).
+///
+/// Two calls rather than one: `message.get` for the part list the row carries,
+/// then `message.materialise_attachment` per part. The files land in the
+/// daemon's handle directory instead of the per-row materialisation directory
+/// `mp open` writes to, which is the one visible consequence of the move: a
+/// handle expires (ten minutes by default) where a materialised copy survived
+/// until the temp directory was swept.
+///
+/// An empty vector is a message with no attachments, which is the caller's
+/// status line to write; `Err` is a sentence for it to print.
+pub(super) fn attachment_files(
+    commands: &dyn Queries,
+    account: &str,
+    row_id: i64,
+) -> Result<Vec<PathBuf>, String> {
+    let shown = commands
+        .call(
+            "message.get",
+            json!({"account": account, "row_id": row_id, "body": false}),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    let parts = shown["attachments"].as_array().map_or(0, Vec::len);
+    (0..parts)
+        .map(|part| {
+            commands
+                .call(
+                    "message.materialise_attachment",
+                    json!({"account": account, "row_id": row_id, "part": part}),
+                )
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|handle| {
+                    handle["path"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .ok_or_else(|| format!("part {part} was materialised without a path"))
+                })
+        })
+        .collect()
+}
+
+/// The `Fwd:` subject the forward wizard opens with, built from the row's own
+/// subject rather than from the list entry, whose `(no subject)` placeholder
+/// must never reach a sent header.
+///
+/// `message.get` with no body: the subject is one field of the record and this
+/// is a keypress, not a read of the message.
+pub(super) fn forward_subject(commands: &dyn Queries, account: &str, row_id: i64) -> String {
+    let subject = commands
+        .call(
+            "message.get",
+            json!({"account": account, "row_id": row_id, "body": false}),
+        )
+        .map_err(|e| {
+            log::warn!("[commands] the subject of row {row_id} of {account}: {e:#}");
+        })
+        .ok()
+        .and_then(|shown| shown["subject"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    crate::draft::fwd_subject(&subject)
+}
+
+/// The browser rendition of one row, as a file a `file://` URL can name.
+///
+/// `message.materialise_html` is the daemon's own copy of what the TUI built
+/// inline: the charset meta, the CSP tag and the `cid:` inlining, all three of
+/// them #0037 fixes that a second renderer would have had to keep in step. A
+/// message whose sender wrote no markup is refused, which is not an error and
+/// is the caller's "No HTML version available".
+pub(super) fn html_rendition(
+    commands: &dyn Queries,
+    account: &str,
+    row_id: i64,
+) -> Result<PathBuf, String> {
+    let handle = commands
+        .call(
+            "message.materialise_html",
+            json!({"account": account, "row_id": row_id}),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    handle["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| "the rendition was materialised without a path".to_string())
+}
+
+/// The file behind an indexed draft id, without a status line: the batch flows
+/// count their misses instead of narrating each one.
+///
+/// `draft.path` is the family's resolver and answers from a fresh directory
+/// scan, which is what makes a draft written a moment ago resolvable: it is the
+/// same reason the store-backed helper used `Store::open` rather than
+/// `open_store`, drafts being local-only files an account with no store still
+/// has.
+///
+/// A refusal is `Ok(None)`: `draft.path` answers `-32602` for an id nothing
+/// resolves to, and that is the "no longer in the index" case rather than a
+/// failure to read the index. There is no second case left to tell it from -
+/// a daemon that could not scan the directory answers the same code - so the
+/// caller's two status lines became one.
+pub(super) fn draft_path(commands: &dyn Queries, account: &str, id: &str) -> Option<PathBuf> {
+    match commands.call("draft.path", json!({"account": account, "id": id})) {
+        Ok(location) => location["path"].as_str().map(PathBuf::from),
+        Err(e) => {
+            log::warn!("[commands] {account} has no draft {id}: {e:#}");
+            None
+        }
+    }
+}
+
+/// The draft a reply or a forward of `row_id` writes, as its path and its
+/// selector.
+///
+/// `draft.reply` and `draft.forward` are the whole of what the client used to
+/// do in three steps (read the row, build the `SourceMessage`, run
+/// `create_draft_from_source`), and the daemon runs them through the very same
+/// library functions, so the file is byte-identical to the one `mp reply` and
+/// `mp forward` write. `headers` is the compose wizard's override of the
+/// recipients and the subject it asked for before the draft existed.
+pub(super) fn draft_from_source(
+    commands: &dyn Queries,
+    account: &str,
+    row_id: i64,
+    kind: crate::draft::DraftFromSource,
+    headers: Option<&crate::draft::DraftRecipientEdit>,
+) -> Result<(PathBuf, String), String> {
+    let (method, all) = match kind {
+        crate::draft::DraftFromSource::Reply { all } => ("draft.reply", Some(all)),
+        crate::draft::DraftFromSource::Forward => ("draft.forward", None),
+    };
+    let mut params = json!({"account": account, "source": {"row_id": row_id}});
+    if let Some(all) = all {
+        params["all"] = json!(all);
+    }
+    if let Some(headers) = headers {
+        params["headers"] = json!({
+            "to": headers.to,
+            "cc": headers.cc,
+            "bcc": headers.bcc,
+            "subject": headers.subject,
+        });
+    }
+    let created = commands
+        .call(method, params)
+        .map_err(|e| format!("{e:#}"))?;
+    let path = created["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{method} wrote a draft it did not name"))?;
+    let selector = created["selector"].as_str().unwrap_or_default().to_string();
+    Ok((path, selector))
+}
+
+/// The rows of the local index that answer `query`, as the search overlay's
+/// own row type (#0105).
+///
+/// `message.search` with `body: true`: the overlay renders a hit's body out of
+/// its `fetched` payload, so the body travels with the row rather than costing
+/// a `message.get` per hit. The query is rendered back into the grammar the
+/// method parses ([`crate::search::to_query_string`]), which is what keeps the
+/// AST off the wire.
+pub(super) fn local_search(
+    commands: &dyn Queries,
+    account: &str,
+    query: &crate::search::Query,
+    mailbox: Option<&str>,
+    limit: usize,
+) -> Vec<super::app::SearchResultEntry> {
+    let params = json!({
+        "account": account,
+        "query": crate::search::to_query_string(query),
+        "mailbox": mailbox,
+        "limit": limit,
+        "body": true,
+    });
+    match commands.call("message.search", params) {
+        Ok(answer) => super::queries::decode_search_hits(&answer),
+        Err(e) => {
+            // The same silence the store-backed pass kept: a local pass that
+            // cannot run leaves the server leg to answer, and the overlay says
+            // "Searching server..." either way.
+            log::warn!("[commands] the local pass over {account} found nothing: {e:#}");
+            Vec::new()
+        }
     }
 }
 
@@ -779,81 +1138,30 @@ pub(super) fn refresh_drafts_after_flip(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use mp_protocol::{Request, RequestId, JSONRPC_VERSION};
-
     use super::*;
-    use crate::config::{AccountConfig, GlobalConfig};
-    use crate::daemon::config::{ConfigState, ConfigStore};
-    use crate::daemon::dispatch::{ClientCtx, ClientKind};
-    use crate::daemon::runtime::InstanceMeta;
-    use crate::daemon::server::DaemonState;
     use crate::tui::app::EmailEntry;
+    use crate::tui::test_daemon::TestDaemon;
 
     const ACCOUNT: &str = "alice";
 
     /// A daemon over a fixture data root, reachable as a [`Queries`].
     ///
-    /// The same shape `src/tui/actions_tests.rs` uses, and for the same reason:
-    /// the layer under test is pinned against the daemon's real method bodies
-    /// rather than against a JSON mock that could agree with nobody. The data
-    /// root is held for as long as the fixture, because every path in sight
-    /// resolves under it.
+    /// [`TestDaemon`](crate::tui::test_daemon::TestDaemon) is the shared
+    /// fixture; what is added here is the seeded account it serves and the
+    /// tempdir that holds it, which lives as long as the fixture because every
+    /// path in sight resolves under it.
     struct Daemon {
-        state: DaemonState,
-        runtime: tokio::runtime::Runtime,
+        daemon: TestDaemon,
         _data: crate::config::test_env::TestDataDir,
     }
 
     impl Daemon {
         fn new() -> Daemon {
             let data = crate::config::test_env::TestDataDir::new();
-            let root = crate::config::mailypoppins_data_dir();
             std::fs::create_dir_all(crate::config::account_dir(ACCOUNT)).expect("an account dir");
             drop(crate::store::Store::open(crate::config::store_path(ACCOUNT)).expect("a store"));
-
-            let config = Arc::new(ConfigStore::new(
-                root.join("config.toml"),
-                ConfigState::Ok,
-                GlobalConfig {
-                    accounts: vec![AccountConfig {
-                        name: ACCOUNT.to_string(),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-                false,
-            ));
-            let state = DaemonState::new(
-                InstanceMeta {
-                    app_version: "0.0.0-p5u6".to_string(),
-                    protocol_min: mp_protocol::PROTOCOL_MIN,
-                    protocol_max: mp_protocol::PROTOCOL_MAX,
-                    instance_id: "commands".to_string(),
-                    pid: 42,
-                    started_at: "2026-07-28T09:00:00Z".to_string(),
-                    data_dir: root.clone(),
-                    config_dir: root,
-                },
-                config,
-            );
-            // Every thread this runtime starts is pointed at the fixture's data
-            // root: the override of #0077 is thread-local and the message
-            // mutations hop to `spawn_blocking`, so without this a mutation
-            // resolves `store_path` against the developer's own tree
-            // (`docs/lessons-learned.md`).
-            let root = crate::config::mailypoppins_data_dir();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .on_thread_start(move || {
-                    std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
-                })
-                .build()
-                .expect("a current-thread runtime");
             Daemon {
-                state,
-                runtime,
+                daemon: TestDaemon::new(&[ACCOUNT]),
                 _data: data,
             }
         }
@@ -861,23 +1169,7 @@ mod tests {
 
     impl Queries for Daemon {
         fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-            let ctx = ClientCtx {
-                connection_id: 1,
-                kind: ClientKind::Tui,
-                protocol: 1,
-                capabilities: Vec::new(),
-            };
-            let request = Request {
-                jsonrpc: JSONRPC_VERSION.to_string(),
-                id: Some(RequestId::Num(1)),
-                method: method.to_string(),
-                params,
-            };
-            let outcome = self
-                .runtime
-                .block_on(self.state.dispatcher.dispatch(&ctx, request))
-                .map_err(|e| anyhow::anyhow!("{method}: {e}"))?;
-            Ok(outcome.result)
+            self.daemon.call(method, params)
         }
     }
 

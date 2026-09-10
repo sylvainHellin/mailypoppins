@@ -6,29 +6,31 @@ use anyhow::{Context, Result};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{
-    entry_from_row, mailbox_key, status_for_mailbox, Action, App, BgResult, ComposeField,
-    ComposeMode, ComposeWizard, Focus, HeldSend, MailboxKind, MessageRef, Overlay,
-    SearchOverlayFocus, SearchResultEntry, StatusLevel,
+    mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus, HeldSend,
+    MailboxKind, MessageRef, Overlay, RsvpChoice, SearchOverlayFocus, StatusLevel,
 };
 use super::helpers::{
-    edit_file, lib_do_multi_search_graph, lib_do_sync_graph, resume_terminal, suspend_terminal,
+    edit_file, lib_do_multi_search_graph, resume_terminal, suspend_terminal,
 };
 use super::commands;
 use super::session::QueryHandle;
 use crate::store::open_store;
 
 use crate::draft::{
-    create_draft_from_source, find_drafts, new_draft_skeleton, DraftFromSource,
-    DraftRecipientEdit, SourceMessage,
+    create_draft_from_source, new_draft_skeleton, DraftFromSource, DraftRecipientEdit,
+    SourceMessage,
 };
 use crate::selector::Selector;
 use crate::send::SendReport;
 use crate::store::BlobStore;
-use crate::types::EmailStatus;
 
 // ---------------------------------------------------------------------------
 // Parking a sync behind the background work it cannot run alongside
 // ---------------------------------------------------------------------------
+
+/// How many local hits the immediate FTS pass of the search overlay shows
+/// before the server leg answers (#0105).
+const LOCAL_SEARCH_LIMIT: usize = 50;
 
 /// Whether a fetch or a sync must wait. One gate, named once, because the
 /// release condition in the event loop has to be the *same* condition: they
@@ -215,21 +217,19 @@ fn attach_file_to_draft(app: &mut App, path: &str) {
 
 /// [`cursor_attachment_files`] for a row named directly, which is the
 /// server-search hit that resolved to one.
+///
+/// Daemon-routed since P5-U6: `message.get` for the part list and
+/// `message.materialise_attachment` per part, so the bytes are written by the
+/// process that owns the blobs. The files land in the daemon's handle
+/// directory rather than in `parse::materialisation_dir`, which is where `mp
+/// open` still puts its own; the picker and the save pipeline address files
+/// either way.
 pub(super) fn row_attachment_files(app: &mut App, row_id: i64) -> Option<Vec<PathBuf>> {
-    let (store, blobs) = store_for_mutation(app, "Attachments")?;
-    // The CLI's own directory, through the CLI's own helper: `mp open` and
-    // `o` put the same row's files in the same private place.
-    let dest = match crate::parse::materialisation_dir(&row_id.to_string()) {
-        Ok(dir) => dir,
-        Err(e) => {
-            app.set_status_level(format!("Attachments failed: {e:#}"), StatusLevel::Error);
-            return None;
-        }
-    };
-    match crate::store::read::materialise_attachments(&store, &blobs, row_id, &dest) {
+    let account = app.account_config.name.clone();
+    match commands::attachment_files(&daemon_door(app), &account, row_id) {
         Ok(files) => Some(files),
         Err(e) => {
-            app.set_status_level(format!("Attachments failed: {e:#}"), StatusLevel::Error);
+            app.set_status_level(format!("Attachments failed: {e}"), StatusLevel::Error);
             None
         }
     }
@@ -303,28 +303,21 @@ fn html_temp_file(html: &str, stem: &str) -> Result<PathBuf> {
 /// The browser rendition of a stored row, or `None` with the status line
 /// saying why: a message whose sender wrote no markup has none, which is not
 /// an error.
+///
+/// Daemon-routed since P5-U6: `message.materialise_html` writes the very same
+/// rendition, charset meta, CSP tag and inlined `cid:` images included, which
+/// is why it exists rather than serving raw markup through a new door. A row
+/// with no markup is refused, and the refusal is the line this always printed.
 pub(super) fn html_rendition_for_row(app: &mut App, row_id: i64) -> Option<PathBuf> {
-    let (store, blobs) = store_for_mutation(app, "Open in browser")?;
-    let Some(html) = crate::store::read::load_html(&store, &blobs, row_id) else {
-        app.set_status("No HTML version available".to_string());
-        return None;
-    };
-    // A browser opening the file has no message to resolve `cid:` URLs
-    // against, so the referenced image parts are inlined as `data:` URIs
-    // (the pre-#0037 rewrite, lost in the store rebuild). The raw blob is
-    // only read when the markup actually carries a reference.
-    let html = if html.to_ascii_lowercase().contains("cid:") {
-        match crate::store::read::load_raw(&store, &blobs, row_id) {
-            Some(raw) => {
-                let images = crate::parse::inline_images(&raw, &html);
-                crate::parse::embed_inline_images(&html, &images)
-            }
-            None => html,
+    let account = app.account_config.name.clone();
+    match commands::html_rendition(&daemon_door(app), &account, row_id) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            log::warn!("[actions] no browser rendition for row {row_id}: {e}");
+            app.set_status("No HTML version available".to_string());
+            None
         }
-    } else {
-        html
-    };
-    html_rendition(app, &html, &row_id.to_string())
+    }
 }
 
 /// [`html_rendition_for_row`] over markup already in hand, which is the
@@ -525,46 +518,12 @@ fn cursor_message(app: &mut App, what: &str) -> Option<MessageRef> {
     None
 }
 
-/// The source of a reply or a forward, read off the store row under the
-/// cursor, or `None` with the status line saying why not.
-///
-/// This is `mp reply` / `mp forward`'s own path: the row is resolved by id,
-/// the quote and the HTML companion come out of `message_blobs`, and the
-/// forward's attachments are materialised by the same
-/// [`crate::draft::source_from_row`] the CLI calls. Nothing here reads a
-/// `.md` file, because there is not one.
-fn source_for_msg(
-    app: &mut App,
-    msg: MessageRef,
-    what: &str,
-    with_attachments: bool,
-) -> Option<SourceMessage> {
-    let (store, blobs) = store_for_mutation(app, what)?;
-    let row = match crate::store::read::find_by_id(&store, msg.row_id()) {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            app.set_status_level(
-                format!("{what} failed: that message is no longer in the store"),
-                StatusLevel::Error,
-            );
-            return None;
-        }
-        Err(e) => {
-            app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
-            return None;
-        }
-    };
-    match crate::draft::source_from_row(&store, &blobs, &row, with_attachments) {
-        Ok(source) => Some(source),
-        Err(e) => {
-            app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
-            None
-        }
-    }
-}
-
 /// The address a draft this account writes is sent from: the SMTP config's,
 /// falling back to the account's own default.
+///
+/// Only the wizard's own writer reads this now: a reply or a forward is built
+/// by the daemon, which resolves the same address off the same configured
+/// account (`SmtpConfig::default_from` is a copy of `AccountConfig`'s).
 fn default_from(app: &App) -> String {
     app.smtp_config
         .as_ref()
@@ -572,10 +531,50 @@ fn default_from(app: &App) -> String {
         .unwrap_or_else(|| app.account_config.default_from.clone())
 }
 
-/// Build the draft and hand it straight to `$EDITOR`, which is what reply and
-/// forward did before the read path moved (the draft is a starting point, not
-/// a finished message).
+/// Build the draft through the daemon and hand it straight to `$EDITOR`, which
+/// is what reply and forward did before the read path moved (the draft is a
+/// starting point, not a finished message).
+///
+/// `draft.reply` / `draft.forward`, addressed by `row_id` (P5-U6): the row
+/// read, the `SourceMessage` build and `create_draft_from_source` are one call
+/// now, run by the process that owns the blobs, through the very same library
+/// functions `mp reply` and `mp forward` run. `headers` is the compose
+/// wizard's override of the recipients and the subject it collected before the
+/// draft existed.
 fn write_draft_and_edit(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    msg: MessageRef,
+    kind: DraftFromSource,
+    headers: Option<&DraftRecipientEdit>,
+    what: &str,
+) -> Result<()> {
+    let account = app.account_config.name.clone();
+    let built = commands::draft_from_source(
+        &daemon_door(app),
+        &account,
+        msg.row_id(),
+        kind,
+        headers,
+    );
+    let (path, selector) = match built {
+        Ok(pair) => pair,
+        Err(e) => {
+            app.set_status_level(format!("{what} failed: {e}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
+    edit_new_draft(app, terminal, &path, format!("{what} draft ready: {selector}"))
+}
+
+/// [`write_draft_and_edit`] over a source the client already holds, which is
+/// the server-search hit that resolved to no local row.
+///
+/// The one draft the daemon cannot build: the message is not in the store, so
+/// there is no row to address, and the content is the fetch the overlay is
+/// rendering. Refusing to quote it would be a limitation of the plumbing
+/// rather than of what is known.
+fn write_fetched_draft_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     source: &SourceMessage,
@@ -587,12 +586,12 @@ fn write_draft_and_edit(
     let signature = app.signature_content.clone();
     let (path, selector) =
         match create_draft_from_source(&account, &from, source, kind, None, signature.as_deref()) {
-        Ok(pair) => pair,
-        Err(e) => {
-            app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
-            return Ok(());
-        }
-    };
+            Ok(pair) => pair,
+            Err(e) => {
+                app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
+                return Ok(());
+            }
+        };
     edit_new_draft(app, terminal, &path, format!("{what} draft ready: {selector}"))
 }
 
@@ -626,30 +625,6 @@ fn edit_new_draft(
     Ok(())
 }
 
-/// The subject the forward wizard opens with: the row's own subject under a
-/// `Fwd:` prefix, or a bare prefix when the row cannot be read.
-///
-/// The list entry is not the source here: it substitutes "(no subject)" for an
-/// empty subject, and that placeholder must not end up in a sent header.
-fn forward_subject(app: &App, msg: MessageRef) -> String {
-    let subject = open_store(&app.account_config.name)
-        .and_then(|store| crate::store::read::find_by_id(&store, msg.row_id()).ok().flatten())
-        .and_then(|row| row.subject)
-        .unwrap_or_default();
-    crate::draft::fwd_subject(&subject)
-}
-
-/// The file behind an indexed draft id, without a status line: the batch
-/// flows count their misses instead of narrating each one.
-///
-/// [`crate::store::Store::open`] rather than `open_store`, for the reason the
-/// Drafts mailbox load gives: drafts are local-only files, so an account that
-/// has never synced has no store file and still has drafts.
-fn lookup_draft_path(account: &str, id: &str) -> Result<Option<PathBuf>> {
-    let store = crate::store::Store::open(crate::config::store_path(account))?;
-    Ok(crate::store::drafts::find(&store, account, id)?.map(|row| row.path))
-}
-
 /// The draft under the cursor, as its indexed id and the file that id names,
 /// or `None` with the status line saying why there is not one.
 ///
@@ -672,20 +647,18 @@ fn cursor_draft(app: &mut App, why: &str) -> Option<(String, PathBuf)> {
 
 /// The file behind an indexed draft id, or `None` with the status line saying
 /// the index no longer holds it.
+///
+/// `draft.path` since P5-U6, which answers from a fresh scan of the drafts
+/// directory the way the store-backed lookup did. It has one refusal where the
+/// lookup had two outcomes ("not in the index" and "the index could not be
+/// read"), so the second line is gone and its reason is in the log.
 fn indexed_draft_path(app: &mut App, id: &str) -> Option<PathBuf> {
     let account = app.account_config.name.clone();
-    match lookup_draft_path(&account, id) {
-        Ok(Some(path)) => Some(path),
-        Ok(None) => {
+    match commands::draft_path(&daemon_door(app), &account, id) {
+        Some(path) => Some(path),
+        None => {
             app.set_status_level(
                 format!("That draft is no longer in the index ({id})"),
-                StatusLevel::Error,
-            );
-            None
-        }
-        Err(e) => {
-            app.set_status_level(
-                format!("Reading the drafts index of {account} failed: {e:#}"),
                 StatusLevel::Error,
             );
             None
@@ -915,14 +888,12 @@ pub(super) fn handle_action(
             let Some(msg) = cursor_message(app, what) else {
                 return Ok(());
             };
-            let Some(source) = source_for_msg(app, msg, what, false) else {
-                return Ok(());
-            };
             write_draft_and_edit(
                 app,
                 terminal,
-                &source,
+                msg,
                 DraftFromSource::Reply { all: reply_all },
+                None,
                 what,
             )?;
         }
@@ -1014,20 +985,23 @@ pub(super) fn handle_action(
             // reply, and it lives in the message's blob (#0038 item 6). The
             // account is the active one by construction: the reference names a
             // row in its store.
-            let Some(ics) = app.load_message_ics(msg) else {
+            // The invite guard stays client-side: `load_message_ics` is one of
+            // the three reads the query layer's residue table keeps
+            // (`app/mod.rs`), and it is the sentence this key has always
+            // printed for a row that carries no invitation. The daemon reads
+            // the payload itself; nothing is handed to it.
+            if app.load_message_ics(msg).is_none() {
                 app.set_status_level(
                     "That message carries no invitation to reply to".to_string(),
                     StatusLevel::Error,
                 );
                 return Ok(());
-            };
+            }
             let acct_idx = app.active_account;
-            let smtp_config = app.smtp_config.clone();
-            let graph_config = app.graph_config.clone();
-            let account_config = app.account_config.clone();
+            let account = app.account_config.name.clone();
 
-            if graph_config.is_some()
-                && account_config.auth_method == crate::config::AuthMethod::Graph
+            if app.graph_config.is_some()
+                && app.account_config.auth_method == crate::config::AuthMethod::Graph
             {
                 app.set_status_level(
                     "RSVP is not supported for Graph accounts yet (#0036)".to_string(),
@@ -1035,19 +1009,17 @@ pub(super) fn handle_action(
                 );
                 return Ok(());
             }
-            let smtp_config = match smtp_config {
-                Some(c) => c,
-                None => {
-                    app.set_status_level(
-                        "SMTP not configured".to_string(),
-                        StatusLevel::Error,
-                    );
-                    return Ok(());
-                }
+            if app.smtp_config.is_none() {
+                app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
+                return Ok(());
+            }
+            // The three words `calendar.rsvp` takes, which are `mp invite
+            // accept|tentative|decline`'s own subcommand names.
+            let response = match choice {
+                RsvpChoice::Accept => "accept",
+                RsvpChoice::Tentative => "tentative",
+                RsvpChoice::Decline => "decline",
             };
-            let account_address =
-                crate::parse::extract_email_address(&account_config.default_from);
-            let rsvp = choice.to_rsvp();
 
             app.bg_count += 1;
             app.set_status_level(
@@ -1055,24 +1027,13 @@ pub(super) fn handle_action(
                 StatusLevel::Progress,
             );
             let tx = bg_tx.clone();
+            let door = daemon_door(app);
+            let row_id = msg.row_id();
             std::thread::spawn(move || {
-                let rt = super::runtime::shared();
-                let result = (|| -> anyhow::Result<String> {
-                    let outcome = rt.block_on(crate::send::send_rsvp(
-                        &ics,
-                        &account_config,
-                        &account_address,
-                        rsvp,
-                        &smtp_config,
-                    ))?;
-                    if !outcome.send_result.any_succeeded() {
-                        anyhow::bail!("Failed to send RSVP to {}", outcome.organizer);
-                    }
-                    Ok(format!("{} — replied to {}", outcome.subject, outcome.organizer))
-                })();
+                let result = commands::run_rsvp(&door, &account, row_id, response);
                 let _ = tx.send(BgResult::Rsvp {
                     account_index: acct_idx,
-                    result: result.map_err(|e| e.to_string()),
+                    result,
                 });
             });
         }
@@ -1087,35 +1048,28 @@ pub(super) fn handle_action(
             // Only the Drafts mailbox has a directory to scan; from anywhere
             // else the answer is the one the old directory walk gave, without
             // walking a tree that has not existed since the store cutover.
-            let Some(dir) = app.active_drafts_dir() else {
+            if app.active_drafts_dir().is_none() {
                 app.set_status_level(
                     "No approved emails found".to_string(),
                     StatusLevel::Success,
                 );
                 return Ok(());
-            };
+            }
             // A Graph account sends over Graph or not at all: an SMTP config
             // that happens to be loaded is not a fallback for a Graph config
-            // that is not (see `resolve_send_transport`).
-            let (graph, smtp) = match super::helpers::resolve_send_transport(
+            // that is not (see `resolve_send_transport`). The check stays
+            // client-side because its sentence is this key's, and because the
+            // progress line below says which transport was resolved.
+            let is_graph = match super::helpers::resolve_send_transport(
                 &app.account_config,
                 app.graph_config.clone(),
                 app.smtp_config.clone(),
             ) {
-                Ok(pair) => pair,
+                Ok((graph, _smtp)) => graph.is_some(),
                 Err(missing) => {
                     app.set_status_level(missing.to_string(), StatusLevel::Error);
                     return Ok(());
                 }
-            };
-            let is_graph = graph.is_some();
-            let ctx = crate::send::SendContext {
-                graph,
-                smtp,
-                account: app.account_config.clone(),
-                email_settings: app.global_config.email.clone(),
-                // Signature is in the draft body (#0099); no send-time inject.
-                signature: None,
             };
 
             app.bg_count += 1;
@@ -1128,42 +1082,14 @@ pub(super) fn handle_action(
                 StatusLevel::Progress,
             );
             let acct_idx = app.active_account;
+            let account = app.account_config.name.clone();
             let tx = bg_tx.clone();
+            let door = daemon_door(app);
             std::thread::spawn(move || {
-                let rt = super::runtime::shared();
-                let result = (|| -> anyhow::Result<String> {
-                    let drafts = find_drafts(&dir, Some(EmailStatus::Approved))?;
-                    if drafts.is_empty() {
-                        return Ok("No approved emails found".to_string());
-                    }
-
-                    let mut sent = 0usize;
-                    let mut failed = 0usize;
-                    for draft in &drafts {
-                        match rt.block_on(crate::send::send_draft(draft, &ctx)) {
-                            Ok(outcome) if outcome.report.send_result.any_succeeded() => sent += 1,
-                            Ok(_) => failed += 1,
-                            Err(e) => {
-                                log::warn!(
-                                    "[send] {} was not sent: {e:#}",
-                                    draft.path.display()
-                                );
-                                failed += 1;
-                            }
-                        }
-                    }
-                    // One refresh for the batch, not one per draft: the index
-                    // is read again the moment the status line lands.
-                    if sent > 0 {
-                        if let Err(e) = crate::store::drafts::refresh_account(&ctx.account.name) {
-                            log::warn!("[drafts] refreshing after send-approved failed: {e:#}");
-                        }
-                    }
-                    Ok(format!("{} sent, {} failed", sent, failed))
-                })();
+                let result = commands::run_send_approved(&door, &account);
                 let _ = tx.send(BgResult::SendApproved {
                     account_index: acct_idx,
-                    result: result.map_err(|e| e.to_string()),
+                    result,
                 });
             });
         }
@@ -1325,61 +1251,38 @@ pub(super) fn handle_action(
                 park_until_idle(app, Action::Fetch, "Quick sync");
                 return Ok(());
             }
-            let account_config = app.account_config.clone();
+            // The transport check stays client-side: the daemon's own refusal
+            // for an account with nothing to sync is worded for `mp sync`,
+            // and this is the sentence the key has always printed.
+            if !app.is_graph() && app.imap_config.is_none() {
+                app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
+                return Ok(());
+            }
+            let account = app.account_config.name.clone();
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
-
-            if app.is_graph() {
-                let graph_config = app.graph_config.clone().unwrap();
-                app.bg_count += 1;
-                app.set_status_level("Quick sync (Graph)...".to_string(), StatusLevel::Progress);
-                std::thread::spawn(move || {
-                    let rt =
-                        super::runtime::shared();
-                    let sync_result =
-                        rt.block_on(lib_do_sync_graph(&account_config, &graph_config, 100));
-                    let (result, new_inbox_mail) = match sync_result {
-                        Ok((msg, meta)) => (Ok(msg), meta.new_inbox_mail),
-                        Err(e) => (Err(e.to_string()), Vec::new()),
-                    };
-                    let _ = tx.send(BgResult::Fetch {
-                        account_index: acct_idx,
-                        result,
-                        new_inbox_mail,
-                    });
+            let door = daemon_door(app);
+            app.bg_count += 1;
+            app.set_status_level(
+                if app.is_graph() {
+                    "Quick sync (Graph)...".to_string()
+                } else {
+                    "Quick sync...".to_string()
+                },
+                StatusLevel::Progress,
+            );
+            // The thread stays: an operation answers `{operation_id}` at once
+            // and finishes later, so something has to wait for it, and it may
+            // not be the draw thread. P5-U8 turns the wait into a
+            // subscription.
+            std::thread::spawn(move || {
+                let (result, new_inbox_mail) = commands::run_sync(&door, "sync.quick", &account);
+                let _ = tx.send(BgResult::Fetch {
+                    account_index: acct_idx,
+                    result,
+                    new_inbox_mail,
                 });
-            } else {
-                let imap_config = match app.imap_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level(
-                            "IMAP not configured".to_string(),
-                            StatusLevel::Error,
-                        );
-                        return Ok(());
-                    }
-                };
-                app.bg_count += 1;
-                app.set_status_level("Quick sync...".to_string(), StatusLevel::Progress);
-                std::thread::spawn(move || {
-                    let rt =
-                        super::runtime::shared();
-                    let sync_result = rt.block_on(super::helpers::lib_do_sync(
-                        &account_config,
-                        &imap_config,
-                        100,
-                    ));
-                    let (result, new_inbox_mail) = match sync_result {
-                        Ok((msg, meta)) => (Ok(msg), meta.new_inbox_mail),
-                        Err(e) => (Err(e.to_string()), Vec::new()),
-                    };
-                    let _ = tx.send(BgResult::Fetch {
-                        account_index: acct_idx,
-                        result,
-                        new_inbox_mail,
-                    });
-                });
-            }
+            });
         }
 
         Action::LoadMailbox { mailbox_idx, generation } => {
@@ -1436,62 +1339,36 @@ pub(super) fn handle_action(
                 Some(a) => a,
                 None => return Ok(()),
             };
-            let account_config = acct.account_config.clone();
-            let account_name = account_config.name.clone();
-            let tx = bg_tx.clone();
-
-            if acct.is_graph() {
-                let graph_config = match acct.graph_config.clone() {
-                    Some(c) => c,
-                    None => return Ok(()),
-                };
-                app.bg_count += 1;
-                app.set_status_level(
-                    format!("Quick sync ({account_name}, Graph)..."),
-                    StatusLevel::Progress,
-                );
-                std::thread::spawn(move || {
-                    let rt = super::runtime::shared();
-                    let sync_result =
-                        rt.block_on(lib_do_sync_graph(&account_config, &graph_config, 100));
-                    let (result, new_inbox_mail) = match sync_result {
-                        Ok((msg, meta)) => (Ok(msg), meta.new_inbox_mail),
-                        Err(e) => (Err(e.to_string()), Vec::new()),
-                    };
-                    let _ = tx.send(BgResult::Fetch {
-                        account_index: acct_idx,
-                        result,
-                        new_inbox_mail,
-                    });
-                });
-            } else {
-                let imap_config = match acct.imap_config.clone() {
-                    Some(c) => c,
-                    None => return Ok(()), // local-only / no IMAP -- no-op
-                };
-                app.bg_count += 1;
-                app.set_status_level(
-                    format!("Quick sync ({account_name})..."),
-                    StatusLevel::Progress,
-                );
-                std::thread::spawn(move || {
-                    let rt = super::runtime::shared();
-                    let sync_result = rt.block_on(super::helpers::lib_do_sync(
-                        &account_config,
-                        &imap_config,
-                        100,
-                    ));
-                    let (result, new_inbox_mail) = match sync_result {
-                        Ok((msg, meta)) => (Ok(msg), meta.new_inbox_mail),
-                        Err(e) => (Err(e.to_string()), Vec::new()),
-                    };
-                    let _ = tx.send(BgResult::Fetch {
-                        account_index: acct_idx,
-                        result,
-                        new_inbox_mail,
-                    });
-                });
+            let account = acct.account_config.name.clone();
+            let graph = acct.is_graph();
+            // A local-only account (no Graph, no IMAP) is still a silent
+            // no-op: the startup auto-fetch runs over every account and must
+            // not narrate one that has no server.
+            if graph && acct.graph_config.is_none() {
+                return Ok(());
             }
+            if !graph && acct.imap_config.is_none() {
+                return Ok(());
+            }
+            let tx = bg_tx.clone();
+            let door = daemon_door(app);
+            app.bg_count += 1;
+            app.set_status_level(
+                if graph {
+                    format!("Quick sync ({account}, Graph)...")
+                } else {
+                    format!("Quick sync ({account})...")
+                },
+                StatusLevel::Progress,
+            );
+            std::thread::spawn(move || {
+                let (result, new_inbox_mail) = commands::run_sync(&door, "sync.quick", &account);
+                let _ = tx.send(BgResult::Fetch {
+                    account_index: acct_idx,
+                    result,
+                    new_inbox_mail,
+                });
+            });
         }
 
         Action::ServerSearch { query, targets, local_mailbox } => {
@@ -1508,21 +1385,13 @@ pub(super) fn handle_action(
             app.server_search_index = 0;
             app.server_search_scroll = 0;
             app.server_search_headers_scroll = 0;
-            if let Some(store) = open_store(&account) {
-                if let Ok(hits) = crate::store::search::search_ast(
-                    &store,
-                    &account,
-                    &query,
-                    local_mailbox.as_deref(),
-                    50,
-                ) {
-                    let blobs = BlobStore::for_account(&account);
-                    app.server_search_results = hits
-                        .into_iter()
-                        .map(|hit| local_search_result(&store, &blobs, hit.row))
-                        .collect();
-                }
-            }
+            app.server_search_results = commands::local_search(
+                &daemon_door(app),
+                &account,
+                &query,
+                local_mailbox.as_deref(),
+                LOCAL_SEARCH_LIMIT,
+            );
             let local_count = app.server_search_results.len();
             app.server_search_status = Some(if local_count > 0 {
                 format!(
@@ -1606,59 +1475,33 @@ pub(super) fn handle_action(
                 park_until_idle(app, Action::Sync, "Full sync");
                 return Ok(());
             }
-            let account_config = app.account_config.clone();
+            if !app.is_graph() && app.imap_config.is_none() {
+                app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
+                return Ok(());
+            }
+            let account = app.account_config.name.clone();
             let acct_idx = app.active_account;
             let tx = bg_tx.clone();
-
-            if app.is_graph() {
-                let graph_config = app.graph_config.clone().unwrap();
-                app.bg_count += 1;
-                app.set_status_level(
-                    "Full sync (Graph)...".to_string(),
-                    StatusLevel::Progress,
-                );
-                std::thread::spawn(move || {
-                    let rt =
-                        super::runtime::shared();
-                    let result = rt
-                        .block_on(lib_do_sync_graph(&account_config, &graph_config, usize::MAX))
-                        .map(|(msg, _meta)| msg)
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Sync {
-                        account_index: acct_idx,
-                        result,
-                    });
+            let door = daemon_door(app);
+            app.bg_count += 1;
+            app.set_status_level(
+                if app.is_graph() {
+                    "Full sync (Graph)...".to_string()
+                } else {
+                    "Full sync...".to_string()
+                },
+                StatusLevel::Progress,
+            );
+            std::thread::spawn(move || {
+                let (result, _arrivals) = commands::run_sync(&door, "sync.full", &account);
+                // A full sync posts no arrival list: `BgResult::Sync` never
+                // carried one, because the notification (#0009) rides on the
+                // quick pass the watcher drives.
+                let _ = tx.send(BgResult::Sync {
+                    account_index: acct_idx,
+                    result,
                 });
-            } else {
-                let imap_config = match app.imap_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level(
-                            "IMAP not configured".to_string(),
-                            StatusLevel::Error,
-                        );
-                        return Ok(());
-                    }
-                };
-                app.bg_count += 1;
-                app.set_status_level("Full sync...".to_string(), StatusLevel::Progress);
-                std::thread::spawn(move || {
-                    let rt =
-                        super::runtime::shared();
-                    let result = rt
-                        .block_on(super::helpers::lib_do_sync(
-                            &account_config,
-                            &imap_config,
-                            usize::MAX,
-                        ))
-                        .map(|(msg, _meta)| msg)
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(BgResult::Sync {
-                        account_index: acct_idx,
-                        result,
-                    });
-                });
-            }
+            });
         }
 
         Action::OpenComposeWizard(mode) => {
@@ -1817,7 +1660,9 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
         // The forward's subject is shown before its draft exists, so it is
         // built by the same rule the draft will use.
         ComposeMode::Forward { msg } => {
-            let subject = forward_subject(app, *msg);
+            let account = app.account_config.name.clone();
+            let subject =
+                commands::forward_subject(&daemon_door(app), &account, msg.row_id());
             (
                 String::new(),
                 String::new(),
@@ -2251,27 +2096,14 @@ fn submit_compose_wizard(
     // A forward keeps the wizard's recipients and subject over the ones the
     // builder derived, which is the whole reason it asks for them first.
     if let ComposeMode::Forward { msg } = wizard.mode {
-        let Some(source) = source_for_msg(app, msg, "Forward", true) else {
-            return Ok(());
-        };
-        let account = app.account_config.name.clone();
-        let from = default_from(app);
-        let signature = app.signature_content.clone();
-        let (path, selector) = match create_draft_from_source(
-            &account,
-            &from,
-            &source,
+        return write_draft_and_edit(
+            app,
+            terminal,
+            msg,
             DraftFromSource::Forward,
             Some(&edit),
-            signature.as_deref(),
-        ) {
-            Ok(pair) => pair,
-            Err(e) => {
-                app.set_status_level(format!("Forward failed: {e:#}"), StatusLevel::Error);
-                return Ok(());
-            }
-        };
-        return edit_new_draft(app, terminal, &path, format!("Forward draft ready: {selector}"));
+            "Forward",
+        );
     }
 
     let draft_result = match &wizard.mode {
@@ -2637,63 +2469,23 @@ fn search_result_draft(
     // fetched payload while `app` is borrowed mutably for the status line.
     let fetched = msg.is_none().then(|| hit.fetched.clone());
 
-    let source = match (msg, fetched) {
-        (Some(msg), _) => source_for_msg(app, msg, what, with_attachments),
-        (None, Some(fetched)) => {
-            let account_dir = crate::config::account_dir(&app.account_config.name);
-            match crate::draft::source_from_fetched(&account_dir, &fetched, with_attachments) {
-                Ok(source) => Some(source),
-                Err(e) => {
-                    app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
-                    None
-                }
-            }
-        }
-        (None, None) => None,
-    };
-    let Some(source) = source else {
+    // A hit that resolved is the list flow exactly, addressed by the row id it
+    // resolved to; one that did not has no row for the daemon to read.
+    if let Some(msg) = msg {
+        return write_draft_and_edit(app, terminal, msg, kind, None, what);
+    }
+    let Some(fetched) = fetched else {
         return Ok(());
     };
-    write_draft_and_edit(app, terminal, &source, kind, what)
-}
-
-/// One local FTS hit as a search-overlay row (#0105).
-///
-/// The overlay renders a hit's body from its `fetched` payload, so the row's
-/// body blob is loaded here; the entry itself is the same shape the mailbox
-/// list builds, and `source_label` is the mailbox key so the All-scope column
-/// says where the row lives.
-fn local_search_result(
-    store: &crate::store::Store,
-    blobs: &BlobStore,
-    row: crate::store::read::MessageRow,
-) -> SearchResultEntry {
-    let body_text = crate::store::read::load_body(store, blobs, row.id).unwrap_or_default();
-    let fetched = crate::parse::FetchedEmail {
-        from: row.from.clone().unwrap_or_default(),
-        to: row.to.clone().unwrap_or_default(),
-        cc: row.cc.clone(),
-        reply_to: row.reply_to.clone(),
-        bcc: row.bcc.clone(),
-        subject: row.subject.clone().unwrap_or_default(),
-        date: row.date_display.clone().unwrap_or_default(),
-        body_text,
-        html_body: None,
-        has_attachments: row.has_attachments,
-        message_id: Some(row.message_id.clone()),
-        attachments: Vec::new(),
-        flags: row.flags(),
-        calendar_ics: None,
-        event: None,
+    let account_dir = crate::config::account_dir(&app.account_config.name);
+    let source = match crate::draft::source_from_fetched(&account_dir, &fetched, with_attachments) {
+        Ok(source) => source,
+        Err(e) => {
+            app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
+            return Ok(());
+        }
     };
-    let source_label = row.mailbox.clone();
-    let status = status_for_mailbox(&row.mailbox);
-    let entry = entry_from_row(row, &status);
-    SearchResultEntry {
-        entry,
-        fetched,
-        source_label,
-    }
+    write_fetched_draft_and_edit(app, terminal, &source, kind, what)
 }
 
 /// Ingest one server-only search hit into the store (#0104), returning the
@@ -3167,6 +2959,20 @@ mod store_backed_drafts {
             Store::open(crate::config::store_path("alice")).unwrap()
         }
 
+        /// A [`Session`](crate::tui::session::Session) over an in-process
+        /// daemon serving this fixture's data root.
+        ///
+        /// What an `App` needs to reach the routed helpers: since P5-U6 the
+        /// attachment materialisation, the browser rendition, the draft-path
+        /// lookup, the forward subject and the reply/forward builders are
+        /// daemon methods, so a fixture `App` with no session gets the same
+        /// answer as a wedged one, which is none. Assign it to `app.session`
+        /// **after** the fixture, so the session (and its thread) is dropped
+        /// before the tempdir it reads.
+        pub(super) fn session(&self) -> crate::tui::session::Session {
+            crate::tui::test_daemon::TestDaemon::new(&["alice"]).session()
+        }
+
         /// Ingest one message and hand back the row the list would show.
         pub(super) fn ingest(&self, email: &FetchedEmail) -> MessageRow {
             let store = self.store();
@@ -3419,6 +3225,7 @@ mod store_backed_drafts {
 
         let mut app = App::default_for_tests();
         app.account_config.name = "alice".to_string();
+        app.session = Some(fx.session());
         let id = fx.resolve(&selector).id;
         assert_eq!(indexed_draft_path(&mut app, &id), Some(path.clone()));
 
@@ -3762,6 +3569,9 @@ mod store_backed_mutations {
         let fx = Fixture::new();
         let (path, _selector, id) = a_draft(&fx);
         let mut app = app_on_draft(&id);
+        // `draft.path` since P5-U6, which answers from a fresh scan of the
+        // drafts directory the way the store-backed lookup did.
+        app.session = Some(fx.session());
 
         assert_eq!(
             cursor_draft(&mut app, "never shown"),
@@ -3807,10 +3617,17 @@ mod store_backed_files {
         }
     }
 
-    /// An app whose cursor sits on the list row for `row`.
-    fn app_on_row(row: &MessageRow) -> App {
+    /// An app whose cursor sits on the list row for `row`, with a session
+    /// onto an in-process daemon over `fx`'s data root.
+    ///
+    /// The session is what makes the file flows work at all since P5-U6: the
+    /// attachment materialisation and the browser rendition are
+    /// `message.materialise_attachment` and `message.materialise_html` now,
+    /// and an `App` with no session reaches neither.
+    fn app_on_row(fx: &Fixture, row: &MessageRow) -> App {
         let mut app = App::default_for_tests();
         app.account_config.name = "alice".to_string();
+        app.session = Some(fx.session());
         app.emails = std::sync::Arc::new(vec![EmailEntry {
             msg: Some(MessageRef::new(row.id)),
             draft_id: None,
@@ -3835,10 +3652,20 @@ mod store_backed_files {
         app
     }
 
-    /// `o` and `O` on a received row resolve the row's blobs into the same
-    /// files `mp open` materialises, under the same temp directory name.
+    /// `o` and `O` on a received row resolve the row's blobs into files, one
+    /// per attachment, in the row's own order and with the sender's names.
+    ///
+    /// The directory moved in P5-U6: `message.materialise_attachment` writes
+    /// each part into a handle directory of the daemon's own
+    /// (`<data>/runtime/handles/<handle>/<name>`, one directory per handle so
+    /// two senders' `report.pdf` cannot collide), where the store-backed
+    /// helper wrote them all into `parse::materialisation_dir(<row id>)`
+    /// beside `mp open`'s. Both are 0700 and private; what the picker and the
+    /// save pipeline address is a file either way. The one behavioural
+    /// consequence is lifetime: a handle expires (ten minutes by default)
+    /// where a materialised copy lived until the temp directory was swept.
     #[test]
-    fn the_cursor_row_materialises_its_blobs_where_mp_open_puts_them() {
+    fn the_cursor_row_materialises_its_blobs_into_daemon_handles() {
         let fx = Fixture::new();
         let mut email = fixture_email("With files");
         email.has_attachments = true;
@@ -3847,20 +3674,30 @@ mod store_backed_files {
             attachment("report.pdf", b"%PDF-1.4"),
         ];
         let row = fx.ingest(&email);
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         let files = cursor_attachment_files(&mut app).unwrap();
 
         assert_eq!(files.len(), 2, "{files:?}");
-        // The name `mp open` uses, spelled out rather than read back off the
-        // helper: it is the CLI/TUI parity this test exists to pin.
-        let expected = crate::parse::test_temp_root().join(format!("mailypoppins-{}", row.id));
-        assert_eq!(files[0].parent().unwrap(), expected);
+        let handles = crate::daemon::runtime::runtime_dir().join("handles");
+        for file in &files {
+            assert_eq!(
+                file.parent().and_then(|dir| dir.parent()),
+                Some(handles.as_path()),
+                "{file:?} is not under the daemon's handle directory"
+            );
+        }
+        assert_ne!(
+            files[0].parent(),
+            files[1].parent(),
+            "one directory per handle, so two names cannot collide"
+        );
         // And it is private to this user (0700), because `$TMPDIR` is not.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&expected).unwrap().permissions().mode();
+            let dir = files[0].parent().unwrap();
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{mode:o}");
         }
         let by_name: Vec<String> = files
@@ -3878,7 +3715,7 @@ mod store_backed_files {
     fn a_row_without_attachments_resolves_to_an_empty_list() {
         let fx = Fixture::new();
         let row = fx.ingest(&fixture_email("Bare"));
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         assert_eq!(cursor_attachment_files(&mut app), Some(Vec::new()));
         assert!(app.status_message.is_none(), "{:?}", app.status_message);
@@ -3948,6 +3785,10 @@ mod store_backed_files {
 
         let mut app = App::default_for_tests();
         app.account_config.name = "alice".to_string();
+        // The draft branch resolves its file through `draft.path` since P5-U6,
+        // even though the attachments themselves are the paths its own
+        // frontmatter names (#0016) and reach no method.
+        app.session = Some(fx.session());
         app.emails = std::sync::Arc::new(vec![draft_entry(Some(&rows[0].id))]);
         app.rebuild_visible();
         app
@@ -4017,7 +3858,7 @@ mod store_backed_files {
         email.has_attachments = true;
         email.attachments = vec![attachment("notes.txt", b"notes")];
         let row = fx.ingest(&email);
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
         let files = cursor_attachment_files(&mut app).unwrap();
 
         let dest = tempfile::tempdir().unwrap();
@@ -4036,7 +3877,7 @@ mod store_backed_files {
     fn the_browser_gets_the_html_blob_written_to_a_file() {
         let fx = Fixture::new();
         let row = fx.ingest(&fixture_email("Rich"));
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         let path = html_rendition_for_row(&mut app, row.id).unwrap();
 
@@ -4084,7 +3925,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let row = crate::store::read::find_by_id(&store, outcome.row_id)
             .unwrap()
             .unwrap();
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         let path = html_rendition_for_row(&mut app, row.id).unwrap();
 
@@ -4101,7 +3942,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let mut email = fixture_email("Plain");
         email.html_body = None;
         let row = fx.ingest(&email);
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         assert_eq!(html_rendition_for_row(&mut app, row.id), None);
         assert_eq!(
@@ -4151,7 +3992,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         email.has_attachments = true;
         email.attachments = vec![attachment("report.pdf", b"%PDF-1.4")];
         let row = fx.ingest(&email);
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         let path = readonly_view_for_row(&mut app, row.id).unwrap();
 
@@ -4198,7 +4039,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
     fn the_read_only_view_is_discarded_however_the_editor_exits() {
         let fx = Fixture::new();
         let row = fx.ingest(&fixture_email("Quarterly Report"));
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         let path = readonly_view_for_row(&mut app, row.id).unwrap();
         assert!(path.exists());
@@ -4232,7 +4073,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let mut email = fixture_email("placeholder");
         email.subject = String::new();
         let row = fx.ingest(&email);
-        let mut app = app_on_row(&row);
+        let mut app = app_on_row(&fx, &row);
 
         let path = readonly_view_for_row(&mut app, row.id).unwrap();
         assert_eq!(

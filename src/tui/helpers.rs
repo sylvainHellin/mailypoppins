@@ -14,9 +14,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{App, EmailEntry, MessageRef, SearchHit, SearchTarget};
 
-use crate::config::{all_configured_mailboxes, AccountConfig, ImapConfig};
+use crate::config::{AccountConfig, ImapConfig};
 use crate::draft::parse_email_draft;
-use crate::imap_client::{open_imap_session, search_on_session, sync_mailboxes, SyncTarget};
+use crate::imap_client::{open_imap_session, search_on_session};
 use crate::parse::FetchedEmail;
 use crate::store::open_store;
 
@@ -263,73 +263,6 @@ pub(super) fn copy_to_clipboard(text: &str) -> Result<()> {
 // Library call helpers
 // ---------------------------------------------------------------------------
 
-pub(super) async fn lib_do_sync(
-    account_config: &AccountConfig,
-    imap_config: &ImapConfig,
-    limit: usize,
-) -> anyhow::Result<(String, SyncResultMeta)> {
-    let span_label = if limit < usize::MAX { "lib_do_sync:quick" } else { "lib_do_sync:full" };
-    let _span = crate::timing::TimingSpan::with_context(span_label, account_config.name.clone());
-
-    let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
-        .iter()
-        .map(|(role, mapping)| SyncTarget {
-            role: role.clone(),
-            server_name: mapping.server.clone(),
-        })
-        .collect();
-
-    // The tick drains at both ends (#0114): the head so the server has
-    // converged by the time the reconcile reads it, the tail so anything the
-    // TUI queued *during* the tick does not wait for the next one.
-    //
-    // An account-level failure (a refused login above all) has to reach the
-    // log: the status line it otherwise becomes loses every race against a
-    // concurrent account that succeeded, which is how #0068 stayed invisible
-    // for seven weeks. The per-mailbox path already warns
-    // (`imap_client::store_sync`); this is its account-level equivalent.
-    // A persistent per-account health surface is #0071.
-    let (ops_suffix, result) = crate::sync::tick::run_tick_with_drains(
-        || drain_queues(account_config),
-        // #0113: each mailbox's body download is bounded, so one slow mailbox
-        // (34 MB of Sent mail took 160 seconds) cannot hold a tick that every
-        // other account and every queued mutation is waiting behind. What it
-        // does not download resumes on the next tick from the same cursor.
-        || {
-            sync_mailboxes(
-                imap_config,
-                &account_config.name,
-                &targets,
-                limit,
-                false,
-                imap_config.body_fetch_deadline(),
-            )
-        },
-        || drain_queues(account_config),
-    )
-    .await;
-    let result = result
-        .inspect_err(|e| log::error!("[sync] account '{}' failed: {e:#}", account_config.name))?;
-    // Another process holds the account's engine lock, so this tick ingested
-    // nothing and opened no session (#0122). It is a status line, not an error:
-    // the holder is doing the work, exactly as a refused outbox drain leaves
-    // the APPENDs to it. The drains at both ends were refused for the same
-    // reason and added nothing to `ops_suffix`, but it is carried anyway so a
-    // rollback the tail did manage is not swallowed.
-    let Some(result) = result else {
-        return Ok((
-            format!(
-                "{SYNC_SKIPPED_MARKER} '{}'; leaving the ingest to it{ops_suffix}",
-                account_config.name
-            ),
-            SyncResultMeta { new_inbox_mail: Vec::new() },
-        ));
-    };
-    Ok((format!("{}{ops_suffix}", finish_sync(account_config, &result)), SyncResultMeta {
-        new_inbox_mail: result.new_inbox_mail.clone(),
-    }))
-}
-
 /// The fragment every failed-drain status suffix carries, so the completion
 /// handler can honestly downgrade the status level of an otherwise-successful
 /// sync that also rolled mutations back (#0039 review note).
@@ -346,115 +279,6 @@ pub(crate) const NON_CONVERGING_MARKER: &str = "fetch not converging";
 /// happened or a red one that failed. The wording is the CLI's, so a user who
 /// meets the refusal in both places reads the same sentence.
 pub(crate) const SYNC_SKIPPED_MARKER: &str = "Sync skipped: another engine is syncing";
-
-/// One end of a sync tick on the IMAP path: the outbox, then the mutation
-/// queue, in that order at the head and at the tail (#0114).
-///
-/// The sync tick is also the outbox's retry tick: a Sent copy that could not be
-/// appended when the message was sent lands here (#0037 item 5). The mutation
-/// queue follows (#0039): archive, delete, move and flag toggles enqueued
-/// locally are retired under the engine lock.
-///
-/// Both halves are no-ops when nothing is queued (one cheap `COUNT` each, no
-/// backend, no lock, no log line), so running this twice per tick costs an
-/// idle account nothing and returns an empty suffix.
-async fn drain_queues(account_config: &AccountConfig) -> String {
-    crate::send::resume_outbox(account_config).await;
-    drain_pending_ops(account_config).await
-}
-
-/// Drain the account's pending-mutation queue at the sync/fetch resume point
-/// (#0039), returning a status suffix that names any failures.
-///
-/// A drained op is silent: it only mirrored a change the store already made, so
-/// there is nothing new to tell the user. A failed op has already been rolled
-/// back by the drain and reappears when the sync refresh reloads the list, so
-/// the suffix points at the log rather than repeating the per-op error the
-/// drain has already written there. The drain builds no backend and takes no
-/// lock unless a row is actually owed, so a clean account adds no traffic.
-async fn drain_pending_ops(account_config: &AccountConfig) -> String {
-    match crate::pending_ops::resume_account(account_config).await {
-        Ok(Some(r)) if r.failed > 0 => {
-            format!("; {} {FAILED_OPS_MARKER} (see the log)", r.failed)
-        }
-        Ok(_) => String::new(),
-        Err(e) => {
-            log::warn!(
-                "[pending_ops] draining {} at the sync tick failed: {e:#}",
-                account_config.name
-            );
-            String::new()
-        }
-    }
-}
-
-/// Post-sync hooks shared by both backends, and the one-line status message.
-///
-/// The `.md` era also returned the directories a sync had touched so the TUI
-/// could invalidate its caches. The store made that list unnecessary rather
-/// than unnecessary to act on: a sync writes rows the list reads, so the TUI
-/// drops every cache of the account when the result lands (see
-/// `tui::bg::refresh_after_server_sync`).
-fn finish_sync(
-    account_config: &AccountConfig,
-    result: &crate::imap_client::SyncResult,
-) -> String {
-    // Incremental contacts-index update (best-effort, no-op if no cache).
-    crate::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
-
-    // Organizer-side REPLY reconciliation (#0030) has no post-sync hook any
-    // more: the fold runs where the statuses are displayed, over the rows this
-    // sync just ingested (#0038 scope item 6), so there is nothing to bump.
-
-    let mut msg = format!("Synced: {} new, {} existing", result.saved, result.skipped);
-    if result.flags_updated > 0 {
-        msg.push_str(&format!(", {} status updated", result.flags_updated));
-    }
-    if result.uid_rebound > 0 {
-        msg.push_str(&format!(", {} renumbered", result.uid_rebound));
-    }
-    if result.pruned > 0 {
-        msg.push_str(&format!(", {} no longer in this mailbox", result.pruned));
-    }
-    // Say so rather than reporting a clean sync: the rows are known to be gone
-    // from the server and are still on screen until a pass sees every mailbox
-    // in full (#0072).
-    if result.prunes_deferred > 0 {
-        msg.push_str(&format!(
-            ", {} removal(s) held back (incomplete pass, run a full sync)",
-            result.prunes_deferred
-        ));
-    }
-    // The tick was cut on purpose, so it reads as progress rather than as a
-    // failure: the mailbox has more mail on the server and the next tick picks
-    // it up where this one stopped (#0113).
-    if result.bodies_truncated > 0 {
-        msg.push_str(&format!(
-            ", {} mailbox(es) stopped at the fetch deadline (resuming next sync)",
-            result.bodies_truncated
-        ));
-    }
-    // A sync that re-downloaded the same mail it downloaded last tick is not a
-    // clean sync, however green its counts look (#0115). The marker downgrades
-    // the status line to a warning; the log line says what to do about it.
-    if !result.non_converging.is_empty() {
-        let mut names = result.non_converging.clone();
-        names.sort();
-        names.dedup();
-        msg.push_str(&format!(
-            ", {NON_CONVERGING_MARKER} on {} (see the log)",
-            names.join(", ")
-        ));
-    }
-    msg
-}
-
-/// Metadata returned alongside the status message from a sync.
-pub(super) struct SyncResultMeta {
-    /// Sender + subject of every genuinely new inbox email this sync
-    /// ingested, for the desktop notification (#0009).
-    pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
-}
 
 pub(super) async fn lib_do_multi_search(
     account: &str,
@@ -547,55 +371,6 @@ pub(super) async fn lib_do_multi_search(
     hits.sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
 
     Ok(hits)
-}
-
-pub(super) async fn lib_do_sync_graph(
-    account_config: &AccountConfig,
-    graph_config: &crate::config::GraphConfig,
-    limit: usize,
-) -> anyhow::Result<(String, SyncResultMeta)> {
-    let span_label = if limit < usize::MAX {
-        "lib_do_sync_graph:quick"
-    } else {
-        "lib_do_sync_graph:full"
-    };
-    let _span = crate::timing::TimingSpan::with_context(span_label, account_config.name.clone());
-
-    let targets: Vec<SyncTarget> = all_configured_mailboxes(account_config)
-        .iter()
-        .map(|(role, mapping)| SyncTarget {
-            role: role.clone(),
-            server_name: mapping.server.clone(),
-        })
-        .collect();
-
-    // Same reason as the IMAP path above: an account-level failure has to be
-    // in the log, not only in a status line another account will overwrite
-    // (#0068, #0071).
-    // The mutation queue drains at both ends of the tick here too (#0039,
-    // #0114), before and after the Graph read. Graph has no outbox resume (its
-    // resubmit is a no-op), but move / delete / mark-read ops are real work the
-    // queue owes the server.
-    let (ops_suffix, result) = crate::sync::tick::run_tick_with_drains(
-        || drain_pending_ops(account_config),
-        || {
-            crate::graph::sync_mailboxes_graph(
-                graph_config,
-                &account_config.name,
-                &targets,
-                limit,
-                false,
-            )
-        },
-        || drain_pending_ops(account_config),
-    )
-    .await;
-    let result = result
-        .inspect_err(|e| log::error!("[sync] account '{}' failed: {e:#}", account_config.name))?;
-
-    Ok((format!("{}{ops_suffix}", finish_sync(account_config, &result)), SyncResultMeta {
-        new_inbox_mail: result.new_inbox_mail.clone(),
-    }))
 }
 
 pub(super) async fn lib_do_multi_search_graph(
