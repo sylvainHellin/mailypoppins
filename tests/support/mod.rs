@@ -11,9 +11,13 @@
 //! (plan unit P4-U3).
 //! [`draft_fixture`] is that store plus a seeded drafts directory, for the
 //! draft slice (plan unit P4-U5).
+//! [`mutation_fixture`] is that root plus an ambiguous message, a message
+//! whose two attachments share a name and a draft id two accounts hold, for
+//! the message-mutation slice (plan unit P4-U7).
 
 #![allow(dead_code)]
 
 pub mod draft_fixture;
+pub mod mutation_fixture;
 pub mod parity;
 pub mod read_fixture;

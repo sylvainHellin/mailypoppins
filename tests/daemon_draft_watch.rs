@@ -339,11 +339,13 @@ const WATCH_POLL_MS_ENV: &str = "MAILYPOPPINS_DAEMON_WATCH_POLL_MS";
 const WATCH_DEBOUNCE_MS_ENV: &str = "MAILYPOPPINS_DAEMON_WATCH_DEBOUNCE_MS";
 
 /// The `draft.*` family, in method-name order. One method at P3b-U9, nine
-/// after the CLI cutover (P4-U5, P4-U6).
-const DRAFT_METHODS: [&str; 9] = [
+/// after the CLI cutover (P4-U5, P4-U6), ten once the mutation slice adds
+/// `draft.discard` (P4-U7).
+const DRAFT_METHODS: [&str; 10] = [
     "draft.approve",
     "draft.create",
     "draft.demote",
+    "draft.discard",
     "draft.forward",
     "draft.list",
     "draft.path",
@@ -641,7 +643,7 @@ fn the_three_payload_types_round_trip_through_json() {
     );
 }
 
-/// The family is exactly the nine names above, and `draft.approve` - the one
+/// The family is exactly the names above, and `draft.approve` - the one
 /// this file owns in full - declares the kind, `since` and cancel scope P3b-U9
 /// fixed for it.
 #[test]

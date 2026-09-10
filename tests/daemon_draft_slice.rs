@@ -274,12 +274,14 @@ use support::parity::{
 /// Upper bound on any single wait: a connection, a handshake, one call.
 const DEADLINE: Duration = Duration::from_secs(20);
 
-/// The nine methods of the slice, in the order their spec array declares them,
-/// which is method-name order like every other family.
-const DRAFT_METHODS: [&str; 9] = [
+/// The methods of the family, in the order their spec array declares them,
+/// which is method-name order like every other family. Nine after this slice
+/// (P4-U5), ten once the mutation slice adds `draft.discard` (P4-U7).
+const DRAFT_METHODS: [&str; 10] = [
     "draft.approve",
     "draft.create",
     "draft.demote",
+    "draft.discard",
     "draft.forward",
     "draft.list",
     "draft.path",
@@ -288,7 +290,7 @@ const DRAFT_METHODS: [&str; 9] = [
     "draft.validate",
 ];
 
-/// The family declares exactly those nine, checked while the tree compiles:
+/// The family declares exactly those ten, checked while the tree compiles:
 /// an array that still holds P3b-U10's single `draft.approve` fails here,
 /// naming the constant, before a single test runs.
 const _: () = assert!(DRAFT_METHOD_SPECS.len() == DRAFT_METHODS.len());
