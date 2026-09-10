@@ -714,8 +714,11 @@ Three surfaces and one plan decision stand between this and the zero P5-U10 need
 
 ### Validation
 
-`timeout 1200 cargo test --workspace --offline` -> **2 156 passed, 0 failed, 1 ignored**, `pgrep -af '[m]p daemon'` empty afterwards.
+`timeout 1200 cargo test --workspace --offline` -> **2 156 passed, 0 failed, 1 ignored**, exit 0, `pgrep -af '[m]p daemon'` empty afterwards.
 That is 1 310 lib tests (part 1's 1 303 passing plus the row that was failing, plus three query-string round trips and three command-layer rows) and every `tests/` suite green.
+
+One environmental note for whoever reruns it: five `store::` rows (`truncated_file_is_dropped_and_rebuilt` and its four neighbours) fail with `SqliteFailure(SystemIoFailure)` and `Disk quota exceeded (os error 122)` when `/tmp` is a tmpfs that other work has filled, because a hundred parallel tests each build a tempdir store there.
+They pass individually and the whole workspace passes with `TMPDIR=/var/tmp`; nothing about them is this unit's.
 
 `cargo test --offline --lib actions_tests` -> **22 passed**, three times over.
 `--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, unmoved, no snapshot re-approved. `--lib queries_tests` -> 18 (plus the `#[ignore]`d timing row).
