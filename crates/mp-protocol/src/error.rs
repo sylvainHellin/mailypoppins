@@ -4,7 +4,7 @@
 //! five of them, which the daemon also emits: `-32700` parse error, `-32600`
 //! invalid request, `-32601` method not found, `-32602` invalid params, and
 //! `-32603` internal error. The daemon's own conditions occupy
-//! `-32009..=-32000`, which collides with none of them.
+//! `-32010..=-32000`, which collides with none of them.
 //!
 //! The numbers and the wire names are pinned by
 //! `crates/mp-protocol/fixtures/*.json` and by `tests/daemon_framing.rs`.
@@ -34,11 +34,14 @@ pub enum ErrorCode {
     OperationCancelled,
     /// The daemon is shutting down and accepts no new work.
     ShuttingDown,
+    /// The named draft is on disk and will not parse, so nothing may act on
+    /// it until the user fixes the file.
+    DraftInvalid,
 }
 
 impl ErrorCode {
     /// Every variant, in table order, for exhaustive mapping and for tests.
-    pub const ALL: [ErrorCode; 10] = [
+    pub const ALL: [ErrorCode; 11] = [
         ErrorCode::NotInitialized,
         ErrorCode::IdentityMismatch,
         ErrorCode::ProtocolIncompatible,
@@ -49,6 +52,7 @@ impl ErrorCode {
         ErrorCode::ConfigInvalid,
         ErrorCode::OperationCancelled,
         ErrorCode::ShuttingDown,
+        ErrorCode::DraftInvalid,
     ];
 
     /// The JSON-RPC `error.code` this condition serialises as.
@@ -64,6 +68,7 @@ impl ErrorCode {
             ErrorCode::ConfigInvalid => -32007,
             ErrorCode::OperationCancelled => -32008,
             ErrorCode::ShuttingDown => -32009,
+            ErrorCode::DraftInvalid => -32010,
         }
     }
 
@@ -80,6 +85,7 @@ impl ErrorCode {
             ErrorCode::ConfigInvalid => "config_invalid",
             ErrorCode::OperationCancelled => "operation_cancelled",
             ErrorCode::ShuttingDown => "shutting_down",
+            ErrorCode::DraftInvalid => "draft_invalid",
         }
     }
 

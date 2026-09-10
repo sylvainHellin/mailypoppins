@@ -13,7 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use mp_protocol::events::{SyncCompleted, KIND_SYNC_COMPLETED};
+use mp_protocol::events::{
+    Diagnostic, SyncCompleted, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SYNC_COMPLETED,
+};
 use serde_json::{json, Value};
 
 use crate::config::AccountConfig;
@@ -95,9 +97,23 @@ pub enum Change {
     DraftUpsert {
         account: String,
         id: String,
+        path: String,
+        to: Option<String>,
         subject: String,
         status: String,
         valid: bool,
+        ready: bool,
+    },
+    /// A draft is on disk and would not parse (P3b-U10).
+    ///
+    /// The same resource [`Change::DraftUpsert`] replaces, because #0080 is
+    /// precisely a broken draft vanishing from every list: it stays a row, and
+    /// fixing the file replaces it rather than adding a second one.
+    DraftInvalid {
+        account: String,
+        id: String,
+        path: String,
+        diagnostics: Vec<Diagnostic>,
     },
     /// A draft was discarded or sent.
     DraftRemoved { account: String, id: String },
@@ -124,6 +140,7 @@ impl Change {
             | Change::AccountBlocked { account, .. }
             | Change::MailboxCounts { account, .. }
             | Change::DraftUpsert { account, .. }
+            | Change::DraftInvalid { account, .. }
             | Change::DraftRemoved { account, .. }
             | Change::OutboxCounts { account, .. } => account,
             Change::SyncCompleted(outcome) => &outcome.account,
@@ -135,7 +152,8 @@ impl Change {
         match self {
             Change::AccountReady { .. } | Change::AccountBlocked { .. } => "account.state_changed",
             Change::MailboxCounts { .. } => "mailbox.counts_changed",
-            Change::DraftUpsert { .. } => "draft.changed",
+            Change::DraftUpsert { .. } => KIND_DRAFT_CHANGED,
+            Change::DraftInvalid { .. } => KIND_DRAFT_INVALID,
             Change::DraftRemoved { .. } => "draft.removed",
             Change::OutboxCounts { .. } => "outbox.counts_changed",
             Change::SyncCompleted(_) => KIND_SYNC_COMPLETED,
@@ -162,12 +180,24 @@ impl Change {
             Change::DraftUpsert {
                 account,
                 id,
+                path,
+                to,
                 subject,
                 status,
                 valid,
+                ready,
             } => json!({
-                "account": account, "id": id,
-                "subject": subject, "status": status, "valid": valid,
+                "account": account, "id": id, "path": path, "to": to,
+                "subject": subject, "status": status, "valid": valid, "ready": ready,
+            }),
+            Change::DraftInvalid {
+                account,
+                id,
+                path,
+                diagnostics,
+            } => json!({
+                "account": account, "id": id, "path": path,
+                "diagnostics": diagnostics,
             }),
             Change::DraftRemoved { account, id } => json!({"account": account, "id": id}),
             Change::OutboxCounts {
@@ -237,9 +267,12 @@ pub struct MailboxView {
 #[derive(Clone, Debug)]
 pub struct DraftView {
     pub(super) id: String,
+    pub(super) path: String,
+    pub(super) to: Option<String>,
     pub(super) subject: String,
     pub(super) status: String,
     pub(super) valid: bool,
+    pub(super) ready: bool,
 }
 
 /// One account's outbox counts.
@@ -311,9 +344,12 @@ impl Snapshot {
                 .map(|draft| {
                     json!({
                         "id": draft.id,
+                        "path": draft.path,
+                        "to": draft.to,
                         "subject": draft.subject,
                         "status": draft.status,
                         "valid": draft.valid,
+                        "ready": draft.ready,
                     })
                 })
                 .collect()

@@ -1548,3 +1548,20 @@ Roughly one run in twelve of the whole binary fails in `the_unconditional_policy
 
 Measured at 2 failures in 25 runs on the tree with the config-ownership unit and 2 in 25 on the tree without it, so it is not that unit's doing.
 The fix is to keep the process-spawning test off the threads that hold locks (its own binary, or `serial_test`), and it is not to widen the assertions.
+
+## A debounce that re-records its timer on every poll never fires
+
+The first `DraftWatcher::poll_once` marked a moving file pending and stamped it with `now`; every later poll that found the same observation fell through to the same "mark it pending" arm and stamped it again.
+Every in-process test still passed, because they drive the clock by hand and poll exactly one debounce apart, which is the one spacing where a timer that restarts on every poll still elapses.
+The daemon polls far more often than it debounces (25 ms against 100 ms in the sandbox, 1000 against 300 in production), so over the socket nothing ever settled and twelve tests waited 20 seconds each for an event that could not arrive.
+
+A debounce has three arms, not two: the observation moved (restart the window), it held still and the window has not elapsed (do nothing at all), it held still and the window has elapsed (settle).
+Any test that only ever polls at the debounce interval cannot tell the middle arm from the first.
+
+## `gray_matter` reports a YAML scan failure as a null document, with no position
+
+`gray_matter`'s YAML engine is `YamlLoader::load_from_str(...).unwrap_or(Pod::Null)`, so a frontmatter block that does not scan reaches `parse_email_draft` as a null document and fails at the *deserialize* step with no line, no column and no mention of the syntax.
+The position exists, it is just thrown away one layer down.
+
+`src/daemon/watch.rs::frontmatter_line` recovers it with a second pass: slice the block between the two `---` delimiters, hand it to `serde_yaml::from_str::<serde_yaml::Value>`, and take `serde_yaml::Error::location()` offset by the lines before the block.
+A refusal by value rather than by syntax - a numeric `id:` (#0083) - parses cleanly in that second pass, which is exactly right: it has no position, and the diagnostic reports `null` instead of pointing the user at an innocent line.

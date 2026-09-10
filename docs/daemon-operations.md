@@ -127,6 +127,27 @@ It is a process-wide singleton, so a `secrets_backend` change in `config.toml` t
 
 The wire shapes, the error payloads and the two event kinds are in [daemon-protocol.md](daemon-protocol.md).
 
+## The draft and signature watcher
+
+The daemon polls every `<account_dir>/drafts/*.md` and every `<config_dir>/signatures/*.md` once a second and publishes what settled (`src/daemon/watch.rs`).
+It is the TUI's one-second fingerprint poll moved into the daemon, with no `notify` dependency, one `stat` per file per poll and no file contents read while looking.
+
+It runs whether or not `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` is set: it opens no store and takes no engine lock, so gating it behind the runtimes would cost a lock nothing about drafts needs.
+The roots are one per configured account plus the global signatures directory, re-derived by every successful `config.reload`, so an added account is watched from the next poll and a removed one is forgotten with its rows.
+A root that does not exist is an empty root and is picked up on the poll after it appears: an account that has never had a draft is not a startup failure.
+
+A change settles only after it has held still for 300 ms, and that debounce is what makes an editor's save one event.
+A file whose `(mtime, size)` moved becomes pending; a pending file that moves again restarts its window; a pending file that has held still for the debounce is reparsed once, in the state it is in at that moment.
+Absence is debounced the same way, so `:w` with `backupcopy=no` - rename the original away, create a new file at the same path - is one `draft.changed` rather than a removal followed by an addition that flickers the row out of every client's list.
+A file that appeared and vanished inside one window is never announced, and therefore never withdrawn.
+
+A draft that parses travels as `draft.changed`, one that does not as `draft.invalid` with a diagnostic, and a draft that was announced and is now gone as `state.remove` of `draft:<account>/<id>`.
+A signature travels as the lifecycle event `signature.changed`.
+
+The watcher never opens a draft for writing: not to mint an `id:`, not to normalise, not to restore a file it saw disappear.
+That is why a draft with no `id:` is announced under its file stem, where the explicit index refresh would mint one: minting inside a watcher means writing to a file an editor is holding open, which is the exact burst the debounce exists to survive.
+A file that will not parse is left byte-identical, mtime included, which is also what keeps it from republishing the same diagnostic on every poll.
+
 ## Account runtimes
 
 With `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` the daemon starts one `AccountRuntime` per configured account (`src/daemon/runtime/account.rs`), and without it there is no runtime, no engine lock and no store to open.
@@ -194,7 +215,7 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Six environment variables exist for the contract tests and for the migration.
+Eight environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.
@@ -234,6 +255,11 @@ Phase 3a has no real long-running method - sync, auth and the rebuilds all arriv
 `scope` is the one parameter a real method would not take: a real one passes its own `MethodSpec`'s `cancel_scope`, and one test method has to cover both halves of the disconnect contract.
 The method is registered only when the hook is set, so a daemon nobody armed it on neither serves nor advertises it.
 It is what pins the wire cases in `tests/daemon_operations.rs`, and its name is `mailypoppins::daemon::operations::FAKE_OPERATIONS_ENV`.
+
+`MAILYPOPPINS_DAEMON_WATCH_POLL_MS=<n>` and `MAILYPOPPINS_DAEMON_WATCH_DEBOUNCE_MS=<n>` set the watcher's poll interval and its debounce, which default to 1000 ms and 300 ms.
+Unset, unparseable or zero means the default, as with the readiness hook.
+Both exist because a test that waited for a real poll plus a real debounce would cost 1.3 seconds per assertion and the draft contract makes a lot of them; the sandboxes in `tests/daemon_draft_watch.rs` run at 25 ms and 100 ms.
+Their names are `mailypoppins::daemon::watch::WATCH_POLL_ENV` and `WATCH_DEBOUNCE_ENV`, so the test and the daemon cannot drift apart.
 
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.

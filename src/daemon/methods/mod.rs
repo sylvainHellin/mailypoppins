@@ -21,6 +21,7 @@
 
 pub mod account;
 pub mod config;
+pub mod draft;
 pub mod mailbox;
 pub mod message;
 pub mod state;
@@ -38,6 +39,7 @@ use super::operations::{
 };
 use super::server::RuntimeTable;
 use super::state::{fake_ready_delay, CanonicalState};
+use super::watch::DraftWatch;
 
 /// JSON-RPC's own "invalid params".
 const INVALID_PARAMS: i32 = -32602;
@@ -57,6 +59,7 @@ pub fn register(
     runtimes: Arc<RuntimeTable>,
     canonical: Arc<CanonicalState>,
     operations: Arc<OperationRegistry>,
+    watch: Arc<DraftWatch>,
 ) {
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
@@ -67,12 +70,21 @@ pub fn register(
     dispatcher.register(Arc::new(message::MessageList {
         config: Arc::clone(&config),
     }));
+    self::draft::register(
+        dispatcher,
+        Arc::new(self::draft::DraftApprove {
+            config: Arc::clone(&config),
+            watch: Arc::clone(&watch),
+            canonical: Arc::clone(&canonical),
+        }),
+    );
     self::config::register(
         dispatcher,
         Arc::new(self::config::ConfigFamily {
             store: config,
             runtimes,
             canonical: Arc::clone(&canonical),
+            watch,
         }),
     );
     dispatcher.register(Arc::new(self::state::StateBootstrap::new(

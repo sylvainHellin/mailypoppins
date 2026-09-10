@@ -37,7 +37,7 @@
 
 use std::collections::VecDeque;
 
-use mp_protocol::events::KIND_SYNC_COMPLETED;
+use mp_protocol::events::{KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SYNC_COMPLETED};
 use serde_json::{json, Value};
 
 use crate::daemon::dispatch::ResourceId;
@@ -116,9 +116,6 @@ pub enum Event {
 /// The kind a readiness or blocked change travels as.
 const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
 
-/// The kind a draft change travels as.
-const KIND_DRAFT_CHANGED: &str = "draft.changed";
-
 impl Event {
     /// The one bridge from the daemon's vocabulary to the wire's.
     ///
@@ -134,6 +131,12 @@ impl Event {
             },
             Change::DraftUpsert { .. } => Event::Replace {
                 kind: KIND_DRAFT_CHANGED,
+                payload: change.payload(),
+            },
+            // The same resource a parsed draft replaces, so a client that
+            // fixes a broken file sees a replacement rather than a second row.
+            Change::DraftInvalid { .. } => Event::Replace {
+                kind: KIND_DRAFT_INVALID,
                 payload: change.payload(),
             },
             Change::MailboxCounts {
@@ -176,7 +179,7 @@ impl Event {
                     "account:{}",
                     payload.get("account")?.as_str()?
                 ))),
-                KIND_DRAFT_CHANGED => Some(ResourceId::new(format!(
+                KIND_DRAFT_CHANGED | KIND_DRAFT_INVALID => Some(ResourceId::new(format!(
                     "draft:{}/{}",
                     payload.get("account")?.as_str()?,
                     payload.get("id")?.as_str()?

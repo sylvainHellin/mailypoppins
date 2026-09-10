@@ -127,7 +127,7 @@ A message the pass downloaded and then failed to write pulls that mark under its
 - `ingest_failures` (v6, #0074) counts those failures per `(account, mailbox, uid)` and bounds them: after `ingest::MAX_INGEST_ATTEMPTS` passes the UID is given up on loudly and stops holding the mark down, so a message the store rejects deterministically cannot suspend the prune for the whole account for good.
 A successful ingest deletes the row, so transient failures never accumulate towards the bound.
 - `outbox` carries the durable send state machine described below.
-- `drafts` is the derived index over the drafts directory.
+- `drafts` is the derived index over the drafts directory. The daemon watches that directory itself instead of reading the index (`src/daemon/watch.rs`): a debounced one-second `stat` poll that reparses what settled and takes no engine lock.
 - `pending_ops` carries the durable mutation queue (#0039): one row per owed server op, with `kind`, the `messages` row id in `target_message_id`, the full `ServerOp` plus its rollback in the JSON `payload`, and a `queued` / `failed` state. `src/pending_ops.rs` owns it, the mutation twin of `outbox`. Like `outbox` its live paths are not the schema's concern, but unlike `outbox` it is a plain cache table: a lost queue row loses a flag change or delays a move, never a message, so it is dropped and rebuilt with the file.
 - Every table carries `account`, although one file holds one account.
 The redundancy keeps a future shared database a schema change rather than a rewrite of every query.
@@ -437,7 +437,7 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 
 ## Testing
 
-- **1352 tests**, run by `cargo test --workspace`, and **1470** with `--features daemon`.
+- **1365 tests**, run by `cargo test --workspace`, and **1759** with `--features daemon`.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`src/tui/ui/golden_frames.rs`).

@@ -486,6 +486,7 @@ mod tests {
                 "config.reload".to_string(),
                 "config.set_password".to_string(),
                 "config.validate".to_string(),
+                "draft.approve".to_string(),
                 "mailbox.list".to_string(),
                 "message.list".to_string(),
                 "operation.cancel".to_string(),

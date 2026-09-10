@@ -295,6 +295,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
     if env_flag(ACCOUNT_RUNTIMES_ENV) {
         spawn_account_runtimes(Arc::clone(&state));
     }
+    // Unconditional, unlike the runtimes above: watching drafts opens no store
+    // and takes no engine lock (P3b-U10).
+    super::watch::spawn(Arc::clone(&state.watch), Arc::clone(&state.canonical));
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(shutdown.clone())?;
 

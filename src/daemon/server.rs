@@ -208,6 +208,11 @@ pub struct DaemonState {
     /// configuration and must reach it without reaching back into the state
     /// that owns the dispatcher.
     pub runtimes: Arc<RuntimeTable>,
+    /// The draft and signature watcher (P3b-U10). Held here because three
+    /// things reach it: the poll loop the daemon spawns, `draft.approve`,
+    /// which resolves an id through its settled inventory, and a
+    /// configuration swap, which re-derives its roots.
+    pub watch: Arc<super::watch::DraftWatch>,
 }
 
 impl DaemonState {
@@ -222,6 +227,13 @@ impl DaemonState {
             seeds_from_config(&configured),
         ));
         let runtimes = Arc::new(RuntimeTable::default());
+        // Rooted at the configured accounts and unconditional: the watcher
+        // opens no store and takes no engine lock, so it runs whether or not
+        // this daemon starts account runtimes.
+        let watch = Arc::new(super::watch::DraftWatch::new(
+            super::watch::roots_from(&configured),
+            super::watch::WatchConfig::from_env(),
+        ));
         let operations = Arc::new(OperationRegistry::new());
         canonical.attach_operations(Arc::clone(&operations));
         // The registry emits events and stamps none: a revision belongs to the
@@ -248,6 +260,7 @@ impl DaemonState {
             Arc::clone(&runtimes),
             Arc::clone(&canonical),
             Arc::clone(&operations),
+            Arc::clone(&watch),
         );
         DaemonState {
             meta,
@@ -256,6 +269,7 @@ impl DaemonState {
             canonical,
             operations,
             runtimes,
+            watch,
         }
     }
 

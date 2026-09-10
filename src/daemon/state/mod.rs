@@ -533,24 +533,40 @@ impl Inner {
             }
             Change::DraftUpsert {
                 id,
+                path,
+                to,
                 subject,
                 status,
                 valid,
+                ready,
                 ..
-            } => {
-                if let Some(list) = self.drafts.get_mut(&account) {
-                    let draft = DraftView {
-                        id: id.clone(),
-                        subject: subject.clone(),
-                        status: status.clone(),
-                        valid: *valid,
-                    };
-                    match list.iter().position(|entry| &entry.id == id) {
-                        Some(at) => list[at] = draft,
-                        None => list.push(draft),
-                    }
-                }
-            }
+            } => self.upsert_draft(
+                &account,
+                DraftView {
+                    id: id.clone(),
+                    path: path.clone(),
+                    to: to.clone(),
+                    subject: subject.clone(),
+                    status: status.clone(),
+                    valid: *valid,
+                    ready: *ready,
+                },
+            ),
+            // A file that would not parse is still a row, with nothing read
+            // out of it: `"invalid"` is not an `EmailStatus`, and that is the
+            // point.
+            Change::DraftInvalid { id, path, .. } => self.upsert_draft(
+                &account,
+                DraftView {
+                    id: id.clone(),
+                    path: path.clone(),
+                    to: None,
+                    subject: String::new(),
+                    status: "invalid".to_string(),
+                    valid: false,
+                    ready: false,
+                },
+            ),
             Change::DraftRemoved { id, .. } => {
                 if let Some(list) = self.drafts.get_mut(&account) {
                     list.retain(|entry| &entry.id != id);
@@ -567,6 +583,17 @@ impl Inner {
             // neither, which is what a command outcome is. It still takes a
             // revision and still fans out.
             Change::SyncCompleted(_) => {}
+        }
+    }
+
+    /// Replace one draft row of `account`, appending it when the account has
+    /// none under that id.
+    fn upsert_draft(&mut self, account: &str, draft: DraftView) {
+        if let Some(list) = self.drafts.get_mut(account) {
+            match list.iter().position(|entry| entry.id == draft.id) {
+                Some(at) => list[at] = draft,
+                None => list.push(draft),
+            }
         }
     }
 

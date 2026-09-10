@@ -101,6 +101,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations.
 - `signature.*` for list, read, create, update, rename, delete, and per-account default selection.
 - `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes.
+- `draft.*` for the draft lifecycle, of which this build serves `draft.approve`.
 - `operation.*` for long-running operation status and cancellation.
 - `diagnostic.*` for logs, health, and support information.
 - `daemon.*` for status and graceful lifecycle control.
@@ -165,7 +166,7 @@ Open connections are not drained: the daemon unlinks its runtime files and exits
   "snapshot": {
     "accounts": [{"name": "work", "state": "opening", "sync_health": {"state": "unknown"}}],
     "mailboxes": {"work": [{"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0}]},
-    "drafts": {"work": []},
+    "drafts": {"work": [{"id": "d-one", "path": "/home/alice/.local/share/mailypoppins/accounts/work/drafts/angebot.md", "to": "robin@example.com", "subject": "Angebot", "status": "draft", "valid": true, "ready": true}]},
     "outbox": {"work": {"queued": 0, "failed": 0}},
     "holds": [],
     "operations": [],
@@ -181,6 +182,11 @@ Open connections are not drained: the daemon unlinks its runtime files and exits
 A daemon with no configured account answers an empty `accounts` array and three empty objects.
 `holds` and `diagnostics` are arrays that nothing in this build fills.
 `operations` lists every long-running operation the daemon has not settled, in start order, each entry being an `operation.status` result, so a client that bootstraps while work is in flight learns about it without having been there when it started.
+
+A draft row carries `{id, path, to, subject, status, valid, ready}`, the same fields the `draft.changed` event carries, so the reducer a client writes is "replace the row with the payload" rather than a projection it has to keep in step.
+`id` is the `id:` frontmatter field, or the file stem when the file has none; `path` is absolute, because a GUI opens a draft by path; `to` is `null` for a draft with no recipient yet.
+`valid` is "the file parsed" and `ready` is "it would send", which are two axes: a draft with no subject parses perfectly and is not sendable.
+A draft that does not parse stays a row with `valid: false`, `status: "invalid"`, `to: null`, `subject: ""` and `ready: false` (#0080): `"invalid"` is not a draft status a file can spell, and that is the point, since nothing read a status out of a file that would not parse.
 
 An account's `state` is one of `opening`, `ready` or `blocked`, and it reports the runtime rather than the store: it answers "has this account's runtime come up", where `account.list`'s `state` answers "can I read this account's store on disk".
 The two are deliberately different questions.
@@ -324,6 +330,23 @@ The key is the one the existing backend already uses, `smtp-password-<account>` 
 An unknown account is `-32005` with `{account}`, and neither its message nor its payload echoes the value: an error message is the single most likely place for a secret to escape.
 The backend is opened on first use rather than at startup, because a first run has no configuration to select one from; a daemon that has already opened one keeps it, so changing `secrets_backend` takes a restart.
 
+### The `draft.*` family
+
+The daemon watches every account's drafts directory and the signatures directory, so a draft written by `$EDITOR`, by an agent or by the daemon itself reaches every client as an event without anybody asking.
+The watcher is described in [daemon-operations.md](daemon-operations.md); what it produces on the wire is the three kinds below and the snapshot rows above.
+
+`draft.approve` is the one method of the family in this build.
+
+| method | kind | params | result |
+|---|---|---|---|
+| `draft.approve` | command | `{account, id}` | `{account, id, status: "approved", path}` |
+
+It rewrites the `status:` line and nothing else, re-serialising no frontmatter, so a field the daemon does not model survives an approval.
+It publishes no event of its own: the watcher notices the daemon's write like any other and publishes the `draft.changed` that carries the new state, so an approval over the socket and an approval in an editor look identical from the outside.
+
+An id resolves through the watcher's settled inventory rather than through the drafts index, which lives in a store behind an engine lock: approving costs no lock, and a draft the daemon has not announced yet resolves to nothing.
+An unknown account is `-32005` with `{account}`; an id nothing resolves to is `-32602` with `{account, id}`; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload; a draft already `sent` is `-32602` with `{account, id, status}`.
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
@@ -383,7 +406,7 @@ A second code for "your socket went away" would be a distinction only the daemon
 ## Error codes
 
 JSON-RPC's own codes keep their meanings: `-32700` parse error, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, and `-32603` internal error.
-The daemon's conditions occupy `-32009` to `-32000`.
+The daemon's conditions occupy `-32010` to `-32000`.
 
 | code | name | `data` |
 |---:|---|---|
@@ -397,10 +420,13 @@ The daemon's conditions occupy `-32009` to `-32000`.
 | -32007 | `config_invalid` | `{path, line?, message}` |
 | -32008 | `operation_cancelled` | `{operation_id}` |
 | -32009 | `shutting_down` | `{}` |
+| -32010 | `draft_invalid` | `{account, id, path, diagnostics: [{line, message}]}` |
 
 `identity_mismatch` names both directories on both sides so the client can print all four and tell the user which override to drop.
 `frame_too_large` reports the cap that was breached and the byte count that breached it, the same pair the decoder produces.
 `message` is a human-readable line for the log and the CLI, and clients match on the code, never on the message text.
+
+`draft_invalid` is its own code rather than an overloaded `-32602`, because "you asked for a draft that does not exist" and "the draft you asked for will not parse" may not be the same answer on one connection, and its `data` is the `draft.invalid` payload, so a client renders the caller's refusal and the watcher's event with one piece of code.
 
 The read-only methods use four of these, and `mailbox.list` uses the same two account refusals `message.list` does.
 An account no configuration names is `account_unknown`, carrying the name that was asked for; a configured account with no readable store is `account_not_ready`, carrying the same `state` `account.list` reports for it, so two answers about one account cannot contradict each other.
@@ -436,8 +462,14 @@ An event either replaces a small resource whole or names one whose cached answer
 
 `account.state_changed` is the kind an account's readiness travels as, with a payload of `{account, state}` where `state` is the `opening`/`ready`/`blocked` the snapshot uses, plus a `reason` when it is `blocked`.
 It is what converges a snapshot taken while an account was still `opening`, and it needs no second bootstrap.
-`draft.changed` replaces one draft whole, with a payload of `{account, id, subject, status, valid}`.
-Both are replacements because they are small and a client that re-queried them would learn nothing the payload did not already carry.
+`draft.changed` replaces one draft whole, with a payload of `{account, id, path, to, subject, status, valid, ready}`, the snapshot row plus its account.
+`draft.invalid` replaces the *same* resource, `draft:<account>/<id>`, with a payload of `{account, id, path, diagnostics}`, where a diagnostic is `{line, message}` and `line` is 1-based, file-relative and `null` for a refusal by value rather than by syntax.
+It is a replacement rather than a lifecycle event because a broken draft is a fact about a resource that stays true until somebody fixes the file: it reduces into the snapshot, so a client that connects after the breakage still learns about it, and fixing the file replaces the row rather than adding a second one.
+All three are replacements because they are small and a client that re-queried them would learn nothing the payload did not already carry.
+
+`signature.changed` says that a signature file was written, with a payload of `{name, path}` where `name` is the file stem.
+It is a lifecycle event and reduces into no snapshot: signatures are global rather than per-account, so no per-account change can carry one, and the event is a "re-read the list" for a client that caches signature bodies.
+A deleted signature publishes nothing in this build.
 
 `state.invalidate` says that a cached query went stale, with a payload of `{resource, scope}`: `resource` is what to re-read, as the `family:path` a method's `affected` list uses, and `scope` is the identity of the query whose answer is now wrong.
 Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbox:<account>/<slug>` and `outbox:<account>`, because that is what makes them coalescible: a hundred count changes for one mailbox are one thing to re-read.
@@ -538,7 +570,7 @@ The `daemon.status` and `daemon.stop` methods, reachable before the handshake, a
 The advertised capability list is the two lifecycle methods followed by the dispatcher's table in method-name order, derived rather than written out.
 
 **Errors.**
-The error table above, codes `-32000` to `-32009`.
+The error table above, codes `-32000` to `-32010`.
 
 **Methods.**
 The read-only `account.list`, `mailbox.list` and `message.list`, all behind the handshake and none taking an engine lock.
@@ -551,5 +583,7 @@ Every method declares a kind (`Query`, `Command`, `Operation`, `ClientIntegratio
 **State and events.**
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
 The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
-The six event kinds: `state.invalidate` `{resource, scope}` and `state.remove` `{resource}`, the replacements `account.state_changed` `{account, state}` and `draft.changed` `{account, id, subject, status, valid}`, and the two lifecycle kinds `operation.progress` and `operation.finished` with the payloads above.
+The event kinds: `state.invalidate` `{resource, scope}` and `state.remove` `{resource}`, the replacements `account.state_changed` `{account, state}`, `draft.changed` `{account, id, path, to, subject, status, valid, ready}` and `draft.invalid` `{account, id, path, diagnostics}`, and the lifecycle kinds `operation.progress`, `operation.finished`, `sync.completed`, `config.changed`, `config.invalid` and `signature.changed` `{name, path}` with the payloads above.
+The `draft.*` family, which is `draft.approve` `{account, id}` -> `{account, id, status, path}`, and the `draft_invalid` refusal it introduced.
+The snapshot's draft row, `{id, path, to, subject, status, valid, ready}`, which a `draft.invalid` reduces into with `status: "invalid"` and `valid: false`.
 The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.

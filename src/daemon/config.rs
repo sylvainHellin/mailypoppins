@@ -424,6 +424,7 @@ pub async fn reconcile(
     store: &ConfigStore,
     runtimes: &Arc<RuntimeTable>,
     canonical: &Arc<CanonicalState>,
+    watch: &Arc<super::watch::DraftWatch>,
     state: ConfigState,
     config: GlobalConfig,
 ) -> Reconcile {
@@ -442,6 +443,10 @@ pub async fn reconcile(
     // readiness is committed, and alpha must be gone before the swap is over.
     store.install(state, config);
     canonical.reseed(seeds_from_config(&store.accounts()));
+    // The watched roots are one per configured account, so a swap that added
+    // or removed one moves them: an added account's drafts are watched from
+    // the next poll, and a removed account's are forgotten with its rows.
+    watch.set_roots(super::watch::roots_from(&store.accounts()));
 
     let accounts = store.accounts();
     let of = |name: &String| accounts.iter().find(|a| &a.name == name).cloned();

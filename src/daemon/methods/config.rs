@@ -182,6 +182,8 @@ pub struct ConfigFamily {
     pub runtimes: Arc<RuntimeTable>,
     /// Where `config.changed` and `config.invalid` go.
     pub canonical: Arc<CanonicalState>,
+    /// The draft watcher, whose roots a swap re-derives.
+    pub watch: Arc<crate::daemon::watch::DraftWatch>,
 }
 
 /// One served method of the family, dispatched by the name its spec declares.
@@ -538,6 +540,7 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
         &family.store,
         &family.runtimes,
         &family.canonical,
+        &family.watch,
         state,
         config,
     )

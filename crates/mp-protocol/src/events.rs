@@ -104,6 +104,85 @@ pub struct ConfigChanged {
     pub config_revision: u64,
 }
 
+/// The `kind` a watched draft that parsed travels as.
+pub const KIND_DRAFT_CHANGED: &str = "draft.changed";
+
+/// The `kind` a watched draft that would not parse travels as.
+pub const KIND_DRAFT_INVALID: &str = "draft.invalid";
+
+/// The `kind` a watched signature file travels as.
+pub const KIND_SIGNATURE_CHANGED: &str = "signature.changed";
+
+/// One thing wrong with a file, positioned when the parser gave a position.
+///
+/// `line` is 1-based and relative to the file rather than to the block the
+/// parser read, and `null` for a refusal by value rather than by syntax:
+/// inventing a position would point the user at an innocent line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diagnostic {
+    /// The offending line, `null` when the refusal has no position.
+    pub line: Option<u32>,
+    /// One line a status bar can show.
+    pub message: String,
+}
+
+/// One draft the daemon parsed, as `draft.changed` carries it (P3b-U10).
+///
+/// `valid` is "the file parsed", so it is `true` on every one of these;
+/// `ready` is `draft::validate_draft`, the second axis, because a draft with no
+/// subject parses perfectly and is not sendable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftChanged {
+    /// The account whose drafts directory holds the file.
+    pub account: String,
+    /// The `id:` field, or the file stem when there is none.
+    pub id: String,
+    /// The absolute path, which is what a GUI opens.
+    pub path: String,
+    /// The `to:` field, `null` for a draft with no recipient yet.
+    pub to: Option<String>,
+    /// The `subject:` field, empty when there is none.
+    pub subject: String,
+    /// The word the file spells: `draft`, `approved` or `sent`.
+    pub status: String,
+    /// Whether the file parsed, which is always `true` here.
+    pub valid: bool,
+    /// Whether the draft would send.
+    pub ready: bool,
+}
+
+/// One draft the daemon could not parse, as `draft.invalid` carries it and as
+/// the `-32010` payload spells it.
+///
+/// It names its account, because two accounts may hold a draft with the same
+/// id and the event keys the same `draft:<account>/<id>` resource
+/// `draft.changed` does: fixing the file replaces the row rather than adding a
+/// second one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftInvalid {
+    /// The account whose drafts directory holds the file.
+    pub account: String,
+    /// The file stem, since the `id:` field is inside what would not parse.
+    pub id: String,
+    /// The absolute path, which is what the user opens to fix it.
+    pub path: String,
+    /// Why it was refused, never empty.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One signature file that was written, as `signature.changed` carries it.
+///
+/// A lifecycle event: signatures are global rather than per-account, so no
+/// snapshot section carries them and this is a "re-read the list" for a client
+/// that caches signature bodies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureChanged {
+    /// The file stem, which is the key `signatures::read` takes.
+    pub name: String,
+    /// The absolute path of the file.
+    pub path: String,
+}
+
 /// Why a configuration candidate was refused, as the `config.invalid` event
 /// carries it and as the `-32007` payload spells it.
 ///
