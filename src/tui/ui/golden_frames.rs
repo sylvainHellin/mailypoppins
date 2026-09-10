@@ -23,6 +23,11 @@
 //! (unread bold, cursor row fill, selection foreground, cancelled strike).
 //! A full style dump was rejected on purpose; it would fail on every palette
 //! tweak and teach the reader to approve diffs blindly.
+//!
+//! Each frame's `App` is built by a `…_app` function of its own, and the
+//! capture helpers, the size and the four base fixtures are `pub(super)`, so
+//! [`super::golden_frames_daemon`] can render the same frames from a
+//! `state.bootstrap` snapshot (P5-U1) without a second copy of any fixture.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -42,8 +47,8 @@ use crate::tui::theme::{self, Theme};
 use crate::types::EventFrontmatter;
 
 /// Frame size every golden frame is captured at (#0049 fixes 120x40).
-const WIDTH: u16 = 120;
-const HEIGHT: u16 = 40;
+pub(super) const WIDTH: u16 = 120;
+pub(super) const HEIGHT: u16 = 40;
 
 // ---------------------------------------------------------------------------
 // Capture helpers
@@ -55,7 +60,7 @@ const HEIGHT: u16 = 40;
 /// the whole binary; every path in the test binary resolves to the default
 /// palette, and the assertion below turns a future divergence into a failure
 /// here instead of an unexplained snapshot diff.
-fn pin_theme() {
+pub(super) fn pin_theme() {
     let _ = theme::init(theme::DEFAULT_THEME_NAME);
     assert_eq!(
         *theme::active(),
@@ -66,7 +71,7 @@ fn pin_theme() {
 
 /// Render `app` through [`super::view`] on a `TestBackend` and return the
 /// snapshot body: the text rows, then the meaning-carrying style runs.
-fn frame_snapshot(app: &mut App, width: u16, height: u16) -> String {
+pub(super) fn frame_snapshot(app: &mut App, width: u16, height: u16) -> String {
     pin_theme();
     // The layout branches on the app's own idea of the terminal size (the
     // real one gets it from the resize handler), so it must match the backend.
@@ -263,7 +268,7 @@ fn invite_frontmatter() -> EventFrontmatter {
 /// selection. The cursor sits on the invite so the right column shows the
 /// event card and the unicode subject unclipped, while the unread entry below
 /// still contributes its own bold run to the legend.
-fn mail_fixture() -> App {
+pub(super) fn mail_fixture() -> App {
     let mut app = App::default_for_tests();
 
     app.mailboxes = vec![
@@ -338,7 +343,7 @@ fn mail_fixture() -> App {
 
 /// The frozen calendar agenda: an accepted event, a cancelled one, and a
 /// pending invitation, cursor on the first row.
-fn calendar_fixture() -> App {
+pub(super) fn calendar_fixture() -> App {
     let mut app = mail_fixture();
     app.view = View::Calendar;
 
@@ -417,7 +422,7 @@ fn calendar_fixture() -> App {
 /// The frozen Contacts view: a small ranked index with the cursor on the top
 /// contact, so the frame carries the list column, the shared cursor-row fill
 /// and the detail pane at once (#TKT-0048).
-fn contacts_fixture() -> App {
+pub(super) fn contacts_fixture() -> App {
     use crate::contacts::{Contact, ContactIndex, ContactSource};
 
     let mut app = mail_fixture();
@@ -458,7 +463,7 @@ fn contacts_fixture() -> App {
 /// it, and one readable draft below. The error row carries the warning glyph
 /// and the filename in the theme's `error` colour, and the preview pane shows
 /// the parse error and how to fix it.
-fn drafts_fixture() -> App {
+pub(super) fn drafts_fixture() -> App {
     let mut app = mail_fixture();
     app.active_mailbox = 1;
     app.sidebar_index = 1;
@@ -532,8 +537,7 @@ fn golden_mail_view() {
 /// selection foreground runs, and the `N SELECTED` hint-bar badge. Captured
 /// separately because the selection changes the list layout, and the default
 /// frame above is the one users see most.
-#[test]
-fn golden_mail_view_with_selection() {
+pub(super) fn mail_view_with_selection_app() -> App {
     let mut app = mail_fixture();
     app.selection = HashSet::from([
         EntryKey::Msg(MessageRef::new(1)),
@@ -543,6 +547,12 @@ fn golden_mail_view_with_selection() {
     // are separate signals and must stay separable in the legend.
     app.list_index = 1;
     app.prime_preview_body(BODY_ROW_2);
+    app
+}
+
+#[test]
+fn golden_mail_view_with_selection() {
+    let mut app = mail_view_with_selection_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -561,8 +571,7 @@ fn golden_mail_view_with_selection() {
 /// Captured separately from the default frame, which stays the read/unread
 /// picture users see most, and which is what the pre-nuke parity capture was
 /// recorded against.
-#[test]
-fn golden_mail_view_with_the_status_axis() {
+pub(super) fn mail_view_with_the_status_axis_app() -> App {
     let mut app = mail_fixture();
     let mut emails = (*app.emails).clone();
     emails[1].answered = true;
@@ -574,14 +583,19 @@ fn golden_mail_view_with_the_status_axis() {
     app.emails = Arc::new(emails);
     app.email_cache = vec![Some(Arc::clone(&app.emails)), None, None, None];
     app.rebuild_visible();
+    app
+}
+
+#[test]
+fn golden_mail_view_with_the_status_axis() {
+    let mut app = mail_view_with_the_status_axis_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
 /// The flagged-only view (#0079): the same fixture with two rows flagged and
 /// the filter armed, so the frame carries the title's `(flagged)` marker, the
 /// narrowed list, and the status line's `shown/total` pair.
-#[test]
-fn golden_mail_view_flagged_filter() {
+pub(super) fn mail_view_flagged_filter_app() -> App {
     let mut app = mail_fixture();
     let mut emails = (*app.emails).clone();
     emails[1].flagged = true;
@@ -591,6 +605,12 @@ fn golden_mail_view_flagged_filter() {
     app.flagged_only = true;
     app.rebuild_visible();
     app.prime_preview_body(BODY_ROW_2);
+    app
+}
+
+#[test]
+fn golden_mail_view_flagged_filter() {
+    let mut app = mail_view_flagged_filter_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -598,11 +618,16 @@ fn golden_mail_view_flagged_filter() {
 /// borrows from the search slot, with the typed text and the block cursor,
 /// over an unfiltered list. Nothing else moves, which is the property that
 /// distinguishes this from `/`: the rows are the same rows in the same order.
-#[test]
-fn golden_mail_view_jump_date_prompt() {
+pub(super) fn mail_view_jump_date_prompt_app() -> App {
     let mut app = mail_fixture();
     app.jump_date_input = Some("last week".to_string());
     app.prime_preview_body(BODY_ROW_2);
+    app
+}
+
+#[test]
+fn golden_mail_view_jump_date_prompt() {
+    let mut app = mail_view_jump_date_prompt_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -614,11 +639,16 @@ fn golden_mail_view_jump_date_prompt() {
 /// bars stay -- the row that says how to leave a zoom must survive it. The
 /// badge reads `BODY ZOOM`, which is the only chrome left that can say the
 /// other panes are hidden rather than empty.
-#[test]
-fn golden_mail_view_zoomed_preview() {
+pub(super) fn mail_view_zoomed_preview_app() -> App {
     let mut app = mail_fixture();
     app.focus = crate::tui::app::Focus::Preview;
     app.zoomed = true;
+    app
+}
+
+#[test]
+fn golden_mail_view_zoomed_preview() {
+    let mut app = mail_view_zoomed_preview_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -628,10 +658,15 @@ fn golden_mail_view_zoomed_preview() {
 /// width, so the subject column stops being truncated at 40 columns. Captured
 /// beside the preview zoom because the two exercise different renderers under
 /// the same layout branch.
-#[test]
-fn golden_mail_view_zoomed_list() {
+pub(super) fn mail_view_zoomed_list_app() -> App {
     let mut app = mail_fixture();
     app.zoomed = true;
+    app
+}
+
+#[test]
+fn golden_mail_view_zoomed_list() {
+    let mut app = mail_view_zoomed_list_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -646,10 +681,15 @@ fn golden_calendar_view() {
 /// keeps its strike-through badge *and* the detail pane leads with the
 /// cancellation banner above an otherwise complete card -- a tombstone the
 /// user can still read, never a deleted event.
-#[test]
-fn golden_calendar_view_cancelled_event_detail() {
+pub(super) fn calendar_view_cancelled_event_detail_app() -> App {
     let mut app = calendar_fixture();
     app.calendar_view.list_index = 1;
+    app
+}
+
+#[test]
+fn golden_calendar_view_cancelled_event_detail() {
+    let mut app = calendar_view_cancelled_event_detail_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -674,22 +714,32 @@ fn golden_drafts_view_with_a_parse_skip() {
 /// row the list pane borrows from the search slot, with the typed path and the
 /// block cursor, over the unfiltered Drafts list. The same one-line borrow the
 /// jump-to-date prompt uses, only the prefix and the mailbox differ.
-#[test]
-fn golden_drafts_view_attach_prompt() {
+pub(super) fn drafts_view_attach_prompt_app() -> App {
     let mut app = drafts_fixture();
     // Cursor on the readable draft below the parse-skip row.
     app.list_index = 1;
     app.attach_file_input = Some("~/Documents/report.pdf".to_string());
+    app
+}
+
+#[test]
+fn golden_drafts_view_attach_prompt() {
+    let mut app = drafts_view_attach_prompt_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
 /// The help overlay floating over the dimmed mail view. Rendered straight
 /// through `ui::view` with `Overlay::Help` set, exactly as the event loop
 /// leaves the state after `?`; no event loop is needed.
-#[test]
-fn golden_help_overlay() {
+pub(super) fn help_overlay_app() -> App {
     let mut app = mail_fixture();
     app.overlay = Overlay::Help;
+    app
+}
+
+#[test]
+fn golden_help_overlay() {
+    let mut app = help_overlay_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -697,10 +747,15 @@ fn golden_help_overlay() {
 /// view, freshly opened with an empty query so the full runnable catalogue
 /// shows from the top, its first entry highlighted. Pins the palette chrome
 /// (query line, action list, footer) and proves it derives from `KEYMAP`.
-#[test]
-fn golden_command_palette() {
+pub(super) fn command_palette_app() -> App {
     let mut app = mail_fixture();
     app.overlay = Overlay::Palette(CommandPalette::new());
+    app
+}
+
+#[test]
+fn golden_command_palette() {
+    let mut app = command_palette_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -708,8 +763,7 @@ fn golden_command_palette() {
 /// with the account default starred, the cursor on the second, and the browse
 /// footer. Built from a literal state (never the real signatures directory),
 /// so the frame stays frozen like every other fixture here.
-#[test]
-fn golden_signatures_overlay() {
+pub(super) fn signatures_overlay_app() -> App {
     let mut app = mail_fixture();
     app.overlay = Overlay::Signatures(SignaturesOverlay {
         account: "work".to_string(),
@@ -723,17 +777,28 @@ fn golden_signatures_overlay() {
         mode: SignaturesMode::Browse,
         input: String::new(),
     });
+    app
+}
+
+#[test]
+fn golden_signatures_overlay() {
+    let mut app = signatures_overlay_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
 /// The Outlook-shape server-search form (#0086b), empty: the scope toggle, the
 /// four text fields, the two date fields, the attachment toggle and the empty
 /// Advanced line with its placeholder. `From` is focused (the default landing).
-#[test]
-fn golden_search_form_empty() {
+pub(super) fn search_form_empty_app() -> App {
     let mut app = mail_fixture();
     app.overlay = Overlay::Search;
     app.server_search_focus = SearchOverlayFocus::Field(SearchField::From);
+    app
+}
+
+#[test]
+fn golden_search_form_empty() {
+    let mut app = search_form_empty_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -741,8 +806,7 @@ fn golden_search_form_empty() {
 /// on and `Current Mailbox` scope, so the frame carries a value in every field
 /// row and the `[x]` toggle state. The Advanced line is empty, so the
 /// structured fields render live (not greyed).
-#[test]
-fn golden_search_form_filled() {
+pub(super) fn search_form_filled_app() -> App {
     let mut app = mail_fixture();
     app.overlay = Overlay::Search;
     app.server_search_focus = SearchOverlayFocus::Field(SearchField::Keywords);
@@ -757,6 +821,12 @@ fn golden_search_form_filled() {
         attachment: true,
         advanced: String::new(),
     };
+    app
+}
+
+#[test]
+fn golden_search_form_filled() {
+    let mut app = search_form_filled_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 
@@ -764,8 +834,7 @@ fn golden_search_form_filled() {
 /// multi-line message typed into it (#0097). Pins the body label, the wrapped
 /// body text with its cursor block, and the Ctrl+g submit hint that replaced
 /// the old Subject-is-last layout.
-#[test]
-fn golden_compose_wizard_with_body() {
+pub(super) fn compose_wizard_with_body_app() -> App {
     let mut app = mail_fixture();
     app.overlay = Overlay::Compose(ComposeWizard {
         mode: ComposeMode::New,
@@ -784,6 +853,12 @@ fn golden_compose_wizard_with_body() {
         contacts: None,
     });
     app.focus = crate::tui::app::Focus::ComposeWizard;
+    app
+}
+
+#[test]
+fn golden_compose_wizard_with_body() {
+    let mut app = compose_wizard_with_body_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 

@@ -5,6 +5,11 @@ mod contacts;
 /// Pre-rewrite golden-frame capture (#0049 unit 0a); tests only.
 #[cfg(test)]
 mod golden_frames;
+/// The same frames built from a `state.bootstrap` snapshot (#0124, P5-U1);
+/// tests only. Does not compile until P5-U2 supplies the two contract items
+/// its header names, which is the T-unit convention.
+#[cfg(test)]
+mod golden_frames_daemon;
 mod headers;
 mod list;
 mod overlays;
