@@ -30,9 +30,13 @@ The daemon stops being a cargo feature and becomes the default build.
 - **P4-U9 (T)** - `2ae504c`, the sync/watch slice contract: `SYNC_METHOD_SPECS`, `mailbox.list_server` as the second `mailbox.*` method, `message.list_server` in an array of its own, `Phase::as_str` and the four client wordings.
 - **P4-U10 (I)** - the sync/watch slice on the daemon: `mp sync [-n|--mailbox|--dry-run|--all-accounts]`, `mp fetch`, `mp list-mailboxes` and `mp watch [--mailbox|--timeout]`. `sync.quick` and `sync.full` are durable operations running the #0114 tick, one `operation.progress` per phase; `sync.watch` is a client-scoped one over bounded IDLE rounds. `--all-accounts` stays a loop in the client, `--timeout` stays client-side, and `mp sync` still passes no body-fetch deadline. A local-only account is `-32006` with `state: "local_only"` and renders as the skip line at exit 0; a blocked runtime is a *successful* operation answering `{blocked: true, outcome: null}`. Every line `mp sync` prints now comes from `mp_client::format`, which gained `TAIL_LABEL`, `outbox_drain_line`, `mutations_drain_line`, `drain_failed_line` and the dry-run rendering.
 
+
+- **P4-U11 (T)** - `c9c91dc`, the send slice contract: `SEND_METHOD_SPECS`, the `mp_protocol::send` result types, the six `mp_client::format` wordings and the `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` hook.
+- **P4-U12 (I)** - the send slice on the daemon: `mp send [-y]`, `mp send --invite`, `mp send-approved [-y] [--all-accounts]` and `mp outbox list|retry|discard`. Six methods, all durable: three sends and a retry as operations, the listing as a query, the discard as a command. The preview, the `[y/N]` prompt, the invitation's `UID` and `--all-accounts` all stay in the client, which renders the preview from `draft.preview` and the batch listing from `draft.list`; the transport, the outbox and the drafts directory are the daemon's. `mailypoppins::invite::plan_invite` is the one validator both sides use, so `ANO-4` is refused in the same sentence and the same order on either. The CLI send paths take no hold (`ANO-7`), and a caller that sends one is `-32602`.
+
 `265f6f7` (test: stop auto-started daemons in legacy CLI suites) sits between P4-U4 and P4-U5 and belongs to no unit; see below.
 
-Still open: P4-U11..U15, the send and admin slices, then the direct-path deletion and the phase gate.
+Still open: P4-U13..U15, the admin slice, then the direct-path deletion and the phase gate.
 
 ## Approved test edits
 
@@ -47,6 +51,7 @@ These are the edits approved so far in Phase 4.
 - **`tests/daemon_draft_slice.rs`** (after P4-U8) finishes the reconciliation `380427a` began: `DRAFT_COMMANDS` gains `draft.discard` (six, in method-name order), since the P4-U7 contract declares it a `Command`, and `every_path_a_draft_method_returns_is_a_draft_path` gains a tenth call so the coverage list matches `DRAFT_METHODS` again. A discard answers `{account, id, selector, status}` and carries no path, so it is exempted from the at-least-one-path check the way `draft.validate` is, with the reason in the assertion message; the call runs last in the list because it removes the draft the earlier calls address, and the slice owns its fixture root.
 - **`tests/daemon_parity_harness.rs` `UNMIGRATED`** (after P4-U10) names `outbox list` where it named `list-mailboxes`. The third row exists to compare a command that *needs* a daemon and has not been migrated onto one, so it had to move the moment the sync/watch slice routed `mp list-mailboxes`; `mp outbox list` is byte-identical over the harness's empty root and belongs to the send slice (P4-U12), which has yet to take it. The assertion is unchanged.
 - **`tests/engine_lock_ingest_cli.rs`** (after P4-U10) wraps its temporary tree in `support::parity::SandboxRoot`, for the reason the three suites above did: the `mp sync` it spawns is a daemon client now, so the child starts a daemon that outlived the tree. It matters more here than elsewhere, because that daemon is forked while the test holds the account's engine lock and therefore inherits a copy of the locked descriptor. Every assertion is kept, the paths are unchanged, and only the guard's `Drop` is added.
+- **`tests/daemon_parity_harness.rs` `UNMIGRATED`** (after P4-U12) names `contacts stats` where it named `outbox list`, for the reason it named `outbox list` in the first place: the third row has to be a command that needs a daemon and has not been migrated, and the send slice took `mp outbox list`. `mp contacts stats` is byte-identical over the harness's empty root and belongs to the admin slice (P4-U14). The assertion is unchanged; the comment above the constant records both moves.
 - **`tests/daemon_autostart.rs` `mp_save_writes_into_the_clients_cwd_with_the_daemon_started_from_root`** (P4-U8) is no longer `#[ignore]`d. It could not pass as written: it ran against a bare temporary root with no configuration and no store and asked for `mp://alpha/inbox/msg@example.com`, which nothing seeds. It now seeds `support::mutation_fixture::seed` into that root and asks for `mp://alpha/inbox/bericht@example.com`; the daemon-started-from-`/` half is unchanged, and so is the assertion.
 
 ## P4-U6 follow-ups
@@ -92,3 +97,39 @@ After P4-U8: 1929 passed in the green targets (1892 + the 35 of `tests/daemon_mu
 After those edits: `timeout 900 cargo test --workspace --offline` -> 1928 passed, 0 failed, `pgrep -af '[m]p daemon'` empty.
 
 After P4-U10: `timeout 900 cargo test --workspace --offline` -> 1968 passed, 0 failed (1928 + the 38 of `tests/daemon_sync_slice.rs` + two unit tests in `src/daemon/methods/sync.rs`), `--test daemon_sync_slice` green three times running, the help walk byte-identical to `docs/baselines/pre-daemon/cli-help.txt`, clippy clean on every touched file, and `pgrep -af '[m]p daemon'` empty.
+
+After P4-U12: `timeout 900 cargo test --workspace --offline --no-fail-fast` -> 2018 passed, 2 failed, 4 ignored (1968 + the 48 passing rows of `tests/daemon_send_slice.rs` + two unit tests in `src/daemon/methods/send.rs`). The two failures are the rows above, which contradict `draft::settle_sent_draft` and the fixture's own recipient list; `--test daemon_send_slice` gives the same 48/2 three times running, `outbox_integration` and `imip_integration` are untouched and green, the help walk is byte-identical to `docs/baselines/pre-daemon/cli-help.txt`, clippy is clean on every touched file, and `pgrep -af '[m]p daemon'` is empty afterwards.
+
+## P4-U12 decisions and follow-ups
+
+Decisions this unit had to take, none of them settled by the plan:
+
+- **`send.invite` takes three parameters the plan's shape does not list**: `uid`, `signature` and `no_signature`. The preview is the client's, `invite::generate_uid` mints a UID per run, and a user who reads `UID: x` must be sent `UID: x`, so the client mints it while previewing and sends it; the daemon mints one only when a caller previewed nothing. The two signature flags are global CLI flags with no draft body to live in, and they travel exactly as the `draft.*` writers' do.
+- **A retry accepts one state more than `outbox::retry` does.** `outbox::retry` re-arms a `failed` row and refuses everything else, which is right and not enough: a `sent_pending_append` row whose APPEND has already been attempted (`attempts > 0`) is the row whose copy may or may not have been filed, and re-driving that APPEND behind the Message-ID dedup search is exactly what `mp outbox retry` is for. A row nobody has attempted is still refused, because somebody may be inside its APPEND right now.
+- **A retry admitted while another retry for the same account is running is not refused on the row's state**, because that state is the other retry's to change and the two calls race by construction. One retry per account runs at a time behind a `tokio::sync::Mutex`, an admission ticket says one is in flight, and the second operation settles on whatever the first left.
+- **`mp outbox retry` drains against `unix_now() + BACKOFF_MAX_SECS`.** A failed APPEND arms a 30-second backoff, so a retry that passed the real clock would re-arm the row and then skip it. `send::resume_outbox_at` and `drain_account_at` take the clock; every periodic driver still passes the real one.
+- **All three outbox subcommands call `send.outbox_list` first.** The pre-daemon command looked for a store file before it read the action, so an account that never queued anything gets `nothing has been queued for <account> yet` and exit 0 from `retry` and `discard` too. That costs one round trip on a mutating subcommand and keeps the sentence.
+
+The rest:
+
+- **`mp outbox list` lost the colour inside its padded state column**, and nothing else: `mp_client::format` is colourless by contract and `colored` drops a width specifier as soon as colours are on, so the pre-daemon binary already printed two different layouts. Recorded in `docs/lessons-learned.md`.
+- **`mp send-approved` still loads an SMTP config per account in the client**, purely to reproduce the `⚠ Could not load SMTP config: …` line the pre-daemon loop printed before each account's batch. It is the last transport load on the CLI's path and it goes with the rest in P4-U15.
+- **The `-y`-less runs reach the daemon before they can be declined**, which is what `MAILYPOPPINS_DAEMON_REQUIRE=1` measures: `mp send` calls `draft.preview` to resolve and preview, and `mp send --invite` opens its session after the `ANO-4` refusal and before the preview, so a Graph invitation still costs no session.
+- **A selector with no account is parsed in the client.** `mp send -A nope <id>` binds an account named `""`, and `selector::parse_in` has always answered that with `no account for <id>: name one with -A/--account or configure a default`; sending the empty name over the socket would answer it with `account_unknown` instead.
+- **Two assertions of `tests/daemon_send_slice.rs` cannot pass against this tree** and are left failing rather than weakened; see below.
+
+### The two failing rows
+
+`tests/daemon_send_slice.rs:2125`, in `a_routed_send_delivers_retires_the_draft_and_files_the_copy`, asserts `draft_status(root, alpha, "freigabe.md") == "sent"` after a successful routed send.
+`draft::settle_sent_draft` (`src/draft.rs`) *deletes* the file when the send reached every recipient and got an outbox row: `mark_draft_sent` writes `status: sent` and then `fs::remove_file` retires it.
+The fixture's approved draft has one recipient, the fake transport accepts it, so the file is gone and `draft_status` panics reading it.
+That behaviour is the library's and predates the daemon, the pre-daemon binary does the same, and no parity row covers a successful send, so the assertion describes a tree that does not exist rather than a routing difference.
+Everything else in that test passes: the success line, the single `append` in the ledger, and the absence of a path in the output.
+
+`tests/daemon_send_slice.rs:2188`, in `a_routed_send_whose_recipient_is_refused_is_partly_delivered`, asserts the send prints `⚠ Partial send:` after arming the fake transport to refuse `carol@example.com` (`send_fixture::REJECTED`).
+The draft it sends is the same approved draft, whose only recipient is `ivana@example.com`; `carol@example.com` is a recipient of the *seeded outbox rows*, not of any draft.
+The fake refuses exactly the addresses it is given and accepts the rest, which is the contract `tests/support/send_fixture.rs` states, so the send succeeds in full and no partial outcome can occur.
+The row's second half, which asserts `mp outbox list` names the recipient who never got it, passes from the seeded partly-delivered row.
+
+Both would be fixed by a change to the test file - rejecting `ivana@example.com` in the second, dropping or inverting the file assertion in the first - which an implementer may not make.
+

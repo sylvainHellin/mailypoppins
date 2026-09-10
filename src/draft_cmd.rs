@@ -174,6 +174,19 @@ pub fn invalid_count(validation: &DraftValidation) -> usize {
 /// the body arrives already cut at 500 characters and `body_truncated` already
 /// decided on 500 bytes, so nothing here re-derives either.
 pub fn render_preview(preview: &DraftPreview) -> String {
+    let mut out = render_send_preview(preview);
+    out.push_str(&format!(
+        "\n{}\n\n",
+        "[DRY RUN] Would send email (use 'send' subcommand to actually send)"
+            .yellow()
+            .bold()
+    ));
+    out
+}
+
+/// The same block without the dry-run trailer, which is the preview `mp send`
+/// prints before it asks (`preview_draft` with `is_dry_run = false`).
+pub fn render_send_preview(preview: &DraftPreview) -> String {
     let mut out = format!(
         "\n{}\n{}: {}\n{}: {}\n",
         "=== Email Draft Preview ===".bold().cyan(),
@@ -239,12 +252,5 @@ pub fn render_preview(preview: &DraftPreview) -> String {
             error
         )),
     }
-
-    out.push_str(&format!(
-        "\n{}\n\n",
-        "[DRY RUN] Would send email (use 'send' subcommand to actually send)"
-            .yellow()
-            .bold()
-    ));
     out
 }

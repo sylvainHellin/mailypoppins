@@ -13,6 +13,7 @@
 pub mod draft;
 pub mod events;
 pub mod frame;
+pub mod send;
 
 mod error;
 mod message;

@@ -76,6 +76,7 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - [#0085 On-open re-fetch of an evicted body](docs/tickets/0085-on-open-body-refetch.md) -- feature _(the missing half of #0060, whose eviction sweep shipped; required before lowering a cap below the working set)_
 - [#0101 Conversation-view collapse and inline navigation on top of the thread view](docs/tickets/0101-conversation-view-collapse-inline-nav.md) -- feature _(cross-ref #0008)_
 - [#0084 iMIP send-side updates and cancellations](docs/tickets/0084-imip-send-cancel-and-update.md) -- feature _(the split-out send half of #0031, whose receive half shipped)_
+- A real fake SMTP/IMAP pair for the test suite: a TLS listener plus a certificate generator, so a send can be driven end to end over the wire the product actually speaks -- chore _(three slices want it and none of them can have it: `tests/outbox_integration.rs` fakes the Sent mailbox behind the `SentMailbox` trait and never opens a socket, `tests/imip_integration.rs` parses and ingests but never sends, and `tests/daemon_send_slice.rs` (P4-U12) had to arm `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` in the daemon because `send::build_smtp_transport` is TLS-only on both branches. A plaintext `TcpListener` cannot serve it and a TLS one needs a certificate generator this tree does not depend on, so every routed success path is pinned against an in-process fake rather than against a server, and the SMTP conversation, its error strings and its timeouts stay unpinned.)_
 
 ### Distribution / cross-platform (adoption track)
 

@@ -2,8 +2,6 @@ use mailypoppins::types::*;
 use mailypoppins::config::*;
 use mailypoppins::parse::*;
 use mailypoppins::imap_client::{self, *};
-use mailypoppins::draft::*;
-use mailypoppins::send::*;
 use mailypoppins::config_cmd::*;
 use mailypoppins::graph;
 use mailypoppins::pending_ops;
@@ -696,119 +694,76 @@ async fn cmd_outbox(
     account_config: &mailypoppins::config::AccountConfig,
     action: OutboxAction,
 ) -> Result<()> {
-    use mailypoppins::outbox::{self, OutboxState};
+    let account = account_config.name.as_str();
+    let mut connection = daemon_connection().await;
 
-    let path = mailypoppins::config::store_path(&account_config.name);
-    if !path.exists() {
-        println!("  {} nothing has been queued for {} yet", "·".dimmed(), account_config.name);
+    // The listing first, whatever was asked: the pre-daemon command looked for
+    // a store file before it read the action, so an account that has never
+    // queued anything gets one sentence and exit 0 from all three subcommands.
+    let listing: mp_protocol::send::OutboxListing = typed_call(
+        &mut connection,
+        account,
+        "send.outbox_list",
+        serde_json::json!({"account": account}),
+    )
+    .await?;
+    if !listing.ever_used {
+        print_lines(&mp_client::format::outbox_cli_lines(&listing));
         return Ok(());
     }
-    let store = mailypoppins::store::Store::open(&path)?;
-    let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
 
     match action {
-        OutboxAction::List => {
-            let rows = outbox::unfinished_rows(&store, &account_config.name)?;
-            if rows.is_empty() {
-                println!(
-                    "  {} the outbox for {} is clear",
-                    "\u{2713}".green(),
-                    account_config.name
-                );
-                return Ok(());
-            }
-            for row in &rows {
-                // A `done` row is only listed when it kept a note, which is
-                // what a partial delivery leaves behind (#0063); calling that
-                // `done` would bury the recipient who never got it.
-                let partial = row.state == OutboxState::Done;
-                let state = if partial {
-                    "partial".to_string().yellow()
-                } else {
-                    match row.state {
-                        OutboxState::Failed => row.state.to_string().red(),
-                        OutboxState::PendingSend => row.state.to_string().yellow(),
-                        _ => row.state.to_string().normal(),
-                    }
-                };
-                println!(
-                    "  {:>4}  {:<20} {}  {}",
-                    row.id,
-                    state,
-                    format_unix_time(row.updated).dimmed(),
-                    row.message_id
-                );
-                if let Some(target) = row.target_mailbox.as_deref() {
-                    println!("        {} {target}", "sent copy ->".dimmed());
-                }
-                if row.state == OutboxState::PendingSend && row.submission_started_at.is_none() {
-                    println!("        {}", "never submitted; the next sync sends it".dimmed());
-                }
-                if let Some(envelope) = row.envelope.as_ref() {
-                    for (addr, reason) in &envelope.rejected {
-                        println!("        {} {addr} ({reason})", "never delivered to:".red());
-                    }
-                    let waiting = envelope.outstanding();
-                    if !waiting.is_empty() && row.state != OutboxState::Done {
-                        println!(
-                            "        {} {}",
-                            "still to deliver to:".dimmed(),
-                            waiting
-                                .iter()
-                                .map(|(addr, _)| addr.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                    }
-                }
-                if let Some(err) = row.last_error.as_deref() {
-                    let label = if partial { "outcome:" } else { "last error:" };
-                    println!("        {} {err}", label.dimmed());
-                }
-            }
-            let counts = outbox::counts(&store, &account_config.name)?;
-            println!(
-                "  {} {} working, {} failed, {} partly delivered",
-                "\u{21bb}".dimmed(),
-                counts.open,
-                counts.failed,
-                counts.partial
-            );
+        OutboxAction::List => print_lines(&mp_client::format::outbox_cli_lines(&listing)),
+        OutboxAction::Discard { id } => {
+            let result = daemon_try_call(
+                &mut connection,
+                "send.outbox_discard",
+                serde_json::json!({"account": account, "row_id": id}),
+            )
+            .await
+            .map_err(|e| refusal(account, e))?;
+            print_lines(&[mp_client::format::outbox_discard_line(
+                id,
+                wire_str(&result["message_id"]),
+            )]);
         }
         OutboxAction::Retry { id } => {
-            outbox::retry(&store, id)?;
-            println!(
-                "  {} row {id} is queued again; sending it now",
-                "\u{21bb}".dimmed()
-            );
-            // Drop the handle first: the resume path opens the store itself.
-            drop(store);
-            let result = mailypoppins::send::resume_outbox(account_config).await;
-            let store = mailypoppins::store::Store::open(&path)?;
-            match outbox::load(&store, id)? {
-                Some(row) => println!("  {} row {id} is now {}", "\u{2713}".green(), row.state),
-                None => println!("  {} row {id} is gone", "\u{2713}".green()),
-            }
-            if result.completed > 0 {
-                println!("  {} {} sent copy/copies filed", "\u{2713}".green(), result.completed);
-            }
-        }
-        OutboxAction::Discard { id } => {
-            let Some(row) = outbox::load(&store, id)? else {
-                return Err(anyhow!("no outbox row {id}"));
-            };
-            outbox::discard(&store, &blobs, id)?;
-            println!(
-                "  {} discarded row {id} ({}); its bytes are released",
-                "\u{2713}".green(),
-                row.message_id
-            );
+            // A client that follows its own operation has to be a subscriber
+            // first: the finished event reaches bootstrapped connections only.
+            daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+            let started = daemon_try_call(
+                &mut connection,
+                "send.outbox_retry",
+                serde_json::json!({"account": account, "row_id": id}),
+            )
+            .await
+            .map_err(|e| refusal(account, e))?;
+            let operation = wire_str(&started["operation_id"]).to_string();
+            let outcome: mp_protocol::send::OutboxRetryOutcome =
+                match await_operation(&mut connection, &operation, |_| {}).await {
+                    Settled::Done(result) => serde_json::from_value(result)
+                        .context("reading the daemon's send.outbox_retry answer")?,
+                    Settled::Failed(message) => return Err(anyhow!("{message}")),
+                };
+            print_lines(&mp_client::format::outbox_retry_lines(&outcome));
         }
     }
     Ok(())
 }
 
+/// Print rendered lines, putting back the colour `mp_client::format` does not
+/// carry: a glyph's colour is a terminal's business and a GUI has neither.
+fn print_lines(lines: &[String]) {
+    for line in lines {
+        println!("{}", paint(line));
+    }
+}
+
 /// A unix timestamp as local `YYYY-MM-DD HH:MM`, or `-` when it is unset.
+// Unused from P4-U12, when `mp outbox list` started rendering its time column
+// through `mp_client::format`, and deleted with the rest of the direct engine
+// paths by P4-U15.
+#[allow(dead_code)]
 fn format_unix_time(ts: i64) -> String {
     if ts <= 0 {
         return "-".to_string();
@@ -822,201 +777,320 @@ fn format_unix_time(ts: i64) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-/// Send an iMIP calendar invitation (`METHOD:REQUEST`) over SMTP.
+/// `mp send --invite`: an iMIP calendar invitation (`METHOD:REQUEST`).
 ///
-/// Builds the `VEVENT` (via `mailypoppins::invite`), assembles the iMIP MIME tree
-/// (via `build_draft_message(..., Some(ics))`) and submits it through the
-/// durable outbox, which also files the local Sent copy so the #0027 receive
-/// path (and #0030 reconciliation) can pick it up.
+/// The preview, the `UID` in it and the confirmation are the client's, because
+/// a daemon has no stdin and a user who reads `UID: x` must be sent `UID: x`;
+/// the `VEVENT`, the MIME tree and the durable submission are `send.invite`'s.
+/// Both sides validate through one [`mailypoppins::invite::plan_invite`], so
+/// the refusals arrive in the order the user has always met them in and the
+/// Graph refusal (`ANO-4`) is made before anything is previewed.
 async fn run_send_invite(
     account_config: &mailypoppins::config::AccountConfig,
-    smtp_config: &SmtpConfig,
-    global_config: &GlobalConfig,
-    signature: Option<&str>,
+    signature: serde_json::Value,
     args: InviteArgs,
 ) -> Result<()> {
-    // Graph accounts cannot send iMIP invites yet (Graph send is #0036, blocked
-    // on tenant admin approval #0035). Fail clearly rather than silently.
-    if account_config.auth_method == AuthMethod::Graph {
-        return Err(anyhow!(
-            "`mp send --invite` is not supported for Graph accounts yet (Graph calendar send \
-             is tracked by #0036, blocked on #0035). Use an SMTP-configured account."
-        ));
-    }
-
-    let subject = args
-        .subject
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("--invite requires --subject (used as the event summary)"))?;
-    let start = args
-        .start
-        .as_deref()
-        .ok_or_else(|| anyhow!("--invite requires --start"))?;
-
-    // Resolve times with validation (end after start, exactly one of end/duration).
-    let (start_dt, end_dt) =
-        mailypoppins::invite::resolve_times(start, args.end.as_deref(), args.duration.as_deref())?;
-
-    // Attendees from --to/--cc (dedup, bare addresses). To/Cc headers keep the
-    // full form; ATTENDEE lines use the extracted address.
-    let to_field = args.to.as_deref().filter(|s| !s.trim().is_empty());
-    let cc_field = args.cc.as_deref().filter(|s| !s.trim().is_empty());
-
-    let mut attendees: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for field in [to_field, cc_field].into_iter().flatten() {
-        for raw in split_addresses(field) {
-            let addr = extract_email_address(&raw);
-            if !addr.is_empty() && seen.insert(addr.to_lowercase()) {
-                attendees.push(addr);
-            }
-        }
-    }
-    if attendees.is_empty() {
-        return Err(anyhow!("--invite requires at least one recipient via --to/--cc"));
-    }
-
-    // ORGANIZER = the sending account's primary address (must match, or Exchange
-    // silently drops the invite). Use the bare email part of default_from.
-    let organizer = extract_email_address(&account_config.default_from);
-    if organizer.is_empty() {
-        return Err(anyhow!(
-            "Account has no usable primary address (default_from); cannot set ORGANIZER"
-        ));
-    }
-
-    let uid = mailypoppins::invite::generate_uid(&organizer);
-    let spec = mailypoppins::invite::InviteSpec {
-        uid: uid.clone(),
-        organizer: organizer.clone(),
-        attendees: attendees.clone(),
-        summary: subject.to_string(),
-        start: start_dt,
-        end: end_dt,
-        location: args.location.clone().filter(|s| !s.trim().is_empty()),
-        description: args.description.clone().filter(|s| !s.trim().is_empty()),
+    let request = mailypoppins::invite::InviteRequest {
+        to: args.to.clone(),
+        cc: args.cc.clone(),
+        subject: args.subject.clone(),
+        start: args.start.clone(),
+        end: args.end.clone(),
+        duration: args.duration.clone(),
+        location: args.location.clone(),
+        description: args.description.clone(),
     };
-    let ics = mailypoppins::invite::build_invite_ics(&spec)?;
+    let plan = mailypoppins::invite::plan_invite(account_config, &request, None)?;
+    let spec = &plan.spec;
+    // Connected before the preview: an invitation the user declines is still a
+    // run that answered from the daemon, and `ANO-4` is refused above this line
+    // so a Graph account costs no session.
+    let mut connection = daemon_connection().await;
 
-    // Human-readable body: reuse the description, else a short summary line.
-    let body = args
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("You are invited to: {}", subject));
-
-    // Build the event: frontmatter block from the same ICS (round-trips via #0027).
-    let event = mailypoppins::calendar::parse_ics(ics.as_bytes())
-        .map(|p| mailypoppins::calendar::event_frontmatter(&p));
-
-    // Synthetic draft, used only to build the message: nothing is written to
-    // disk on this path any more (the Sent copy is the outbox's, #0037).
-    let sent_at = chrono::Utc::now();
-    let draft_path = PathBuf::from(format!(
-        "{}-invite-{}.md",
-        sent_at.format("%Y%m%d-%H%M%S"),
-        mailypoppins::parse::slugify_subject(subject)
-    ));
-
-    let draft = EmailDraft {
-        path: draft_path.clone(),
-        frontmatter: EmailFrontmatter {
-            id: None,
-            date: None,
-            to: to_field.map(str::to_string),
-            cc: cc_field.map(str::to_string),
-            bcc: None,
-            subject: subject.to_string(),
-            status: EmailStatus::Approved,
-            from: Some(account_config.default_from.clone()),
-            reply_to: None,
-            attachments: None,
-            sent_at: None,
-            sent_via: None,
-            message_id: None,
-            in_reply_to: None,
-            forwarded_from: None,
-            signature: None,
-            event,
-        },
-        body_markdown: body,
-    };
-
-    // Preview.
     println!("{}", "--- Invite Preview ---".bold());
-    println!("  {} {}", "Summary:".yellow(), subject);
-    println!("  {} {}", "Organizer:".green(), organizer);
-    println!("  {} {}", "Attendees:".green(), attendees.join(", "));
+    println!("  {} {}", "Summary:".yellow(), plan.subject);
+    println!("  {} {}", "Organizer:".green(), spec.organizer);
+    println!("  {} {}", "Attendees:".green(), spec.attendees.join(", "));
     println!(
-        "  {} {}  →  {}",
+        "  {} {}  \u{2192}  {}",
         "When:".blue(),
-        start_dt.to_rfc3339(),
-        end_dt.to_rfc3339()
+        spec.start.to_rfc3339(),
+        spec.end.to_rfc3339()
     );
     if let Some(loc) = spec.location.as_deref() {
         println!("  {} {}", "Location:".blue(), loc);
     }
-    println!("  {} {}", "UID:".dimmed(), uid);
+    println!("  {} {}", "UID:".dimmed(), spec.uid);
     println!("{}", "---".dimmed());
 
     if !args.yes && !prompt_confirmation("Send this invitation?") {
-        println!("Cancelled.");
+        println!("{}", mp_client::format::CANCELLED_LINE);
         return Ok(());
     }
-
     println!("Sending invitation...");
-    let built = mailypoppins::send::build_draft_message(
-        &draft,
-        &smtp_config.default_from,
-        &global_config.email,
-        signature,
-        Some(&ics),
-    )?;
-    let report = mailypoppins::send::send_durably(&built, account_config, smtp_config).await?;
-    let send_result = &report.send_result;
 
-    for r in send_result.succeeded() {
-        println!("  {} {} ({})", "✓".green(), r.address, r.role);
-    }
-    for r in send_result.failed() {
-        println!(
-            "  {} {} ({}): {}",
-            "✗".red(),
-            r.address,
-            r.role,
-            r.error.as_deref().unwrap_or("unknown error")
-        );
-    }
+    let mut params = serde_json::json!({
+        "account": account_config.name,
+        "to": args.to,
+        "cc": args.cc,
+        "subject": args.subject,
+        "start": args.start,
+        "end": args.end,
+        "duration": args.duration,
+        "location": args.location,
+        "description": args.description,
+        // The UID the preview above printed, so what the user read is what goes
+        // out; the daemon mints one only when a client previewed nothing.
+        "uid": spec.uid,
+    });
+    params = with_params(params, signature);
 
-    if !send_result.any_succeeded() {
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+    let started = daemon_try_call(&mut connection, "send.invite", params)
+        .await
+        .map_err(|e| refusal(&account_config.name, e))?;
+    let operation = wire_str(&started["operation_id"]).to_string();
+    let outcome: mp_protocol::send::SendOutcome =
+        match await_operation(&mut connection, &operation, |_| {}).await {
+            Settled::Done(result) => serde_json::from_value(result)
+                .context("reading the daemon's send.invite answer")?,
+            Settled::Failed(message) => return Err(anyhow!("{message}")),
+        };
+
+    for recipient in &outcome.recipients {
+        if recipient.delivered {
+            println!("  {} {} ({})", "\u{2713}".green(), recipient.address, recipient.role);
+        } else {
+            println!(
+                "  {} {} ({}): {}",
+                "\u{2717}".red(),
+                recipient.address,
+                recipient.role,
+                recipient.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
+    let delivered = outcome.recipients.iter().filter(|r| r.delivered).count();
+    if delivered == 0 {
         return Err(anyhow!(
             "Failed to send invitation to all {} recipient(s)",
-            send_result.results.len()
+            outcome.recipients.len()
         ));
     }
-
-    mailypoppins::contacts::hooks::bump_after_send(account_config, &draft);
-
-    if send_result.all_succeeded() {
+    if delivered == outcome.recipients.len() {
         println!(
             "{} Invitation sent to all {} recipient(s) [{}]",
-            "✓".green().bold(),
-            send_result.results.len(),
-            report.status_line()
+            "\u{2713}".green().bold(),
+            outcome.recipients.len(),
+            outcome.status_line
         );
     } else {
         println!(
             "{} Partial send: {} succeeded, {} failed",
-            "⚠".yellow().bold(),
-            send_result.succeeded().len(),
-            send_result.failed().len()
+            "\u{26a0}".yellow().bold(),
+            delivered,
+            outcome.recipients.len() - delivered
         );
     }
+    Ok(())
+}
 
+/// `mp send <selector>`: the preview and the prompt here, the send there.
+///
+/// `draft.preview` is what resolves the selector, so the echoed line and the
+/// refusal of a draft that does not validate are the daemon's answers rendered
+/// locally, exactly as the bare-selector dry run is (P4-U6).
+async fn routed_send(
+    account_config: &mailypoppins::config::AccountConfig,
+    selector: &str,
+    yes: bool,
+) -> Result<()> {
+    let account = account_config.name.as_str();
+    // Parsed here, because the sentence a selector with no account earns is the
+    // parser's and predates the daemon: sending an empty account name across
+    // the socket would answer it with `account_unknown` instead.
+    let query =
+        mailypoppins::selector::parse_in(selector, Namespace::Drafts, account, None)?;
+    let mut connection = daemon_connection().await;
+    let preview: mp_protocol::draft::DraftPreview = typed_call(
+        &mut connection,
+        account,
+        "draft.preview",
+        serde_json::json!({"account": account, "id": query.key}),
+    )
+    .await?;
+    println!("{} {}", "\u{2192}".dimmed(), preview.selector);
+    if let Some(error) = preview.error.as_deref() {
+        return Err(anyhow!("{error}"));
+    }
+
+    // Which transport carries it is the account's business (#0058); what is
+    // decided here is only how the message is shown before it goes.
+    let is_graph = account_config.auth_method == AuthMethod::Graph;
+    if is_graph {
+        // Simplified: the Graph path needs no SMTP configuration to preview.
+        println!("{}", "--- Email Preview ---".bold());
+        println!("  {} {}", "To:".green(), preview.to.as_deref().unwrap_or("(none)"));
+        if let Some(cc) = preview.cc.as_deref() {
+            println!("  {} {}", "Cc:".blue(), cc);
+        }
+        if let Some(bcc) = preview.bcc.as_deref() {
+            println!("  {} {}", "Bcc:".blue(), bcc);
+        }
+        println!("  {} {}", "Subject:".yellow(), preview.subject);
+        println!("{}", "---".dimmed());
+    } else {
+        print!("{}", mailypoppins::draft_cmd::render_send_preview(&preview));
+    }
+
+    if !yes && !prompt_confirmation("Send this email?") {
+        println!("{}", mp_client::format::CANCELLED_LINE);
+        return Ok(());
+    }
+    println!(
+        "{}",
+        if is_graph {
+            "Sending via Graph API..."
+        } else {
+            "Sending email..."
+        }
+    );
+
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+    let started = daemon_try_call(
+        &mut connection,
+        "send.draft",
+        serde_json::json!({"account": account, "id": preview.id}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    let operation = wire_str(&started["operation_id"]).to_string();
+    let outcome: mp_protocol::send::SendOutcome =
+        match await_operation(&mut connection, &operation, |_| {}).await {
+            Settled::Done(result) => {
+                serde_json::from_value(result).context("reading the daemon's send.draft answer")?
+            }
+            Settled::Failed(message) => return Err(anyhow!("{message}")),
+        };
+
+    let delivered = outcome.recipients.iter().filter(|r| r.delivered).count();
+    if is_graph {
+        if delivered == 0 {
+            return Err(anyhow!(
+                "{}",
+                outcome
+                    .recipients
+                    .iter()
+                    .find_map(|r| r.error.clone())
+                    .unwrap_or_else(|| "Graph send failed".to_string())
+            ));
+        }
+        if let Some(error) = outcome.settle_error.as_deref() {
+            println!("{} (sent but failed to retire draft: {error})", "\u{26a0}".yellow());
+        }
+        println!(
+            "{} Email sent successfully via Graph API [{}]",
+            "\u{2713}".green().bold(),
+            outcome.status_line
+        );
+        return Ok(());
+    }
+
+    print_lines(&mp_client::format::send_cli_lines(&outcome));
+    if delivered == 0 {
+        return Err(anyhow!(
+            "Failed to send to all {} recipient(s)",
+            outcome.recipients.len()
+        ));
+    }
+    Ok(())
+}
+
+/// `mp send-approved`: the batch listing and the prompt here, the sends there.
+///
+/// The listing comes from `draft.list`, which is the family whose subject is
+/// the drafts directory, and the file name it prints is the one field of that
+/// listing a send path has any business with.
+async fn routed_send_approved(
+    account_config: &mailypoppins::config::AccountConfig,
+    yes: bool,
+) -> Result<()> {
+    let account = account_config.name.as_str();
+    // The pre-daemon loop loaded a transport per account and said so when it
+    // could not. The line is the user's; the load behind it goes with the rest
+    // of the client's transport handling in P4-U15.
+    if let Err(e) = SmtpConfig::load(account_config) {
+        eprintln!("{} Could not load SMTP config: {}", "\u{26a0}".yellow(), e);
+    }
+    let mut connection = daemon_connection().await;
+    let listing: mp_protocol::draft::DraftListing = typed_call(
+        &mut connection,
+        account,
+        "draft.list",
+        serde_json::json!({"account": account, "status": "approved"}),
+    )
+    .await?;
+    let approved: Vec<&mp_protocol::draft::DraftEntry> =
+        listing.drafts.iter().filter(|entry| entry.valid).collect();
+    if approved.is_empty() {
+        println!("No approved drafts for {account}");
+        return Ok(());
+    }
+
+    println!("\n{} approved email(s) found:\n", approved.len().to_string().bold());
+    for entry in &approved {
+        println!(
+            "  {} -> {}",
+            std::path::Path::new(&entry.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            entry.to.as_deref().unwrap_or("(bcc only)")
+        );
+    }
+    if !yes
+        && !prompt_confirmation(&format!(
+            "\nSend all {} emails for {account}?",
+            approved.len()
+        ))
+    {
+        println!("{}", mp_client::format::CANCELLED_LINE);
+        return Ok(());
+    }
+
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+    let started = daemon_try_call(
+        &mut connection,
+        "send.approved",
+        serde_json::json!({"account": account}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    let operation = wire_str(&started["operation_id"]).to_string();
+    let outcome: mp_protocol::send::ApprovedOutcome =
+        match await_operation(&mut connection, &operation, |_| {}).await {
+            Settled::Done(result) => serde_json::from_value(result)
+                .context("reading the daemon's send.approved answer")?,
+            Settled::Failed(message) => return Err(anyhow!("{message}")),
+        };
+
+    for result in &outcome.results {
+        // The recipient is the listing's, because it is the listing the user
+        // just read: the outcome names addresses, not the `to:` line.
+        let to = result
+            .selector
+            .as_deref()
+            .and_then(|selector| approved.iter().find(|entry| entry.selector == selector))
+            .and_then(|entry| entry.to.as_deref())
+            .unwrap_or("(bcc only)");
+        print!("Sending to {to}... ");
+        io::stdout().flush()?;
+        println!("{}", paint(&mp_client::format::send_approved_line(result)));
+    }
+    println!(
+        "\n{}",
+        paint(&mp_client::format::send_approved_summary(&outcome))
+    );
     Ok(())
 }
 
@@ -1082,6 +1156,9 @@ fn no_received_store(account: &str) -> anyhow::Error {
 /// This is the engine-start refresh of #0050 scope item 5, paid by every
 /// draft-facing command before it reads the table: a draft an agent wrote a
 /// second ago is in the index by the time the command lists or resolves it.
+// Unused from P4-U12: the daemon owns the drafts directory every send path
+// reads. Deleted with the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 fn drafts_store(account: &str) -> Result<Store> {
     Ok(drafts_store_reporting(account)?.0)
 }
@@ -1089,6 +1166,9 @@ fn drafts_store(account: &str) -> Result<Store> {
 /// [`drafts_store`], additionally handing back the files the refresh skipped
 /// for a parse failure, so `mp list` can name them after its listing instead
 /// of letting a broken draft vanish from the output (#0080).
+// Unused from P4-U12: the daemon owns the drafts directory every send path
+// reads. Deleted with the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 fn drafts_store_reporting(
     account: &str,
 ) -> Result<(Store, Vec<mailypoppins::store::drafts::SkippedDraft>)> {
@@ -1138,6 +1218,9 @@ fn print_skipped_drafts(skipped: &[mailypoppins::store::drafts::SkippedDraft]) {
 /// reader (the TUI, `mp list`, the next command) sees it without waiting for
 /// the one-second scan. Best-effort: the write already happened, and the scan
 /// would pick it up anyway.
+// Unused from P4-U12: the daemon owns the drafts directory every send path
+// reads. Deleted with the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 fn reindex_drafts(account: &str) {
     if let Err(e) = drafts_store(account) {
         warn!("could not refresh the drafts index of {account}: {e:#}");
@@ -1145,6 +1228,9 @@ fn reindex_drafts(account: &str) {
 }
 
 /// Resolve a draft selector to its indexed row plus the canonical selector.
+// Unused from P4-U12: the daemon owns the drafts directory every send path
+// reads. Deleted with the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 fn resolve_draft_arg(
     store: &Store,
     selector: &str,
@@ -2922,7 +3008,10 @@ async fn main() -> Result<()> {
     // carry it in the body (#0099). Draft sends (`mp send`) take None: their
     // signature was appended to the body at `mp reply`/`mp forward`/`mp new`
     // time.
-    let signature_content: Option<String> = resolve_body_signature(
+    // Unused from P4-U12, when `mp send --invite` started resolving its
+    // signature in the daemon, and deleted with the rest of the direct engine
+    // paths by P4-U15.
+    let _signature_content: Option<String> = resolve_body_signature(
         &account_config,
         cli.no_signature,
         cli.signature.as_deref(),
@@ -2951,9 +3040,7 @@ async fn main() -> Result<()> {
             if invite {
                 run_send_invite(
                     &account_config,
-                    &smtp_config,
-                    &global_config,
-                    signature_content.as_deref(),
+                    draft_signature.clone(),
                     InviteArgs {
                         to,
                         cc,
@@ -2977,161 +3064,17 @@ async fn main() -> Result<()> {
                      invitation"
                 )
             })?;
-            // Transport and signature are already bound to this account; a
-            // cross-account selector fails loudly rather than sending from the
-            // wrong account (see `ensure_selector_account_matches`).
+            // The account this command is bound to picked the transport before
+            // the selector was read, so a cross-account selector fails loudly
+            // rather than sending from the wrong account.
             ensure_selector_account_matches(&selector, &account_config)?;
-            let store = drafts_store(&account_config.name)?;
-            let (row, canonical) = resolve_draft_arg(&store, &selector, &account_config.name)?;
-            drop(store);
-            println!("{} {}", "\u{2192}".dimmed(), canonical);
-            let draft = parse_email_draft(&row.path)?;
-            validate_draft(&draft)?;
-
-            // Which transport carries it is the account's business, and the
-            // send itself is `send::send_draft`'s (#0058). What stays here is
-            // the CLI's own half: the preview, the confirmation and the
-            // wording of what happened.
-            let is_graph = account_config.auth_method == AuthMethod::Graph;
-            let graph = if is_graph {
-                Some(GraphConfig::load(&account_config)?)
-            } else {
-                None
-            };
-
-            if is_graph {
-                // Preview (simplified -- no SMTP config needed)
-                println!("{}", "--- Email Preview ---".bold());
-                println!("  {} {}", "To:".green(), draft.frontmatter.to.as_deref().unwrap_or("(none)"));
-                if let Some(ref cc) = draft.frontmatter.cc {
-                    println!("  {} {}", "Cc:".blue(), cc);
-                }
-                if let Some(ref bcc) = draft.frontmatter.bcc {
-                    println!("  {} {}", "Bcc:".blue(), bcc);
-                }
-                println!("  {} {}", "Subject:".yellow(), draft.frontmatter.subject);
-                println!("{}", "---".dimmed());
-            } else {
-                // The signature lives in the draft body since #0099; a
-                // send-time signature line would advertise an injection that
-                // no longer happens.
-                preview_draft(&draft, &smtp_config, &global_config.email, None, false)?;
-            }
-
-            if !yes && !prompt_confirmation("Send this email?") {
-                println!("Cancelled.");
-                mailypoppins::daemon::client::enforce_routing(&command_label);
-                return Ok(());
-            }
-
-            if is_graph {
-                println!("Sending via Graph API...");
-            } else {
-                println!("Sending email...");
-            }
-
-            let ctx = mailypoppins::send::SendContext {
-                graph,
-                smtp: (!is_graph).then(|| smtp_config.clone()),
-                account: account_config.clone(),
-                email_settings: global_config.email.clone(),
-                // The signature is already in the draft body (#0099).
-                signature: None,
-            };
-            let sent = mailypoppins::send::send_draft(&draft, &ctx).await?;
-            let report = &sent.report;
-            let send_result = &report.send_result;
-
-            // The message is out; a bookkeeping failure here is a warning,
-            // not a failed send (the log line is `send_draft`'s).
-            let retire_warning = || {
-                if let Some(e) = sent.settle_error.as_ref() {
-                    println!("{} (sent but failed to retire draft: {})", "\u{26a0}".yellow(), e);
-                }
-            };
-
-            if is_graph {
-                if !send_result.any_succeeded() {
-                    return Err(anyhow!(
-                        "{}",
-                        send_result
-                            .failed()
-                            .first()
-                            .and_then(|r| r.error.clone())
-                            .unwrap_or_else(|| "Graph send failed".to_string())
-                    ));
-                }
-                retire_warning();
-                info!("Email sent via Graph and marked as sent: {}", draft.path.display());
-                reindex_drafts(&account_config.name);
-                println!(
-                    "{} Email sent successfully via Graph API [{}]",
-                    "\u{2713}".green().bold(),
-                    report.status_line()
-                );
-            } else {
-                // Display per-recipient results
-                for r in &send_result.succeeded() {
-                    println!(
-                        "  {} {} ({})",
-                        "\u{2713}".green(),
-                        r.address,
-                        r.role
-                    );
-                }
-                for r in &send_result.failed() {
-                    println!(
-                        "  {} {} ({}): {}",
-                        "\u{2717}".red(),
-                        r.address,
-                        r.role,
-                        r.error.as_deref().unwrap_or("unknown error")
-                    );
-                }
-
-                if send_result.all_succeeded() {
-                    retire_warning();
-                    info!("Email marked as sent: {}", draft.path.display());
-                    reindex_drafts(&account_config.name);
-
-                    println!(
-                        "{} Email sent successfully to all {} recipient(s) [{}]",
-                        "\u{2713}".green().bold(),
-                        send_result.results.len(),
-                        report.status_line()
-                    );
-                } else if send_result.any_succeeded() {
-                    retire_warning();
-                    warn!(
-                        "Partial send: {} succeeded, {} failed for {}",
-                        send_result.succeeded().len(),
-                        send_result.failed().len(),
-                        draft.path.display()
-                    );
-                    reindex_drafts(&account_config.name);
-
-                    println!(
-                        "{} Partial send: {} succeeded, {} failed [{}] (marked as sent -- see logs for details)",
-                        "\u{26a0}".yellow().bold(),
-                        send_result.succeeded().len().to_string().green(),
-                        send_result.failed().len().to_string().red(),
-                        report.status_line()
-                    );
-                } else {
-                    error!("All recipients failed for {}", draft.path.display());
-                    return Err(anyhow!(
-                        "Failed to send to all {} recipient(s)",
-                        send_result.results.len()
-                    ));
-                }
-            }
+            routed_send(&account_config, &selector, yes).await?;
         }
 
+        // `--all-accounts` is a loop over the same body rather than a second
+        // code path, in configuration order, and it keeps going past an account
+        // with nothing to send (#0071).
         Some(Commands::SendApproved { all_accounts, yes }) => {
-            // `--all-accounts` is a loop over the same body rather than a
-            // second code path: each account resolves its own SMTP config,
-            // signature and drafts index, so the per-account send is exactly
-            // what the single-account form does.
             let accounts: Vec<mailypoppins::config::AccountConfig> = if all_accounts {
                 global_config.accounts.clone()
             } else {
@@ -3140,157 +3083,11 @@ async fn main() -> Result<()> {
             if accounts.is_empty() {
                 return Err(anyhow!("No account configured (check `mp config show`)"));
             }
-
             for account_config in accounts {
-            let smtp_config = SmtpConfig::load(&account_config).unwrap_or_else(|e| {
-                eprintln!("{} Could not load SMTP config: {}", "\u{26a0}".yellow(), e);
-                smtp_config.clone()
-            });
-            let store = drafts_store(&account_config.name)?;
-            let rows =
-                mailypoppins::store::drafts::list(&store, &account_config.name, Some("approved"))?;
-            drop(store);
-            let drafts: Vec<EmailDraft> = rows
-                .iter()
-                .filter_map(|row| match parse_email_draft(&row.path) {
-                    Ok(draft) => Some(draft),
-                    Err(e) => {
-                        eprintln!("{} Skipping {}: {}", "\u{26a0}".yellow(), row.id, e);
-                        None
-                    }
-                })
-                .collect();
-
-            if drafts.is_empty() {
-                println!("No approved drafts for {}", account_config.name);
-                continue;
-            }
-
-            println!(
-                "\n{} approved email(s) found:\n",
-                drafts.len().to_string().bold()
-            );
-
-            for draft in &drafts {
-                println!(
-                    "  {} -> {}",
-                    draft.path.file_name().unwrap_or_default().to_string_lossy(),
-                    draft.frontmatter.to.as_deref().unwrap_or("(bcc only)")
-                );
-            }
-
-            if !yes
-                && !prompt_confirmation(&format!(
-                    "\nSend all {} emails for {}?",
-                    drafts.len(),
-                    account_config.name
-                ))
-            {
-                println!("Cancelled.");
-                continue;
-            }
-
-            let mut sent_count = 0;
-            let mut failed_count = 0;
-
-            // One transport for the whole batch, one send implementation for
-            // every draft in it (#0058): what this loop owns is the running
-            // tally and the per-draft line.
-            let is_graph = account_config.auth_method == AuthMethod::Graph;
-            let ctx = mailypoppins::send::SendContext {
-                graph: if is_graph {
-                    Some(GraphConfig::load(&account_config)?)
-                } else {
-                    None
-                },
-                smtp: (!is_graph).then(|| smtp_config.clone()),
-                account: account_config.clone(),
-                email_settings: global_config.email.clone(),
-                // Signatures live in the draft body now (#0099).
-                signature: None,
-            };
-
-            for draft in drafts {
-                print!("Sending to {}... ", draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
-                io::stdout().flush()?;
-
-                let sent = match mailypoppins::send::send_draft(&draft, &ctx).await {
-                    Ok(sent) => sent,
-                    Err(e) => {
-                        println!("{} {}", "\u{2717}".red(), e);
-                        error!("Send failed for {}: {e:#}", draft.path.display());
-                        failed_count += 1;
-                        continue;
-                    }
-                };
-                let send_result = &sent.report.send_result;
-
-                if send_result.any_succeeded() {
-                    if let Some(e) = sent.settle_error.as_ref() {
-                        println!("{} (sent but failed to update status: {})", "\u{26a0}".yellow(), e);
-                    } else if send_result.all_succeeded() {
-                        println!("{} [{}]", "\u{2713}".green(), sent.report.status_line());
-                    } else {
-                        println!(
-                            "{} (partial: {}/{} recipients) [{}]",
-                            "\u{26a0}".yellow(),
-                            send_result.succeeded().len(),
-                            send_result.results.len(),
-                            sent.report.status_line()
-                        );
-                    }
-                    for r in &send_result.failed() {
-                        warn!(
-                            "Failed recipient {} ({}) for {}: {}",
-                            r.address,
-                            r.role,
-                            draft.path.display(),
-                            r.error.as_deref().unwrap_or("unknown")
-                        );
-                    }
-                    sent_count += 1;
-                } else {
-                    match send_result.failed().first().and_then(|r| r.error.clone()) {
-                        Some(reason) => println!(
-                            "{} all recipients failed: {} [{}]",
-                            "\u{2717}".red(),
-                            reason,
-                            sent.report.status_line()
-                        ),
-                        None => println!(
-                            "{} all recipients failed [{}]",
-                            "\u{2717}".red(),
-                            sent.report.status_line()
-                        ),
-                    }
-                    for r in &send_result.failed() {
-                        error!(
-                            "Failed recipient {} ({}) for {}: {}",
-                            r.address,
-                            r.role,
-                            draft.path.display(),
-                            r.error.as_deref().unwrap_or("unknown")
-                        );
-                    }
-                    failed_count += 1;
-                }
-            }
-
-            reindex_drafts(&account_config.name);
-            println!(
-                "\n{} {}: {} sent, {} failed",
-                "Summary".bold(),
-                account_config.name,
-                sent_count.to_string().green(),
-                failed_count.to_string().red()
-            );
+                routed_send_approved(&account_config, yes).await?;
             }
         }
 
-        // The draft slice (P4-U6): every one of these answers from the daemon,
-        // which owns the drafts directory, and renders what it answered through
-        // `draft_cmd`. A refusal travels typed and leaves through `main`'s own
-        // error path, exactly as the read slice's does.
         Some(Commands::List { status }) => {
             let listing: mp_protocol::draft::DraftListing = draft_call(
                 &account_config.name,

@@ -89,6 +89,12 @@ The migration moves the CLI one slice at a time, and a command routes the moment
 | `mp fetch [--from ...] [-n] [--mailbox] [--full]` | `message.list_server` | P4-U10 |
 | `mp list-mailboxes` | `mailbox.list_server` | P4-U10 |
 | `mp watch [--mailbox] [--timeout N]` | `sync.watch`, with the wait and the timeout in the client | P4-U10 |
+| `mp send <selector> [-y]` | `draft.preview` for the echo and the preview, then `send.draft` | P4-U12 |
+| `mp send --invite …` | `send.invite`, with the preview, the `UID` and the prompt in the client | P4-U12 |
+| `mp send-approved [-y] [--all-accounts]` | `draft.list` for the batch listing, then one `send.approved` per account, in configuration order | P4-U12 |
+| `mp outbox list` | `send.outbox_list` | P4-U12 |
+| `mp outbox retry <id>` | `send.outbox_list`, then `send.outbox_retry` | P4-U12 |
+| `mp outbox discard <id>` | `send.outbox_list`, then `send.outbox_discard` | P4-U12 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 
 Every other command still answers in process and will until its own slice.
@@ -98,6 +104,8 @@ That is why a refusal the daemon spelled out comes back typed rather than printe
 `tests/daemon_mutation_slice.rs` is the gate for `mp archive`, `mp delete`, `mp open` and `mp save`, with one row deliberately not byte-identical: `mp open` prints the path it handed the opener, and a daemon-materialised file lives under `<data_dir>/runtime/handles/<handle>/` rather than in the client's own temp directory, so that row is compared with the two directories masked.
 `mp save` is the mirror image of it: the absolute destination is what crosses the socket, and the spelling the user typed is what the `✓` lines print.
 The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.
+`tests/daemon_send_slice.rs` is the gate for the send slice, over a fixture that adds a Graph account, an SMTP account with no credentials and a seeded outbox in every state the listing renders.
+Its successful sends are routed-side assertions rather than parity rows, because they run through `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` and the pre-daemon oracle has no such hook.
 
 `tests/daemon_sync_slice.rs` is the gate for the sync/watch slice, with one sanctioned deviation: `mp watch --mailbox` naming anything but INBOX prints one extra line on stderr saying so, and that line is masked in that row alone.
 
@@ -350,6 +358,16 @@ The outcomes are committed off the bootstrap's own path and after its revision w
 It is inert unless `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES=1` is set too: without a runtime there is no tick, and a hook that fired anyway would report on an engine that is not running.
 Unset, empty, unparseable, or with no configured account it does nothing.
 It is what pins the socket cases in `tests/daemon_sync_outcome.rs`, and its name is `mailypoppins::daemon::sync_outcome::FAKE_SYNC_OUTCOME_ENV`.
+
+`MAILYPOPPINS_DAEMON_FAKE_TRANSPORT=<json>` serves the SMTP submission and the Sent-mailbox APPEND in process and writes one line per transport event to a log file.
+`src/send.rs`'s transport is TLS-only on both of its branches, so a plaintext `TcpListener` cannot serve it and a TLS one would need a certificate generator this tree does not depend on; without the hook every success path of the send slice would be unpinned.
+Its value is a JSON object, every key optional: `log` is the ledger path, `reject` maps a recipient address to the reason the server refuses it for good, `append` is `ok`, `fail` or `swallow_ack`, and `append_delay_ms` parks inside the APPEND.
+`swallow_ack` files the copy and reports a failure, which is the ambiguity the Message-ID dedup search exists for; the search answers out of the ledger, so a copy an earlier attempt filed is found by a later one.
+Each line is `submit <message-id> <address> accepted|rejected`, `append <mailbox> <message-id>` or `search <mailbox> <message-id>`, appended with one `O_APPEND` write so two concurrent drains cannot lose a line.
+An account with no credentials sends through it all the same: the fake *is* the transport, so a `SmtpConfig::load` that fails is replaced by a placeholder while the hook is armed.
+It is read by whichever process submits, which after P4-U12 is the daemon and only the daemon, so the pre-daemon oracle cannot see it and no row that uses it is a parity row.
+Unset, empty or unparseable it does nothing.
+It is what pins the successful sends in `tests/daemon_send_slice.rs`, and its name is `mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV`.
 
 `MAILYPOPPINS_DAEMON_FAKE_OPERATIONS=1` registers one extra method, `test.operation`, so a client can start, watch and cancel a long-running operation.
 Its params are `{"steps": u64, "step_ms": u64, "scope": "durable"|"client_scoped", "fail_at": u64|null}`; it answers immediately with `{"operation_id": str}` and reports `steps` times, `step_ms` apart, before succeeding with `{"steps": steps}`.

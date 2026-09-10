@@ -706,8 +706,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp send <selector> [-y]`, `src/main.rs`, `src/send.rs`
 - Daemon surface: `send.draft`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`, `tests/mime_oracle_integration.rs`
-- Status: not started
+- Validation: `tests/outbox_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12); GUI not started
+- Note: the preview and the `[y/N]` prompt stay in the client, which renders them from `draft.preview`: a daemon has no stdin, and a run without `-y` prints `Cancelled.` and exits 0 without a single `send.*` call.
 
 ### SND-02 Send every approved draft of one account or of all accounts
 
@@ -715,8 +716,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp send-approved [-y] [--all-accounts]` (`src/main.rs`), TUI `cX` (`src/tui/app/keymap.rs:669`)
 - Daemon surface: `send.approved`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`
-- Status: not started
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12); GUI not started
+- Note: `--all-accounts` is a loop in the client over `global_config.accounts` in configuration order, so `send.approved` names one account and a caller that sends `all_accounts` is refused.
 
 ### SND-03 Approve and send the current draft with one key
 
@@ -744,9 +746,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp send --invite --to --cc --subject --start --end|--duration --location --description`, `src/main.rs`, `src/calendar.rs`
 - Daemon surface: `send.invite`, refused on Microsoft Graph with the reason in the error
 - GUI location: TBD (Phase 9)
-- Validation: `tests/imip_integration.rs`
-- Status: not started
-- Note: start and end accept local time or RFC3339, duration accepts ISO8601 or the short form, and Graph accounts are refused in `src/main.rs`, which the GUI shows as a disabled action with its reason rather than as a late failure (`ANO-4`).
+- Validation: `tests/imip_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12); GUI not started
+- Note: start and end accept local time or RFC3339, duration accepts ISO8601 or the short form, and Graph accounts are refused by `mailypoppins::invite::plan_invite`, which both the client and `send.invite` validate through, so the GUI shows a disabled action with its reason rather than a late failure (`ANO-4`); `send.invite` makes that refusal before it looks at anything else about the invitation.
+  The client mints the `UID` while it previews and sends it as a parameter, so the UID a user read is the UID that goes out.
 
 ### SND-06 Outbox state visibility
 
@@ -754,8 +757,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `src/outbox.rs`, surfaced as a TUI badge and status entry
 - Daemon surface: `state.bootstrap` outbox summary, then `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`
-- Status: not started
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12) for the `mp outbox list` surface; the TUI badge and GUI not started
 - Note: covers queued, retrying, failed, and partly delivered submissions.
 
 ### SND-07 Outbox operator actions
@@ -764,9 +767,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp outbox list`, `mp outbox retry <id>`, `mp outbox discard <id>`, `src/main.rs`, `src/outbox.rs`, `tests/outbox_integration.rs`
 - Daemon surface: `send.outbox_list`, `send.outbox_retry`, `send.outbox_discard`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`
-- Status: not started
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12); GUI not started
 - Note: deliberately manual, because a submission that died without a verdict may or may not have been delivered, so the GUI shows the blocked state and names the command instead of guessing.
+  `send.outbox_retry` is an operation and not a command: it re-arms the row and then drains it against SMTP and IMAP.
 
 ### SND-08 Partly delivered submission where a recipient was refused
 
@@ -774,8 +778,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `src/outbox.rs`, `src/send.rs`
 - Daemon surface: `state.event` carrying the partly delivered state
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`
-- Status: not started
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12) for the CLI surface; the `state.event` half and the GUI not started
 - Note: only a human can close this state, and the GUI must not present it as a plain failure.
 
 ### SND-09 Sent-copy append after submission
@@ -784,8 +788,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `src/imap_client/sent.rs`
 - Daemon surface: daemon-internal, reported on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/outbox_integration.rs`
-- Status: not started
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
+- Status: routed (P4-U12) for the CLI surface; the `state.event` half and the GUI not started
 - Note: implicit workflow driven on the next startup or sync, which is how the outbox drives itself.
 
 ## Sync, offline behaviour, and pending operations

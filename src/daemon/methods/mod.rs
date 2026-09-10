@@ -25,6 +25,7 @@ pub mod config;
 pub mod draft;
 pub mod mailbox;
 pub mod message;
+pub mod send;
 pub mod state;
 pub mod sync;
 
@@ -92,6 +93,12 @@ pub fn register(
         Arc::clone(&config),
         Arc::clone(&watch),
         Arc::clone(&canonical),
+    );
+    self::send::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&canonical),
+        Arc::clone(&operations),
     );
     self::config::register(
         dispatcher,

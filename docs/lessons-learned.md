@@ -1738,3 +1738,21 @@ Polling `operation.status` instead would have been simpler and would have lost e
 `mp sync --dry-run` prints `✓ [dry-run] Synced: 3 email(s) to download`, and the pre-daemon binary built that by threading a `prefix` variable through eleven `println!` calls *and* switching one verb.
 A client rendering the same lines from a payload has neither, so `mp_client::format` grew `sync_cli_lines_dry_run` beside `sync_cli_lines` rather than a caller-side string splice: the prefix goes after the glyph, not before it, and "ingested" becomes "to download" only on the branch where nothing was already present.
 Splicing at the call site would have put `[dry-run] ` in front of the glyph on every line and still got the verb wrong.
+
+## A padded, coloured column cannot be rendered from a colourless formatter
+
+`mp outbox list` prints `format!("  {:>4}  {:<20} {}  {}", id, state, updated, message_id)` with a *coloured* `state`, and `colored`'s `Display` honours the formatter's width only while colours are off: on a terminal it writes the escape sequences itself and the padding is silently dropped.
+So the pre-daemon binary already produced two different layouts, and a parity comparison, which runs with stdio piped and colours off, only ever saw the padded one.
+
+`mp_client::format` is colourless by contract, so `outbox_cli_lines` owns the padding and the CLI puts colour back with `paint`, which only recognises a leading glyph.
+The state column and the dimmed timestamp therefore lost their colour on a terminal; the bytes a test compares did not move.
+The general shape: a line whose colour is *inside* a width specifier cannot be split into "render here, colour there" without choosing which of the two layouts to keep.
+
+## The clock is what makes `mp outbox retry` mean now
+
+An APPEND that failed arms a 30-second backoff on its row (`outbox::backoff_secs`), and every drain compares `row.updated + backoff` against a `now` it is handed.
+A retry that passed `unix_now()` would therefore re-arm the row, open the drain and skip it, which reads to the operator as a retry that did nothing.
+
+`send::resume_outbox_at` and `drain_account_at` take that clock, and `send.outbox_retry` hands them `unix_now() + BACKOFF_MAX_SECS`: an operator who names one row means now, and the periodic drivers keep waiting because they still pass the real clock.
+`drain_guarded_at` already took a `now` for exactly this reason and `max`es it against the wall clock per sweep, so an injected future timestamp stays authoritative.
+

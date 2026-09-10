@@ -654,7 +654,7 @@ fn configured<'a>(
 ///
 /// `id` is the key verbatim, `selector` is the grammar a user types, and both
 /// at once is a caller who may disagree with themselves.
-fn addressed(params: &Value, account: &str) -> Result<Option<String>, RpcError> {
+pub(super) fn addressed(params: &Value, account: &str) -> Result<Option<String>, RpcError> {
     let given = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
     match (given("id"), given("selector")) {
         (true, true) => Err(invalid_params(
@@ -672,7 +672,7 @@ fn addressed(params: &Value, account: &str) -> Result<Option<String>, RpcError> 
 }
 
 /// [`addressed`], for the two methods that address exactly one draft.
-fn addressed_one(params: &Value, account: &str) -> Result<String, RpcError> {
+pub(super) fn addressed_one(params: &Value, account: &str) -> Result<String, RpcError> {
     addressed(params, account)?
         .ok_or_else(|| invalid_params("a draft is addressed by id or by selector; send one"))
 }
@@ -727,7 +727,7 @@ fn address_received(
 }
 
 /// The row `key` names, from a scan of the account's drafts directory.
-fn resolve(account: &str, key: &str) -> Result<DraftRow, RpcError> {
+pub(super) fn resolve(account: &str, key: &str) -> Result<DraftRow, RpcError> {
     row_by_id(account, key).ok_or_else(|| not_found(account, key))
 }
 
@@ -775,7 +775,11 @@ fn refuse_unparseable(account: &str, id: &str, path: &Path) -> RpcError {
 
 /// The signature a written draft carries, resolved from the account's
 /// configuration exactly as the client resolved it before this slice.
-fn signature_of(account: &AccountConfig, params: &Value, email: &EmailSettings) -> Option<String> {
+pub(super) fn signature_of(
+    account: &AccountConfig,
+    params: &Value,
+    email: &EmailSettings,
+) -> Option<String> {
     crate::config::body_signature(
         account,
         matches!(params.get("no_signature"), Some(Value::Bool(true))),

@@ -2207,6 +2207,21 @@ pub async fn drain_account(
     blobs: &crate::store::BlobStore,
     account: &crate::config::AccountConfig,
 ) -> crate::outbox::DrainResult {
+    drain_account_at(store, blobs, account, crate::outbox::unix_now()).await
+}
+
+/// [`drain_account`] against a clock of the caller's choosing.
+///
+/// The clock is what decides whether a row is still in its backoff, so a caller
+/// that hands this a future timestamp is saying "now, whatever the backoff
+/// says". `mp outbox retry` is that caller and nothing else is: an operator who
+/// names one row means now, and the periodic drivers must keep waiting.
+pub async fn drain_account_at(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &crate::config::AccountConfig,
+    now: i64,
+) -> crate::outbox::DrainResult {
     let counts = match crate::outbox::counts(store, &account.name) {
         Ok(c) => c,
         Err(e) => {
@@ -2216,6 +2231,22 @@ pub async fn drain_account(
     };
     if counts.open == 0 {
         return crate::outbox::DrainResult::default();
+    }
+
+    // The fake Sent mailbox stands in for the IMAP session, credentials and
+    // all (P4-U12): it is armed on the daemon and nowhere else.
+    if let Some(fake) = crate::daemon::fake_transport::fake_transport() {
+        let mut mailbox = crate::daemon::fake_transport::FakeSentMailbox::new(fake);
+        return match crate::outbox::drain_guarded(store, blobs, &account.name, &mut mailbox, now)
+            .await
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => crate::outbox::DrainResult::default(),
+            Err(e) => {
+                log::warn!("[outbox] draining {} failed: {e:#}", account.name);
+                crate::outbox::DrainResult::default()
+            }
+        };
     }
 
     let imap_config = match crate::config::ImapConfig::load(account) {
@@ -2236,14 +2267,7 @@ pub async fn drain_account(
     // Captured before the lock, so it is already stale by the time the first
     // APPEND goes out; the guarded drain re-reads the clock per sweep and only
     // treats this as a floor.
-    let result = crate::outbox::drain_guarded(
-        store,
-        blobs,
-        &account.name,
-        &mut mailbox,
-        crate::outbox::unix_now(),
-    )
-    .await;
+    let result = crate::outbox::drain_guarded(store, blobs, &account.name, &mut mailbox, now).await;
     mailbox.close().await;
     match result {
         Ok(Some(result)) => result,
@@ -2268,6 +2292,15 @@ pub async fn drain_account(
 ///    credentials and the envelope, and both live on this side.
 /// 3. [`drain_account`] finishes the outstanding APPENDs, this pass's included.
 pub async fn resume_outbox(account: &crate::config::AccountConfig) -> crate::outbox::DrainResult {
+    resume_outbox_at(account, crate::outbox::unix_now()).await
+}
+
+/// [`resume_outbox`] against a clock of the caller's choosing, which is what
+/// makes `mp outbox retry` immediate; see [`drain_account_at`].
+pub async fn resume_outbox_at(
+    account: &crate::config::AccountConfig,
+    now: i64,
+) -> crate::outbox::DrainResult {
     let path = crate::config::store_path(&account.name);
     if !path.exists() {
         return crate::outbox::DrainResult::default();
@@ -2280,8 +2313,8 @@ pub async fn resume_outbox(account: &crate::config::AccountConfig) -> crate::out
         }
     };
     let blobs = crate::store::BlobStore::for_account(&account.name);
-    resubmit_pending(&store, &blobs, account).await;
-    drain_account(&store, &blobs, account).await
+    resubmit_pending(&store, &blobs, account, now).await;
+    drain_account_at(&store, &blobs, account, now).await
 }
 
 /// Send the `pending_send` rows that a crash left behind, exactly once each.
@@ -2294,6 +2327,7 @@ async fn resubmit_pending(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
     account: &crate::config::AccountConfig,
+    now: i64,
 ) {
     let sweep = match crate::outbox::sweep_pending_sends(store, &account.name) {
         Ok(sweep) => sweep,
@@ -2331,8 +2365,18 @@ async fn resubmit_pending(
         return;
     }
 
+    // A fake transport needs no credentials: it is the transport (P4-U12).
     let smtp_config = match SmtpConfig::load(account) {
         Ok(c) => c,
+        Err(_) if crate::daemon::fake_transport::armed() => SmtpConfig {
+            host: "fake.invalid".to_string(),
+            port: 465,
+            username: String::new(),
+            password: String::new(),
+            default_from: account.default_from.clone(),
+            accept_invalid_certs: false,
+            auth_method: crate::config::AuthMethod::Password,
+        },
         Err(e) => {
             log::warn!(
                 "[outbox] {} has {} queued message(s) but no usable SMTP config: {e:#}",
@@ -2343,7 +2387,6 @@ async fn resubmit_pending(
         }
     };
 
-    let now = crate::outbox::unix_now();
     for row in sweep.resubmittable {
         if row.updated + crate::outbox::backoff_secs(row.attempts) > now {
             // A previous clean failure (no transport, a rejected address) bumped
@@ -2678,6 +2721,11 @@ pub fn build_draft_message(
 /// Never called before the message is committed to the outbox: see
 /// [`crate::outbox`] for why the ordering is the whole design.
 pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<SendResult> {
+    // The daemon-side transport fake (P4-U12), which serves the submission in
+    // process and records it. Unset outside a test, and never set on a client.
+    if let Some(fake) = crate::daemon::fake_transport::fake_transport() {
+        return Ok(fake.submit(&built.message_id, &built.recipients));
+    }
     // Parse from address for envelope
     let from_addr: lettre::Address = built
         .from

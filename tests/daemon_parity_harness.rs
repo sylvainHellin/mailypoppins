@@ -59,9 +59,10 @@ use support::parity::{
 /// The third row is the point of the list: a command that *needs* a daemon and
 /// has not been migrated onto one, so the comparison proves the harness reports
 /// no difference by construction. It was `list-mailboxes` until the sync/watch
-/// slice routed it (P4-U10) and is now `outbox list`, which the send slice
-/// (P4-U12) has yet to take.
-const UNMIGRATED: [&[&str]; 3] = [&["--version"], &["config", "path"], &["outbox", "list"]];
+/// slice routed it (P4-U10), then `outbox list` until the send slice took that
+/// one (P4-U12), and is now `contacts stats`, which the admin slice (P4-U14)
+/// has yet to take.
+const UNMIGRATED: [&[&str]; 3] = [&["--version"], &["config", "path"], &["contacts", "stats"]];
 
 fn root() -> TempDir {
     TempDir::new().expect("a temporary parity root")
