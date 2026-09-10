@@ -166,8 +166,8 @@
 //!   `Durable`.
 //!
 //! All three answer the documented shapes and nothing else:
-//! `{handle, path, bytes, expires_at}` for the two materialisers and `{}` for
-//! the release.
+//! `{handle, path, name, bytes, expires_at}` for the two materialisers and
+//! `{}` for the release.
 //!
 //! # Contract points this file pins beyond the plan text
 //!
@@ -304,7 +304,7 @@ const HANDLE_METHODS: [&str; 3] = [
 ];
 
 /// The keys a materialisation answers with, sorted.
-const MATERIALISED_KEYS: [&str; 4] = ["bytes", "expires_at", "handle", "path"];
+const MATERIALISED_KEYS: [&str; 5] = ["bytes", "expires_at", "handle", "name", "path"];
 
 /// JSON-RPC's own "invalid params", the answer to an unknown handle.
 const INVALID_PARAMS: i32 = -32602;
@@ -1512,6 +1512,12 @@ fn materialised(sandbox: &Sandbox, answer: &Value, expected_name: &str) -> (Stri
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             && !handle.is_empty(),
         "the handle is a directory-safe name, got {handle:?}"
+    );
+
+    assert_eq!(
+        answer["name"].as_str(),
+        Some(expected_name),
+        "name is the file's own name under the handle directory, got {answer}"
     );
 
     let path = PathBuf::from(

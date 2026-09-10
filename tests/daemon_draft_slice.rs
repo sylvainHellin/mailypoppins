@@ -295,11 +295,12 @@ const DRAFT_METHODS: [&str; 10] = [
 /// naming the constant, before a single test runs.
 const _: () = assert!(DRAFT_METHOD_SPECS.len() == DRAFT_METHODS.len());
 
-/// The five methods that change a file, so their answers carry a revision.
-const DRAFT_COMMANDS: [&str; 5] = [
+/// The six methods that change a file, so their answers carry a revision.
+const DRAFT_COMMANDS: [&str; 6] = [
     "draft.approve",
     "draft.create",
     "draft.demote",
+    "draft.discard",
     "draft.forward",
     "draft.reply",
 ];
@@ -1725,14 +1726,23 @@ async fn every_path_a_draft_method_returns_is_a_draft_path() {
             "draft.forward",
             json!({"account": fixture::ACCOUNT, "source": {"id": "inbox/1"}}),
         ),
+        // Last, because it removes the draft the calls above address; this
+        // slice's fixture root is its own, so nothing after it needs the file.
+        (
+            "draft.discard",
+            json!({"account": fixture::ACCOUNT, "id": fixture::VALID}),
+        ),
     ];
     let mut seen: Vec<&str> = Vec::new();
     for (method, params) in calls {
         let result = call(&mut conn, method, params).await;
         assert_paths_are_draft_paths(method, &result, slice.root(), fixture::ACCOUNT);
         assert!(
-            !path_fields(&result).is_empty() || matches!(method, "draft.validate"),
-            "{method} answers at least one path, or is the one method that answers none"
+            !path_fields(&result).is_empty()
+                || matches!(method, "draft.validate" | "draft.discard"),
+            "{method} answers at least one path, or is one of the two methods that \
+             answer none (a discard answers {{account, id, selector, status}}: the \
+             file it names is gone, so a path to it would be a lie)"
         );
         seen.push(method);
     }
