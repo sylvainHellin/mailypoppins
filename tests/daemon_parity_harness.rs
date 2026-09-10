@@ -56,13 +56,16 @@ use support::parity::{
 /// The commands compared in the agreement test, with the name each assertion
 /// reports.
 ///
-/// The third row is the point of the list: a command that *needs* a daemon and
-/// has not been migrated onto one, so the comparison proves the harness reports
-/// no difference by construction. It was `list-mailboxes` until the sync/watch
-/// slice routed it (P4-U10), then `outbox list` until the send slice took that
-/// one (P4-U12), and is now `contacts stats`, which the admin slice (P4-U14)
-/// has yet to take.
-const UNMIGRATED: [&[&str]; 3] = [&["--version"], &["config", "path"], &["contacts", "stats"]];
+/// The second row is the point of the list: a command a daemon-era binary and
+/// the pre-daemon oracle answer identically because the daemon does not answer
+/// it, so the comparison proves the harness reports no difference by
+/// construction. It was `list-mailboxes` until the sync/watch slice routed it
+/// (P4-U10), then `outbox list` until the send slice took that one (P4-U12),
+/// then `contacts stats` until the admin slice took that one (P4-U13/P4-U14),
+/// and is now `config path` - which never moves again, because it is on the
+/// no-daemon list for good (`src/daemon/client.rs::needs_daemon`) and is the
+/// only command left in the product that a client answers in process.
+const UNMIGRATED: [&[&str]; 2] = [&["--version"], &["config", "path"]];
 
 fn root() -> TempDir {
     TempDir::new().expect("a temporary parity root")
