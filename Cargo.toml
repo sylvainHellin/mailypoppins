@@ -169,3 +169,8 @@ required-features = ["daemon"]
 name = "daemon_draft_watch"
 path = "tests/daemon_draft_watch.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "daemon_handles"
+path = "tests/daemon_handles.rs"
+required-features = ["daemon"]
