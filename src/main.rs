@@ -1,11 +1,10 @@
 use mailypoppins::types::*;
 use mailypoppins::config::*;
 use mailypoppins::parse::*;
-use mailypoppins::imap_client::{self, *};
+use mailypoppins::imap_client;
 use mailypoppins::config_cmd::*;
 use mailypoppins::graph;
-use mailypoppins::pending_ops;
-use mailypoppins::selector::{Namespace, Selector};
+use mailypoppins::selector::Namespace;
 use mailypoppins::store::Store;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -759,24 +758,6 @@ fn print_lines(lines: &[String]) {
     }
 }
 
-/// A unix timestamp as local `YYYY-MM-DD HH:MM`, or `-` when it is unset.
-// Unused from P4-U12, when `mp outbox list` started rendering its time column
-// through `mp_client::format`, and deleted with the rest of the direct engine
-// paths by P4-U15.
-#[allow(dead_code)]
-fn format_unix_time(ts: i64) -> String {
-    if ts <= 0 {
-        return "-".to_string();
-    }
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| {
-            dt.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|| "-".to_string())
-}
-
 /// `mp send --invite`: an iMIP calendar invitation (`METHOD:REQUEST`).
 ///
 /// The preview, the `UID` in it and the confirmation are the client's, because
@@ -1098,14 +1079,6 @@ async fn routed_send_approved(
 // The selector edge (#0050)
 // ---------------------------------------------------------------------------
 
-/// The store's mailbox key for the archive folder. `mp archive` is a move with
-/// a fixed destination, exactly as the TUI frames it.
-// Unused from P4-U8, when `mp archive` started answering from the daemon and
-// the daemon started naming the destination mailbox itself, and deleted with
-// the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-const ARCHIVE_MAILBOX: &str = "archive";
-
 /// `--status` values for `mp list`. A closed set rather than a free string, so
 /// a typo is a clap error instead of an empty listing.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -1151,95 +1124,6 @@ fn no_received_store(account: &str) -> anyhow::Error {
     )
 }
 
-/// Open the account's store and refresh its drafts index.
-///
-/// This is the engine-start refresh of #0050 scope item 5, paid by every
-/// draft-facing command before it reads the table: a draft an agent wrote a
-/// second ago is in the index by the time the command lists or resolves it.
-// Unused from P4-U12: the daemon owns the drafts directory every send path
-// reads. Deleted with the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-fn drafts_store(account: &str) -> Result<Store> {
-    Ok(drafts_store_reporting(account)?.0)
-}
-
-/// [`drafts_store`], additionally handing back the files the refresh skipped
-/// for a parse failure, so `mp list` can name them after its listing instead
-/// of letting a broken draft vanish from the output (#0080).
-// Unused from P4-U12: the daemon owns the drafts directory every send path
-// reads. Deleted with the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-fn drafts_store_reporting(
-    account: &str,
-) -> Result<(Store, Vec<mailypoppins::store::drafts::SkippedDraft>)> {
-    let store = Store::open(mailypoppins::config::store_path(account))
-        .with_context(|| format!("opening the store of {account}"))?;
-    let dir = mailypoppins::config::drafts_dir(account);
-    let (_, collisions, skipped) =
-        mailypoppins::store::drafts::refresh_reporting(&store, account, &dir)
-            .with_context(|| format!("refreshing the drafts index of {account}"))?;
-    // Two files claiming one id means one of them is unaddressable. The index
-    // cannot decide which the user meant, so it says so rather than dropping
-    // the loser in silence.
-    for collision in &collisions {
-        eprintln!("{} {collision}", "⚠".yellow());
-    }
-    Ok((store, skipped))
-}
-
-/// Print the warning block `mp list` shows after its listing when the refresh
-/// skipped one or more drafts for a parse failure (#0080).
-///
-/// A skipped file is a draft the index cannot see: no `id:`, no row, absent
-/// from the listing above. Naming it here, with its one-line parse error, is
-/// what turns "my draft disappeared" into a fixable line. The exit code stays
-/// 0: the listing itself succeeded, and the broken file is a warning about the
-/// directory, not a failure of the command.
-// Unused from P4-U6, when `mp list` started answering from the daemon and
-// `draft_cmd::render_skipped` started rendering the block from the wire, and
-// deleted with the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-fn print_skipped_drafts(skipped: &[mailypoppins::store::drafts::SkippedDraft]) {
-    if skipped.is_empty() {
-        return;
-    }
-    let n = skipped.len();
-    let noun = if n == 1 { "draft" } else { "drafts" };
-    eprintln!(
-        "\n{} {n} {noun} skipped (frontmatter would not parse; fix the YAML to list them):",
-        "⚠".yellow()
-    );
-    for skip in skipped {
-        eprintln!("  {} - {}", skip.path.display().to_string().yellow(), skip.error);
-    }
-}
-
-/// Re-index the drafts directory after a command wrote a draft, so the next
-/// reader (the TUI, `mp list`, the next command) sees it without waiting for
-/// the one-second scan. Best-effort: the write already happened, and the scan
-/// would pick it up anyway.
-// Unused from P4-U12: the daemon owns the drafts directory every send path
-// reads. Deleted with the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-fn reindex_drafts(account: &str) {
-    if let Err(e) = drafts_store(account) {
-        warn!("could not refresh the drafts index of {account}: {e:#}");
-    }
-}
-
-/// Resolve a draft selector to its indexed row plus the canonical selector.
-// Unused from P4-U12: the daemon owns the drafts directory every send path
-// reads. Deleted with the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-fn resolve_draft_arg(
-    store: &Store,
-    selector: &str,
-    account: &str,
-) -> Result<(mailypoppins::store::drafts::DraftRow, Selector)> {
-    let query = mailypoppins::selector::parse_in(selector, Namespace::Drafts, account, None)?;
-    mailypoppins::selector::resolve_draft(store, &query)
-}
-
 /// Whether a `mp delete` argument names a draft rather than received mail.
 ///
 /// Dispatch is on the selector shape (#0073 scope item 1), not a second
@@ -1281,39 +1165,6 @@ fn resolve_mailbox_key(account: &AccountConfig, want: &str) -> Result<String> {
         "'{want}' is not a mailbox of {} (known: {known})",
         account.name
     ))
-}
-
-/// The `(label, total, first `limit` rows)` groups `mp list-messages` prints.
-///
-/// One group per configured mailbox, in sidebar order, so a whole-account
-/// listing reads like the sidebar rather than like a merged stream; the drafts
-/// pseudo-mailbox is skipped, because it is local truth and `mp list` owns it.
-/// The limit is per mailbox for the same reason: a shared budget would let a
-/// busy inbox hide every other mailbox entirely.
-///
-/// `--mailbox` matches a role id or a sidebar label case-insensitively, the
-/// same rule `mp dump-mailbox` applies, and an unknown name is an error naming
-/// what it could have been rather than an empty listing.
-// Unused from P4-U4, when `mp list-messages` started answering from the daemon,
-// and deleted with the rest of the direct engine paths by P4-U15. Kept until
-// then so one unit moves the callers and another removes what they left.
-#[allow(dead_code)]
-fn list_message_groups(
-    store: &Store,
-    account: &AccountConfig,
-    mailbox: Option<&str>,
-    limit: usize,
-) -> Result<Vec<(String, usize, Vec<mailypoppins::store::read::MessageRow>)>> {
-    let selected = select_mailboxes(account, mailbox)?;
-
-    let mut groups = Vec::new();
-    for info in selected {
-        let mut rows = mailypoppins::store::read::list_mailbox(store, &account.name, &info.id)?;
-        let total = rows.len();
-        rows.truncate(limit);
-        groups.push((info.label.clone(), total, rows));
-    }
-    Ok(groups)
 }
 
 /// The mailboxes a listing covers: the one `--mailbox` names, or every mailbox
@@ -1960,20 +1811,6 @@ async fn release_handle(connection: &mut mp_client::Connection, handle: &str) {
     }
 }
 
-// Unused from P4-U14, when `mp invite` was the last command to resolve a
-// received selector in this process. Deleted with the rest of the direct engine
-// paths by P4-U15.
-#[allow(dead_code)]
-fn resolve_received_arg(
-    store: &Store,
-    selector: &str,
-    account: &str,
-    mailbox: Option<&str>,
-) -> Result<(mailypoppins::store::read::MessageRow, Selector)> {
-    let query = mailypoppins::selector::parse_in(selector, Namespace::Received, account, mailbox)?;
-    mailypoppins::selector::resolve_received(store, &query)
-}
-
 /// The account a selector operates on: its own `mp://<account>/…` segment when
 /// present, otherwise the `-A`/default account already resolved. The selector's
 /// account overrides the flag because naming it in the selector is the more
@@ -2042,252 +1879,6 @@ fn resolve_body_signature(
     email: &EmailSettings,
 ) -> Option<String> {
     mailypoppins::config::body_signature(account, no_signature, signature_name, email)
-}
-
-/// The mailboxes an account is configured for, as a human-readable list for
-/// the error a `--mailbox` typo produces.
-///
-/// The list itself moved into the library with the refusal that carries it
-/// (P4-U10): the daemon resolves a sync's targets now, so the sentence has to be
-/// reachable from both processes.
-#[allow(dead_code)]
-fn configured_mailbox_names(account: &AccountConfig) -> String {
-    mailypoppins::config::configured_mailbox_names(account)
-}
-
-/// One end of a `mp sync` tick: the outbox, then the mutation queue (#0114).
-///
-/// Dead since P4-U10: `mp sync` drains inside the daemon's pass and renders the
-/// report lines from the `operation.progress` events it publishes. The direct
-/// path is deleted by P4-U15 with the rest of them.
-#[allow(dead_code)]
-///
-/// The outbox goes first so a message that reached the server before the last
-/// crash gets its Sent copy before this sync reads the mailbox it belongs in
-/// (#0037 item 5); the mutation queue follows (#0039), so a move, delete or
-/// flag toggle enqueued locally (by the TUI, or by a CLI invocation that
-/// crashed before its op ran) is retired against the same mailboxes. Nothing is
-/// drained and nothing is printed when nothing is owed, so a clean account adds
-/// no traffic and no output at either end.
-///
-/// The returned suffix is always empty: this path reports on stdout rather than
-/// in a status line, and only the shape of
-/// [`mailypoppins::sync::tick::run_tick_with_drains`] is borrowed.
-/// `label` distinguishes the tail's report lines from the head's, since
-/// both print above the `✓ Synced` summary and would otherwise be four
-/// identical `↻` lines when work was queued at both ends.
-async fn drain_queues_cli(account_config: &AccountConfig, dry_run: bool, label: &str) -> String {
-    if dry_run {
-        return String::new();
-    }
-    let drained = mailypoppins::send::resume_outbox(account_config).await;
-    if drained.completed > 0 || drained.still_open > 0 {
-        println!(
-            "  {} outbox{label}: {} completed, {} still pending",
-            "↻".dimmed(),
-            drained.completed,
-            drained.still_open + drained.awaiting_submission
-        );
-    }
-    match pending_ops::resume_account(account_config).await {
-        Ok(Some(ops)) if ops.completed > 0 || ops.failed > 0 => {
-            println!(
-                "  {} mutations{label}: {} completed, {} failed",
-                "↻".dimmed(),
-                ops.completed,
-                ops.failed
-            );
-        }
-        Ok(_) => {}
-        // Loud but not fatal: the tail drain must not turn a sync that worked
-        // into a failed command, and the queue is retried on the next tick.
-        Err(e) => {
-            eprintln!("  {} mutations: drain failed: {e:#}", "⚠".yellow());
-            log::warn!(
-                "[pending_ops] draining {} at the sync tick failed: {e:#}",
-                account_config.name
-            );
-        }
-    }
-    String::new()
-}
-
-/// One account's `mp sync`: the outbox drain, the sync itself, the contacts
-/// hook, and the per-account summary lines.
-///
-/// Factored out of the `Sync` arm so `--all-accounts` is a loop over exactly
-/// the single-account body (#0071). `Err` is an account-level failure, a
-/// refused login above all; the caller names it and keeps going.
-///
-/// Dead since P4-U10: the pass is `sync.quick`'s and the rendering is
-/// [`sync_one_routed`]'s. Deleted by P4-U15.
-#[allow(dead_code)]
-async fn sync_one_account(
-    account_config: &AccountConfig,
-    limit: usize,
-    mailbox: Option<&[String]>,
-    dry_run: bool,
-) -> Result<()> {
-    let targets: Vec<imap_client::SyncTarget> = if let Some(user_mailboxes) = mailbox {
-        // Both halves of a target come from one configured mapping: building
-        // the role from the typed string files an extra mailbox's rows under
-        // `projects` while the rest of the product reads `Projects` (#0064).
-        user_mailboxes
-            .iter()
-            .map(|mb| {
-                let (role, server_name) = find_sync_target(account_config, mb)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "account '{}' has no mailbox '{}' configured; it knows {}",
-                            account_config.name,
-                            mb,
-                            configured_mailbox_names(account_config)
-                        )
-                    })?;
-                Ok(imap_client::SyncTarget { role, server_name })
-            })
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        all_configured_mailboxes(account_config)
-            .iter()
-            .map(|(role, mapping)| imap_client::SyncTarget {
-                role: role.clone(),
-                server_name: mapping.server.clone(),
-            })
-            .collect()
-    };
-
-    // The tick drains at both ends (#0114): once before the read, so the
-    // server has converged by the time this sync looks at it, and once after,
-    // so anything queued while the tick was in flight (a TUI running alongside
-    // this one) is retired now instead of waiting for the next tick. Both ends
-    // run whether the sync itself succeeded or failed, because the ticks that
-    // fail are the long ones.
-    let (_suffix, result) = mailypoppins::sync::tick::run_tick_with_drains(
-        || drain_queues_cli(account_config, dry_run, ""),
-        || async {
-            if account_config.auth_method == AuthMethod::Graph {
-                let graph_config = GraphConfig::load(account_config)?;
-                // The Graph path is not guarded yet (#0122 covers the IMAP
-                // ingest), so it always reports a pass that ran.
-                graph::sync_mailboxes_graph(
-                    &graph_config,
-                    &account_config.name,
-                    &targets,
-                    limit,
-                    dry_run,
-                )
-                .await
-                .map(Some)
-            } else {
-                let imap_config = ImapConfig::load(account_config)?;
-                // No body deadline (#0113): `mp sync` is the explicit recovery
-                // path, and the pass a user runs to make the store converge is
-                // the one pass that must not stop early.
-                sync_mailboxes(
-                    &imap_config,
-                    &account_config.name,
-                    &targets,
-                    limit,
-                    dry_run,
-                    None,
-                )
-                .await
-            }
-        },
-        || drain_queues_cli(account_config, dry_run, " (after sync)"),
-    )
-    .await;
-    // Another process is this account's engine, so this run ingested nothing
-    // and opened no session (#0122). That is a success, not a failure: the
-    // holder is doing the work. Say so instead of printing a summary of a pass
-    // that never ran.
-    let Some(result) = result? else {
-        println!(
-            "{} Sync skipped: another engine is syncing '{}'; leaving the ingest to it",
-            "ℹ".blue(),
-            account_config.name,
-        );
-        return Ok(());
-    };
-
-    if !dry_run {
-        // Incremental contacts-index update (best-effort).
-        mailypoppins::contacts::hooks::bump_after_sync(account_config, &result.fresh_observations);
-    }
-
-    let prefix = if dry_run { "[dry-run] " } else { "" };
-
-    if result.skipped > 0 {
-        println!(
-            "{} {}Synced: {} new, {} already present",
-            "✓".green(),
-            prefix,
-            result.saved,
-            result.skipped,
-        );
-    } else {
-        println!(
-            "{} {}Synced: {} email(s) {}",
-            "✓".green(),
-            prefix,
-            result.saved,
-            if dry_run { "to download" } else { "ingested" },
-        );
-    }
-
-    if result.flags_updated > 0 {
-        println!(
-            "{} {}Status updated on {} message(s)",
-            "ℹ".blue(),
-            prefix,
-            result.flags_updated,
-        );
-    }
-    if result.uid_rebound > 0 {
-        println!(
-            "{} {}Rebound {} message(s) to new UIDs after a UIDVALIDITY reset",
-            "ℹ".blue(),
-            prefix,
-            result.uid_rebound,
-        );
-    }
-    if result.pruned > 0 {
-        println!(
-            "{} {}{} message(s) left their mailbox on the server",
-            "ℹ".blue(),
-            prefix,
-            result.pruned,
-        );
-    }
-    if result.prunes_deferred > 0 {
-        println!(
-            "{} {}{} removal(s) held back: this pass did not see every message, \
-             run a full sync to apply them",
-            "⚠".yellow(),
-            prefix,
-            result.prunes_deferred,
-        );
-    }
-    // #0115: one line per mailbox that downloaded the same mail it downloaded
-    // last pass. The exit code is unchanged, because nothing failed; what is
-    // wrong is that the work repeats.
-    {
-        let mut names = result.non_converging.clone();
-        names.sort();
-        names.dedup();
-        for name in names {
-            println!(
-                "{} {}'{}' downloaded the same messages again: the fetch is not converging, \
-                 see the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md",
-                "⚠".yellow(),
-                prefix,
-                name,
-            );
-        }
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2417,7 +2008,6 @@ fn is_local_only(error: &mp_protocol::RpcError) -> bool {
 /// rendering of a per-account result, and a `^C` stops the account currently
 /// running rather than every account at once.
 async fn routed_sync(
-    global_config: &GlobalConfig,
     accounts: &[AccountConfig],
     limit: usize,
     mailbox: Option<&[String]>,
@@ -2446,10 +2036,10 @@ async fn routed_sync(
                 attempted += 1;
                 // The retention sweep rides on every real sync (#0060): a
                 // dry-run touches nothing, and a failed sync is not a moment to
-                // start deleting cached blobs. Still the client's, and the one
-                // store this handler still opens; P4-U15 owns moving it.
+                // start deleting cached blobs. The sweep is the daemon's since
+                // P4-U15; only the report below it is this process's.
                 if !dry_run {
-                    retention_sweep_after_sync(global_config, account_config);
+                    retention_sweep_after_sync(&mut connection, account_config).await;
                 }
             }
             Synced::Failed(message) => {
@@ -2739,75 +2329,36 @@ fn fetched_from_wire(message: &serde_json::Value) -> FetchedEmail {
     }
 }
 
-/// Run the retention sweep for one account and report it, the body of
-/// `mp store gc`.
-///
-/// A store file that does not exist yet has nothing to sweep, which is the
-/// common case for a freshly configured or drafts-only account.
-// Unused from P4-U14, when `mp store gc` started answering from
-// `diagnostic.store_gc`. Deleted with the rest of the direct engine paths by
-// P4-U15.
-#[allow(dead_code)]
-fn run_store_gc(
-    global_config: &GlobalConfig,
-    account: &AccountConfig,
-    dry_run: bool,
-    force: bool,
-) -> Result<()> {
-    let path = mailypoppins::config::store_path(&account.name);
-    if !path.exists() {
-        println!(
-            "  {} {} has no store yet; nothing to sweep",
-            "\u{b7}".dimmed(),
-            account.name
-        );
-        return Ok(());
-    }
-    let policy = mailypoppins::config::retention_for(global_config, account)?;
-    let store = mailypoppins::store::Store::open(&path)?;
-    let blobs = mailypoppins::store::BlobStore::for_account(&account.name);
-    let outcome = mailypoppins::store::sweep::sweep(
-        &store,
-        &blobs,
-        &policy,
-        mailypoppins::store::sweep::SweepOptions { dry_run, force },
-    )?;
-    report_sweep_outcome(&account.name, &outcome, true);
-    Ok(())
-}
-
 /// Run the automatic post-sync retention sweep for one account, best-effort.
+///
+/// The sweep is `diagnostic.store_gc`'s from P4-U15, on the connection the sync
+/// is already following, with the options the post-sync sweep has always used
+/// (`SweepOptions::default()`, which is neither a dry run nor forced). Only the
+/// report is this process's, and `manual = false` keeps it as quiet as it was.
 ///
 /// A sweep failure never fails the sync it rides on: the store is a cache and
 /// an unswept cache is merely too big, not broken, so the error is logged and
-/// the sync still reports success.
-fn retention_sweep_after_sync(global_config: &GlobalConfig, account: &AccountConfig) {
-    let policy = match mailypoppins::config::retention_for(global_config, account) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("[retention] skipping sweep for '{}': {e:#}", account.name);
+/// the sync still reports success. An account the daemon calls storeless is the
+/// silent case the file check used to be.
+async fn retention_sweep_after_sync(
+    connection: &mut mp_client::Connection,
+    account: &AccountConfig,
+) {
+    let params =
+        serde_json::json!({"account": account.name, "dry_run": false, "force": false});
+    let started = match daemon_try_call(connection, "diagnostic.store_gc", params).await {
+        Ok(started) => started,
+        Err(error) if is_storeless(&error) => return,
+        Err(error) => {
+            warn!(
+                "[retention] skipping sweep for '{}': {}",
+                account.name, error.message
+            );
             return;
         }
     };
-    let path = mailypoppins::config::store_path(&account.name);
-    if !path.exists() {
-        return;
-    }
-    let store = match mailypoppins::store::Store::open(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("[retention] sweep could not open the store of '{}': {e:#}", account.name);
-            return;
-        }
-    };
-    let blobs = mailypoppins::store::BlobStore::for_account(&account.name);
-    match mailypoppins::store::sweep::sweep(
-        &store,
-        &blobs,
-        &policy,
-        mailypoppins::store::sweep::SweepOptions::default(),
-    ) {
-        Ok(outcome) => report_sweep_outcome(&account.name, &outcome, false),
+    match settle(connection, &started).await {
+        Ok(result) => report_sweep_outcome(&account.name, &sweep_outcome(&result, false), false),
         Err(e) => warn!("[retention] sweep of '{}' failed: {e:#}", account.name),
     }
 }
@@ -3092,8 +2643,6 @@ async fn routed_rsvp(
 /// `mp store gc`: the sweep is the daemon's, the report is
 /// [`report_sweep_outcome`]'s, and an account with no store is a note.
 async fn routed_store_gc(account: &str, dry_run: bool, force: bool) -> Result<()> {
-    use mailypoppins::store::sweep::{BlobKind, EvictedBlob, SweepDecision, SweepOutcome};
-
     let mut connection = operation_session().await;
     let params = serde_json::json!({"account": account, "dry_run": dry_run, "force": force});
     let started = daemon_try_call(&mut connection, "diagnostic.store_gc", params).await;
@@ -3110,9 +2659,24 @@ async fn routed_store_gc(account: &str, dry_run: bool, force: bool) -> Result<()
         Err(error) => return Err(anyhow!("{}", error.message)),
     };
     let result = settle(&mut connection, &started).await?;
+    report_sweep_outcome(account, &sweep_outcome(&result, dry_run), true);
+    Ok(())
+}
+
+/// One settled `diagnostic.store_gc` result, back as the outcome
+/// [`report_sweep_outcome`] renders.
+///
+/// `dry_run` is the flag the caller asked for, used only when the answer does
+/// not carry one of its own.
+fn sweep_outcome(
+    result: &serde_json::Value,
+    dry_run: bool,
+) -> mailypoppins::store::sweep::SweepOutcome {
+    use mailypoppins::store::sweep::{BlobKind, EvictedBlob, SweepDecision, SweepOutcome};
+
     let number = |key: &str| result[key].as_u64().unwrap_or_default();
     let decision = &result["decision"];
-    let outcome = SweepOutcome {
+    SweepOutcome {
         cap_bytes: number("cap_bytes"),
         before_bytes: number("before_bytes"),
         after_bytes: number("after_bytes"),
@@ -3142,9 +2706,7 @@ async fn routed_store_gc(account: &str, dry_run: bool, force: bool) -> Result<()
             },
         },
         dry_run: result["dry_run"].as_bool().unwrap_or(dry_run),
-    };
-    report_sweep_outcome(account, &outcome, true);
-    Ok(())
+    }
 }
 
 /// `mp cutover`: the drafts import and the file-era scan are the daemon's, and
@@ -3908,7 +3470,7 @@ async fn main() -> Result<()> {
             if accounts.is_empty() || accounts.iter().all(|a| a.name.is_empty()) {
                 return Err(anyhow!("No account to sync (check `mp config show`)"));
             }
-            routed_sync(&global_config, &accounts, limit, mailbox.as_deref(), dry_run).await?;
+            routed_sync(&accounts, limit, mailbox.as_deref(), dry_run).await?;
         }
 
         Some(Commands::Watch { mailbox, timeout }) => {

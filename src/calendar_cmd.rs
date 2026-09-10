@@ -1,56 +1,10 @@
-//! CLI handlers for `mp calendar …` (organizer-side iMIP reconciliation).
+//! What `mp calendar …` prints (organizer-side iMIP reconciliation).
+//!
+//! The fold itself is `calendar.rebuild`'s since P4-U14 and its direct handler
+//! went with the rest of the direct engine paths in P4-U15; what is left is the
+//! four literals, printed once here from whatever the daemon reports.
 
-use crate::config::{store_path, AccountConfig, GlobalConfig};
-use crate::reconcile::reconcile_account;
-use crate::store::{BlobStore, Store};
-use anyhow::{anyhow, Result};
 use colored::*;
-
-/// `mp calendar rebuild [--account NAME]`: report what the stored REPLY
-/// messages resolve on the stored invitations.
-///
-/// It writes nothing. Attendee statuses are derived where they are displayed,
-/// from the `invite.ics` blobs of the account's rows (#0038 scope item 6), so
-/// there is no cached copy left to rebuild and the command exists to show what
-/// the fold sees. Safe to run repeatedly by construction.
-// Unused from P4-U14, when `mp calendar rebuild` started answering from
-// `calendar.rebuild`. Deleted with the rest of the direct engine paths by
-// P4-U15; the rendering below is shared with the routed client.
-#[allow(dead_code)]
-pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Result<()> {
-    let accounts: Vec<&AccountConfig> = match account_name {
-        Some(name) => vec![config
-            .accounts
-            .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(&name))
-            .ok_or_else(|| anyhow!("no account named '{}'", name))?],
-        None => {
-            if config.accounts.is_empty() {
-                return Err(anyhow!("no accounts configured"));
-            }
-            config.accounts.iter().collect()
-        }
-    };
-
-    for account in accounts {
-        print_header(&account.name);
-        let path = store_path(&account.name);
-        if !path.exists() {
-            print_no_store(&account.name);
-            continue;
-        }
-        let store = Store::open(&path)?;
-        let blobs = BlobStore::for_account(&account.name);
-        let report = reconcile_account(&store, &blobs, &account.name);
-        print_report(
-            report.resolved,
-            report.invites_seen,
-            report.replies_seen,
-            report.cancelled,
-        );
-    }
-    Ok(())
-}
 
 /// The line printed before one account's fold.
 pub fn print_header(account: &str) {

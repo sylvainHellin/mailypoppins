@@ -45,10 +45,9 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use colored::*;
 
-use crate::config::{account_dir, drafts_dir, store_path, AccountConfig, GlobalConfig};
 use crate::store::drafts::{IdCollision, SkippedDraft};
 use crate::store::{drafts as drafts_index, Store};
 
@@ -321,59 +320,6 @@ pub fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
-}
-
-/// `mp cutover [--account NAME] [--dry-run]`.
-///
-/// Reports; the only write is the `id:` field the drafts import adds, and
-/// `--dry-run` suppresses that too.
-pub fn handle_cutover(
-    config: &GlobalConfig,
-    account_name: Option<String>,
-    dry_run: bool,
-) -> Result<()> {
-    let accounts: Vec<&AccountConfig> = match account_name {
-        Some(name) => vec![config
-            .accounts
-            .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(&name))
-            .ok_or_else(|| anyhow!("no account named '{}'", name))?],
-        None => {
-            if config.accounts.is_empty() {
-                return Err(anyhow!("no accounts configured"));
-            }
-            config.accounts.iter().collect()
-        }
-    };
-
-    if dry_run {
-        print_dry_run_notice();
-    }
-
-    let mut reports = Vec::new();
-    for account in accounts {
-        let path = store_path(&account.name);
-        let dir = account_dir(&account.name);
-        print_account_header(&account.name);
-        if !path.exists() {
-            print_no_store();
-            continue;
-        }
-        let store = Store::open(&path)?;
-        let report = CutoverReport::from(&cutover_account(
-            &store,
-            &account.name,
-            &dir,
-            &drafts_dir(&account.name),
-            dry_run,
-        )?);
-        print_report(&report, &dir, dry_run);
-        reports.push(report);
-    }
-
-    let remnants: Vec<&LegacyRemnant> = reports.iter().flat_map(|r| &r.remnants).collect();
-    print_footer(&remnants);
-    Ok(())
 }
 
 /// The one line a `--dry-run` pass opens with.

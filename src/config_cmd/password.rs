@@ -1,7 +1,9 @@
+//! `mp config set-password`, as far as the client still owns it: the refusal,
+//! the prompt and the line a stored password prints. The write itself is
+//! `config.set_password`'s since P4-U14.
+
 use anyhow::{Context, Result};
 use colored::*;
-
-use crate::config::set_secret;
 
 /// Refuse a credential name the product does not have, in the words and with
 /// the exit code `mp config set-password` has always used.
@@ -43,18 +45,4 @@ pub fn stored_line(which: &str, account_name: &str) -> String {
         which.to_uppercase(),
         account_name
     )
-}
-
-/// Store a password in the active secrets backend.
-///
-/// The direct path, unused from P4-U14 (the CLI prompts and calls
-/// `config.set_password`) and deleted with the rest of them by P4-U15.
-#[allow(dead_code)]
-pub fn cmd_set_password(which: &str, account_name: &str) -> Result<()> {
-    check_kind(which);
-    let key = format!("{}-password-{}", which, account_name);
-    let password = prompt(which, account_name)?;
-    set_secret(&key, &password)?;
-    println!("{}", stored_line(which, account_name));
-    Ok(())
 }

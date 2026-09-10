@@ -92,34 +92,6 @@ pub fn print_search(results: &[ContactRow], q: &str, parsable: bool) {
     }
 }
 
-// Unused from P4-U14, when `mp contacts rebuild` started answering from
-// `contact.rebuild`. Deleted with the rest of the direct engine paths by
-// P4-U15.
-#[allow(dead_code)]
-pub fn handle_rebuild(config: &GlobalConfig, account_name: Option<String>) -> Result<()> {
-    let accounts: Vec<&AccountConfig> = match account_name {
-        Some(name) => vec![pick_account(config, Some(&name))?],
-        None => {
-            if config.accounts.is_empty() {
-                return Err(anyhow!("no accounts configured"));
-            }
-            config.accounts.iter().collect()
-        }
-    };
-    for account in accounts {
-        let root = account_root(account)?;
-        print_rebuild_header(&account.name);
-        let index = build_index_for_account(account)?;
-        let count = index.contacts.len();
-        print_rebuild_outcome(
-            &save_rebuilt_cache(&root, &index)?,
-            count,
-            &cache_path(&root),
-        );
-    }
-    Ok(())
-}
-
 /// The line a rebuild prints before it starts, which names the account so a
 /// batch of five is legible while it runs.
 pub fn print_rebuild_header(account: &str) {
@@ -156,31 +128,6 @@ pub fn print_rebuild_outcome(saved: &CacheSave, count: usize, root: &Path) {
             ),
         }
     }
-}
-
-// Unused from P4-U14, when `mp contacts stats` started answering from
-// `contact.stats`. Deleted with the rest of the direct engine paths by P4-U15.
-#[allow(dead_code)]
-pub fn handle_stats(config: &GlobalConfig, account_name: Option<String>) -> Result<()> {
-    let account = pick_account(config, account_name.as_deref())?;
-    let root = account_root(account)?;
-    let index = load_or_build(account, &root)?;
-
-    let top: Vec<ContactRow> = search(&index, "", 10)
-        .iter()
-        .map(|m| ContactRow::from(m.contact))
-        .collect();
-    print_stats(
-        &account.name,
-        index.contacts.len(),
-        index.contacts.values().map(|c| u64::from(c.sent_to)).sum(),
-        index.contacts.values().map(|c| u64::from(c.sent_cc)).sum(),
-        index.contacts.values().map(|c| u64::from(c.received)).sum(),
-        &cache_path(&root).display().to_string(),
-        &index.built_at,
-        &top,
-    );
-    Ok(())
 }
 
 /// Every line `mp contacts stats` prints, in order.
