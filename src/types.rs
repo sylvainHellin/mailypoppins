@@ -215,68 +215,13 @@ impl std::fmt::Display for MailboxRole {
     }
 }
 
-/// A single attendee within an `event:` frontmatter block.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct EventAttendee {
-    pub address: String,
-    /// needs-action | accepted | tentative | declined
-    pub status: String,
-}
-
-/// The nested `event:` frontmatter block populated when an email carries an
-/// iMIP calendar invitation. The sidecar `.ics` is the source of truth; this
-/// block is a render/query cache (see `docs/plans/calendar-invites.md`, D2).
+/// The `event:` frontmatter block and its attendees.
 ///
-/// Every field is optional or defaulted so that emails without an `event:`
-/// block (the vast majority) round-trip unchanged.
-#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
-pub struct EventFrontmatter {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uid: Option<String>,
-    /// `RECURRENCE-ID` of a single-occurrence payload (#0031), `None` for the
-    /// whole series. Part of the event identity together with `uid`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recurrence_id: Option<String>,
-    /// REQUEST | REPLY | CANCEL
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    #[serde(default)]
-    pub sequence: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    /// RFC3339 with offset where the source carried a resolvable timezone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub organizer: Option<String>,
-    /// Own RSVP status: needs-action | accepted | tentative | declined.
-    #[serde(default)]
-    pub rsvp: String,
-    /// Human-readable RRULE summary, empty when the event does not recur (D6).
-    #[serde(default)]
-    pub recurrence: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attendees: Vec<EventAttendee>,
-    /// Derived (#0031): a `METHOD:CANCEL` for this identity exists locally with
-    /// a sequence at least this event's. The event is kept and shown, marked
-    /// cancelled -- never deleted.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub cancelled: bool,
-    /// Derived (#0031): a newer `METHOD:REQUEST` for the same identity exists
-    /// locally (higher `SEQUENCE`, or the same one with a later `DTSTAMP`), so
-    /// this copy is a superseded version of the event.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub superseded: bool,
-    /// Derived (#0031): the `RECURRENCE-ID`s of occurrences of this series that
-    /// were cancelled individually. Empty for a non-recurring event and for a
-    /// single-occurrence payload (which reports its own state in `cancelled`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cancelled_instances: Vec<String>,
-}
+/// Defined in `mp-protocol` since P5-U10 (#0124): they are pure serde structs
+/// that both the daemon and a store-less client need, and `mp-protocol` is
+/// where a type both ends of the socket speak lives. Re-exported here because
+/// `crate::types::EventFrontmatter` is how the rest of the tree spells it.
+pub use mp_protocol::calendar::{EventAttendee, EventFrontmatter};
 
 /// Read a string field that may be written as a bare key (YAML null) as the
 /// empty string. Paired with `#[serde(default)]`, which covers the field being

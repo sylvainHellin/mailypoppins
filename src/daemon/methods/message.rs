@@ -35,6 +35,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use chrono::Utc;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
@@ -389,6 +391,110 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
         })
         .collect();
     Ok(json!({"account": name, "query": query, "hits": hits}))
+}
+
+// ---------------------------------------------------------------------------
+// The invitation reads (P5-U10)
+// ---------------------------------------------------------------------------
+
+/// The two invitation reads, in method-name order and in an array of their own
+/// for the reason [`MESSAGE_QUEUE_METHOD_SPECS`] is one: the arrays above are
+/// pinned by tests written about the slices that created them.
+///
+/// ```text
+/// message.ics    {account, id|row_id|selector, mailbox?}
+///                    -> {account, row_id, ics: <base64>|null}
+/// message.invite {account, id|row_id|selector, mailbox?}
+///                    -> {account, row_id, event: EventFrontmatter|null}
+/// ```
+///
+/// Two methods rather than one with a projection, because they answer two
+/// questions about one row and only one of them is a fold: `message.ics` hands
+/// out the row's raw `invite.ics` blob, which is what an RSVP reply is built
+/// from, and `message.invite` hands out the *card*, the payload with the
+/// account's REPLY rows and its cancellation chain folded onto it (#0031).
+///
+/// Both are queries and both answer `null` rather than refusing when the row
+/// carries no invitation: a non-invite is the ordinary case, not an error, and
+/// the preview shows no card for it exactly as it always did.
+///
+/// The blob travels base64-encoded, in the standard alphabet with padding: an
+/// ics payload is text in practice but is a byte blob on the wire (#0038 item
+/// 6 stores it as one), and a JSON string cannot carry a byte that is not
+/// valid UTF-8.
+pub const MESSAGE_INVITE_METHOD_SPECS: [MethodSpec; 2] = [
+    MethodSpec::new("message.ics", MethodKind::Query, 1),
+    MethodSpec::new("message.invite", MethodKind::Query, 1),
+];
+
+/// One of the two, selected by its own [`MethodSpec`].
+pub struct MessageInviteMethod {
+    /// Which of [`MESSAGE_INVITE_METHOD_SPECS`] this instance serves.
+    pub spec: MethodSpec,
+    /// The live configuration, so a reload is visible to the next call.
+    pub config: Arc<super::super::config::ConfigStore>,
+}
+
+impl Method for MessageInviteMethod {
+    fn spec(&self) -> MethodSpec {
+        self.spec
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            let accounts = self.config.accounts();
+            let folded = self.spec.name == "message.invite";
+            invite(&params, &accounts, folded)
+                .map(Outcome::query)
+                .map_err(DomainError::from)
+        })
+    }
+}
+
+/// Register the two invitation reads on `dispatcher`.
+pub fn register_invites(
+    dispatcher: &mut Dispatcher,
+    config: Arc<super::super::config::ConfigStore>,
+) {
+    for spec in MESSAGE_INVITE_METHOD_SPECS {
+        dispatcher.register(Arc::new(MessageInviteMethod {
+            spec,
+            config: Arc::clone(&config),
+        }));
+    }
+}
+
+/// The `result` of `message.invite` (`folded`) and of `message.ics`.
+pub fn invite(params: &Value, accounts: &[AccountConfig], folded: bool) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?;
+    let self_address = crate::parse::extract_email_address(&account.default_from);
+
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let row = address(params, &store, &name)?;
+    let blobs = BlobStore::for_account(&name);
+
+    if folded {
+        let event =
+            crate::reconcile::event_for_message(&store, &blobs, &name, row.id, &self_address);
+        let event = match event {
+            Some(event) => serde_json::to_value(event)
+                .map_err(|e| internal(format!("serialising the invitation of {name}: {e}")))?,
+            None => Value::Null,
+        };
+        return Ok(json!({"account": name, "row_id": row.id, "event": event}));
+    }
+
+    let ics = read::load_invite_ics(&store, &blobs, row.id)
+        .map(|bytes| Value::String(BASE64.encode(bytes)))
+        .unwrap_or(Value::Null);
+    Ok(json!({"account": name, "row_id": row.id, "ics": ics}))
 }
 
 // ---------------------------------------------------------------------------

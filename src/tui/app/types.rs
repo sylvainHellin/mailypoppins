@@ -1404,6 +1404,40 @@ pub struct CalendarEvent {
     pub cancelled: bool,
 }
 
+impl CalendarEvent {
+    /// The wire form of this row, for `calendar.events` (P5-U10).
+    ///
+    /// The whole row travels: every derived column is a fold over the
+    /// account's *other* rows, which is exactly what a client without a store
+    /// cannot recompute.
+    pub fn to_wire(self) -> mp_protocol::calendar::AgendaEvent {
+        mp_protocol::calendar::AgendaEvent {
+            row_id: self.msg.row_id(),
+            event: self.event,
+            subject: self.subject,
+            start_sort: self.start_sort,
+            end_sort: self.end_sort,
+            start_display: self.start_display,
+            is_organizer: self.is_organizer,
+            cancelled: self.cancelled,
+        }
+    }
+
+    /// The inverse of [`Self::to_wire`]: one decoded `calendar.events` row.
+    pub fn from_wire(row: mp_protocol::calendar::AgendaEvent) -> Self {
+        Self {
+            msg: MessageRef::new(row.row_id),
+            event: row.event,
+            subject: row.subject,
+            start_sort: row.start_sort,
+            end_sort: row.end_sort,
+            start_display: row.start_display,
+            is_organizer: row.is_organizer,
+            cancelled: row.cancelled,
+        }
+    }
+}
+
 /// State for the Calendar view (#0034).
 ///
 /// Sibling of [`ContactsView`]: a read-only agenda over the events the local

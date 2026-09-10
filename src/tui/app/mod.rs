@@ -4,6 +4,8 @@ pub(crate) mod jump_date;
 mod keymap;
 mod keys;
 #[cfg(test)]
+mod invites_tests;
+#[cfg(test)]
 mod queries_tests;
 mod store_rows;
 mod types;
@@ -665,12 +667,23 @@ impl App {
         self.recompute_calendar_visible();
     }
 
-    /// Build the agenda from the active account's store, or an empty agenda
-    /// when there is no account or no store yet.
+    /// Build the agenda for the active account, or an empty agenda when there
+    /// is no account, no store yet, or nothing invited.
+    ///
+    /// One `calendar.events` on the session the `App` holds (P5-U10). The
+    /// store-backed build below it is the sessionless path, for the reason
+    /// [`super::store_rows`] gives for every one of them: a wedged
+    /// `Session::connect` and every unit test.
     fn load_calendar_events(&self) -> Vec<CalendarEvent> {
         let account = self.account_config.name.trim().to_string();
         if account.is_empty() {
             return Vec::new();
+        }
+        if let Some(queries) = self.queries() {
+            return super::queries::calendar_events(queries, &account).unwrap_or_else(|e| {
+                log::warn!("[queries] decoding the agenda of {account}: {e:#}");
+                Vec::new()
+            });
         }
         let Some(store) = open_store(&account) else {
             return Vec::new();
@@ -1434,37 +1447,35 @@ impl App {
         &self,
         msg: MessageRef,
     ) -> Option<crate::types::EventFrontmatter> {
-        let account = &self.account_config.name;
-        let store = open_store(account)?;
-        let blobs = crate::store::BlobStore::for_account(account);
-        let ics = crate::store::read::load_invite_ics(&store, &blobs, msg.row_id())?;
-        let parsed = crate::calendar::parse_ics(&ics)?;
-        let mut event = crate::calendar::event_frontmatter(&parsed);
-        let uid = parsed
-            .uid
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-            .map(str::to_string);
-        let invites = crate::reconcile::load_invites(&store, &blobs, account);
-        let replies = crate::reconcile::fold_replies(&invites);
-        let by_addr = uid.as_deref().and_then(|uid| replies.get(uid));
-        crate::reconcile::apply_replies(&mut event, parsed.sequence, by_addr);
-        event.rsvp = crate::reconcile::own_rsvp(&event, &self.self_address(), by_addr);
-        // Cancellation and supersession are account-wide facts, not facts of
-        // this one payload: a CANCEL or a bumped REQUEST is a *different*
-        // message (#0031). The card shows the state of the event this message
-        // is a copy of, not the state the copy was born with.
-        crate::reconcile::fold_status(&invites)
-            .apply(&mut event, parsed.dtstamp.as_deref().unwrap_or_default());
-        Some(event)
+        let account = self.account_config.name.clone();
+        if let Some(queries) = self.queries() {
+            return super::queries::message_invite(queries, &account, msg).unwrap_or_else(|e| {
+                log::warn!("[queries] decoding the invitation on {msg} of {account}: {e:#}");
+                None
+            });
+        }
+        let store = open_store(&account)?;
+        let blobs = crate::store::BlobStore::for_account(&account);
+        crate::reconcile::event_for_message(
+            &store,
+            &blobs,
+            &account,
+            msg.row_id(),
+            &self.self_address(),
+        )
     }
 
     /// The raw `invite.ics` bytes of one message, for the RSVP reply builder.
     pub(crate) fn load_message_ics(&self, msg: MessageRef) -> Option<Vec<u8>> {
-        let account = &self.account_config.name;
-        let store = open_store(account)?;
-        let blobs = crate::store::BlobStore::for_account(account);
+        let account = self.account_config.name.clone();
+        if let Some(queries) = self.queries() {
+            return super::queries::message_ics(queries, &account, msg).unwrap_or_else(|e| {
+                log::warn!("[queries] decoding the ics of {msg} of {account}: {e:#}");
+                None
+            });
+        }
+        let store = open_store(&account)?;
+        let blobs = crate::store::BlobStore::for_account(&account);
         crate::store::read::load_invite_ics(&store, &blobs, msg.row_id())
     }
 

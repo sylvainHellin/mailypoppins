@@ -2,6 +2,8 @@
 //! (P4-U14).
 //!
 //! ```text
+//! calendar.events   {account}
+//!                       -> {account, events:[AgendaEvent]}
 //! calendar.rebuild  {account}
 //!                       -> {operation_id}
 //!                       settles {account, resolved, invites_seen,
@@ -53,11 +55,22 @@ use super::{invalid_params, only_params, server_error, string_param};
 pub const GRAPH_RSVP_REFUSAL: &str =
     "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)";
 
-/// The two methods of the family, in method-name order.
+/// The two *operations* of the family, in method-name order.
 pub const CALENDAR_METHOD_SPECS: [MethodSpec; 2] = [
     MethodSpec::new("calendar.rebuild", MethodKind::Operation, 1),
     MethodSpec::new("calendar.rsvp", MethodKind::Operation, 1),
 ];
+
+/// The family's queries, an array of their own for the reason
+/// [`super::message::MESSAGE_QUEUE_METHOD_SPECS`] is one (P5-U6):
+/// `tests/daemon_admin_slice.rs` holds
+/// `const _: () = assert!(CALENDAR_METHOD_SPECS.len() == CALENDAR_METHODS.len());`
+/// over a two-name list, and growing that array would edit a pinned test to say
+/// something it was not written to say. The split is a Rust-side fact: the
+/// wire, the capability list and the dispatcher see three methods in one
+/// family.
+pub const CALENDAR_QUERY_METHOD_SPECS: [MethodSpec; 1] =
+    [MethodSpec::new("calendar.events", MethodKind::Query, 1)];
 
 /// Register the family on `dispatcher`.
 pub fn register(
@@ -72,6 +85,71 @@ pub fn register(
             operations: Arc::clone(&operations),
         }));
     }
+    for spec in CALENDAR_QUERY_METHOD_SPECS {
+        dispatcher.register(Arc::new(CalendarQueryMethod {
+            spec,
+            config: Arc::clone(&config),
+        }));
+    }
+}
+
+/// `calendar.events`: the account's agenda, deduped, folded and sorted.
+///
+/// A query, not an operation: it is one indexed join over `messages` plus one
+/// blob read per invite row, which is the cost the TUI paid on its own UI
+/// thread when it opened the store itself (#0034, #0038 item 6). What it is
+/// *not* is a rebuild: it writes nothing, exactly as `calendar.rebuild` writes
+/// nothing, because attendee statuses are derived where they are displayed.
+pub struct CalendarQueryMethod {
+    spec: MethodSpec,
+    config: Arc<ConfigStore>,
+}
+
+impl Method for CalendarQueryMethod {
+    fn spec(&self) -> MethodSpec {
+        self.spec
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            let accounts = self.config.accounts();
+            events(&params, &accounts)
+                .map(Outcome::query)
+                .map_err(DomainError::from)
+        })
+    }
+}
+
+/// The `result` of `calendar.events`.
+///
+/// The agenda rows are built by [`crate::tui::app::calendar_view`], the one
+/// place that owns the dedup, the tiebreak and the sort; a second copy here
+/// would be a second answer to "which copy of this event is the row". That
+/// module is still under `src/tui/`, which is where P5-U10's crate move has to
+/// pick it up: see the ticket's follow-ups.
+pub fn events(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    only_params("calendar.events", params, &["account"])?;
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?;
+    let self_address = crate::parse::extract_email_address(&account.default_from);
+
+    let store =
+        Store::open(crate::config::store_path(&name)).map_err(|e| server_error(&name, &e))?;
+    let blobs = BlobStore::for_account(&name);
+    let rows = crate::tui::app::calendar_view::load_events_for_account(
+        &store,
+        &blobs,
+        &name,
+        &self_address,
+    );
+    let events: Vec<mp_protocol::calendar::AgendaEvent> =
+        rows.into_iter().map(|row| row.to_wire()).collect();
+    Ok(json!({"account": name, "events": events}))
 }
 
 /// One of the two, selected by its own [`MethodSpec`].

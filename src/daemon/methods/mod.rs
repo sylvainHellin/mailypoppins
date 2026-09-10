@@ -79,6 +79,7 @@ pub fn register(
         config: Arc::clone(&config),
     }));
     message::register_reads(dispatcher, Arc::clone(&config));
+    message::register_invites(dispatcher, Arc::clone(&config));
     message::register_mutations(dispatcher, Arc::clone(&config), Arc::clone(&canonical));
     message::register_handles(dispatcher, Arc::clone(&config), handles);
     dispatcher.register(Arc::new(message::MessageListServer {

@@ -385,6 +385,43 @@ pub fn own_rsvp(
     "needs-action".to_string()
 }
 
+/// The invitation card of one stored message: its own iMIP payload, with the
+/// account's REPLY rows and cancellation chain folded onto it.
+///
+/// The primitive behind `message.invite` (P5-U10) and, before it, behind the
+/// TUI's `App::load_message_invite`. It lives here rather than in either caller
+/// because the fold is this module's: cancellation and supersession are
+/// account-wide facts, not facts of one payload (#0031), so the card shows the
+/// state of the event this message is a copy of, not the state the copy was
+/// born with.
+///
+/// `None` when the row carries no iMIP payload or the payload does not parse,
+/// which is what a non-invite looks like.
+pub fn event_for_message(
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    row_id: i64,
+    self_address: &str,
+) -> Option<EventFrontmatter> {
+    let ics = read::load_invite_ics(store, blobs, row_id)?;
+    let parsed = crate::calendar::parse_ics(&ics)?;
+    let mut event = crate::calendar::event_frontmatter(&parsed);
+    let uid = parsed
+        .uid
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string);
+    let invites = load_invites(store, blobs, account);
+    let replies = fold_replies(&invites);
+    let by_addr = uid.as_deref().and_then(|uid| replies.get(uid));
+    apply_replies(&mut event, parsed.sequence, by_addr);
+    event.rsvp = own_rsvp(&event, self_address, by_addr);
+    fold_status(&invites).apply(&mut event, parsed.dtstamp.as_deref().unwrap_or_default());
+    Some(event)
+}
+
 /// Reconcile every invite of one account and report what the fold resolved.
 ///
 /// The primitive behind `mp calendar rebuild`. It is a read: running it twice
@@ -521,6 +558,109 @@ pub(crate) mod tests {
                 calendar_ics: ics.map(|s| s.as_bytes().to_vec()),
                 event: None,
             }
+        }
+    }
+
+    /// The same primitive over the **ambient** data root rather than a private
+    /// tempdir: a store at [`crate::config::store_path`] and blobs at
+    /// [`crate::config::blobs_dir`], which is where a daemon looks for them.
+    ///
+    /// It lives here, beside the fold it seeds, so that the TUI's own
+    /// daemon-versus-store equality rows (`src/tui/app/invites_tests.rs`) can
+    /// have a seeded store and the two store-backed oracles without importing
+    /// `crate::store` or `crate::ingest` under `src/tui/`: that import set is
+    /// the allow-list `tests/architecture_boundaries.rs` drives to zero, and a
+    /// test module widening it would be the boundary widening (#0124, P5-U10).
+    pub(crate) struct AmbientFixture {
+        _data: crate::config::test_env::TestDataDir,
+        account: String,
+        store: Store,
+        blobs: BlobStore,
+    }
+
+    impl AmbientFixture {
+        /// A fresh data root with an empty store for `account`. The store file
+        /// is created here because it is what makes the account `ready` to a
+        /// daemon; rows are seeded afterwards, which the per-call probe sees.
+        pub(crate) fn new(account: &str) -> AmbientFixture {
+            let data = crate::config::test_env::TestDataDir::new();
+            let store = Store::open(crate::config::store_path(account)).expect("a store");
+            let blobs = BlobStore::for_account(account);
+            AmbientFixture {
+                _data: data,
+                account: account.to_string(),
+                store,
+                blobs,
+            }
+        }
+
+        /// Ingest one message with `ics` as its iMIP payload, through the real
+        /// ingest path; returns its `messages.id`.
+        pub(crate) fn ingest(
+            &self,
+            mailbox: &str,
+            uid: i64,
+            subject: &str,
+            ics: Option<&str>,
+        ) -> i64 {
+            let email = FetchedEmail {
+                from: "Organizer <me@example.com>".into(),
+                to: format!("{}@example.com", self.account),
+                cc: None,
+                reply_to: None,
+                bcc: None,
+                subject: subject.into(),
+                date: "Mon, 20 Jul 2026 09:00:00 +0000".into(),
+                body_text: "You are invited.".into(),
+                html_body: None,
+                has_attachments: false,
+                message_id: Some(format!("<{mailbox}-{uid}@example.com>")),
+                attachments: Vec::new(),
+                flags: Default::default(),
+                calendar_ics: ics.map(|s| s.as_bytes().to_vec()),
+                event: None,
+            };
+            ingest_message(
+                &self.store,
+                &self.blobs,
+                &IngestInput {
+                    account: &self.account,
+                    mailbox,
+                    uid,
+                    email: &email,
+                    raw: None,
+                },
+            )
+            .expect("the ingest")
+            .row_id
+        }
+
+        /// The store-backed agenda, the oracle `calendar.events` answers.
+        pub(crate) fn agenda(&self, self_address: &str) -> Vec<crate::tui::app::CalendarEvent> {
+            crate::tui::app::load_events_for_account(
+                &self.store,
+                &self.blobs,
+                &self.account,
+                self_address,
+            )
+        }
+
+        /// The store-backed invitation card, the oracle `message.invite`
+        /// answers.
+        pub(crate) fn card(&self, row_id: i64, self_address: &str) -> Option<EventFrontmatter> {
+            event_for_message(
+                &self.store,
+                &self.blobs,
+                &self.account,
+                row_id,
+                self_address,
+            )
+        }
+
+        /// The store-backed `invite.ics` blob, the oracle `message.ics`
+        /// answers.
+        pub(crate) fn ics(&self, row_id: i64) -> Option<Vec<u8>> {
+            read::load_invite_ics(&self.store, &self.blobs, row_id)
         }
     }
 

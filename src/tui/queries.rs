@@ -47,6 +47,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 use mp_protocol::draft::DraftListing;
@@ -56,8 +58,8 @@ use crate::selector::DRAFTS_MAILBOX;
 use crate::store::drafts::{DraftRow, SkippedDraft};
 use crate::store::read::MessageRow;
 use crate::tui::app::{
-    entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox, EmailEntry,
-    MailboxInfo, MessageRef,
+    entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox,
+    CalendarEvent, EmailEntry, MailboxInfo, MessageRef,
 };
 use crate::types::MessageFlags;
 
@@ -337,6 +339,73 @@ pub fn message_body(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<O
             Ok(None)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Invitations and the agenda (P5-U10)
+// ---------------------------------------------------------------------------
+
+/// The active account's agenda, through `calendar.events`.
+///
+/// The daemon does the dedup, the reply fold and the sort, which is what a
+/// client with no store cannot do: every derived column of a row is a fold over
+/// the account's *other* rows (#0031).
+///
+/// An empty agenda on a refusal, which is what an account with no store, no
+/// invites or no readable blob always looked like.
+pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<CalendarEvent>> {
+    let answer = match q.call("calendar.events", json!({"account": account})) {
+        Ok(answer) => answer,
+        Err(e) => {
+            log::warn!("[queries] the agenda of {account}: {e:#}");
+            return Ok(Vec::new());
+        }
+    };
+    let rows: Vec<mp_protocol::calendar::AgendaEvent> =
+        serde_json::from_value(answer["events"].clone())?;
+    Ok(rows.into_iter().map(CalendarEvent::from_wire).collect())
+}
+
+/// One message's invitation card, through `message.invite`.
+///
+/// `None` when the row is gone, carries no iMIP payload, or the payload does
+/// not parse; the preview then shows no card, which is what a non-invite looks
+/// like.
+pub fn message_invite(
+    q: &dyn Queries,
+    account: &str,
+    msg: MessageRef,
+) -> Result<Option<crate::types::EventFrontmatter>> {
+    let params = json!({"account": account, "row_id": msg.row_id()});
+    let answer = match q.call("message.invite", params) {
+        Ok(answer) => answer,
+        Err(e) => {
+            log::warn!("[queries] the invitation on {msg} of {account}: {e:#}");
+            return Ok(None);
+        }
+    };
+    match answer.get("event") {
+        None | Some(Value::Null) => Ok(None),
+        Some(event) => Ok(Some(serde_json::from_value(event.clone())?)),
+    }
+}
+
+/// One message's raw `invite.ics` bytes, through `message.ics`.
+///
+/// Base64 on the wire, because a blob is bytes and a JSON string is not.
+pub fn message_ics(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<Option<Vec<u8>>> {
+    let params = json!({"account": account, "row_id": msg.row_id()});
+    let answer = match q.call("message.ics", params) {
+        Ok(answer) => answer,
+        Err(e) => {
+            log::warn!("[queries] the ics of {msg} of {account}: {e:#}");
+            return Ok(None);
+        }
+    };
+    let Some(encoded) = answer.get("ics").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(Some(BASE64.decode(encoded)?))
 }
 
 // ---------------------------------------------------------------------------
