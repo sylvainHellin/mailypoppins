@@ -664,16 +664,24 @@ fn assert_snapshot_shape(snapshot: &Value, label: &str) {
 
 /// Assert every count of every listed account is zero and every draft list is
 /// empty: what `App::new` presents for an account it has not opened yet.
+///
+/// P5-U8 edit: the state is "not ready" rather than the literal `opening`. The
+/// daemon starts a runtime per account now, and this fixture's accounts have no
+/// store, so they settle `blocked` instead of staying `opening` for ever; what
+/// the row is about - a snapshot whose counts are all zero and whose drafts are
+/// empty, which is the frame `App::new` paints first - is unchanged, and which
+/// of the two non-ready states an account is in is `daemon_account_runtime`'s
+/// business.
 fn assert_opening_and_zeroed(snapshot: &Value, label: &str) {
     for account in snapshot["accounts"]
         .as_array()
         .unwrap_or_else(|| panic!("{label}: accounts is an array"))
     {
         let name = account["name"].as_str().expect("an account name");
-        assert_eq!(
+        assert_ne!(
             account["state"],
-            json!("opening"),
-            "{label}: {name} is opening before any runtime reports readiness"
+            json!("ready"),
+            "{label}: {name} is not ready before any runtime reports readiness"
         );
         for mailbox in snapshot["mailboxes"][name]
             .as_array()
@@ -1418,7 +1426,6 @@ server = "INBOX"
             .env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .env_remove(FAKE_READY_ENV);
         for (key, value) in extra {

@@ -33,13 +33,11 @@
 //! them. These are the decisions taken here; nothing may change them without a
 //! protocol-changelog entry.
 //!
-//! - **`account.list` reports the configuration, not the runtimes.** Phase 2
-//!   starts no account runtime (`MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` is
-//!   absent in every test here), so the list is every `[[accounts]]` entry of
-//!   `config.toml`, in the file's order, which is the order `-A`-less commands
-//!   already treat as authoritative. This is deliberately *not*
-//!   `daemon.status`'s `accounts`, which stays empty without that environment
-//!   variable (`src/daemon/lifecycle.rs::account_statuses`): a client asking
+//! - **`account.list` reports the configuration, not the runtimes.** The list
+//!   is every `[[accounts]]` entry of `config.toml`, in the file's order,
+//!   which is the order `-A`-less commands already treat as authoritative.
+//!   This is deliberately *not* `daemon.status`'s `accounts`, which is what the
+//!   runtime table says (`src/daemon/server.rs::status_result`): a client asking
 //!   which accounts exist must get an answer in Phase 2.
 //! - **`default` is the first configured account**, and only it. The CLI has no
 //!   other notion of a default: every `-A`-less command means "first in
@@ -391,7 +389,6 @@ default_from = "delta@example.com"
             // a missing daemon, which the auto-start would repair before the
             // assertion could see it.
             .env("MAILYPOPPINS_DAEMON_AUTOSTART", "0")
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START");
         cmd
     }
@@ -1252,18 +1249,22 @@ async fn serving_reads_holds_no_engine_lock() {
         "the fixture built alpha's account directory"
     );
 
-    let held = EngineLock::try_acquire_at(&lock_path, "alpha")
-        .expect("the engine lock file opens")
-        .unwrap_or_else(|| {
-            panic!(
-                "{} was already locked while the daemon served a read: the daemon must not take \
-                 the engine lock before Phase 5",
-                lock_path.display()
-            )
-        });
+    // P5-U8 edit: the daemon *does* hold the lock now, for as long as its
+    // runtime lives, which is what makes it the account's engine. What this row
+    // is about survives the flip and is asserted below: a read is served
+    // whoever holds the lock, in both directions. The fixture's alpha has a
+    // store, so its runtime came up ready and took it; the test process
+    // therefore cannot, and the assertion is the other way round.
+    assert!(
+        EngineLock::try_acquire_at(&lock_path, "alpha")
+            .expect("the engine lock file opens")
+            .is_none(),
+        "{} is the lock of an account this daemon is the engine for",
+        lock_path.display()
+    );
 
-    // And it stays true the other way round: with the test process holding the
-    // engine lock, the daemon still serves, and so does the routed CLI.
+    // And it stays true the other way round: with the account's engine lock
+    // held, the daemon still serves, and so does the routed CLI.
     let again = call(
         &mut conn,
         "message.list",
@@ -1282,14 +1283,4 @@ async fn serving_reads_holds_no_engine_lock() {
         "a routed listing works while another process holds the engine lock: {routed}"
     );
 
-    drop(held);
-
-    // Once released, the lock is free again: nothing in this test leaked it.
-    let after =
-        EngineLock::try_acquire_at(&lock_path, "alpha").expect("the engine lock file opens");
-    assert!(
-        after.is_some(),
-        "{} is free again once the test releases it",
-        lock_path.display()
-    );
 }

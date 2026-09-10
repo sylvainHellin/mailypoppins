@@ -202,7 +202,6 @@ impl Sandbox {
             .env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .args(["daemon", "run"])
             .stdin(Stdio::null())

@@ -313,10 +313,6 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// Poll interval for every bounded wait.
 const TICK: Duration = Duration::from_millis(25);
 
-/// The environment opt-in for account runtimes (plan section 3.0). Spelled out
-/// rather than imported so the test states the name a user would type.
-const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
-
 /// The value every secrecy assertion hunts for. Distinctive enough that a
 /// substring match cannot hit anything else the daemon writes.
 const SECRET: &str = "s3cr3t-vodka-2f7a-never-logged";
@@ -690,7 +686,14 @@ impl Sandbox {
     }
 
     /// A sandbox whose `config.toml` declares `accounts`, each with its data
-    /// directory already present.
+    /// directory and its store already present.
+    ///
+    /// The store is there because a daemon does not create one (P5-U8): an
+    /// account that has never been synced comes up `blocked` rather than
+    /// having an empty database materialised under it, which is what keeps the
+    /// storeless account of `tests/support/send_fixture.rs` a state the read
+    /// methods can still refuse. An account these tests add *during* a swap
+    /// therefore settles blocked, and the rows that add one say so.
     fn with_accounts(accounts: &[&str]) -> Self {
         let sandbox = Sandbox::empty();
         let document: String = accounts
@@ -700,6 +703,10 @@ impl Sandbox {
         sandbox.write_config(&document);
         for name in accounts {
             fs::create_dir_all(sandbox.account_dir(name)).expect("account dir");
+            drop(
+                mailypoppins::store::Store::open(sandbox.account_dir(name).join("store.sqlite3"))
+                    .expect("an empty store for a configured account"),
+            );
         }
         sandbox
     }
@@ -766,7 +773,6 @@ impl Sandbox {
         cmd.env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove(ACCOUNT_RUNTIMES_ENV)
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST")
@@ -777,26 +783,23 @@ impl Sandbox {
 
     /// Spawn `mp daemon run`, killed on drop, and wait until its socket
     /// accepts a connection. Its stdio goes nowhere.
-    async fn start_daemon(&self, account_runtimes: bool) -> Proc {
-        self.spawn_daemon(account_runtimes, None).await
+    async fn start_daemon(&self) -> Proc {
+        self.spawn_daemon(None).await
     }
 
     /// The same, with `--foreground-logs` and both streams captured, for the
     /// test that reads the daemon's own output back.
-    async fn start_daemon_capturing(&self, account_runtimes: bool) -> (Proc, Capture) {
+    async fn start_daemon_capturing(&self) -> (Proc, Capture) {
         let capture = Capture {
             stdout: self.root.path().join("daemon.stdout"),
             stderr: self.root.path().join("daemon.stderr"),
         };
-        let proc = self.spawn_daemon(account_runtimes, Some(&capture)).await;
+        let proc = self.spawn_daemon(Some(&capture)).await;
         (proc, capture)
     }
 
-    async fn spawn_daemon(&self, account_runtimes: bool, capture: Option<&Capture>) -> Proc {
+    async fn spawn_daemon(&self, capture: Option<&Capture>) -> Proc {
         let mut cmd = self.cmd();
-        if account_runtimes {
-            cmd.env(ACCOUNT_RUNTIMES_ENV, "1");
-        }
         cmd.args(["daemon", "run"]);
         match capture {
             Some(capture) => {
@@ -1220,7 +1223,7 @@ fn semantically_broken_document() -> String {
 #[tokio::test]
 async fn the_capability_list_is_exactly_the_declared_config_family() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (_conn, hello) = connect_initialized(&sandbox).await;
 
     let mut served: Vec<&str> = hello
@@ -1246,7 +1249,7 @@ async fn the_capability_list_is_exactly_the_declared_config_family() {
 #[tokio::test]
 async fn config_get_reports_the_effective_configuration_with_every_secret_redacted() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let get = call_ok(&mut conn, "config.get", json!({})).await;
@@ -1370,7 +1373,7 @@ async fn config_get_reports_the_effective_configuration_with_every_secret_redact
 #[tokio::test]
 async fn config_validate_accepts_a_good_document_and_changes_nothing() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let candidate = format!(
@@ -1403,7 +1406,7 @@ async fn config_validate_accepts_a_good_document_and_changes_nothing() {
 #[tokio::test]
 async fn config_validate_reports_the_line_of_a_syntax_error() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let candidate = syntactically_broken_document();
@@ -1436,7 +1439,7 @@ async fn config_validate_reports_the_line_of_a_syntax_error() {
 #[tokio::test]
 async fn config_validate_reports_a_semantic_refusal_with_no_line() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let result = call_ok(
@@ -1463,7 +1466,7 @@ async fn config_validate_reports_a_semantic_refusal_with_no_line() {
 #[tokio::test]
 async fn config_validate_needs_its_toml_parameter() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let error = call_err(&mut conn, "config.validate", json!({})).await;
@@ -1480,7 +1483,7 @@ async fn config_validate_needs_its_toml_parameter() {
 #[tokio::test]
 async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_order() {
     let sandbox = Sandbox::with_accounts(&["alpha", "beta"]);
-    let _daemon = sandbox.start_daemon(true).await;
+    let _daemon = sandbox.start_daemon().await;
     // Both runtimes settle before the connection subscribes, so every event
     // this test collects belongs to the reload and nothing races it.
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
@@ -1529,7 +1532,7 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
             });
         if envelope.kind == "account.state_changed"
             && envelope.payload["account"] == json!("gamma")
-            && envelope.payload["state"] == json!("ready")
+            && envelope.payload["state"] != json!("opening")
         {
             alpha_lock_at_gamma_ready = Some(sandbox.engine_lock_is_free("alpha"));
         }
@@ -1553,15 +1556,18 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
     assert_eq!(
         alpha_lock_at_gamma_ready,
         Some(true),
-        "the removed account's engine lock is free by the time the added account reports ready: \
-         a stop that only ordered its event ahead would leave the next engine locked out"
+        "the removed account's engine lock is free by the time the added account reports its \
+         state: a stop that only ordered its event ahead would leave the next engine locked out"
     );
     assert_eq!(
         describe(&events),
         vec![
             "state.remove account:alpha".to_string(),
             "account.state_changed beta ready".to_string(),
-            "account.state_changed gamma ready".to_string(),
+            // gamma is the account this swap adds and it has never been
+            // synced, so it comes up blocked rather than having a store
+            // materialised under it (P5-U8); the order is what this row pins.
+            "account.state_changed gamma blocked".to_string(),
             "config.changed".to_string(),
         ],
         "the reconciliation is stop-removed, then update, then start-added, and the announcement \
@@ -1609,12 +1615,12 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
         "with beta's new budget"
     );
 
-    assert!(
-        sandbox.account_dir("gamma").exists(),
-        "a started runtime's account directory is created when it is missing"
-    );
     assert_eq!(sandbox.account_state("beta").as_deref(), Some("ready"));
-    assert_eq!(sandbox.account_state("gamma").as_deref(), Some("ready"));
+    assert_eq!(
+        sandbox.account_state("gamma").as_deref(),
+        Some("blocked"),
+        "the added account has never been synced, so it has no store to serve from (P5-U8)"
+    );
     assert_eq!(
         sandbox.account_state("alpha"),
         None,
@@ -1625,7 +1631,7 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
 #[tokio::test]
 async fn removing_an_account_stops_its_runtime_and_releases_its_engine_lock() {
     let sandbox = Sandbox::with_accounts(&["alpha", "beta"]);
-    let _daemon = sandbox.start_daemon(true).await;
+    let _daemon = sandbox.start_daemon().await;
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
     assert_eq!(sandbox.wait_settled_state("beta"), "ready");
     assert!(
@@ -1654,7 +1660,7 @@ async fn removing_an_account_stops_its_runtime_and_releases_its_engine_lock() {
 #[tokio::test]
 async fn an_invalid_edit_keeps_the_previous_snapshot_live_and_publishes_a_diagnostic() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(true).await;
+    let _daemon = sandbox.start_daemon().await;
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
 
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
@@ -1716,7 +1722,7 @@ async fn an_invalid_edit_keeps_the_previous_snapshot_live_and_publishes_a_diagno
 #[tokio::test]
 async fn a_reload_that_changes_nothing_still_announces_itself() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
     bootstrap(&mut conn).await;
 
@@ -1754,7 +1760,7 @@ async fn a_reload_that_changes_nothing_still_announces_itself() {
 async fn a_daemon_with_no_config_serves_the_config_family_and_reports_zero_accounts() {
     let sandbox = Sandbox::empty();
     assert!(!sandbox.config_path().exists());
-    let _daemon = sandbox.start_daemon(true).await;
+    let _daemon = sandbox.start_daemon().await;
 
     let status = sandbox.status_json();
     assert_eq!(status["running"], json!(true));
@@ -1809,7 +1815,7 @@ async fn a_daemon_with_no_config_serves_the_config_family_and_reports_zero_accou
 #[tokio::test]
 async fn config_init_writes_a_config_the_daemon_then_loads_and_runs() {
     let sandbox = Sandbox::empty();
-    let _daemon = sandbox.start_daemon(true).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
     bootstrap(&mut conn).await;
 
@@ -1845,7 +1851,11 @@ async fn config_init_writes_a_config_the_daemon_then_loads_and_runs() {
     assert_eq!(
         describe(&events),
         vec![
-            "account.state_changed alpha ready".to_string(),
+            // Blocked and not ready: `config.init` writes an account that has
+            // never been synced, and a daemon does not materialise a store for
+            // one (P5-U8). What is pinned here is the order, which is
+            // unchanged.
+            "account.state_changed alpha blocked".to_string(),
             "config.changed".to_string(),
         ],
         "a written configuration is reconciled like any other swap, and announced last"
@@ -1881,21 +1891,20 @@ async fn config_init_writes_a_config_the_daemon_then_loads_and_runs() {
 
     assert_eq!(
         sandbox.account_state("alpha").as_deref(),
-        Some("ready"),
-        "and the account it configured is running"
+        Some("blocked"),
+        "the account it configured is known and has nothing to serve until it is synced (P5-U8)"
     );
     assert!(
-        sandbox.account_dir("alpha").exists(),
-        "config.init creates the account's data directory, as the wizard it mirrors does"
+        sandbox.engine_lock_is_free("alpha"),
+        "and an account with no store holds no engine lock"
     );
-    assert!(!sandbox.engine_lock_is_free("alpha"));
 }
 
 #[tokio::test]
 async fn config_init_refuses_to_overwrite_an_existing_config() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
     let before = sandbox.read_config();
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let error = call_err(
@@ -1929,7 +1938,7 @@ async fn config_init_refuses_to_overwrite_an_existing_config() {
 #[tokio::test]
 async fn config_add_account_appends_an_account_and_reconciles_it() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(true).await;
+    let _daemon = sandbox.start_daemon().await;
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
 
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
@@ -1954,7 +1963,9 @@ async fn config_add_account_appends_an_account_and_reconciles_it() {
     assert_eq!(
         describe(&events),
         vec![
-            "account.state_changed delta ready".to_string(),
+            // Blocked, for the reason `config.init`'s row gives: an appended
+            // account has no store yet (P5-U8).
+            "account.state_changed delta blocked".to_string(),
             "config.changed".to_string(),
         ]
     );
@@ -1971,14 +1982,17 @@ async fn config_add_account_appends_an_account_and_reconciles_it() {
         json!(DEFAULT_BODY_FETCH_DEADLINE_SECS),
         "and the account that was already there is untouched"
     );
-    assert!(!sandbox.engine_lock_is_free("delta"));
+    assert!(
+        sandbox.engine_lock_is_free("delta"),
+        "an appended account has no store yet, so no runtime holds its engine lock (P5-U8)"
+    );
 }
 
 #[tokio::test]
 async fn config_add_account_refuses_a_duplicate_name_and_leaves_the_file_untouched() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
     let before = sandbox.read_config();
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let error = call_err(
@@ -2010,7 +2024,7 @@ async fn config_add_account_refuses_a_duplicate_name_and_leaves_the_file_untouch
 #[tokio::test]
 async fn config_set_password_stores_through_the_existing_backend() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let _daemon = sandbox.start_daemon(false).await;
+    let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let result = call_ok(
@@ -2054,7 +2068,7 @@ async fn config_set_password_stores_through_the_existing_backend() {
 #[tokio::test]
 async fn a_secret_never_reaches_a_log_line_an_error_payload_or_the_effective_config() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
-    let (daemon, capture) = sandbox.start_daemon_capturing(true).await;
+    let (daemon, capture) = sandbox.start_daemon_capturing().await;
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
 
     let (mut conn, _hello) = connect_initialized(&sandbox).await;

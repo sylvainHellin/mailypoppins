@@ -272,10 +272,9 @@
 //!   behind an engine lock, and the whole point of this unit is that watching
 //!   drafts costs no lock. [`DraftWatcher::resolve`] is that lookup, and it is
 //!   why a socket test waits for a draft's event before approving it.
-//! - **The watcher runs whether or not `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`
-//!   is set.** It takes no engine lock, opens no store and starts no runtime;
-//!   gating it behind the runtime hook would make Phase 3b's drafts
-//!   untestable without also acquiring locks the tests do not want held.
+//! - **The watcher is independent of the account runtimes.** It takes no
+//!   engine lock, opens no store and starts no runtime, so it watches an
+//!   account whose runtime is blocked and one that has not come up yet.
 //! - **Two env hooks, both millisecond integers**, mirroring
 //!   `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS`: absent, unparseable or zero
 //!   means the default. The poll hook alone would not be enough, because a
@@ -1727,7 +1726,6 @@ impl Sandbox {
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
             .env(WATCH_POLL_MS_ENV, FAST_POLL_MS.to_string())
             .env(WATCH_DEBOUNCE_MS_ENV, self.debounce_ms.to_string())
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST")
@@ -1739,8 +1737,8 @@ impl Sandbox {
     /// Spawn `mp daemon run`, killed on drop, and wait until its socket
     /// accepts a connection. Its stdio goes nowhere.
     ///
-    /// No `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`: watching drafts takes no
-    /// engine lock and opens no store, so the watcher must run without it.
+    /// Watching drafts takes no engine lock and opens no store, so the
+    /// watcher runs whatever the account runtimes are doing.
     async fn start_daemon(&self) -> Proc {
         let child = self
             .cmd()

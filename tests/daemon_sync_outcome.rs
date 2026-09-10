@@ -149,15 +149,14 @@
 //!   schedules no tick, so nothing would ever emit an outcome and every socket
 //!   assertion here would be vacuous. `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME`
 //!   holds a JSON **array** of `sync.completed` payload objects (a bare object
-//!   is read as an array of one). With `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`
-//!   also set, the daemon commits one `Change::SyncCompleted` per element, in
-//!   array order, through `CanonicalState::apply`, **after every
+//!   is read as an array of one). The daemon commits one
+//!   `Change::SyncCompleted` per element, in array order, through `CanonicalState::apply`, **after every
 //!   `state.bootstrap` it answers** and off the bootstrap's own path, against
 //!   the first configured account: each element's `account` field is ignored and
 //!   replaced by that account's configured name, and every other field travels
 //!   verbatim, `severity` included, so a test can pin a severity no fake sync
-//!   could produce. Unset, empty, unparseable, or without the account-runtimes
-//!   opt-in it does nothing at all, exactly as `fake_event_burst` behaves. No
+//!   could produce. Unset, empty or unparseable it does nothing at all,
+//!   exactly as `fake_event_burst` behaves. No
 //!   flag exposes it, so `mp --help` never moves; its name is
 //!   `daemon::sync_outcome::FAKE_SYNC_OUTCOME_ENV`, re-exported from
 //!   `daemon::lifecycle` beside the other four hooks, so the test and the daemon
@@ -263,10 +262,6 @@ const TICK: Duration = Duration::from_millis(25);
 /// The account every test uses, so a failure names something readable.
 const ACCOUNT: &str = "alpha";
 
-/// The environment opt-in for account runtimes (plan section 3.0). Spelled out
-/// rather than imported so the test states the name a user would type.
-const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
-
 /// The substring `tui::bg::drained_sync_level` downgrades a green line on when
 /// mutations were rolled back (`src/tui/helpers.rs::FAILED_OPS_MARKER`).
 /// Spelled out rather than imported: it is `pub(crate)`, and the point of this
@@ -293,13 +288,18 @@ const FORMATTED_FRAGMENTS: [&str; 4] = [
     SYNC_SKIPPED_MARKER,
 ];
 
-/// The thirteen keys the plan's payload has, and no others.
-const PAYLOAD_KEYS: [&str; 13] = [
+/// The fourteen keys the payload has, and no others.
+///
+/// P5-U8 edit: `new_inbox_mail` joined them, because a runtime's tick is a pass
+/// nobody asked for and the event is the only carrier the desktop notification
+/// of #0009 has left. The protocol changelog carries the entry.
+const PAYLOAD_KEYS: [&str; 14] = [
     "account",
     "bodies_truncated",
     "error",
     "failed_mutations",
     "flags_updated",
+    "new_inbox_mail",
     "non_converging",
     "pruned",
     "prunes_deferred",
@@ -330,6 +330,7 @@ fn clean() -> SyncCompleted {
         non_converging: Vec::new(),
         failed_mutations: 0,
         error: None,
+        new_inbox_mail: Vec::new(),
     }
 }
 
@@ -473,8 +474,8 @@ fn severity_travels_as_ok_warning_or_error() {
     );
 }
 
-/// The payload is exactly the plan's object: those thirteen keys, those types,
-/// `error` null when there is none, and nothing else.
+/// The payload is exactly the documented object: those fourteen keys, those
+/// types, `error` null when there is none, and nothing else.
 #[test]
 fn the_payload_is_exactly_the_documented_object() {
     let encoded = serde_json::to_value(busy()).expect("a payload serialises");
@@ -494,13 +495,14 @@ fn the_payload_is_exactly_the_documented_object() {
             "non_converging": ["INBOX", "Sent"],
             "failed_mutations": 2,
             "error": null,
+            "new_inbox_mail": [],
         }),
-        "the payload is the plan's object, field for field"
+        "the payload is the documented object, field for field"
     );
     assert_eq!(
         sorted_keys(&encoded),
         PAYLOAD_KEYS.to_vec(),
-        "no field beyond the thirteen the plan lists"
+        "no field beyond the fourteen the protocol lists"
     );
 }
 
@@ -525,6 +527,7 @@ fn a_clean_payload_carries_every_key_with_its_empty_value() {
             "non_converging": [],
             "failed_mutations": 0,
             "error": null,
+            "new_inbox_mail": [],
         })
     );
     assert!(
@@ -1354,22 +1357,15 @@ server = "INBOX"
     /// Spawn `mp daemon run` with the outcomes armed behind every
     /// `state.bootstrap`, killed on drop, and wait until its socket accepts.
     ///
-    /// `account_runtimes` is a parameter rather than a constant because the
-    /// hook is defined to do nothing without it: without a runtime there is no
-    /// tick, and without a tick there is no outcome.
-    async fn start_daemon(&self, outcomes: Option<&Value>, account_runtimes: bool) -> Proc {
+    async fn start_daemon(&self, outcomes: Option<&Value>) -> Proc {
         let mut cmd = Command::new(MP);
         cmd.env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove(ACCOUNT_RUNTIMES_ENV)
             .env_remove(FAKE_SYNC_OUTCOME_ENV)
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST");
-        if account_runtimes {
-            cmd.env(ACCOUNT_RUNTIMES_ENV, "1");
-        }
         if let Some(outcomes) = outcomes {
             cmd.env(FAKE_SYNC_OUTCOME_ENV, outcomes.to_string());
         }
@@ -1592,7 +1588,7 @@ fn armed_outcomes() -> Value {
 #[tokio::test]
 async fn a_client_receives_one_sync_completed_notification_per_tick() {
     let sandbox = Sandbox::single_account();
-    let _daemon = sandbox.start_daemon(Some(&armed_outcomes()), true).await;
+    let _daemon = sandbox.start_daemon(Some(&armed_outcomes())).await;
     let (mut conn, hello) = connect_initialized(&sandbox).await;
     let bootstrap = bootstrap_revision(&mut conn).await;
 
@@ -1639,7 +1635,7 @@ async fn a_client_receives_one_sync_completed_notification_per_tick() {
 #[tokio::test]
 async fn a_warning_outcome_is_never_merged_into_a_later_clean_one() {
     let sandbox = Sandbox::single_account();
-    let _daemon = sandbox.start_daemon(Some(&armed_outcomes()), true).await;
+    let _daemon = sandbox.start_daemon(Some(&armed_outcomes())).await;
     let (mut conn, hello) = connect_initialized(&sandbox).await;
     let bootstrap = bootstrap_revision(&mut conn).await;
 
@@ -1660,7 +1656,7 @@ async fn a_warning_outcome_is_never_merged_into_a_later_clean_one() {
 #[tokio::test]
 async fn the_notification_payload_is_typed_data_and_not_a_rendered_line() {
     let sandbox = Sandbox::single_account();
-    let _daemon = sandbox.start_daemon(Some(&armed_outcomes()), true).await;
+    let _daemon = sandbox.start_daemon(Some(&armed_outcomes())).await;
     let (mut conn, hello) = connect_initialized(&sandbox).await;
     let bootstrap = bootstrap_revision(&mut conn).await;
 
@@ -1704,30 +1700,17 @@ async fn the_notification_payload_is_typed_data_and_not_a_rendered_line() {
     );
 }
 
-/// No runtime, no tick, no outcome: the hook is armed but the account-runtimes
-/// opt-in is absent, so the daemon has nothing to report on.
-#[tokio::test]
-async fn no_outcome_is_emitted_without_the_account_runtimes_opt_in() {
-    let sandbox = Sandbox::single_account();
-    let _daemon = sandbox.start_daemon(Some(&armed_outcomes()), false).await;
-    let (mut conn, _hello) = connect_initialized(&sandbox).await;
-    bootstrap_revision(&mut conn).await;
-
-    assert_no_outcome_within(
-        &mut conn,
-        Duration::from_millis(1_500),
-        "without the account-runtimes opt-in nothing ticks",
-    )
-    .await;
-}
-
-/// The hook is opt-in on both sides: runtimes without armed outcomes emit
-/// nothing either, so no test elsewhere in the suite starts seeing events it
-/// never asked for.
+/// An unarmed hook emits nothing, so no test elsewhere in the suite starts
+/// seeing events it never asked for.
+///
+/// P5-U8 edit: its neighbour, `no_outcome_is_emitted_without_the_account_runtimes_opt_in`,
+/// was deleted with the opt-in it was about. The hook had two gates and has
+/// one, because runtimes are on by default and there is no second gate to
+/// forget.
 #[tokio::test]
 async fn no_outcome_is_emitted_without_the_hook() {
     let sandbox = Sandbox::single_account();
-    let _daemon = sandbox.start_daemon(None, true).await;
+    let _daemon = sandbox.start_daemon(None).await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
     bootstrap_revision(&mut conn).await;
 

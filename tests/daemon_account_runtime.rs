@@ -22,11 +22,11 @@
 //! can be made to hang, to fail, or to panic if it is ever called.
 //!
 //! **(b) Over the socket, against a spawned `mp daemon run`.** Whether a
-//! runtime exists at all is a property of the daemon, and the plan states it as
-//! an environment opt-in: no `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`, no runtime
-//! and no engine lock. Only a real daemon process can be wrong about that, and
-//! the engine lock is cross-process by construction, so the assertion is a
-//! `flock` attempt from the test process.
+//! runtime exists at all is a property of the daemon: since P5-U8 every
+//! configured account gets one, which is an engine lock held for the daemon's
+//! lifetime. Only a real daemon process can be wrong about that, and the engine
+//! lock is cross-process by construction, so the assertion is a `flock` attempt
+//! from the test process.
 //!
 //! # Surface under test
 //!
@@ -219,10 +219,6 @@ const DEADLINE: Duration = Duration::from_secs(20);
 
 /// Poll interval for every bounded wait.
 const TICK: Duration = Duration::from_millis(25);
-
-/// The environment opt-in the plan fixes in section 3.0. Spelled out rather
-/// than imported so the test states the name a user would type.
-const ACCOUNT_RUNTIMES_ENV: &str = "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES";
 
 /// The account every test uses, so a failure names something readable.
 const ACCOUNT: &str = "alpha";
@@ -973,8 +969,15 @@ server = "INBOX"
         )
         .expect("write config.toml");
         // The account directory exists before any daemon runs, so a test can
-        // reach the lock file whether or not a runtime was ever created.
+        // reach the lock file whether or not a runtime was ever created, and
+        // the store exists because a daemon does not create one (P5-U8): an
+        // account that has never been synced comes up `blocked` rather than
+        // having an empty database materialised under it.
         fs::create_dir_all(sandbox.account_dir()).expect("account dir");
+        drop(
+            mailypoppins::store::Store::open(sandbox.account_dir().join("store.sqlite3"))
+                .expect("an empty store for the account the daemon serves"),
+        );
         sandbox
     }
 
@@ -1002,26 +1005,21 @@ server = "INBOX"
         self.data_dir().join("runtime").join("daemon.pid")
     }
 
-    /// An `mp` invocation pointed at this sandbox, with the opt-in explicitly
-    /// cleared so an inherited variable cannot change the outcome.
+    /// An `mp` invocation pointed at this sandbox.
     fn cmd(&self) -> Command {
         let mut cmd = Command::new(MP);
         cmd.env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove(ACCOUNT_RUNTIMES_ENV)
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START");
         cmd
     }
 
     /// Spawn `mp daemon run`, killed on drop, and wait until its socket
     /// accepts a connection.
-    fn start_daemon(&self, account_runtimes: bool) -> Proc {
-        let mut cmd = self.cmd();
-        if account_runtimes {
-            cmd.env(ACCOUNT_RUNTIMES_ENV, "1");
-        }
-        let child = cmd
+    fn start_daemon(&self) -> Proc {
+        let child = self
+            .cmd()
             .args(["daemon", "run"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1134,36 +1132,9 @@ async fn within<T>(label: &str, fut: impl Future<Output = T>) -> T {
 }
 
 #[test]
-fn without_the_environment_opt_in_the_daemon_starts_no_runtime_and_takes_no_engine_lock() {
+fn the_account_becomes_ready_and_the_daemon_holds_the_engine_lock() {
     let sandbox = Sandbox::new();
-    let _daemon = sandbox.start_daemon(false);
-
-    let status = sandbox.status_json();
-    assert_eq!(status["running"], Value::from(true));
-    // The array may list configured accounts (tests/daemon_lifecycle.rs leaves
-    // that free), but none of them may have come up.
-    for entry in status["accounts"]
-        .as_array()
-        .unwrap_or_else(|| panic!("accounts is an array, got {status}"))
-    {
-        assert_eq!(
-            entry["state"],
-            Value::from("opening"),
-            "no runtime exists without {ACCOUNT_RUNTIMES_ENV}, so nothing is ready or blocked: \
-             {entry}"
-        );
-    }
-
-    assert!(
-        sandbox.engine_lock_is_free(),
-        "without {ACCOUNT_RUNTIMES_ENV} the daemon acquires no engine lock"
-    );
-}
-
-#[test]
-fn with_the_environment_opt_in_the_account_becomes_ready_and_the_daemon_holds_the_engine_lock() {
-    let sandbox = Sandbox::new();
-    let _daemon = sandbox.start_daemon(true);
+    let _daemon = sandbox.start_daemon();
 
     assert_eq!(
         sandbox.wait_settled_state(),
@@ -1187,7 +1158,7 @@ fn an_account_whose_lock_is_held_elsewhere_comes_up_blocked_over_the_socket() {
         .expect("the lock file is creatable")
         .expect("a free lock is taken");
 
-    let _daemon = sandbox.start_daemon(true);
+    let _daemon = sandbox.start_daemon();
 
     assert_eq!(
         sandbox.wait_settled_state(),

@@ -1262,7 +1262,6 @@ server = "INBOX"
             .env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS")
             .env(FAKE_EVENT_BURST_ENV, count.to_string())

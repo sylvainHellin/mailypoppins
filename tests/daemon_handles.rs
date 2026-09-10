@@ -240,8 +240,7 @@
 //!   this unit adds no arm to the exhaustive `reduce` of
 //!   `tests/daemon_bootstrap.rs`.
 //! - **The daemon opens the store the way `message.list` does** - by path,
-//!   through `crate::config::store_path` - and takes no engine lock, so the
-//!   socket layer needs no `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`.
+//!   through `crate::config::store_path` - and takes no engine lock of its own.
 //!   Materialising is a read plus a write into the daemon's own runtime
 //!   directory, and neither makes the daemon an account's engine.
 //! - **The TTL default is ten minutes**, long enough for a person to look at
@@ -1338,7 +1337,6 @@ impl Sandbox {
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
             .env(HANDLE_TTL_ENV, self.ttl_ms.to_string())
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS")
             .env_remove("MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST")
@@ -1350,9 +1348,9 @@ impl Sandbox {
     /// Spawn `mp daemon run`, killed on drop, and wait until its socket
     /// accepts a connection. Its stdio goes nowhere.
     ///
-    /// No `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES`: materialising is a store read
-    /// and a write into the daemon's own runtime directory, so it takes no
-    /// engine lock, exactly as `message.list` does not.
+    /// Materialising is a store read and a write into the daemon's own runtime
+    /// directory, so it takes no engine lock of its own, exactly as
+    /// `message.list` does not.
     async fn start_daemon(&self) -> Proc {
         let child = self
             .cmd()

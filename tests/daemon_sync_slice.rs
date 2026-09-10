@@ -335,6 +335,30 @@ impl Slice {
         Slice::start_with(&[])
     }
 
+    /// The same, with `SERVER_ACCOUNT`'s engine lock already held by this
+    /// process when the daemon starts (P5-U8).
+    ///
+    /// Before this unit the lock was taken *after* the daemon was up, because
+    /// the daemon started no runtime and took no lock, so the only holder that
+    /// mattered was this process. Now every account has a runtime and the
+    /// daemon *is* an engine, so the lock has to be held before it starts or it
+    /// will take it first and the row would be about a daemon syncing rather
+    /// than about a daemon refused. Rust opens every file `O_CLOEXEC`, so the
+    /// child inherits no copy of the description and the holder here is the
+    /// only one.
+    fn start_behind_a_held_lock() -> (Slice, EngineLock) {
+        let tmp = TempDir::new().expect("a temporary sync-slice root");
+        fixture::seed(tmp.path());
+        let holder = EngineLock::try_acquire_at(
+            &fixture::engine_lock_path(tmp.path(), fixture::SERVER_ACCOUNT),
+            fixture::SERVER_ACCOUNT,
+        )
+        .expect("taking the fixture's engine lock")
+        .expect("the test process holds the lock the daemon will be refused");
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &[]);
+        (Slice { daemon, tmp }, holder)
+    }
+
     /// The same, with hooks put back on top of the sandbox.
     fn start_with(env: &[(&str, &str)]) -> Slice {
         let tmp = TempDir::new().expect("a temporary sync-slice root");
@@ -528,6 +552,8 @@ fn loud_outcome() -> SyncCompleted {
         non_converging: vec![fixture::INBOX.to_string()],
         failed_mutations: 1,
         error: None,
+        // P5-U8: a tick carries what arrived, and this one arrived at nothing.
+        new_inbox_mail: Vec::new(),
     }
 }
 
@@ -1270,13 +1296,10 @@ async fn a_sync_completed_event_renders_through_the_shared_wordings() {
         "failed_mutations": 0,
         "error": null,
     }]);
-    let slice = Slice::start_with(&[
-        ("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES", "1"),
-        (
-            "MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME",
-            &outcomes.to_string(),
-        ),
-    ]);
+    let slice = Slice::start_with(&[(
+        "MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME",
+        &outcomes.to_string(),
+    )]);
     let mut conn = slice.connect().await;
     call(&mut conn, "state.bootstrap", json!({})).await;
 
@@ -1692,23 +1715,15 @@ fn no_sync_command_can_still_answer_without_a_daemon() {
 /// has no encrypted secrets file and skips, exactly as
 /// `tests/secrets_integration.rs` does.
 ///
-/// The lock is taken *after* the daemon is started, so the daemon never
-/// inherits the descriptor: `flock` is per open file description, and a child
-/// forked while the lock was held would keep a copy of it alive
-/// (`tests/engine_lock_ingest_cli.rs` header). The clients spawned afterwards
-/// do inherit one, which only makes the lock harder to lose and is the
-/// direction this test wants.
+/// The lock is taken *before* the daemon is started (P5-U8): the daemon starts
+/// a runtime per account now and would otherwise be the holder itself. See
+/// [`Slice::start_behind_a_held_lock`].
 #[test]
 fn the_routed_sync_says_it_skipped_when_another_process_holds_the_lock() {
-    let slice = Slice::start();
+    let (slice, _holder) = Slice::start_behind_a_held_lock();
     if !fixture::seed_secrets(slice.root()) {
         return;
     }
-
-    let lock_path = fixture::engine_lock_path(slice.root(), fixture::SERVER_ACCOUNT);
-    let _holder = EngineLock::try_acquire_at(&lock_path, fixture::SERVER_ACCOUNT)
-        .expect("taking the fixture's engine lock")
-        .expect("the test process holds the lock the daemon will be refused");
 
     let out = slice.routed(&["sync", "-A", fixture::SERVER_ACCOUNT]);
     assert_eq!(
@@ -1735,15 +1750,10 @@ fn the_routed_sync_says_it_skipped_when_another_process_holds_the_lock() {
 /// the client can print the skip line instead of a summary.
 #[tokio::test]
 async fn a_blocked_account_settles_as_a_success_that_did_nothing() {
-    let slice = Slice::start();
+    let (slice, _holder) = Slice::start_behind_a_held_lock();
     if !fixture::seed_secrets(slice.root()) {
         return;
     }
-
-    let lock_path = fixture::engine_lock_path(slice.root(), fixture::SERVER_ACCOUNT);
-    let _holder = EngineLock::try_acquire_at(&lock_path, fixture::SERVER_ACCOUNT)
-        .expect("taking the fixture's engine lock")
-        .expect("the test process holds the lock the daemon will be refused");
 
     let mut conn = slice.connect().await;
     let started = call(

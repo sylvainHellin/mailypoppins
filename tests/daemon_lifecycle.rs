@@ -51,9 +51,9 @@
 //!   absolute paths, i.e. exactly what `$MAILYPOPPINS_DATA_DIR` and
 //!   `$MAILYPOPPINS_CONFIG_DIR` name (canonicalised: macOS `TempDir` paths go
 //!   through `/private`).
-//! - **`accounts` with no runtimes.** Every test that asserts on the array
-//!   leaves `MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` unset and uses a tree with
-//!   no `config.toml`, where the answer is unambiguously `[]`. The MIG-04 test
+//! - **`accounts` with no accounts.** Every test that asserts on the array
+//!   uses a tree with no `config.toml`, where the answer is unambiguously
+//!   `[]` whatever the runtimes are doing. The MIG-04 test
 //!   has a configured account and deliberately asserts nothing about the array,
 //!   so the implementer stays free to list configured-but-not-started accounts.
 //!
@@ -153,7 +153,6 @@ impl Sandbox {
         cmd.env("HOME", self.home())
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
-            .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START");
         cmd
     }

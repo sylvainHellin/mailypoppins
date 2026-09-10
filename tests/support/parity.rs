@@ -143,11 +143,10 @@ const LOCK_TIMEOUT_SECS: u64 = 2100;
 
 /// Every daemon environment hook `docs/daemon-operations.md` documents, removed
 /// from any child this module spawns.
-pub const DAEMON_ENV_HOOKS: [&str; 13] = [
+pub const DAEMON_ENV_HOOKS: [&str; 12] = [
     "MAILYPOPPINS_DAEMON_AUTOSTART",
     "MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS",
     "MAILYPOPPINS_DAEMON_REQUIRE",
-    "MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES",
     "MAILYPOPPINS_DAEMON_FAIL_START",
     "MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS",
     "MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST",
