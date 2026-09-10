@@ -1015,3 +1015,85 @@ A `kill -9` on the pid file's daemon put `The daemon is not reachable; reconnect
 `rustfmt --edition 2021` on `src/tui/events.rs`, `src/daemon/runtime/watcher.rs`, `src/daemon/client.rs`, `src/daemon/config.rs`, `src/daemon/sync_outcome.rs`, `crates/mp-protocol/src/events.rs`, `src/tui/session.rs`, `src/tui/commands.rs`, `src/tui/app/bootstrap.rs`, `src/daemon/methods/sync.rs` and `src/daemon/runtime/account.rs`, all clean; the files that were not rustfmt-clean at `40059a8` (`src/tui/{mod,bg,actions}.rs`, `src/engine_lock.rs`, `src/daemon/runtime/mod.rs`) were left alone.
 
 The throwaway `git worktree` at `~/.cache/mp-stub-p5u7` was removed.
+
+## P5-U9: the parity-gate oracle suite, the contract
+
+Two files, 13 rows, no production name added and no stub worktree needed: every name these tests use exists at `6ea3d0c`.
+
+- `tests/phase5_parity_gate.rs` (11 rows) carries four of the five oracles plan section 3.7 names.
+- `tests/phase5_undo_send_hold.rs` (2 rows) carries the fifth, which is the one oracle that is not a comparison.
+
+### The five oracles
+
+**(a) The eight integration suites, through a live daemon.**
+`the_eight_legacy_suites_answer_through_a_live_daemon` is a roll-up over the eight suites `docs/baselines/phase4-gate-evidence.md` names, one routed command each, all against one `admin_fixture` root in one daemon lifetime: `list-messages`, `path <draft>`, `list`, `dump-mailbox --json`, `search --local`, `outbox list`, `calendar rebuild`, `sync -A alpha`.
+Every row runs through `DaemonFixture::mp_routed` (`MAILYPOPPINS_DAEMON_REQUIRE=1`, so a command answered in the client's own process fails instead of passing) and is byte-diffed against the `pre-daemon` oracle over the same root.
+It is a roll-up rather than eight new comparisons because the six Phase 4 slice suites already compare these surfaces command by command; what Phase 4 never wrote down is the *list*, so a suite that quietly stops being daemon-backed now fails a test instead of a paragraph.
+`the_roll_up_names_every_suite_the_phase_four_gate_named` pins the list and the existence of each file.
+
+`sync -A alpha` is byte-identical because every account of that fixture is local-only, so both binaries skip before a lock is reached, which means the row says nothing about the property `tests/engine_lock_ingest_cli.rs` is actually about.
+`the_engine_the_legacy_lock_suite_assumes_is_the_daemon` says it instead, over `sync_fixture`'s server account: the lock is free before the daemon starts, the daemon takes it (P5-U8 turned runtimes on by default), and it is free again after `daemon stop`.
+
+The roll-up **skips with a message** when no `pre-daemon` binary is present rather than building one: `support::parity::oracle_bin` builds the tag when the cache is cold, which is right for a slice suite and wrong inside a gate run, where a 30-minute build is indistinguishable from a hang.
+The message names `MP_ORACLE_BIN`, the cache path and `docs/baselines/pre-daemon/README.md`.
+
+**(b) The daemon-backed golden frames.**
+Three rows, over the module source and `src/tui/ui/snapshots/`, because a library test module is not reachable as tests from `tests/`.
+`the_daemon_golden_frames_module_carries_at_least_twenty_two_tests` counts `#[test]` in `src/tui/ui/golden_frames_daemon.rs` (22 today) and checks the module is still declared and still shares `frame_snapshot`.
+`every_store_backed_golden_frame_has_a_daemon_twin_pinned_to_its_snapshot` walks the 18 reviewed store-backed snapshots, requires a `golden_<scene>_daemon` twin for each, and requires that twin to be pinned either by a `…_daemon.snap` whose body equals the store-backed body or by a `same_frame(` call - the stronger form P5-U1 chose, where the daemon-built frame is asserted byte-identical to the hand-built one and inherits the reviewed snapshot instead of minting one to be approved on trust.
+The failure names every pair, pinned and unpinned.
+`the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair` fixes the `…_daemon.snap` set at exactly `golden_opening_account_daemon` and `golden_extra_mailbox_daemon`; a third one means a shared scene minted a second snapshot rather than being compared against the reviewed one.
+
+**(c) The help walk and the key dump, from a binary of this run.**
+`env!("CARGO_BIN_EXE_mp")` is the "reinstalled in the same run" the gate line asks for: cargo builds it from this working tree before the test runs, where an installed `mp` on `PATH` is whatever the developer last installed.
+`the_help_walk_of_this_runs_binary_is_the_phase_zero_capture` runs `scripts/capture-cli-help.sh` with `MP` pointed at it, in a sandboxed empty root with auto-start off, and byte-compares the whole 50-screen walk to `docs/baselines/pre-daemon/cli-help.txt`.
+`dump_keys_json_of_this_runs_binary_is_the_phase_zero_capture` does the same for `mp dump-keys --json` against `tui-keys.json`.
+Both failures print the first differing line with context rather than two walls of text.
+
+**(d) The `KeyAction::Manual` checklist.**
+The set is taken from `mailypoppins::tui::app::KEYMAP` (public since long before the daemon; rows with an empty `keys` are the dispatch-only leader rows and are excluded) and cross-checked against the two hand-dispatched sections of this run's `dump-keys --json`, so neither source can drift alone: `the_manual_rows_are_exactly_what_this_runs_binary_dumps`, which also pins the count at Phase 0's 20 (15 `SERVER SEARCH`, 5 `ACTIVITY LOG`).
+`every_manual_key_has_a_row_in_the_pre_daemon_checklist` splits each display spelling into its atoms (`gg / G` is two keys, `/` is one) and requires each atom inside its **own** surface's sections of `docs/baselines/pre-daemon/manual-keys.md`; a whole-file search would pass for a key nobody documented, because `Esc` appears in a dozen surfaces.
+`the_phase_five_manual_checklist_is_complete_and_carries_no_failure` requires the companion `docs/baselines/phase5-manual-keys.md`.
+
+**(e) The undo-send hold.**
+`quitting_the_last_client_mid_hold_leaves_the_draft_approved_and_sends_nothing` is the plan's sentence, socket-level and headless: seed `send_fixture`, prepend `[email] send_hold_secs = 2` to the config (a top-level table written after the `[[accounts]]` array tables would belong to the last account), start the daemon with the fake transport armed, connect a `ClientKind::Tui` connection, `draft.approve`, drop the connection while the window is open, wait twice the window, then ask a fresh connection.
+The draft is still `approved` in `draft.list`, its file is still where `draft.path` says, no outbox row appeared that the approve did not find there, and the fake transport's ledger is empty.
+
+At Phase 5 the hold is client-side (`src/tui/actions.rs`, `app.held_send`, fired by the pre-draw loop in `src/tui/mod.rs`), so quitting mid-hold means the send request is never made and the criterion is a statement about the daemon: an approved draft whose client vanished stays approved and is sent by nobody.
+P6-U2 moves the hold into the send scheduler and P6-U3 makes the daemon cancel it when the last client exits, *"leaving the draft approved"* - the same sentence, and these assertions then pin the daemon's own cancellation without moving a line.
+**Not `#[ignore]`**: the whole row runs over the socket with no terminal and no pty. What cannot be driven headless is the `u` cancel key, which is hand-dispatched and therefore belongs to oracle (d)'s checklist.
+
+The three negative assertions are kept honest by `the_same_fixture_records_a_send_when_a_client_really_sends`: the same daemon, the same ledger, a routed `mp send <approved> -y`, and the ledger fills while the delivered draft is retired file and all.
+The window is asserted non-zero before anything is held, because `send_hold_secs = 0` is the config value that makes "mid-hold" meaningless.
+
+### What fails as committed, and who turns it green
+
+One row, by construction, and it is the T-unit proof for oracle (d):
+
+- **`the_phase_five_manual_checklist_is_complete_and_carries_no_failure`** - `docs/baselines/phase5-manual-keys.md` does not exist.
+  **P5-U11 writes it**, from a real run of the daemon-backed TUI against `docs/baselines/pre-daemon/manual-keys.md`; no automated test can press a hand-dispatched key, which is why the plan asks for a checklist rather than a test.
+  The failure message states the format: one Markdown table row per key, `| surface | key | status | evidence |`, all 20 `(surface, key)` pairs of `mp dump-keys --json` present once, `status` exactly `pass` or `NOT TAKEN (owner-only)`.
+  `fail` is refused outright: a failed key is a bug to fix before the gate closes, not a row to record.
+  The parser was proved against a filled-in file (20 rows accepted, one `fail` row refused) and the file removed again, so the row is red as committed.
+
+The other twelve pass at `6ea3d0c`. Nothing here is a finding for P5-U10 or P5-U11 beyond that file.
+
+### Decisions this unit had to take
+
+- **The eight rows are all parity rows.** The brief allowed a divergent-oracle row for `engine_lock_ingest_cli`; the fixture's accounts are local-only, so the routed and pre-daemon `mp sync` agree byte for byte and the divergence never arises. The lock property gets a row of its own instead, which says more than a `sync` comparison could.
+- **The roll-up skips instead of building the oracle.** See (a).
+- **Oracle (b) reads sources and snapshots.** The alternative, a second snapshot family per shared scene, is exactly what P5-U1 refused, and this unit does not overrule a landed T unit.
+- **The undo-send row asserts "no new outbox row" rather than "the outbox is empty".** `send_fixture` seeds four rows in the states `mp outbox list` renders; an empty-outbox assertion would be a false statement about the fixture rather than a true one about the send.
+
+### Approved test edits
+
+None. No existing test file was touched, and no production name was added: `git diff --stat 6ea3d0c..HEAD -- src/ crates/` is empty.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline --no-fail-fast` -> **2 191 passed, 1 failed, 5 ignored** over 49 result lines; `pgrep -af '[m]p daemon'` empty afterwards.
+That is P5-U8's 2 179 plus this unit's 13, minus the one intended failure above.
+
+`cargo test --offline --test phase5_parity_gate` -> 10 passed, 1 failed (the checklist row).
+`cargo test --offline --test phase5_undo_send_hold` -> 2 passed, in 5.2 s, of which 5 s is the deliberate wait past the hold window.
+`rustfmt --edition 2021` on both new files, which are this unit's own and therefore clean by construction.
