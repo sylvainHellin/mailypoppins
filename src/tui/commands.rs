@@ -49,13 +49,15 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use mp_protocol::events::SyncCompleted;
 
-use super::app::{mailbox_key, Action, App, MailboxKind, MessageRef, StatusLevel};
+use super::app::{
+    mailbox_key, Action, App, BgResult, MailboxKind, MessageRef, RsvpChoice, StatusLevel,
+};
+use super::events::Awaited;
 use super::helpers::SYNC_SKIPPED_MARKER;
 use super::queries::Queries;
 use crate::notify::NewMailMeta;
@@ -286,6 +288,31 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             }
             true
         }
+        // The four operation-kind actions (P5-U8). Each starts its operation
+        // and returns; the finish arrives as an `operation.finished` event and
+        // lands through [`settled`]. Until this unit each kept a worker thread
+        // and a `BgResult` channel in `handle_action`, which is why they were
+        // the four `dispatch` used to hand back.
+        Action::Fetch => {
+            start_pass(app, commands, "sync.quick", "Quick sync", Action::Fetch);
+            true
+        }
+        Action::Sync => {
+            start_pass(app, commands, "sync.full", "Full sync", Action::Sync);
+            true
+        }
+        Action::FetchAccount(index) => {
+            start_account_pass(app, commands, *index);
+            true
+        }
+        Action::SendApproved => {
+            send_approved(app, commands);
+            true
+        }
+        Action::Rsvp { msg, choice } => {
+            rsvp(app, commands, *msg, *choice);
+            true
+        }
         Action::BatchToggleFlag(msgs) => {
             let any_unflagged = msgs
                 .iter()
@@ -309,84 +336,253 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
 // The operations
 // ---------------------------------------------------------------------------
 
-/// How often a worker thread asks the daemon whether its operation finished.
+/// Start one operation and remember it until its `operation.finished` arrives
+/// (P5-U8).
 ///
-/// A poll and not a subscription, because P5-U2 left the event stream connected
-/// and drained by nobody: `operation.status` is a registered query and the
-/// registry prunes nothing, so a worker can read the machine to its terminal
-/// state. **P5-U8 replaces this with the `operation.finished` event**, which is
-/// what the daemon already publishes and what `mp sync` already waits on
-/// (`await_operation`, `src/main.rs`).
+/// An operation answers `{operation_id}` at once and finishes later, so
+/// something has to wait for it. Until this unit that was a worker thread per
+/// action reading `operation.status` every 100 ms; now it is the event stream
+/// the connection has been subscribed to since its first `state.bootstrap`, so
+/// a minute-long sync costs one call instead of six hundred and the wait is a
+/// map entry rather than a thread.
 ///
-/// 100 ms is a tenth of the one-second poll the TUI's own tick already runs at,
-/// so an operation that finishes instantly is reported within a frame and a
-/// sync that takes a minute costs six hundred round trips over a Unix socket,
-/// which is nothing beside the pass itself.
-pub(super) const OPERATION_POLL: Duration = Duration::from_millis(100);
-
-/// Start one operation and follow it to a terminal state.
-///
-/// `Ok` is the `result` a succeeded operation settled with; `Err` is the
-/// sentence a failed or cancelled one carries, or the transport error that
-/// stopped the client reaching it. Both are what the arm's `BgResult` has
-/// always carried, so nothing above this changes shape.
-///
-/// The wait is unbounded, which is the wait the arm has always had: a full sync
-/// takes as long as the mailbox does. Each individual call is bounded by
-/// `Session`'s own 30 s `CALL_TIMEOUT`, which is ample for a method that
-/// answers `{operation_id}` at once and for a status read.
-pub(super) fn run_operation(
+/// `false` means the operation never started and the caller has already been
+/// told why; `bg_count` is bumped only on the `true` path, because it is the
+/// finished event that brings it down again.
+pub(super) fn start_operation(
+    app: &mut App,
     commands: &dyn Queries,
     method: &str,
     params: Value,
-) -> Result<Value, String> {
-    let started = commands
-        .call(method, params)
-        .map_err(|e| format!("{e:#}"))?;
-    let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
-        return Err(format!("{method} answered no operation id"));
-    };
-    loop {
-        let status = commands
-            .call("operation.status", json!({"operation_id": id}))
-            .map_err(|e| format!("{e:#}"))?;
-        match status["state"].as_str() {
-            Some("succeeded") => return Ok(status["result"].clone()),
-            Some("failed") | Some("cancelled") => return Err(operation_error(method, &status)),
-            // `queued` and `running` are the two it can still leave.
-            _ => std::thread::sleep(OPERATION_POLL),
+    awaited: Awaited,
+) -> bool {
+    let started = match commands.call(method, params) {
+        Ok(started) => started,
+        Err(e) => {
+            app.set_status_level(format!("{method}: {e:#}"), StatusLevel::Error);
+            return false;
         }
+    };
+    let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
+        app.set_status_level(
+            format!("{method} answered no operation id"),
+            StatusLevel::Error,
+        );
+        return false;
+    };
+    app.bg_count += 1;
+    app.events.started(id, awaited);
+    true
+}
+
+/// One finished operation as the [`BgResult`] its arm used to post.
+///
+/// The event's payload carries `result` exclusive-or `error`
+/// (`src/daemon/operations.rs`), and the four shapes below are the four the
+/// arms already knew how to present, so nothing above this changed when the
+/// poll went away.
+pub(super) fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
+    let result = match payload["state"].as_str() {
+        Some("succeeded") => Ok(payload["result"].clone()),
+        _ => Err(operation_error(payload)),
+    };
+    match awaited {
+        Awaited::Quick {
+            account_index,
+            account,
+        } => match result {
+            Ok(settled) => BgResult::Fetch {
+                account_index: *account_index,
+                result: Ok(sync_status_line(account, &settled)),
+                new_inbox_mail: new_inbox_mail(&settled),
+            },
+            Err(e) => BgResult::Fetch {
+                account_index: *account_index,
+                result: Err(e),
+                new_inbox_mail: Vec::new(),
+            },
+        },
+        Awaited::Full {
+            account_index,
+            account,
+        } => BgResult::Sync {
+            account_index: *account_index,
+            result: result.map(|settled| sync_status_line(account, &settled)),
+        },
+        Awaited::SendApproved { account_index } => BgResult::SendApproved {
+            account_index: *account_index,
+            result: result.map(|settled| approved_line(&settled)),
+        },
+        Awaited::Rsvp { account_index } => BgResult::Rsvp {
+            account_index: *account_index,
+            result: result.and_then(|settled| rsvp_line(&settled)),
+        },
     }
 }
 
 /// The sentence a settled-badly operation carries, which is the engine's own
 /// error rendered by the daemon.
-fn operation_error(method: &str, status: &Value) -> String {
-    status["error"]["message"]
+fn operation_error(payload: &Value) -> String {
+    payload["error"]["message"]
         .as_str()
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{method} stopped without saying why"))
+        .unwrap_or_else(|| "the operation stopped without saying why".to_string())
 }
 
-/// One sync pass through the daemon, as the status line and the arrival list
-/// [`BgResult::Fetch`](crate::tui::app::BgResult) carries.
+/// One of the two passes over the active account, as its key issues it.
 ///
-/// `sync.quick` and `sync.full` cover both transports: the daemon's own pass
-/// body loads the Graph or the IMAP configuration itself, so the client-side
-/// fork the two arms had is gone and only the progress line still says which
-/// one it is.
-pub(super) fn run_sync(
-    commands: &dyn Queries,
-    method: &str,
-    account: &str,
-) -> (Result<String, String>, Vec<NewMailMeta>) {
-    match run_operation(commands, method, json!({"account": account})) {
-        Ok(settled) => (
-            Ok(sync_status_line(account, &settled)),
-            new_inbox_mail(&settled),
-        ),
-        Err(e) => (Err(e), Vec::new()),
+/// The three client-side checks stay ahead of the call, each because its
+/// sentence belongs to the key and not to `mp`: the gate that parks a pass
+/// behind the one already running, the transport check whose refusal the daemon
+/// words for `mp sync`, and the progress line, which still says "(Graph)"
+/// because that is what the user reads while it runs.
+fn start_pass(app: &mut App, commands: &dyn Queries, method: &str, label: &str, action: Action) {
+    if super::actions::sync_is_blocked(app) {
+        return super::actions::park_until_idle(app, action, label);
     }
+    if !app.is_graph() && app.imap_config.is_none() {
+        return app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
+    }
+    let account = app.account_config.name.clone();
+    let account_index = app.active_account;
+    let awaited = if method == "sync.quick" {
+        Awaited::Quick {
+            account_index,
+            account: account.clone(),
+        }
+    } else {
+        Awaited::Full {
+            account_index,
+            account: account.clone(),
+        }
+    };
+    let progress = if app.is_graph() {
+        format!("{label} (Graph)...")
+    } else {
+        format!("{label}...")
+    };
+    app.set_status_level(progress, StatusLevel::Progress);
+    start_operation(app, commands, method, json!({"account": account}), awaited);
+}
+
+/// The startup auto-fetch's per-account quick pass (#0001).
+///
+/// Ungated, unlike [`start_pass`]: the accounts open concurrently and each one
+/// fetches as it comes up, so a second account may not be parked behind the
+/// first. A local-only account is a silent no-op, because the auto-fetch runs
+/// over every account and must not narrate one that has no server.
+fn start_account_pass(app: &mut App, commands: &dyn Queries, index: usize) {
+    let Some(account) = app.accounts.get(index) else {
+        return;
+    };
+    let graph = account.is_graph();
+    if graph && account.graph_config.is_none() {
+        return;
+    }
+    if !graph && account.imap_config.is_none() {
+        return;
+    }
+    let name = account.account_config.name.clone();
+    app.set_status_level(
+        if graph {
+            format!("Quick sync ({name}, Graph)...")
+        } else {
+            format!("Quick sync ({name})...")
+        },
+        StatusLevel::Progress,
+    );
+    start_operation(
+        app,
+        commands,
+        "sync.quick",
+        json!({"account": name}),
+        Awaited::Quick {
+            account_index: index,
+            account: name,
+        },
+    );
+}
+
+/// `send.approved` over the open Drafts directory.
+///
+/// The two client-side refusals are the key's own sentences: a view with no
+/// drafts directory answers what the empty scan answered, and a transport that
+/// cannot be resolved is named before an operation is started for it.
+fn send_approved(app: &mut App, commands: &dyn Queries) {
+    if app.active_drafts_dir().is_none() {
+        return app.set_status_level("No approved emails found".to_string(), StatusLevel::Success);
+    }
+    let graph = match super::helpers::resolve_send_transport(
+        &app.account_config,
+        app.graph_config.clone(),
+        app.smtp_config.clone(),
+    ) {
+        Ok((graph, _smtp)) => graph.is_some(),
+        Err(missing) => return app.set_status_level(missing.to_string(), StatusLevel::Error),
+    };
+    let account = app.account_config.name.clone();
+    let account_index = app.active_account;
+    app.set_status_level(
+        if graph {
+            "Sending approved via Graph...".to_string()
+        } else {
+            "Sending approved...".to_string()
+        },
+        StatusLevel::Progress,
+    );
+    start_operation(
+        app,
+        commands,
+        "send.approved",
+        json!({"account": account}),
+        Awaited::SendApproved { account_index },
+    );
+}
+
+/// `calendar.rsvp` for the row under the cursor.
+///
+/// The invitation's own iMIP payload is the source of truth for the reply and
+/// the daemon reads it itself; what stays here are the three refusals whose
+/// wording belongs to this key, the first of them the read
+/// `TUI_APP_STORE_RESIDUE` keeps in `app/mod.rs`.
+fn rsvp(app: &mut App, commands: &dyn Queries, msg: MessageRef, choice: RsvpChoice) {
+    if app.load_message_ics(msg).is_none() {
+        return app.set_status_level(
+            "That message carries no invitation to reply to".to_string(),
+            StatusLevel::Error,
+        );
+    }
+    if app.graph_config.is_some()
+        && app.account_config.auth_method == crate::config::AuthMethod::Graph
+    {
+        return app.set_status_level(
+            "RSVP is not supported for Graph accounts yet (#0036)".to_string(),
+            StatusLevel::Error,
+        );
+    }
+    if app.smtp_config.is_none() {
+        return app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
+    }
+    // The three words `calendar.rsvp` takes, which are `mp invite
+    // accept|tentative|decline`'s own subcommand names.
+    let response = match choice {
+        RsvpChoice::Accept => "accept",
+        RsvpChoice::Tentative => "tentative",
+        RsvpChoice::Decline => "decline",
+    };
+    let account = app.account_config.name.clone();
+    let account_index = app.active_account;
+    app.set_status_level(
+        format!("Sending {} reply...", choice.label().to_lowercase()),
+        StatusLevel::Progress,
+    );
+    start_operation(
+        app,
+        commands,
+        "calendar.rsvp",
+        json!({"account": account, "row_id": msg.row_id(), "response": response}),
+        Awaited::Rsvp { account_index },
+    );
 }
 
 /// The one line a finished pass shows.
@@ -430,32 +626,20 @@ fn new_inbox_mail(settled: &Value) -> Vec<NewMailMeta> {
 ///
 /// An account with no approved draft is `0 sent, 0 failed`, which is the
 /// sentence the in-process batch printed for an empty scan.
-pub(super) fn run_send_approved(commands: &dyn Queries, account: &str) -> Result<String, String> {
-    let settled = run_operation(commands, "send.approved", json!({"account": account}))?;
+fn approved_line(settled: &Value) -> String {
     let sent = settled["sent"].as_u64().unwrap_or_default();
     let failed = settled["failed"].as_u64().unwrap_or_default();
     if sent == 0 && failed == 0 {
-        return Ok("No approved emails found".to_string());
+        return "No approved emails found".to_string();
     }
-    Ok(format!("{sent} sent, {failed} failed"))
+    format!("{sent} sent, {failed} failed")
 }
 
-/// `calendar.rsvp` for the row `row_id` names, as the line the arm has always
-/// posted.
+/// `calendar.rsvp`'s settled outcome, as the line the arm has always posted.
 ///
 /// A reply that reached nobody is a failure and not a green line, which is the
 /// `any_succeeded` check the arm made on the outcome it had in hand.
-pub(super) fn run_rsvp(
-    commands: &dyn Queries,
-    account: &str,
-    row_id: i64,
-    response: &str,
-) -> Result<String, String> {
-    let settled = run_operation(
-        commands,
-        "calendar.rsvp",
-        json!({"account": account, "row_id": row_id, "response": response}),
-    )?;
+fn rsvp_line(settled: &Value) -> Result<String, String> {
     let organizer = settled["organizer"].as_str().unwrap_or_default();
     if !settled["delivered"].as_bool().unwrap_or(false) {
         return Err(format!("Failed to send RSVP to {organizer}"));
@@ -1463,43 +1647,91 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The operations, and the poll that stands in for the event (P5-U8)
+    // The operations, started here and finished by event (P5-U8)
     // -----------------------------------------------------------------------
 
-    /// An operation is followed from its `{operation_id}` to its terminal
-    /// state and answers with the `result` it settled with.
+    /// A started operation is remembered by id and counted as background
+    /// work, and its finished event lands as the `BgResult` its arm posted.
     ///
     /// `calendar.rebuild` is the cheapest real operation the fixture can run:
     /// it folds the stored replies onto the stored invitations of an account
-    /// with neither, which is a walk over an empty mailbox and a settled
-    /// operation. What is pinned is the machinery every sync, send-approved
-    /// and RSVP arm now rides on, not the fold.
+    /// with neither, so what is pinned is the machinery every sync,
+    /// send-approved and RSVP arm rides on, not the fold. The finish itself
+    /// arrives over a socket in a real run (`tests/tui_daemon_recovery.rs`),
+    /// so here the settled payload is handed to [`settled`] directly.
     #[test]
-    fn an_operation_is_polled_to_the_state_it_settled_in() {
+    fn a_started_operation_is_remembered_until_its_finish_lands() {
         let daemon = Daemon::new();
-        let settled = run_operation(&daemon, "calendar.rebuild", json!({"account": ACCOUNT}))
-            .expect("the rebuild settled");
-        assert_eq!(settled["account"], json!(ACCOUNT));
-        assert_eq!(settled["invites_seen"], json!(0));
+        let mut app = App::default_for_tests();
+
+        assert!(start_operation(
+            &mut app,
+            &daemon,
+            "calendar.rebuild",
+            json!({"account": ACCOUNT}),
+            Awaited::Quick {
+                account_index: 0,
+                account: ACCOUNT.to_string(),
+            },
+        ));
+        assert_eq!(app.bg_count, 1, "an operation is background work");
+
+        let landed = settled(
+            &Awaited::Quick {
+                account_index: 0,
+                account: ACCOUNT.to_string(),
+            },
+            &json!({
+                "operation_id": "whatever",
+                "state": "succeeded",
+                "result": {"blocked": false, "outcome": {
+                    "account": ACCOUNT, "severity": "ok", "saved": 1, "skipped": 2,
+                    "flags_updated": 0, "pruned": 0, "prunes_deferred": 0, "uid_rebound": 0,
+                    "uidvalidity_resets": 0, "bodies_truncated": 0, "non_converging": [],
+                    "failed_mutations": 0, "error": null, "new_inbox_mail": [],
+                }},
+            }),
+        );
+        match landed {
+            crate::tui::app::BgResult::Fetch { result, .. } => assert_eq!(
+                result.expect("a settled pass"),
+                "Synced: 1 new, 2 existing",
+                "the line the polled answer produced, from the same pure function"
+            ),
+            other => panic!("a quick pass lands as a Fetch, got {other:?}"),
+        }
     }
 
-    /// A refused operation is the daemon's own sentence, and it reaches the
-    /// caller as the `Err` the arm's `BgResult` has always carried.
+    /// A refused operation never starts, and the daemon's own sentence is what
+    /// the status line says.
     ///
     /// An account with no server configured is refused by `sync.quick` before
     /// an operation is created at all, which is the branch a sync over a
-    /// local-only account takes and the one whose wording lands on the status
-    /// line as `Fetch failed (<account>): …`.
+    /// local-only account takes.
     #[test]
     fn a_refused_sync_is_the_sentence_the_daemon_gave() {
         let daemon = Daemon::new();
-        let (result, arrivals) = run_sync(&daemon, "sync.quick", ACCOUNT);
-        let error = result.expect_err("an account with no server has nothing to sync");
+        let mut app = App::default_for_tests();
+
         assert!(
-            error.contains("configures no server"),
-            "the daemon's own refusal, verbatim: {error}"
+            !start_operation(
+                &mut app,
+                &daemon,
+                "sync.quick",
+                json!({"account": ACCOUNT}),
+                Awaited::Quick {
+                    account_index: 0,
+                    account: ACCOUNT.to_string(),
+                },
+            ),
+            "an account with no server has nothing to sync"
         );
-        assert!(arrivals.is_empty(), "a refused pass reported no arrivals");
+        let line = app.status_message.clone().expect("a refusal is shown");
+        assert!(
+            line.contains("configures no server"),
+            "the daemon's own refusal, verbatim: {line}"
+        );
+        assert_eq!(app.bg_count, 0, "nothing started, so nothing is pending");
     }
 
     /// The local search pass answers the rows the index holds, addressed by

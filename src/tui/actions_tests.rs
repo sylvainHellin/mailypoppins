@@ -1034,10 +1034,19 @@ fn deleting_a_drafts_row_calls_draft_discard() {
 
 /// An action `dispatch` does not own is handed back rather than swallowed.
 ///
-/// The seven operation-kind actions keep the arm they have in `handle_action`,
-/// which owns the thread and the `BgResult` their answer arrives on (see the
-/// module header). A `dispatch` that returned `true` for one of them would
-/// drop a sync on the floor.
+/// The operation-kind actions that still keep the arm they have in
+/// `handle_action`, which owns the thread and the `BgResult` their answer
+/// arrives on (see the module header). A `dispatch` that returned `true` for
+/// one of them would drop the work on the floor.
+///
+/// P5-U8 edit: `Action::Fetch` and `Action::Sync` left this list, because that
+/// unit's own contract (`src/tui/events_tests.rs`,
+/// `a_quick_sync_starts_an_operation_and_polls_nothing`) requires `dispatch` to
+/// own them: an operation is started there and its finish arrives as an
+/// `operation.finished` event, so there is no thread and no `BgResult` channel
+/// left for `handle_action` to own. `Action::Send` is not an operation of that
+/// kind - it is the undo-send hold's arm, which stays until P6-U1/U2 - and the
+/// two client-only rows are unchanged.
 #[test]
 fn an_operation_and_a_client_only_action_are_not_dispatchs_business() {
     let fixture = Fixture::new();
@@ -1046,8 +1055,6 @@ fn an_operation_and_a_client_only_action_are_not_dispatchs_business() {
     fixture.forget();
 
     for action in [
-        Action::Fetch,
-        Action::Sync,
         Action::Send,
         Action::CopyMessageRef,
         Action::OpenComposeWizard(ComposeMode::New),

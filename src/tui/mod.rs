@@ -5,6 +5,7 @@ mod actions_tests;
 mod bg;
 pub mod commands;
 mod event;
+pub mod events;
 #[cfg(test)]
 mod events_tests;
 mod helpers;
@@ -25,10 +26,8 @@ use mp_protocol::state::Bootstrap;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, BgResult, MailboxKind};
-use helpers::{
-    graph_watcher_loop, init_terminal, install_panic_hook, restore_terminal, watcher_loop,
-    WatchEvent,
-};
+use helpers::{init_terminal, install_panic_hook, restore_terminal};
+use session::QueryHandle;
 
 use crate::store::drafts;
 
@@ -110,31 +109,20 @@ fn run_loop(
     app.terminal_width = size.width;
     app.terminal_height = size.height;
 
-    // Spawn one watcher thread per account that has IMAP config
-    let (watch_tx, watch_rx) = mpsc::channel::<WatchEvent>();
-    for (i, acct) in app.accounts.iter_mut().enumerate() {
-        if let Some(ref imap_cfg) = acct.imap_config {
-            acct.watcher_active = true;
-            let tx = watch_tx.clone();
-            let imap_clone = imap_cfg.clone();
-            let acct_idx = i;
-            std::thread::spawn(move || {
-                watcher_loop(tx, imap_clone, acct_idx);
-            });
-        } else if let Some(ref graph_cfg) = acct.graph_config {
-            acct.watcher_active = true;
-            let tx = watch_tx.clone();
-            let graph_clone = graph_cfg.clone();
-            let acct_idx = i;
-            std::thread::spawn(move || {
-                graph_watcher_loop(tx, graph_clone, acct_idx);
-            });
-        }
+    // The daemon's event stream, which is where the two watcher threads per
+    // account went (P5-U8): the daemon holds the IDLE connection and the Graph
+    // poller now, beside the engine that ingests what they find, and this
+    // client is told about a tick rather than running one.
+    //
+    // `watcher_active` keeps its name and changes its meaning with them: it is
+    // the session's health, which is the honest answer to "is anything telling
+    // me about new mail", and the sidebar renders it unchanged.
+    let events = app.session.as_mut().and_then(session::Session::events);
+    let watching = events.is_some();
+    for acct in app.accounts.iter_mut() {
+        acct.watcher_active = watching;
     }
-    // Sync watcher_active for active account
-    if let Some(acct) = app.accounts.first() {
-        app.watcher_active = acct.watcher_active;
-    }
+    app.watcher_active = watching;
 
     // Background task results channel
     let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();
@@ -294,55 +282,20 @@ fn run_loop(
             }
         }
 
-        // Check background watcher
-        match watch_rx.try_recv() {
-            Ok(WatchEvent::Changed { account_index }) => {
-                let mut current_msg = Some(app::Message::MailboxChanged { account_index });
-                while let Some(m) = current_msg {
-                    current_msg = app.update(m);
-                }
+        // The daemon's events, drained in the same pre-draw pass and under the
+        // same two bounds as the terminal batch above (P5-U8): a first sync of
+        // a large mailbox publishing a row per message may not starve the
+        // paint. The door is a handle rather than `app.session`, because the
+        // drain takes `&mut App` and a borrow of the session inside it would
+        // collide.
+        if let Some(events) = events.as_ref() {
+            let door = app
+                .session
+                .as_ref()
+                .map(session::Session::handle)
+                .unwrap_or_else(QueryHandle::closed);
+            if events::drain(&mut app, &door, events) > 0 {
                 dirty = true;
-            }
-            Ok(WatchEvent::Reconnected { account_index }) => {
-                let acct_name = app.accounts.get(account_index)
-                    .map(|a| a.account_config.name.clone())
-                    .unwrap_or_default();
-                app.set_status(format!("Watch ({}): reconnected", acct_name));
-                if let Some(acct) = app.accounts.get_mut(account_index) {
-                    acct.watcher_active = true;
-                }
-                if account_index == app.active_account {
-                    app.watcher_active = true;
-                }
-                dirty = true;
-            }
-            Ok(WatchEvent::Error { account_index, message }) => {
-                let acct_name = app.accounts.get(account_index)
-                    .map(|a| a.account_config.name.clone())
-                    .unwrap_or_default();
-                app.set_status(format!("Watch ({}): {}", acct_name, message));
-                if let Some(acct) = app.accounts.get_mut(account_index) {
-                    acct.watcher_active = false;
-                }
-                if account_index == app.active_account {
-                    app.watcher_active = false;
-                }
-                dirty = true;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                // The watch_tx original is held by this function, so this arm
-                // is effectively unreachable during the run; guard the redraw
-                // on a real state change anyway so it cannot spin.
-                let was_active =
-                    app.watcher_active || app.accounts.iter().any(|a| a.watcher_active);
-                for acct in &mut app.accounts {
-                    acct.watcher_active = false;
-                }
-                app.watcher_active = false;
-                if was_active {
-                    dirty = true;
-                }
             }
         }
 

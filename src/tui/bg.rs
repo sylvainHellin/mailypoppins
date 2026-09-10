@@ -180,39 +180,7 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             account_index,
             result,
             new_inbox_mail,
-        } => {
-            record_sync_health(
-                app,
-                account_index,
-                result.as_ref().map(|_| ()).map_err(|e| e.as_str()),
-            );
-            match result {
-                Ok(msg) => {
-                    let text = if msg.is_empty() { "Fetch complete".into() } else { msg };
-                    let level = drained_sync_level(&text);
-                    app.set_status_level(text, level);
-                    // Desktop notification for genuinely new inbox mail
-                    // (#0009). Opt-in via `notifications = true` in
-                    // config.toml; no-op when the list is empty (read-flag
-                    // updates never populate it).
-                    if app.global_config.notifications && !new_inbox_mail.is_empty() {
-                        let account_name = app
-                            .accounts
-                            .get(account_index)
-                            .map(|a| a.account_config.name.as_str())
-                            .unwrap_or("");
-                        crate::notify::notify_new_mail(account_name, &new_inbox_mail);
-                    }
-                    refresh_after_server_sync(app, account_index);
-                }
-                Err(e) => {
-                    // Named, because a multi-account run turns an anonymous
-                    // "Fetch failed" into a line nobody can act on (#0068).
-                    let name = account_label(app, account_index);
-                    app.set_status_level(format!("Fetch failed{name}: {e}"), StatusLevel::Error)
-                }
-            }
-        }
+        } => land_sync(app, account_index, result, new_inbox_mail),
 
         BgResult::Sync { account_index, result } => {
             record_sync_health(
@@ -404,20 +372,70 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
     }
 }
 
+/// Land one finished quick pass: the status line, the account's health mark,
+/// the desktop notification and the refresh the rows owe.
+///
+/// Two callers and one behaviour (P5-U8). A pass this client asked for arrives
+/// as [`BgResult::Fetch`] when its `operation.finished` lands; a pass the
+/// daemon's own watcher ran arrives as a `sync.completed` event nobody asked
+/// for. Both are one tick over one account and read the same way, and the
+/// account's mark (#0071) and the wording (#0068) may not depend on which of
+/// the two brought it.
+///
+/// `bg_count` is deliberately not touched here: the caller that started
+/// background work is the caller that counts it down.
+pub(super) fn land_sync(
+    app: &mut App,
+    account_index: usize,
+    result: Result<String, String>,
+    new_inbox_mail: Vec<crate::notify::NewMailMeta>,
+) {
+    record_sync_health(
+        app,
+        account_index,
+        result.as_ref().map(|_| ()).map_err(|e| e.as_str()),
+    );
+    match result {
+        Ok(msg) => {
+            let text = if msg.is_empty() {
+                "Fetch complete".into()
+            } else {
+                msg
+            };
+            let level = drained_sync_level(&text);
+            app.set_status_level(text, level);
+            // Desktop notification for genuinely new inbox mail (#0009).
+            // Opt-in via `notifications = true` in config.toml; no-op when the
+            // list is empty (read-flag updates never populate it).
+            if app.global_config.notifications && !new_inbox_mail.is_empty() {
+                let account_name = app
+                    .accounts
+                    .get(account_index)
+                    .map(|a| a.account_config.name.as_str())
+                    .unwrap_or("");
+                crate::notify::notify_new_mail(account_name, &new_inbox_mail);
+            }
+            refresh_after_server_sync(app, account_index);
+        }
+        Err(e) => {
+            // Named, because a multi-account run turns an anonymous "Fetch
+            // failed" into a line nobody can act on (#0068).
+            let name = account_label(app, account_index);
+            app.set_status_level(format!("Fetch failed{name}: {e}"), StatusLevel::Error)
+        }
+    }
+}
+
 /// Fold one row delta into the open list, or ask for the mailbox again
 /// (P5-U4).
 ///
-/// The consumer end of [`crate::tui::queries::MessageRowDelta`], and the seam
-/// P5-U8 connects to the session's event stream: this build subscribes to that
-/// stream and drains none of it (P5-U2), and it starts no account runtime, so
-/// no event exists to drain yet. What is here is the whole of what an event
-/// costs the list once one does: a replace lands where the row stands, a
-/// removal drops it, and anything the client cannot apply reloads the mailbox
-/// through the same off-thread path a mailbox switch takes.
+/// The consumer end of [`crate::tui::queries::MessageRowDelta`], called by the
+/// event drain (P5-U8): a replace lands where the row stands, a removal drops
+/// it, and anything the client cannot apply reloads the mailbox through the
+/// same off-thread path a mailbox switch takes.
 ///
 /// The cache slot moves with the list, because the two share the allocation and
 /// a slot that kept the pre-delta rows would undo the delta on the next visit.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowDelta) -> bool {
     let Some(mailbox) = app.current_local_mailbox_key() else {
         return true;

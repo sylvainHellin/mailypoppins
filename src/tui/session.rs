@@ -20,17 +20,29 @@
 //! `MAILYPOPPINS_DAEMON_REQUIRE` flag that a run really did reach a daemon. A
 //! second connect routine here would be a second set of those decisions.
 //!
-//! # What it does not do yet
+//! # The events, and the daemon going away
 //!
-//! Consume events. The connection is a subscriber from its first
-//! `state.bootstrap` on, and the daemon queues `state.event` notifications for
-//! it, but nothing here reads them: the TUI's watcher threads still drive
-//! refreshes and P5-U7/U8 replace them. [`mp_client::Connection`] buffers a
-//! notification it meets while reading a reply, so the notifications that
-//! arrive between two calls are held rather than mistaken for answers. That
-//! buffer is unbounded, which is safe only because this build starts no account
-//! runtime and therefore produces no events; draining it is P5-U8's, and
-//! `BACKLOG.md` carries it.
+//! The connection is a subscriber from its first `state.bootstrap` on, and the
+//! thread reads that stream between calls (P5-U8): every notification is
+//! decoded into an [`Incoming`] and posted to the UI thread, which drains it
+//! before the next paint. [`mp_client::Connection`] buffers a notification it
+//! meets while reading a reply, so nothing is mistaken for an answer and
+//! nothing is dropped; what used to make that buffer unbounded was that nobody
+//! read it, and somebody does now.
+//!
+//! A daemon that goes away is read off the same stream: the notification
+//! reader answering `None` is the socket closing, which is posted as
+//! [`Incoming::Disconnected`] and followed by reconnect attempts on a widening
+//! gap. A call made while there is no daemon is refused at once rather than
+//! waiting out the 30 s ceiling, and **nothing falls back to the store**: a
+//! client that answered a dead daemon by opening the store itself would be the
+//! second engine the whole architecture exists to prevent.
+//!
+//! The reconnect goes through [`crate::daemon::client::reopen_session`], which
+//! is `client_session` with the exit-4 diagnostic replaced by a `None`: the
+//! auto-start policy and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping are the
+//! same ones, because a reconnect is a connect, but a TUI on the alternate
+//! screen may not be ended by a diagnostic printed into a terminal in raw mode.
 //!
 //! # Lifetime
 //!
@@ -49,7 +61,11 @@ use log::{info, warn};
 use serde_json::Value;
 use tokio::sync::mpsc as async_mpsc;
 
+use mp_client::Connection;
 use mp_protocol::state::Bootstrap;
+use mp_protocol::{EventEnvelope, METHOD_STATE_EVENT, METHOD_STATE_RESYNC_REQUIRED};
+
+use super::events::{Incoming, Subscription};
 
 /// How long [`Session::connect`] waits for the connect-and-handshake sequence
 /// before giving up on the session thread.
@@ -62,6 +78,16 @@ const CONNECT_CEILING: Duration = Duration::from_secs(30);
 
 /// How long a blocking [`Session::call`] waits for its answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// First gap between reconnect attempts after the daemon went away.
+///
+/// Short, because the common case is a daemon that was restarted deliberately
+/// and is back within a second; the gap widens to [`RECONNECT_MAX`] so a
+/// machine with no daemon coming back does not spend the session connecting.
+const RECONNECT_MIN: Duration = Duration::from_millis(250);
+
+/// The longest gap between two reconnect attempts.
+const RECONNECT_MAX: Duration = Duration::from_secs(2);
 
 /// One method call handed to the session thread, with what to do with the
 /// answer.
@@ -80,6 +106,9 @@ pub struct Session {
     /// `None` once [`Session::close`] has run, which is what makes closing
     /// twice (explicitly, then in `Drop`) harmless.
     calls: Option<async_mpsc::UnboundedSender<Call>>,
+    /// The UI thread's end of the event stream, handed out once by
+    /// [`Session::events`] and `None` afterwards: one drain, one reader.
+    events: Option<Subscription>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -104,8 +133,9 @@ impl Session {
     /// `Err` is a wedged session thread and nothing else; every ordinary
     /// failure to reach a daemon has already exited by then.
     pub fn connect() -> Result<Session> {
-        let (calls, mut inbox) = async_mpsc::unbounded_channel::<Call>();
+        let (calls, inbox) = async_mpsc::unbounded_channel::<Call>();
         let (ready, connected) = sync_mpsc::sync_channel::<()>(1);
+        let (events, subscription) = sync_mpsc::channel::<Incoming>();
 
         let thread = std::thread::Builder::new()
             .name("mp-tui-session".to_string())
@@ -123,23 +153,16 @@ impl Session {
                 runtime.block_on(async move {
                     // Exits the process with the exit-4 diagnostic when no
                     // daemon can be reached, which is the contract every
-                    // migrated command already runs under.
-                    let mut connection = crate::daemon::client::client_session().await;
+                    // migrated command already runs under. Only the *first*
+                    // connect does: a reconnect answers instead of ending a run
+                    // that is already on the alternate screen.
+                    let connection = crate::daemon::client::client_session().await;
                     info!("[tui] daemon session open");
                     // A closed receiver means `connect` gave up waiting; the
                     // loop below still runs, and the first dropped sender ends
                     // it.
                     let _ = ready.try_send(());
-                    while let Some(call) = inbox.recv().await {
-                        let answer = connection
-                            .call(&call.method, call.params)
-                            .await
-                            .map_err(|e| format!("{e}"));
-                        if let Err(ref e) = answer {
-                            warn!("[tui] {} failed: {e}", call.method);
-                        }
-                        (call.then)(answer);
-                    }
+                    serve(connection, inbox, events).await;
                     info!("[tui] daemon session closed");
                 });
             })?;
@@ -147,6 +170,7 @@ impl Session {
         match connected.recv_timeout(CONNECT_CEILING) {
             Ok(()) => Ok(Session {
                 calls: Some(calls),
+                events: Some(subscription),
                 thread: Some(thread),
             }),
             Err(e) => Err(anyhow!(
@@ -189,8 +213,20 @@ impl Session {
             .expect("a test session thread");
         Session {
             calls: Some(calls),
+            // Nothing publishes to a fixture, so a test that asked for the
+            // stream would drain an empty one for ever; the rows that exercise
+            // the drain feed it a `Sender` of their own.
+            events: None,
             thread: Some(thread),
         }
+    }
+
+    /// The event stream, once.
+    ///
+    /// `None` on the second call and for a session that serves no daemon: the
+    /// drain is the loop's and there is exactly one of it.
+    pub fn events(&mut self) -> Option<Subscription> {
+        self.events.take()
     }
 
     /// Post a call and hand its answer to `then`, on the session thread.
@@ -324,6 +360,113 @@ impl QueryHandle {
             None => Err(anyhow!("{method}: the daemon session is closed")),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The session thread
+// ---------------------------------------------------------------------------
+
+/// Answer calls and publish events until the last door is dropped (P5-U8).
+///
+/// One `select!` over the two things that can happen: the UI thread asks
+/// something, or the daemon says something. They share the connection, so they
+/// cannot both hold it, and a loop that read notifications only between calls
+/// would sit on an event until the next keystroke.
+///
+/// Both futures are cancellation-safe, which is what makes the `select!` sound:
+/// `recv` on a tokio channel is, and `next_notification` awaits nothing but one
+/// `read` and decodes what that read returned before it awaits again.
+async fn serve(
+    mut connection: Connection,
+    mut inbox: async_mpsc::UnboundedReceiver<Call>,
+    events: sync_mpsc::Sender<Incoming>,
+) {
+    loop {
+        // Connected: serve calls, publish notifications.
+        let lost = loop {
+            tokio::select! {
+                call = inbox.recv() => {
+                    let Some(call) = call else { return };
+                    let answer = connection
+                        .call(&call.method, call.params)
+                        .await
+                        .map_err(|e| format!("{e}"));
+                    if let Err(ref e) = answer {
+                        warn!("[tui] {} failed: {e}", call.method);
+                    }
+                    (call.then)(answer);
+                }
+                notification = connection.next_notification() => match notification {
+                    Some(notification) => publish(&events, notification),
+                    None => break "the daemon closed the connection".to_string(),
+                },
+            }
+        };
+
+        // Disconnected: say so, refuse what is asked, and try again.
+        warn!("[tui] the daemon session was lost: {lost}");
+        if events
+            .send(Incoming::Disconnected { reason: lost })
+            .is_err()
+        {
+            return;
+        }
+        let mut gap = RECONNECT_MIN;
+        // A deadline and not a fresh `sleep` per iteration: the UI thread polls
+        // this session while it waits, and a timer recreated on every refused
+        // call would be reset before it ever fired.
+        let mut next_attempt = tokio::time::Instant::now() + gap;
+        connection = loop {
+            tokio::select! {
+                call = inbox.recv() => {
+                    let Some(call) = call else { return };
+                    // At once rather than after the 30 s ceiling, and from
+                    // nowhere else: a client that answered a dead daemon out of
+                    // the store would be a second engine.
+                    (call.then)(Err("the daemon is not reachable".to_string()));
+                }
+                _ = tokio::time::sleep_until(next_attempt) => {
+                    if let Some((connection, instance_id)) =
+                        crate::daemon::client::reopen_session().await
+                    {
+                        info!("[tui] reconnected to daemon instance {instance_id}");
+                        if events.send(Incoming::Reconnected { instance_id }).is_err() {
+                            return;
+                        }
+                        break connection;
+                    }
+                    gap = (gap * 2).min(RECONNECT_MAX);
+                    next_attempt = tokio::time::Instant::now() + gap;
+                }
+            }
+        };
+    }
+}
+
+/// One server-initiated notification as the UI thread's [`Incoming`].
+///
+/// A notification of a method this client does not read is dropped here rather
+/// than posted: the drain's bound is a budget for the paint, and spending it on
+/// frames nothing reacts to would make a chatty daemon cost the screen.
+fn publish(events: &sync_mpsc::Sender<Incoming>, notification: mp_protocol::Notification) {
+    let incoming = match notification.method.as_str() {
+        METHOD_STATE_EVENT => match serde_json::from_value::<EventEnvelope>(notification.params) {
+            Ok(envelope) => Incoming::Event(envelope),
+            Err(e) => return warn!("[tui] a state.event did not decode: {e}"),
+        },
+        METHOD_STATE_RESYNC_REQUIRED => Incoming::Resync {
+            instance_id: notification.params["instance_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            reason: notification.params["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        },
+        other => return info!("[tui] ignoring the {other} notification"),
+    };
+    let _ = events.send(incoming);
 }
 
 /// Post one call and block for its answer, which is what both doors do.

@@ -21,14 +21,13 @@
 //! # The rule that keeps today's frames byte-identical
 //!
 //! [`App::apply_bootstrap`] touches an account **only while it is still
-//! `opening`**. Until P5-U4 replaces it, the store-backed background open of
-//! #0003 is still the thing that reads the real counts, and it clears `opening`
-//! when it lands. A daemon in this build starts no account runtime
-//! (`MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES` is off until P5-U8), so every
-//! account it reports is `opening` with zeroed counts - exactly what
-//! `App::new` already built - and a bootstrap that arrives first therefore
-//! changes nothing, while one that arrives second cannot overwrite counts the
-//! store already answered with zeros.
+//! `opening`**: the background open of #0003 clears that marker when it lands
+//! with the counts the account really has, and a bootstrap that arrives after
+//! it may not put a snapshot's numbers back over them.
+//!
+//! It is also the one place the event watermark is set (P5-U8), which is why a
+//! resync and a reconnect are both spelled "bootstrap again" rather than
+//! "clear a flag".
 
 use mp_protocol::state::{Bootstrap, MailboxRow};
 
@@ -100,6 +99,19 @@ impl App {
     /// skipped whole (see the module header): until P5-U4 moves the row loading
     /// onto the daemon, that open is the fresher answer.
     pub fn apply_bootstrap(&mut self, bootstrap: &Bootstrap) {
+        // The only place a watermark is set (P5-U8). The instance and the
+        // revision are the daemon's word about the state this snapshot
+        // describes, so every event above it is comparable and everything at or
+        // below it is already here.
+        let orphaned = self
+            .events
+            .watermark(&bootstrap.instance_id, bootstrap.revision);
+        if orphaned > 0 {
+            // The daemon that was running them is gone, so the spinner they
+            // are holding up would never come down.
+            log::warn!("[events] {orphaned} operation(s) died with the previous daemon");
+            self.bg_count = self.bg_count.saturating_sub(orphaned);
+        }
         for account in &bootstrap.snapshot.accounts {
             let Some(index) = self
                 .accounts

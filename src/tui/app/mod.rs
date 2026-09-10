@@ -210,6 +210,15 @@ pub struct App {
     /// which is everywhere. Dropping it closes the socket, so quitting the TUI
     /// ends the session without a teardown path having to remember to.
     pub session: Option<super::session::Session>,
+
+    /// What this client remembers about the daemon's event stream (P5-U8): the
+    /// instance whose revisions are comparable, the watermark inside it, and
+    /// the operations this client started and has not seen finish.
+    ///
+    /// On the `App` rather than in a thread-local because it is model state:
+    /// two `App`s in one process (a test, a future second window) may not share
+    /// a watermark, and an operation belongs to the client that started it.
+    pub events: super::events::EventState,
 }
 
 impl Default for App {
@@ -363,6 +372,7 @@ impl App {
             server_search_generation: 0,
             global_config,
             session: None,
+            events: super::events::EventState::default(),
         }
     }
 
@@ -442,6 +452,7 @@ impl App {
             server_search_generation: 0,
             global_config: crate::config::GlobalConfig::default(),
             session: None,
+            events: super::events::EventState::default(),
         }
     }
 

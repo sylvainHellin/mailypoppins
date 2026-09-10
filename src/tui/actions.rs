@@ -7,7 +7,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{
     mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus, HeldSend,
-    MailboxKind, MessageRef, Overlay, RsvpChoice, SearchOverlayFocus, StatusLevel,
+    MailboxKind, MessageRef, Overlay, SearchOverlayFocus, StatusLevel,
 };
 use super::helpers::{
     edit_file, lib_do_multi_search_graph, resume_terminal, suspend_terminal,
@@ -62,7 +62,7 @@ pub(super) fn queued_action_is_releasable(app: &App) -> bool {
 /// every keypress. Mutations now enqueue silently into the durable queue and
 /// block nothing, so the only thing a sync can wait behind is another sync or
 /// fetch, and the line says just that.
-fn park_until_idle(app: &mut App, action: Action, label: &str) {
+pub(super) fn park_until_idle(app: &mut App, action: Action, label: &str) {
     let already_parked = app
         .queued_action
         .as_ref()
@@ -980,120 +980,6 @@ pub(super) fn handle_action(
                 app.held_send = Some(held);
             }
         }
-        Action::Rsvp { msg, choice } => {
-            // The invitation's own iMIP payload is the source of truth for the
-            // reply, and it lives in the message's blob (#0038 item 6). The
-            // account is the active one by construction: the reference names a
-            // row in its store.
-            // The invite guard stays client-side: `load_message_ics` is one of
-            // the three reads the query layer's residue table keeps
-            // (`app/mod.rs`), and it is the sentence this key has always
-            // printed for a row that carries no invitation. The daemon reads
-            // the payload itself; nothing is handed to it.
-            if app.load_message_ics(msg).is_none() {
-                app.set_status_level(
-                    "That message carries no invitation to reply to".to_string(),
-                    StatusLevel::Error,
-                );
-                return Ok(());
-            }
-            let acct_idx = app.active_account;
-            let account = app.account_config.name.clone();
-
-            if app.graph_config.is_some()
-                && app.account_config.auth_method == crate::config::AuthMethod::Graph
-            {
-                app.set_status_level(
-                    "RSVP is not supported for Graph accounts yet (#0036)".to_string(),
-                    StatusLevel::Error,
-                );
-                return Ok(());
-            }
-            if app.smtp_config.is_none() {
-                app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
-                return Ok(());
-            }
-            // The three words `calendar.rsvp` takes, which are `mp invite
-            // accept|tentative|decline`'s own subcommand names.
-            let response = match choice {
-                RsvpChoice::Accept => "accept",
-                RsvpChoice::Tentative => "tentative",
-                RsvpChoice::Decline => "decline",
-            };
-
-            app.bg_count += 1;
-            app.set_status_level(
-                format!("Sending {} reply...", choice.label().to_lowercase()),
-                StatusLevel::Progress,
-            );
-            let tx = bg_tx.clone();
-            let door = daemon_door(app);
-            let row_id = msg.row_id();
-            std::thread::spawn(move || {
-                let result = commands::run_rsvp(&door, &account, row_id, response);
-                let _ = tx.send(BgResult::Rsvp {
-                    account_index: acct_idx,
-                    result,
-                });
-            });
-        }
-
-        Action::SendApproved => {
-            // `mp send-approved` in-process, over the same one send
-            // implementation the single-draft key and the CLI use (#0058):
-            // every approved draft in the open Drafts directory goes through
-            // [`crate::send::send_draft`], which owns the outbox commit, the
-            // transport choice and the draft file's fate. What is counted
-            // here is only how many made it.
-            // Only the Drafts mailbox has a directory to scan; from anywhere
-            // else the answer is the one the old directory walk gave, without
-            // walking a tree that has not existed since the store cutover.
-            if app.active_drafts_dir().is_none() {
-                app.set_status_level(
-                    "No approved emails found".to_string(),
-                    StatusLevel::Success,
-                );
-                return Ok(());
-            }
-            // A Graph account sends over Graph or not at all: an SMTP config
-            // that happens to be loaded is not a fallback for a Graph config
-            // that is not (see `resolve_send_transport`). The check stays
-            // client-side because its sentence is this key's, and because the
-            // progress line below says which transport was resolved.
-            let is_graph = match super::helpers::resolve_send_transport(
-                &app.account_config,
-                app.graph_config.clone(),
-                app.smtp_config.clone(),
-            ) {
-                Ok((graph, _smtp)) => graph.is_some(),
-                Err(missing) => {
-                    app.set_status_level(missing.to_string(), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
-
-            app.bg_count += 1;
-            app.set_status_level(
-                if is_graph {
-                    "Sending approved via Graph...".to_string()
-                } else {
-                    "Sending approved...".to_string()
-                },
-                StatusLevel::Progress,
-            );
-            let acct_idx = app.active_account;
-            let account = app.account_config.name.clone();
-            let tx = bg_tx.clone();
-            let door = daemon_door(app);
-            std::thread::spawn(move || {
-                let result = commands::run_send_approved(&door, &account);
-                let _ = tx.send(BgResult::SendApproved {
-                    account_index: acct_idx,
-                    result,
-                });
-            });
-        }
-
         Action::NewDraft => {
             let name = chrono::Local::now()
                 .format("draft-%Y%m%d-%H%M%S")
@@ -1246,45 +1132,6 @@ pub(super) fn handle_action(
             }
         },
 
-        Action::Fetch => {
-            if sync_is_blocked(app) {
-                park_until_idle(app, Action::Fetch, "Quick sync");
-                return Ok(());
-            }
-            // The transport check stays client-side: the daemon's own refusal
-            // for an account with nothing to sync is worded for `mp sync`,
-            // and this is the sentence the key has always printed.
-            if !app.is_graph() && app.imap_config.is_none() {
-                app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                return Ok(());
-            }
-            let account = app.account_config.name.clone();
-            let acct_idx = app.active_account;
-            let tx = bg_tx.clone();
-            let door = daemon_door(app);
-            app.bg_count += 1;
-            app.set_status_level(
-                if app.is_graph() {
-                    "Quick sync (Graph)...".to_string()
-                } else {
-                    "Quick sync...".to_string()
-                },
-                StatusLevel::Progress,
-            );
-            // The thread stays: an operation answers `{operation_id}` at once
-            // and finishes later, so something has to wait for it, and it may
-            // not be the draw thread. P5-U8 turns the wait into a
-            // subscription.
-            std::thread::spawn(move || {
-                let (result, new_inbox_mail) = commands::run_sync(&door, "sync.quick", &account);
-                let _ = tx.send(BgResult::Fetch {
-                    account_index: acct_idx,
-                    result,
-                    new_inbox_mail,
-                });
-            });
-        }
-
         Action::LoadMailbox { mailbox_idx, generation } => {
             // Background mailbox load (P1 step 2, daemon-backed since P5-U4).
             // Queued by `App::request_mailbox_load` on cache-miss
@@ -1325,48 +1172,6 @@ pub(super) fn handle_action(
                     mailbox_idx,
                     generation,
                     entries,
-                });
-            });
-        }
-
-        Action::FetchAccount(acct_idx) => {
-            // Per-account quick sync used by the startup auto-fetch path.
-            // Triggered from `BgResult::IndexReady` once that account's
-            // `message_id_index` has been populated. Unlike `Action::Fetch`,
-            // does *not* gate on `bg_count > 0` -- multiple accounts'
-            // fetches must be allowed to run concurrently.
-            let acct = match app.accounts.get(acct_idx) {
-                Some(a) => a,
-                None => return Ok(()),
-            };
-            let account = acct.account_config.name.clone();
-            let graph = acct.is_graph();
-            // A local-only account (no Graph, no IMAP) is still a silent
-            // no-op: the startup auto-fetch runs over every account and must
-            // not narrate one that has no server.
-            if graph && acct.graph_config.is_none() {
-                return Ok(());
-            }
-            if !graph && acct.imap_config.is_none() {
-                return Ok(());
-            }
-            let tx = bg_tx.clone();
-            let door = daemon_door(app);
-            app.bg_count += 1;
-            app.set_status_level(
-                if graph {
-                    format!("Quick sync ({account}, Graph)...")
-                } else {
-                    format!("Quick sync ({account})...")
-                },
-                StatusLevel::Progress,
-            );
-            std::thread::spawn(move || {
-                let (result, new_inbox_mail) = commands::run_sync(&door, "sync.quick", &account);
-                let _ = tx.send(BgResult::Fetch {
-                    account_index: acct_idx,
-                    result,
-                    new_inbox_mail,
                 });
             });
         }
@@ -1470,40 +1275,6 @@ pub(super) fn handle_action(
             fetch_search_hit(app, bg_tx);
         }
 
-        Action::Sync => {
-            if sync_is_blocked(app) {
-                park_until_idle(app, Action::Sync, "Full sync");
-                return Ok(());
-            }
-            if !app.is_graph() && app.imap_config.is_none() {
-                app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
-                return Ok(());
-            }
-            let account = app.account_config.name.clone();
-            let acct_idx = app.active_account;
-            let tx = bg_tx.clone();
-            let door = daemon_door(app);
-            app.bg_count += 1;
-            app.set_status_level(
-                if app.is_graph() {
-                    "Full sync (Graph)...".to_string()
-                } else {
-                    "Full sync...".to_string()
-                },
-                StatusLevel::Progress,
-            );
-            std::thread::spawn(move || {
-                let (result, _arrivals) = commands::run_sync(&door, "sync.full", &account);
-                // A full sync posts no arrival list: `BgResult::Sync` never
-                // carried one, because the notification (#0009) rides on the
-                // quick pass the watcher drives.
-                let _ = tx.send(BgResult::Sync {
-                    account_index: acct_idx,
-                    result,
-                });
-            });
-        }
-
         Action::OpenComposeWizard(mode) => {
             open_compose_wizard(app, mode);
         }
@@ -1592,11 +1363,16 @@ pub(super) fn handle_action(
             edit_signature_file(app, terminal, &name)?;
         }
 
-        // The fifteen the command layer owns (P5-U6). Listed rather than
-        // wildcarded so a new action still has to be classified here, and
-        // unreachable because `dispatch` answered `true` for every one of them
-        // before this match was entered.
-        Action::Approve
+        // The twenty the command layer owns (P5-U6's fifteen and P5-U8's five
+        // operations). Listed rather than wildcarded so a new action still has
+        // to be classified here, and unreachable because `dispatch` answered
+        // `true` for every one of them before this match was entered.
+        Action::Fetch
+        | Action::Sync
+        | Action::FetchAccount(_)
+        | Action::SendApproved
+        | Action::Rsvp { .. }
+        | Action::Approve
         | Action::BatchApprove(_)
         | Action::MarkDraft
         | Action::BatchMarkDraft(_)
