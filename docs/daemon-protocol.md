@@ -202,6 +202,10 @@ Together the two rules give the invariant: a change made anywhere around a boots
 `state.bootstrap` is a query and sits behind the handshake gate like every other domain method: called before `initialize` it is `not_initialized`, and the connection stays usable.
 Bootstrapping twice on one connection is allowed and is what a client does after a gap, a resync request or an instance change.
 
+The whole result is typed as `mp_protocol::state::Bootstrap` since P5-U2, so a client decodes one answer into one value (`serde_json::from_value::<Bootstrap>(result)`) rather than indexing a map with string literals.
+An account `state` and a `sync_health.state` are enums there, because both are closed sets this protocol version fixes and a client branches on them; every collection defaults, so a section a client does not read yet cannot stop it from starting.
+The daemon still renders the object by hand in `src/daemon/state/snapshot.rs`, which owns the state these are a projection of.
+
 ### Read-only methods
 
 `account.list`, `mailbox.list`, `message.get`, `message.list` and `message.search` are the read-only domain methods.
@@ -865,3 +869,4 @@ The admin slice (P4-U14) added three families' worth of methods and three to `co
 `config.cutover` `{account, dry_run}` settles `{account, dry_run, drafts: {imported, already_indexed, skipped, collisions}, remnants: [{path, md_files, bytes}]}`, with `skipped` and `collisions` already rendered as the sentences the report prints; `config.oauth2_login` `{account}` reports `{phase: "device_code", done: 0, total: null, message: "<verification_uri> <user_code>"}` and settles `{stored, account, kind, key}`, the browser launch staying client-side (`INT-04`); `config.reset_secrets` `{}` -> `{removed: [path]}` is a command naming the secrets file first and then the token caches, in path order.
 Four of these results carry a path deliberately, because the command prints one and a client cannot compute it: `contact.stats.cache_path` and `contact.rebuild`'s settled `cache_path`, `config.cutover`'s `remnants[].path` and `drafts.imported[]`, and `config.reset_secrets`'s `removed[]`, beside `config.get`'s `path`.
 `config.get`'s `config` is the *effective* configuration, which means after serde defaults and not after the engine's clamps: a configuration that omits `smtp.port` reports `465` and one that omits `imap.port` reports `993`, where the pre-daemon binary printed `0` for both.
+P5-U2 added `mp_protocol::state`, the typed decode of the `state.bootstrap` result described above, which is a client-side shape and moves nothing on the wire.

@@ -1810,3 +1810,24 @@ After P4-U12 every send runs inside the daemon, `daemon::lifecycle::spawn_detach
 The client could not fix it either: no attachment path crosses the wire, because `send.draft` carries a selector and the daemon reads the draft file itself, so there was nothing for `client::absolutise` to rewrite short of editing the user's draft on disk. The anchor became the draft file's own directory, which is the one location both processes agree on, and it is a *parameter* of the function now. That is the general shape: a library function that resolves a relative path takes the anchor from its caller, and only the outermost client-side layer is allowed to ask the environment where it is standing.
 
 The grep that finds the rest is `rg 'current_dir\(\)' src/` outside `src/daemon/client.rs` and `src/main.rs`.
+
+## `MAILYPOPPINS_DAEMON_REQUIRE=1` cannot be set on a run that has to auto-start its daemon
+
+`REQUIRE` is inherited by every child, and the child an auto-start spawns is `mp daemon run`, which is on the no-daemon list.
+`main` refuses that combination on purpose - "`mp daemon run` is on the no-daemon list, so `MAILYPOPPINS_DAEMON_REQUIRE` cannot be satisfied" - so the daemon exits 1, the start fails, and the client that asked for it reports exit 4 for a daemon that would have started perfectly without the variable.
+
+A smoke test that wants both starts the daemon first (`mp daemon start`, no `REQUIRE`) and only then runs the command under `REQUIRE=1`.
+`tests/support/parity.rs` does exactly this, which is why the suites never met it; a by-hand run in a pty does.
+
+## A tokio connection belongs to the thread whose runtime created it
+
+The TUI's main loop is synchronous and `mp`'s `main` is `#[tokio::main]`, so there is no thread that can both paint frames and await a call: blocking on the current runtime from inside it panics, and an async `run_loop` would put frame painting on a worker thread.
+
+The obvious fix - connect in `main`, hand the `Connection` to the TUI - does not work either. `mp_client::Connection` holds a `tokio::net::UnixStream` registered with the I/O driver of the runtime that created it, so a handle moved onto a second runtime is bound to a driver that is not running.
+
+`src/tui/session.rs` therefore spawns a thread, builds a current-thread runtime *on it*, and connects *there*; the UI thread posts calls over a channel and gets answers back through a closure. The rule generalises: move the work to the runtime, never the resource.
+
+## `script -q` reports its own exit status, not the command's
+
+`timeout 25 script -qc "mp" /dev/null; echo $?` prints 0 whatever `mp` did, which makes a pty smoke test look like it passed.
+`-e` is the flag that propagates the child's status, and the typescript file records it either way as `[COMMAND_EXIT_CODE="4"]` on the `Script done` line.

@@ -110,6 +110,11 @@ The table is what routes and through what:
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
 | `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
+| `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
+
+The TUI's row is a session rather than a call: `mp` with no arguments connects through the same `client_session` every command above goes through, before it takes over the terminal, and holds the connection until the user quits.
+It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal, and it still opens each account's store in the background for the message rows, which P5-U3/U4 replace.
+A daemon it cannot reach ends the run with the ordinary exit-4 diagnostic, on a terminal that is still in its normal mode.
 
 `mp config path` is the one domain command that never contacts a daemon: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
 

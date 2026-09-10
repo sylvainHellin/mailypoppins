@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 has landed its tests; P5-U2 is next.
+Status: in-progress. P5-U1 and P5-U2 have landed; P5-U3 is next.
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -20,7 +20,7 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | unit | kind | commit | subject | status |
 |---|---|---|---|---|
 | P5-U1 | T | this commit | daemon-backed golden frames | done (tests) |
-| P5-U2 | I | | TUI initialisation via handshake + bootstrap | open |
+| P5-U2 | I | this commit | TUI initialisation via handshake + bootstrap | done |
 | P5-U3 | T | | the query layer contract | open |
 | P5-U4 | I | | the query layer | open |
 | P5-U5 | T | | actions to commands, the contract | open |
@@ -127,3 +127,53 @@ The line was restored before the commit.
 The equality oracle is only worth writing if it is reachable, so a plausible `from_bootstrap` was written in the same throwaway worktree (and discarded there) purely to run the suite: **20 passed, 2 failed**, the two failures being exactly the two unminted `…_daemon` snapshots.
 All 18 equality frames, the reproducibility row and the count-sensitivity row pass against an implementation that does what the contract section above describes, so P5-U2 is not being handed an assertion no implementation can satisfy.
 That implementation is not this commit's and is not proposed as P5-U2's; it exists only as the answer to "can these 18 frames be equal".
+
+## P5-U2: initialisation via handshake and bootstrap
+
+Three pieces, in the order a reader meets them.
+
+`crates/mp-protocol/src/state.rs` (248 lines before its tests) is the typed decode of the whole `state.bootstrap` result: `Bootstrap`, `Snapshot`, `AccountSnapshot`, `MailboxRow`, `DraftRow`, `OutboxCounts`, and the two closed enums `AccountState` and `SyncHealthState`.
+The daemon still renders the object by hand in `src/daemon/state/snapshot.rs`, which owns the state these are a projection of; this module is what every client decodes it with.
+
+`src/tui/app/bootstrap.rs` (195 lines before its tests) is `App::from_bootstrap` and the `App::apply_bootstrap` it delegates to.
+`App::new`'s ~90-field struct literal was extracted into `App::shell(global_config, accounts)` so the two constructors cannot drift; nothing else in `App::new` moved.
+
+`src/tui/session.rs` (233 lines) is the connection: a thread of its own with a current-thread runtime on it, reached over channels.
+
+### Decisions
+
+**The connection is created on the thread that owns it.** `mp`'s `main` is `#[tokio::main]`, so `tui::run` is already inside a runtime and cannot block on one; `run_loop` is a synchronous paint loop and cannot become async without moving frame painting onto a worker thread. A `Connection` holds a `tokio::net::UnixStream` registered with the runtime that created it, so connecting in `main` and moving the handle would bind it to a driver that is not running. The session thread therefore calls `client_session` itself, and the UI thread talks to it with `dispatch` (post and forget) or `call` (block for the answer, which is the door P5-U3 needs).
+
+**The session comes up before the terminal does.** `client_session` may start a daemon and may end the run with the exit-4 diagnostic, and neither reads well through a terminal already in raw mode on the alternate screen. It costs the connect and the handshake before the first paint; a cold auto-start costs its own budget on top, which is the number P5-U11 measures against `docs/baselines/pre-daemon/measurements.md` W5.
+
+**A bootstrap never overwrites an account that already opened.** `apply_bootstrap` skips any account whose `opening` is already clear, because until P5-U4 the store-backed background open of #0003 is still what reads the real counts. A daemon in this build starts no account runtime, so every account it reports is `opening` with zeroed counts, which is exactly what `App::new` already built: a bootstrap that arrives first changes nothing visible, and one that arrives second cannot replace a real count with a zero. The `opening` -> ready transition therefore still happens on `BgResult::AccountOpened`, the same signal as today, which is what keeps the frames byte-identical.
+
+**A wedged session is not fatal.** `Session::connect` returns `Err` only when the session thread does not come up within 30 s; every ordinary failure to reach a daemon has already exited by then. The TUI starts without a session in that case and the run's own `MAILYPOPPINS_DAEMON_REQUIRE` check fails on the way out, which is where a parity test looks.
+
+**The event stream is connected and not consumed.** The connection is a subscriber from its first `state.bootstrap` on, and `mp_client::Connection` buffers a notification it meets while reading a reply, so nothing is mistaken for an answer. That buffer is unbounded, which is safe only because this build starts no account runtime and therefore produces no events. Draining it is P5-U7/U8's.
+
+### The two minted snapshots
+
+`golden_opening_account_daemon` renders the four mailbox rows with `··` in the count column and the frozen fixture's list and preview beside them: the frame a daemon-backed TUI paints first, every time.
+`golden_extra_mailbox_daemon` renders five rows, the fifth being `󰉇 Projekte  0` with the extra-mailbox icon and no count of its own, and everything below the sidebar shifted by one row.
+Both were inspected against the frame their test describes before they were committed.
+
+### Follow-ups
+
+- The unbounded notification buffer above (P5-U8).
+- `mailbox_counts` takes each row's `total` unconditionally, including for an `opening` account. A real daemon reports zeros for one, so the two readings agree today; a daemon that reported counts for an account still coming up would show them behind the `··` marker rather than instead of it.
+- `App::apply_bootstrap` leaves an account the snapshot does not name alone rather than removing it: dropping an `AccountState` would invalidate `active_account` mid-frame, and a configuration reload is `config.changed`'s business (P5-U8).
+
+### Validation
+
+`timeout 1200 cargo test --workspace --offline` -> **2 108 passed, 0 failed**, `pgrep -af '[m]p daemon'` empty afterwards.
+That is P5-U1's 2 075 plus its 22 frames plus this unit's 11 unit tests (5 in `mp-protocol`, 6 in `app/bootstrap.rs`).
+
+`cargo test --offline --lib golden_frames` -> 20, `--lib golden_frames_daemon` -> 22, both green three times over.
+`git diff --stat 96c4b85..HEAD -- src/tui/ui/golden_frames*.rs tests/` is empty: no test file was edited.
+
+`mp --help` recursive and `mp dump-keys --json` byte-identical to the Phase 0 captures, from a binary rebuilt in the same run.
+`cargo clippy --workspace --offline --all-targets` -> 39 warnings, the baseline, none of them in a file this unit touched.
+
+A manual smoke in a pty, against a sandbox root in the `tests/support/parity.rs` layout (`HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` all pointing at one temp tree with a one-account `config.toml`): `mp` connected, painted the shell, applied the bootstrap 250 ms later (one idle poll tick, so after the first frame), rendered `Inbox ··` and `Drafts ··` at 120x40, and quit on `q` with exit 0 under `MAILYPOPPINS_DAEMON_REQUIRE=1`, the session closing before the process left.
+The same run against a tree with no daemon printed the exit-4 diagnostic on a terminal still in its normal mode and exited 4.
