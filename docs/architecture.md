@@ -48,23 +48,19 @@ It owns no policy, no paths and no configuration.
 Neither crate depends on `mailypoppins`, and that is the boundary that matters: a GUI links `mp-client` alone and cannot reach the engine by accident.
 The daemon itself is not a crate; it is `src/daemon/` inside the root package, because it drives the engine that already lives there.
 
-### The `daemon` feature
+### The `daemon` feature, and its removal
 
-`src/daemon/` is behind `#[cfg(feature = "daemon")]` for the whole migration.
-`cargo install --path .` ships an `mp` with not a byte of it, so the daemon cannot change what a user runs until P4-U1 removes the gate and makes the daemon the default.
+For Phases 2 to 3b, `src/daemon/` sat behind `#[cfg(feature = "daemon")]` and every daemon contract test had an explicit `[[test]]` target in `Cargo.toml` with `required-features = ["daemon"]`.
+Cargo skips building a target whose required features are unmet, which is what let a contract test land in one commit and its implementation in the next: the test commit's proof was that `cargo test` was green and unchanged while `cargo test --features daemon` failed to compile with unresolved imports naming exactly the contract items.
 
-Two test commands follow from that, and CI runs both:
+P4-U1 removed the feature.
+From Phase 4 the daemon is required by default, so there is one build, one test command and no `[[test]]` stanzas at all (Cargo autodiscovers `tests/*.rs`):
 
 ```sh
-cargo test --workspace                     # the product tree
-cargo test --workspace --features daemon   # the daemon and its contract tests
+cargo test --workspace   # the whole tree, daemon included
 ```
 
-Every daemon contract test gets an explicit `[[test]]` target in `Cargo.toml` with `required-features = ["daemon"]`.
-Cargo skips building a target whose required features are unmet, so a test file may reference `mailypoppins::daemon::…` or `mp_protocol::…` before either exists and the plain `cargo test` still compiles and passes.
-An explicit `[[test]]` block does not disable autodiscovery of the other test files, so nothing else had to move.
-
-The convention is what lets a contract test land in one commit and its implementation in the next: the test commit's proof is that `cargo test` is green and unchanged while `cargo test --features daemon` fails to compile with unresolved imports naming exactly the contract items.
+What did not change is the help surface: `mp daemon`, `mp account` and the global `--daemon` flag keep `#[command(hide = true)]` / `hide = true`, so `mp --help` stays byte-identical to `docs/baselines/pre-daemon/cli-help.txt` until a later unit moves it deliberately.
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
 It counts `#[test]` attributes by scanning `src/tui/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
@@ -441,7 +437,7 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 
 ## Testing
 
-- **1365 tests**, run by `cargo test --workspace`, and **1802** with `--features daemon`.
+- **1805 tests**, run by `cargo test --workspace`.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`src/tui/ui/golden_frames.rs`).

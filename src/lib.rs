@@ -32,5 +32,4 @@ pub mod store;
 pub mod sync;
 pub mod sync_health;
 pub mod tui;
-#[cfg(feature = "daemon")]
 pub mod daemon;

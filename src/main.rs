@@ -46,13 +46,12 @@ struct Cli {
 
     /// Answer this command from the local daemon instead of in process.
     ///
-    /// Debug reach while the daemon is behind the `daemon` feature (P2-U11):
+    /// Debug reach while the migration is under way (P2-U11):
     /// `mp account list` and `mp list-messages` are routed, everything else
-    /// still runs in process. Hidden, because `mp --help` may not move before
-    /// P4-U1 makes the daemon the default. It never falls back: a routed
-    /// command that cannot reach a daemon exits 4 rather than answering from
-    /// this process.
-    #[cfg(feature = "daemon")]
+    /// still runs in process. Hidden, because `mp --help` may not move until
+    /// the cutover slices make the daemon the default. It never falls back: a
+    /// routed command that cannot reach a daemon exits 4 rather than answering
+    /// from this process.
     #[arg(long, global = true, hide = true)]
     daemon: bool,
 }
@@ -471,10 +470,9 @@ enum Commands {
     },
     /// Inspect the configured accounts.
     ///
-    /// Hidden and behind the `daemon` cargo feature for the same reason as
-    /// `mp daemon` below: it is the oracle `mp --daemon account list` must
-    /// match, so it lands with the daemon work and becomes visible with it.
-    #[cfg(feature = "daemon")]
+    /// Hidden for the same reason as `mp daemon` below: it is the oracle
+    /// `mp --daemon account list` must match, so it becomes visible with the
+    /// cutover rather than before it.
     #[command(hide = true)]
     Account {
         #[command(subcommand)]
@@ -482,13 +480,11 @@ enum Commands {
     },
     /// Manage the local mailypoppins daemon (run, start, status, stop, restart).
     ///
-    /// Hidden and behind the `daemon` cargo feature until P4-U1 makes the
-    /// daemon the default: `tests/cli_help_snapshot.rs` holds one snapshot for
-    /// both the featured and the unfeatured build, so a visible subcommand
-    /// would make one of the two `cargo test` runs fail against a snapshot it
-    /// cannot satisfy. P4-U1 drops both the `cfg` and the `hide` and moves the
-    /// snapshot once.
-    #[cfg(feature = "daemon")]
+    /// Hidden until the cutover slices make the daemon the default:
+    /// `tests/cli_help_snapshot.rs` pins `mp --help` byte-identical to the
+    /// pre-daemon baseline, and a visible subcommand would move it. P4-U1
+    /// removed the `daemon` cargo feature; the `hide` stays until the surface
+    /// is meant to move, and the snapshot moves once with it.
     #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
@@ -497,7 +493,6 @@ enum Commands {
 }
 
 /// `mp account <action>`: what a client may ask about the accounts themselves.
-#[cfg(feature = "daemon")]
 #[derive(Clone, Debug, Subcommand)]
 enum AccountAction {
     /// List the configured accounts, their backend and their state
@@ -1255,7 +1250,6 @@ fn select_mailboxes(
 }
 
 /// How long a routed command waits for the daemon, per call.
-#[cfg(feature = "daemon")]
 const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Connect to the local daemon and complete the handshake, or end the run.
@@ -1263,7 +1257,6 @@ const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// `--daemon` never falls back: a command that asked for the daemon and cannot
 /// have it exits 4 with the reason, rather than quietly answering from this
 /// process and letting the user believe the daemon did the work.
-#[cfg(feature = "daemon")]
 async fn daemon_connection() -> mp_client::Connection {
     use mp_client::{ClientInfo, ClientKind, Connection, Identity};
     let handshake = async {
@@ -1300,7 +1293,6 @@ async fn daemon_connection() -> mp_client::Connection {
 /// A refusal the daemon spelled out (an unknown account, a mailbox that is not
 /// one) is an ordinary command failure and exits 1; a daemon that stops
 /// answering is exit 4, the same code as one that was never there.
-#[cfg(feature = "daemon")]
 async fn daemon_call(
     connection: &mut mp_client::Connection,
     method: &str,
@@ -1321,7 +1313,6 @@ async fn daemon_call(
 }
 
 /// The exit-4 diagnostic of a routed command: why, where, and how to fix it.
-#[cfg(feature = "daemon")]
 fn daemon_unavailable(why: &str) -> ! {
     eprintln!(
         "{} --daemon was asked for and no daemon could serve it: {why}",
@@ -1337,7 +1328,6 @@ fn daemon_unavailable(why: &str) -> ! {
 
 /// `mp account list`, printed identically whether the entries were built here
 /// or came off the wire.
-#[cfg(feature = "daemon")]
 fn render_accounts(entries: &[mailypoppins::daemon::methods::account::AccountEntry]) -> String {
     if entries.is_empty() {
         return "No accounts configured\n".to_string();
@@ -1357,7 +1347,6 @@ fn render_accounts(entries: &[mailypoppins::daemon::methods::account::AccountEnt
 }
 
 /// `mp --daemon account list`: the daemon's answer, rendered locally.
-#[cfg(feature = "daemon")]
 async fn routed_account_list() -> Vec<mailypoppins::daemon::methods::account::AccountEntry> {
     let mut connection = daemon_connection().await;
     let result = daemon_call(&mut connection, "account.list", serde_json::json!({})).await;
@@ -1377,7 +1366,6 @@ async fn routed_account_list() -> Vec<mailypoppins::daemon::methods::account::Ac
 ///
 /// One `message.list` per listed mailbox, because the method answers about one
 /// mailbox and the grouping is the client's presentation.
-#[cfg(feature = "daemon")]
 async fn routed_list_messages(
     account: &AccountConfig,
     mailbox: Option<&str>,
@@ -1423,7 +1411,6 @@ async fn routed_list_messages(
 /// recipients, the body blob, the thread. `flags` is rebuilt as the token
 /// string the store holds, so `MessageRow::flags` parses it back into the same
 /// three bits.
-#[cfg(feature = "daemon")]
 fn row_from_wire(
     message: &serde_json::Value,
     mailbox: &str,
@@ -1954,7 +1941,6 @@ async fn main() -> Result<()> {
     // The daemon commands own their startup order (MIG-04, config load, socket)
     // and must not run the client preamble below, which loads secrets and SMTP
     // credentials this process has no use for.
-    #[cfg(feature = "daemon")]
     if let Some(Commands::Daemon { action }) = &cli.command {
         let code = mailypoppins::daemon::lifecycle::dispatch(action.clone()).await;
         std::process::exit(code);
@@ -3037,7 +3023,6 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::ListMessages { mailbox, limit }) => {
-            #[cfg(feature = "daemon")]
             if cli.daemon {
                 routed_list_messages(&account_config, mailbox.as_deref(), limit).await?;
                 return Ok(());
@@ -3362,7 +3347,6 @@ async fn main() -> Result<()> {
                 mailypoppins::tui::run()?;
             }
         }
-        #[cfg(feature = "daemon")]
         Some(Commands::Account { action }) => match action {
             AccountAction::List => {
                 let entries = if cli.daemon {
@@ -3376,7 +3360,6 @@ async fn main() -> Result<()> {
 
         // Dispatched and exited before the client preamble above, so control
         // never arrives here.
-        #[cfg(feature = "daemon")]
         Some(Commands::Daemon { .. }) => unreachable!("daemon commands exit before dispatch"),
     }
 

@@ -16,11 +16,12 @@
 //! race, because the only lock here is the one this test deliberately hands to
 //! the child to be refused, and there is no sibling test to inherit it.
 //!
-//! Not feature-gated: the engine lock on the ingest path is a change to library
-//! behaviour that every build ships, so this runs in the default suite exactly
-//! as `tests/engine_lock_ingest.rs` does. It is declared explicitly in
-//! `Cargo.toml` (with no `required-features`) so the split is visible where the
-//! other test targets are listed rather than only in the `tests/` directory.
+//! The engine lock on the ingest path is a change to library behaviour that
+//! every build ships, so this runs in the default suite exactly as
+//! `tests/engine_lock_ingest.rs` does. It had an explicit `[[test]]` target in
+//! `Cargo.toml` while the daemon feature existed, to keep the split visible
+//! beside the gated targets; P4-U1 removed every stanza and Cargo autodiscovers
+//! `tests/*.rs`, so the split now lives only in this header.
 
 use std::fs;
 use std::net::TcpListener;

@@ -3,9 +3,9 @@
 How to start, inspect, stop and recover the local daemon, and what it leaves on disk while it runs.
 The wire contract is [daemon-protocol.md](daemon-protocol.md); this file is the operator's half of it.
 
-Everything here is behind the `daemon` cargo feature and hidden from `mp --help` until P4-U1 of the migration (`.agents/workflow/native-gui-daemon/plan.md`).
-An `mp` from `cargo install --path .` contains none of it, and the commands below need a build made with `--features daemon`.
-The subcommands carry `hide = true` on top of the feature gate because `tests/cli_help_snapshot.rs` holds one snapshot for the featured and the unfeatured build, and a visible subcommand would fail one of the two runs against a snapshot it cannot satisfy.
+Everything here ships in every build: P4-U1 removed the `daemon` cargo feature, so `cargo install --path .` and a plain `cargo build` both contain the daemon and `--features daemon` no longer exists.
+The subcommands are still hidden from `mp --help`, because `tests/cli_help_snapshot.rs` pins the help surface byte-identical to `docs/baselines/pre-daemon/cli-help.txt` and a later unit of the migration moves it deliberately (`.agents/workflow/native-gui-daemon/plan.md`).
+`mp daemon --help` and `mp account --help` still render; a hidden command is absent from the parent's `Commands:` block, not from the binary.
 
 ## The five lifecycle commands
 
