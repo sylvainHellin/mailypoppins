@@ -34,6 +34,33 @@ With nothing running it exits 0, and it sweeps a stale socket on the way out, be
 `mp daemon restart` stops whatever runs, waits for the old pid to disappear (up to 10 s), and then starts this executable's daemon.
 The wait is not decoration: a new daemon binding before the old one's cleanup runs would have its own socket unlinked by its predecessor.
 
+## On-demand start, and the no-daemon list
+
+A normal `mp` run that needs the daemon and finds nothing listening starts one itself.
+It goes through the same routine `mp daemon start` uses, so the start lock that makes two racing clients produce one daemon, the sweep of a socket a crash left behind, the `current_exe()` spawn into its own session with its stdio in the daemon log, and the early failure on a child that died are all the same code.
+The daemon it produces is detached, so it outlives the client that wanted it, which is the whole point.
+
+The bound on the whole sequence is 5 s: the readiness wait first, then a connect retry that backs off from 25 ms to 400 ms until the same deadline.
+One budget rather than two, so the worst case a user waits is that number and not some multiple of it.
+When it expires, or when the spawn dies, the run exits 4 naming the socket, the daemon log and the literal `mp daemon run` to type by hand.
+There is no fallback to answering in process: a command that quietly did the work locally would let the user believe the daemon did it.
+
+Five commands never reach any of that, because each of them either *is* the lifecycle surface or answers from a compiled-in structure:
+
+| command | why |
+|---|---|
+| `mp daemon *` | `mp daemon run` is the daemon; a `status` that auto-started one would always report one running |
+| `mp dump-keys` | the TUI key table is compiled in |
+| `mp --help` | clap answers it and exits |
+| `mp --version` | the same |
+| `mp config path` | it prints where the file would be, and reads nothing |
+
+`mp config init` and `mp config add-account` are deliberately **not** on that list.
+The daemon owns configuration and secrets, so an init that wrote `config.toml` behind a running daemon's back would leave it describing a file that changed underneath it.
+
+The policy is one pure function, `mailypoppins::daemon::client::needs_daemon(command, subcommand)`, taking the names as they are typed, so the list can be asserted without running anything.
+The single door to the daemon is `mailypoppins::daemon::client::client_session()`; from P4-U4 on every migrated command goes through it and nothing else opens a connection.
+
 ## Exit codes
 
 `0` is success, and for `status` it means a daemon answered.
@@ -47,7 +74,8 @@ The code is pinned here and in the protocol document so the unit that adds the c
 
 `4` is a daemon that is unavailable or failed to start.
 `mp daemon start` exits 4 when the child dies or never becomes ready, printing the daemon log path, the newest structured log and the `mp daemon run` command to reproduce the failure in the foreground.
-A routed `mp --daemon` command exits 4 when it cannot connect, cannot handshake, or loses the daemon mid-call, and it never falls back to answering in process: a command that asked for the daemon and quietly ran locally would let the user believe the daemon did the work.
+A client command exits 4 when it cannot connect, cannot handshake, cannot start a daemon within the bound, or loses the daemon mid-call, and it never falls back to answering in process.
+Its message carries the socket path, the daemon log path and the `mp daemon run` command, so the user has something to type rather than only a number.
 
 `2` is not available to the daemon; `mp watch --timeout` already owns it.
 
@@ -230,8 +258,24 @@ When that also fails, the command exits nonzero naming the daemon log rather tha
 
 ## Test-only environment hooks
 
-Ten environment variables exist for the contract tests and for the migration.
+Thirteen environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
+
+`MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
+It is not test-only either: it is what an operator debugging a daemon that dies as fast as it is started wants, and what a test that has to observe "nothing is listening, and nothing appeared" needs.
+`0`, `false`, `no` and an empty value disable it; anything else, and being unset, leaves it on.
+Its name is `mailypoppins::daemon::client::AUTOSTART_ENV`.
+
+`MAILYPOPPINS_DAEMON_AUTOSTART_TIMEOUT_MS=<n>` sets the whole auto-start budget, readiness wait and connect retry together, which defaults to 5000 ms.
+Unset, unparseable or zero means the default, as with the daemon's other numeric hooks: a client may not refuse to run over an environment variable it did not understand.
+It exists because a test of "it gives up after the bound" would otherwise cost five seconds each time; `tests/daemon_autostart.rs` runs its failure cases at 800 ms.
+Its name is `mailypoppins::daemon::client::AUTOSTART_TIMEOUT_ENV`.
+
+`MAILYPOPPINS_DAEMON_REQUIRE=1` makes a command that answered from its own process exit 1 saying so, instead of producing output a parity comparison would credit to the daemon.
+The check sits at the single client entry point, so it cannot drift away from what actually routes: `client_session` records that it handed out a connection, and the end of the run refuses to be silent when nothing did.
+A command on the no-daemon list fails immediately with a different message, because asking one of those to prove it routed is a mistake in the test rather than a failure of the command.
+It cannot catch a run that leaves through `std::process::exit` or through an error, neither of which returns to the check; every migrated command returns normally, and a command that failed proves nothing about routing anyway.
+Its name is `mailypoppins::daemon::client::REQUIRE_ENV`, and `DaemonFixture::mp_routed` in the parity harness is what sets it.
 
 `MAILYPOPPINS_DAEMON_FAIL_START=1` makes `mp daemon run` exit nonzero after logging is initialised and before the socket is bound, so `mp daemon start` has a deterministic dead child to report.
 The hook sits at that exact point on purpose: a forced failure leaves nothing on disk to clean up.
@@ -284,7 +328,8 @@ The lifetime is read once, at startup, so a handle cannot be minted under one li
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
 
-The four flag-shaped ones read as set for any value other than empty, `0` or `false`; the readiness and burst hooks read as absent unless their value parses as a number, and the sync-outcome hook unless its value parses as a payload.
+The flag-shaped ones read as set for any value other than empty, `0`, `false` or `no`; the readiness and burst hooks read as absent unless their value parses as a number, and the sync-outcome hook unless its value parses as a payload.
+`MAILYPOPPINS_DAEMON_AUTOSTART` is the one that reads the other way round, being on by default.
 A test that runs `mp` as a subprocess should `env_remove` every hook it does not want, or an exported one in the developer's shell will change what the test observes.
 
 ## The parity harness
@@ -297,6 +342,21 @@ Every Phase 4 slice that moves a command onto the daemon is gated on byte parity
 
 The oracle binary is `$MP_ORACLE_BIN`, else `~/.cache/mp-oracle/pre-daemon/mp`, else a build of the `pre-daemon` tag into that path; the procedure and the cache layout are in [baselines/pre-daemon/README.md](baselines/pre-daemon/README.md#the-oracle-binary).
 Build it once by hand before the first suite run, or the run that finds the cache empty pays 75 s for it under a lock every parallel test then waits on.
+
+P4-U2 added the half of the harness that runs with no daemon: `mp_no_daemon(args, root)` runs the client with auto-start off, `mp_autostart(args, root, budget_ms, cwd)` runs it with auto-start on and an explicit bound, and `stop_daemon(root)` ends whatever an auto-start produced through `mp daemon stop`, because a detached daemon is nobody's child and there is no pid to signal that anyone owns.
+`DaemonFixture::start_in(root, cwd)` and `fixture.mp_in(cwd, args)` give the daemon and the client different working directories, which is how a slice proves the daemon's cwd carries no meaning: start it from `/`, stand the client in a temp directory, and a relative path still resolves under the temp directory.
+`fixture.mp_routed(args)` sets `MAILYPOPPINS_DAEMON_REQUIRE=1`; a slice switches its parity assertion to it the moment the command routes, and the assertion stops being a tautology.
+
+## Path resolution is the client's
+
+The daemon is started from wherever the machine happened to start it, so a relative path that reached it would resolve somewhere nobody chose.
+The client is the process with a meaningful working directory, and it absolutises every user-supplied path before that path crosses the socket, through `mailypoppins::daemon::client::absolutise`.
+Nothing is canonicalised: a destination that does not exist yet is the normal case, and following symlinks would answer a different question than the user asked.
+
+Two places carry user paths today and both apply the rule from P4-U2 on, before either command routes:
+
+- `mp save -o`, whose default is the current directory. `mp save` with no `-o` therefore prints absolute paths where it used to print `./name`; the files land exactly where they always did.
+- A draft's `attachments:` entries, resolved by `send::resolve_attachment_paths`. A relative entry still means the same file it meant before, anchored to the sending client's working directory; the only visible change is that a missing attachment is now reported by its full path.
 
 ## Login mode
 

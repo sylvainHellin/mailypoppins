@@ -478,7 +478,8 @@ An account no configuration names is `account_unknown`, carrying the name that w
 A mailbox the account does not have is `-32602` naming the ones it does, because the caller asked for something that does not exist rather than for something the daemon refuses.
 A store that exists and then fails to open or to read is `-32603`.
 
-The CLI maps two of these onto stable exit codes: `3` for an incompatible daemon, which prints the `mp daemon restart` command, and `4` for a daemon that is unavailable or failed to start, which prints the daemon log path and the `mp daemon run` command.
+The CLI maps two of these onto stable exit codes: `3` for an incompatible daemon, which prints the `mp daemon restart` command, and `4` for a daemon that is unavailable or failed to start, which prints the socket path, the daemon log path and the `mp daemon run` command.
+Exit 4 is also what a client reaches after an on-demand start it asked for did not produce a daemon within its bound; the start policy and its bound are in [daemon-operations.md](daemon-operations.md#on-demand-start-and-the-no-daemon-list).
 
 ## Event semantics
 

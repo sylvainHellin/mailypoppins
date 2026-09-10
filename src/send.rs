@@ -1893,17 +1893,25 @@ fn parse_graph_recipients(field: Option<&str>) -> Vec<(String, String)> {
 
 /// Expand a draft's `attachments:` frontmatter entries into concrete files.
 ///
-/// Each entry is tilde-expanded. A directory entry contributes every regular
-/// file directly inside it (non-recursive, sorted by file name, dotfiles
-/// skipped); any other entry contributes itself unchanged. This lets a draft
-/// name one folder instead of listing every file in it. A path that is neither
-/// a readable directory nor an existing file is passed through untouched, so
-/// the later `fs::read` reports the missing path the same way it always has.
+/// Each entry is tilde-expanded and then made absolute against this process's
+/// working directory. A directory entry contributes every regular file
+/// directly inside it (non-recursive, sorted by file name, dotfiles skipped);
+/// any other entry contributes itself. This lets a draft name one folder
+/// instead of listing every file in it. A path that is neither a readable
+/// directory nor an existing file is passed through, so the later `fs::read`
+/// reports the missing path the same way it always has.
+///
+/// The absolutisation is the client-side path rule of P4-U2: a relative entry
+/// still means what it means today, "below where the sender is standing", and
+/// making it absolute here is what keeps that true once the send crosses the
+/// socket to a daemon whose own working directory is somewhere else entirely.
+/// The only visible change is in a failure: a missing `report.pdf` is now
+/// reported by its full path.
 pub fn resolve_attachment_paths(entries: &[String]) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in entries {
         let expanded = shellexpand::tilde(entry);
-        let path = PathBuf::from(expanded.as_ref());
+        let path = crate::daemon::client::absolutise(Path::new(expanded.as_ref()));
         if path.is_dir() {
             let mut dir_files = Vec::new();
             for dent in fs::read_dir(&path)

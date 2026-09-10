@@ -382,6 +382,13 @@ default_from = "delta@example.com"
             .env("MAILYPOPPINS_DATA_DIR", self.data_dir())
             .env("MAILYPOPPINS_CONFIG_DIR", self.config_dir())
             .env("NO_COLOR", "1")
+            // P4-U2 gave a routed command an on-demand start. Every daemon
+            // this file needs it starts itself, so a client that started a
+            // second one would be a leak; and
+            // `the_daemon_flag_does_not_fall_back_to_the_direct_path` is about
+            // a missing daemon, which the auto-start would repair before the
+            // assertion could see it.
+            .env("MAILYPOPPINS_DAEMON_AUTOSTART", "0")
             .env_remove("MAILYPOPPINS_DAEMON_ACCOUNT_RUNTIMES")
             .env_remove("MAILYPOPPINS_DAEMON_FAIL_START");
         cmd

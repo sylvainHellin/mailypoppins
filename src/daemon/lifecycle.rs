@@ -125,7 +125,11 @@ const POLL: Duration = Duration::from_millis(25);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The file `mp daemon start` points a detached daemon's stdio at.
-fn daemon_log_path() -> PathBuf {
+///
+/// Public because the client's exit-4 diagnostic names it too
+/// ([`super::client::unavailable`]), and two spellings of the same path would
+/// eventually become two paths.
+pub fn daemon_log_path() -> PathBuf {
     crate::config::logs_dir().join("daemon.log")
 }
 
@@ -422,7 +426,13 @@ fn spawn_account_runtimes(state: Arc<DaemonState>) {
 // ---------------------------------------------------------------------------
 
 /// Detached start: spawn `mp daemon run`, wait for a real `daemon.status`.
-async fn start(timeout: Duration) -> Result<i32> {
+///
+/// Public because on-demand auto-start ([`super::client::client_session`])
+/// uses this exact routine rather than a second one: the start lock that makes
+/// two racing starters produce one daemon, the stale-socket sweep, the
+/// `current_exe()` spawn into its own session, and the early exit on a child
+/// that died are all decisions this function already took correctly.
+pub async fn start(timeout: Duration) -> Result<i32> {
     let socket = socket_path();
     if query_status().await.is_ok() {
         info!("[daemon] start: a daemon is already running");

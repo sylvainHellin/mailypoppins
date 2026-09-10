@@ -1,12 +1,16 @@
 //! The long-lived local daemon: runtime files, the startup lock, and (from
 //! later units) the socket server and its lifecycle commands.
 //!
-//! The whole module is gated behind the `daemon` cargo feature during the
-//! migration described in `.agents/workflow/native-gui-daemon/plan.md`; the
-//! gate goes away in P4-U1, when clients require a daemon by default. Until
-//! then `cargo install --path .` ships an `mp` binary that does not contain a
-//! byte of this module.
+//! The module was gated behind the `daemon` cargo feature for the first three
+//! phases of the migration described in
+//! `.agents/workflow/native-gui-daemon/plan.md`. P4-U1 removed the gate,
+//! because from Phase 4 clients require a daemon by default, so
+//! `cargo install --path .` now ships it.
+//!
+//! [`client`] is the other side of the socket: the policy a normal `mp` run
+//! applies before it reaches any of this.
 
+pub mod client;
 pub mod config;
 pub mod dispatch;
 pub mod handles;

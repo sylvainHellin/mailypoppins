@@ -1254,38 +1254,15 @@ const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Connect to the local daemon and complete the handshake, or end the run.
 ///
-/// `--daemon` never falls back: a command that asked for the daemon and cannot
-/// have it exits 4 with the reason, rather than quietly answering from this
-/// process and letting the user believe the daemon did the work.
+/// One line, on purpose: the policy lives in
+/// [`mailypoppins::daemon::client::client_session`], which is the single door
+/// every command reaching the daemon goes through from P4-U4 on. It starts a
+/// daemon on demand when none is listening, waits a bounded time for it, and
+/// exits 4 naming the socket and `mp daemon run` when that fails. It never
+/// falls back: a command that asked for the daemon and quietly answered from
+/// this process would let the user believe the daemon did the work.
 async fn daemon_connection() -> mp_client::Connection {
-    use mp_client::{ClientInfo, ClientKind, Connection, Identity};
-    let handshake = async {
-        let mut connection =
-            Connection::connect(&mailypoppins::daemon::runtime::socket_path()).await?;
-        connection
-            .initialize(
-                ClientInfo {
-                    kind: ClientKind::Cli,
-                    app_version: env!("CARGO_PKG_VERSION").to_string(),
-                },
-                Identity {
-                    data_dir: mailypoppins::config::mailypoppins_data_dir(),
-                    config_dir: mailypoppins::config::config_dir(),
-                },
-                &[],
-                &[],
-            )
-            .await?;
-        Ok::<Connection, mp_client::ClientError>(connection)
-    };
-    match tokio::time::timeout(DAEMON_TIMEOUT, handshake).await {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(e)) => daemon_unavailable(&format!("{e}")),
-        Err(_) => daemon_unavailable(&format!(
-            "it did not answer within {}s",
-            DAEMON_TIMEOUT.as_secs()
-        )),
-    }
+    mailypoppins::daemon::client::client_session().await
 }
 
 /// One call on a routed command's connection.
@@ -1314,16 +1291,7 @@ async fn daemon_call(
 
 /// The exit-4 diagnostic of a routed command: why, where, and how to fix it.
 fn daemon_unavailable(why: &str) -> ! {
-    eprintln!(
-        "{} --daemon was asked for and no daemon could serve it: {why}",
-        "\u{2717}".red()
-    );
-    eprintln!(
-        "  socket:    {}",
-        mailypoppins::daemon::runtime::socket_path().display()
-    );
-    eprintln!("  start one: mp daemon start");
-    std::process::exit(mailypoppins::daemon::lifecycle::EXIT_UNAVAILABLE);
+    mailypoppins::daemon::client::unavailable(why, &mailypoppins::daemon::runtime::socket_path())
 }
 
 /// `mp account list`, printed identically whether the entries were built here
@@ -1931,10 +1899,50 @@ fn report_sweep_outcome(
     }
 }
 
+/// The command and, where the no-daemon list distinguishes one, the
+/// subcommand, as they were typed.
+///
+/// Taken from clap's own [`ArgMatches`](clap::ArgMatches) rather than from a
+/// match over [`Commands`], so the strings are the ones on the command line,
+/// kebab-case and all, and a renamed variant cannot silently move a command on
+/// or off [`mailypoppins::daemon::client::needs_daemon`]'s list.
+fn invocation(matches: &clap::ArgMatches) -> (Option<&str>, Option<&str>) {
+    let command = matches.subcommand_name();
+    let subcommand = matches
+        .subcommand()
+        .and_then(|(_, inner)| inner.subcommand_name());
+    (command, subcommand)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
-    let cli = Cli::parse();
+    // Two steps rather than `Cli::parse()`, which is these two: the matches
+    // carry the typed command name that the daemon policy is written in.
+    // `get_matches` answers `--help` and `--version` and exits, exactly as
+    // `parse` does, so the help surface does not move.
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let (command_name, subcommand_name) = invocation(&matches);
+    let command_label = match (command_name, subcommand_name) {
+        (Some(command), Some(sub)) => format!("{command} {sub}"),
+        (Some(command), None) => command.to_string(),
+        _ => "(no subcommand)".to_string(),
+    };
+
+    // Asking a command that can never reach the daemon to prove it did is a
+    // mistake in the test, not a failure of the command, and saying so here
+    // costs less than debugging an exit 1 from the end of the run.
+    if mailypoppins::daemon::client::routing_required()
+        && !mailypoppins::daemon::client::needs_daemon(command_name, subcommand_name)
+    {
+        eprintln!(
+            "{} `mp {command_label}` is on the no-daemon list, so {} cannot be satisfied",
+            "\u{2717}".red(),
+            mailypoppins::daemon::client::REQUIRE_ENV,
+        );
+        std::process::exit(1);
+    }
 
     info!("mailypoppins started: {:?}", std::env::args().collect::<Vec<_>>());
 
@@ -2992,7 +3000,11 @@ async fn main() -> Result<()> {
             let (row, canonical) =
                 resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
             let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            let dest = output.unwrap_or_else(|| PathBuf::from("."));
+            // The destination is the user's, so this process resolves it: the
+            // daemon that will materialise the attachments from P4-U8 on was
+            // started from somewhere else and its cwd means nothing (P4-U2).
+            let dest =
+                mailypoppins::daemon::client::absolutise(&output.unwrap_or_else(|| PathBuf::from(".")));
             let files = materialise_attachments(&store, &blobs, row.id, &dest)?;
             if files.is_empty() {
                 return Err(anyhow!("{canonical} has no attachments"));
@@ -3025,6 +3037,10 @@ async fn main() -> Result<()> {
         Some(Commands::ListMessages { mailbox, limit }) => {
             if cli.daemon {
                 routed_list_messages(&account_config, mailbox.as_deref(), limit).await?;
+                // An early return leaves the check at the bottom of `main`
+                // unrun, so it happens here instead. Every early return out of
+                // a routed command owes this line.
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 return Ok(());
             }
             let store = received_store(&account_config.name)?;
@@ -3362,6 +3378,11 @@ async fn main() -> Result<()> {
         // never arrives here.
         Some(Commands::Daemon { .. }) => unreachable!("daemon commands exit before dispatch"),
     }
+
+    // The parity hook (P4-U2): with MAILYPOPPINS_DAEMON_REQUIRE set, a command
+    // that answered from this process fails here instead of producing output a
+    // parity test would credit to the daemon.
+    mailypoppins::daemon::client::enforce_routing(&command_label);
 
     Ok(())
 }
