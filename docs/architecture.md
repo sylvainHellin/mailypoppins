@@ -66,14 +66,23 @@ What did not change is the help surface: `mp daemon`, `mp account` and the globa
 It counts `#[test]` attributes by scanning `src/tui/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
 The three floors are 368 TUI tests, 20 golden-frame tests and 18 snapshot files.
 
-### The engine-import allow-list
+### The engine-import allow-list, and the CLI's engine-touch residue
 
-`tests/architecture_boundaries.rs` walks `src/tui/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
+`tests/architecture_boundaries.rs` holds both halves of the client/engine boundary.
+
+The first walks `src/tui/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
 The file holds 12 pairs over 7 files today, and that 12 is the number Phase 5 has to drive to zero as the TUI stops calling the engine and starts calling the daemon.
 
 It is a record, not a ceiling: a removed import fails the test as loudly as a new one, because the count is the migration's progress bar.
 Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.
 The test is not feature-gated and passes on the pre-daemon tree, and `engine_imports` takes the client source root as an argument so Phase 5 can re-point it at a `crates/mp-tui/` without a rewrite.
+
+The second (P4-U15) walks the client-side sources - `src/main.rs`, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
+Seventeen rows in four groups: the server leg of `mp search` (`docs/parity-matrix.md` LST-06, which no Phase 4 slice contracted), the startup preamble (which runs before any socket and on the no-daemon list too), `mp config show`'s secret and token probes (`config.get` is contracted *not* to look a secret up), and the two `config.toml` wizards (one interactive transaction).
+The TUI is deliberately outside this second list until Phase 5; the first half is what records its residue meanwhile.
+There is no `UPDATE_` switch for it: an entry is added by hand, with its reason, or it is not added.
+
+`docs/baselines/phase4-gate-evidence.md` is the long form.
 
 ### The hidden CLI surfaces
 
@@ -437,7 +446,7 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 
 ## Testing
 
-- **1817 tests**, run by `cargo test --workspace`, the parity harness included.
+- **2071 tests**, run by `cargo test --workspace`, the parity harness and the six daemon slice suites included.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`src/tui/ui/golden_frames.rs`).

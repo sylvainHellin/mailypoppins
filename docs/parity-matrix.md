@@ -60,9 +60,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `config.get` before the first prompt, then `config.reload` once the wizard has written; `config.init`, `config.set_password`, `operation.*` for the multi-step pass, `state.event` once the account exists
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_init_prompts_in_the_client`), otherwise manual
-- Status: routed (P4-U14)
+- Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15)
 - Note: the wizard writes `config.toml` and one secret in a single pass, so the GUI drives it through `config.*` rather than spawning the CLI.
   P4-U14 routed the branch a parity test can reach - the overwrite question, which the client asks after `config.get` has told it whether a configuration exists and where - and left the wizard's own writes in the client, which reload the daemon when they finish; the pass past the first prompt dials a mail server and is pinned by nothing.
+  P4-U15 kept it there and recorded why: the prompting, the connection test the answers steer, and the write are one interactive transaction, and splitting it needs a wizard protocol no unit of Phase 4 contracted. It is five rows of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs` (`set_secret`, `imap_client::` twice, `GraphClient::`, `device_code_flow`, `SmtpTransport::`).
 
 ### ACC-02 Add a further account to an existing configuration
 
@@ -71,7 +72,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `config.get` before the first prompt, then `config.reload`; `config.add_account`, `state.event`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_add_account_refuses_without_a_configuration`), otherwise manual
-- Status: routed (P4-U14)
+- Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15)
 - Note: the refusal when there is no configuration to add to is the daemon's answer, rendered here; the wizard past it is `ACC-01`'s note.
 
 ### ACC-03 Show the effective configuration
@@ -81,8 +82,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `config.get`
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_show_matches_the_oracle`)
-- Status: routed (P4-U14)
-- Note: the output is redacted, and after the cutover the daemon is the only reader of the underlying file.
+- Status: routed (P4-U14) for the configuration; three probes stay client-side, recorded (P4-U15)
+- Note: the output is redacted, and after the cutover the daemon is the only reader of the underlying `config.toml`.
+  Three things on the screen are still read locally, and stay so by `config.get`'s own contract: the `password = **** / (not set)` column (`get_secret`), the `token = valid|expired|invalid|not cached` line (`oauth2::load_token_cache`), and the signature listing. `tests/daemon_config.rs` contracts `config.get` *not* to probe a secret, because answering "is a password stored" for every account on every read is what turns a redacted read into a secret read; a tenth `config.*` method is pinned shut by `tests/daemon_admin_slice.rs`. Three rows of `CLI_ENGINE_RESIDUE`.
   One divergence from the `pre-daemon` binary is deliberate and older than this slice: `config.get` reports the effective configuration, which `docs/daemon-protocol.md` defines as the document *after serde defaults*, so `mp config show` prints `smtp.port = 465` and `imap.port = 993` for a configuration that omits them where the oracle printed `0`.
   The `ACC-03` parity row names every port in its fixture, which takes the difference out of the comparison and leaves the row measuring what it is about.
 
@@ -94,7 +96,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_path_never_contacts_a_daemon`)
 - Status: client-side, confirmed (P4-U14)
-- Note: on `needs_daemon`'s no-daemon list for good, and from P4-U14 the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`: after the admin slice it is the only command in the product a daemon-era binary answers in process.
+- Note: on `needs_daemon`'s no-daemon list for good, and from P4-U14 the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`: it is the only *whole command* a daemon-era binary answers in process. The startup preamble every command runs, and the server leg of `mp search` (`LST-06`), are the other in-process code paths; both are rows of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs`.
 
 ### ACC-05 Store an SMTP or IMAP password in the active secrets backend
 
@@ -302,7 +304,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.search` as an `operation.*` for the server leg
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/search.rs`, `tests/cli_help_snapshot.rs` for the grammar's help text
-- Status: not started
+- Status: not started, and deliberately not taken by Phase 4 (P4-U15)
+- Note: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, so the server leg still opens its own IMAP session or Graph client in `src/main.rs`, and the plain-IMAP `has:attachment` post-filter still reads the local index there. It is the one command surface Phase 4 leaves on the direct path and the largest of the four groups in `CLI_ENGINE_RESIDUE`; the method it wants would be `message.search_server`, the twin of `message.list_server`.
 - Note: the grammar covers `from:`, `to:`, `cc:`, `subject:`, `body:`, `filename:`, `has:attachment`, `before:`, `after:` with `since:` as an alias, quoted phrases, `OR` groups, `in:`, and `message-id:`; `filename:` resolves only on Gmail, Exchange, or the local index.
 
 ### LST-07 Search the local ranked full-text index across every synced mailbox
@@ -874,10 +877,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: diagnostics and maintenance
 - Source anchor: `mp store gc [--dry-run] [--force] [--all-accounts]`, `src/main.rs`, `src/store/sweep.rs`
-- Daemon surface: `diagnostic.store_gc`, plus the automatic sweep the daemon runs after every sync
+- Daemon surface: `diagnostic.store_gc`, for `mp store gc` and for the automatic sweep after every sync alike
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/store/sweep.rs`, `tests/daemon_admin_slice.rs` (`mp_store_gc_matches_the_oracle`)
-- Status: routed (P4-U14)
+- Status: routed (P4-U14 for `mp store gc`, P4-U15 for the post-sync sweep)
 - Note: two safety rules a daemon or GUI port reproduces rather than relaxing (`ANO-5`): the first over-cap run warns and records a marker while the second evicts, and a plan reclaiming more than half the store's blob bytes is refused without `--force`.
   The sweep skips blobs backing a materialized handle a client still holds (`ANO-6`).
 

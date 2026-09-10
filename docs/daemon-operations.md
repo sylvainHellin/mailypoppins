@@ -63,7 +63,8 @@ The single door to the daemon is `mailypoppins::daemon::client::client_session()
 
 ## What routes today
 
-The migration moves the CLI one slice at a time, and a command routes the moment its slice lands:
+Phase 4 is complete: every command a slice contracted routes, and P4-U15 deleted the direct engine path each one used, so there is no in-process fallback left to reach.
+The table is what routes and through what:
 
 | command | methods | slice |
 |---|---|---|
@@ -107,16 +108,24 @@ The migration moves the CLI one slice at a time, and a command routes the moment
 | `mp config set-password <smtp\|imap> [--account]` | `config.set_password`, with the `dialoguer` prompt in the client | P4-U14 |
 | `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
+| `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 
-`mp config path` is the one domain command that never contacts a daemon, and after the admin slice it is the only command in the product that answers in process at all: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
+`mp config path` is the one domain command that never contacts a daemon: it computes a path and reads nothing, so it is on `needs_daemon`'s no-daemon list for good and is the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`.
+
+What still answers in process, and why, is four things, each a row of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs` and each spelled out in `docs/baselines/phase4-gate-evidence.md`:
+
+- **`mp search` without `--local`.** The server leg (`docs/parity-matrix.md` LST-06) is `not started`: the read slice contracted `mp search --local` and nothing else, so a server search still opens its own IMAP session or Graph client, and the plain-IMAP `has:attachment` post-filter still reads the local index. It is the one command surface Phase 4 leaves on the direct path.
+- **The startup preamble.** `init_secrets_backend` and the `SmtpConfig::load` under it print the `⚠ Could not load SMTP config: …` pair and the undecryptable-store exit that every `mp` invocation has printed since long before the daemon. They run before any socket and on the no-daemon list too, so routing them would move bytes on a command that must never need a daemon. `mp send-approved` prints the same line per account for the same reason.
+- **`mp config show`'s secret column, token line and signature listing.** `config.get` is contracted *not* to look a secret up (a redacted read that probes the backend for every account on every call is the pattern the contract exists to prevent), so the `(not set)` / `****` column and `token = valid|expired|invalid|not cached` are read locally.
+- **The two `config.toml` wizards.** `mp config init` and `mp config add-account` ask `config.get` where the configuration is and what accounts it has, then prompt, test the connection the user just described, prompt again on the result, and write the file themselves before calling `config.reload`. That is one interactive transaction, and splitting it needs a wizard protocol no unit of Phase 4 contracted.
 A routed command produces the pre-daemon binary's bytes, refusals included: `tests/daemon_read_slice.rs` compares stdout, stderr and the exit code against `~/.cache/mp-oracle/pre-daemon/mp` over one seeded root, for every flag combination and every error case.
 That is why a refusal the daemon spelled out comes back typed rather than printed at the call site: `account_not_ready` becomes the sentence a store-less read has always produced, and the rest leaves through `main`'s ordinary error path, which is where the pre-daemon binary reported it.
 `tests/daemon_draft_slice.rs` is the same gate for the draft slice, over a fixture whose drafts directories are stashed and restored between the two binaries, because half of those commands write.
 `tests/daemon_admin_slice.rs` is the gate for the admin slice, and it masks nothing: the two values that would have forced a mask are removed at the fixture instead, the contact index's `built_at` by building the cache once before either binary runs, and an RSVP's `Message-ID` by keeping every row that actually sends one on the routed side.
 `tests/daemon_mutation_slice.rs` is the gate for `mp archive`, `mp delete`, `mp open` and `mp save`, with one row deliberately not byte-identical: `mp open` prints the path it handed the opener, and a daemon-materialised file lives under `<data_dir>/runtime/handles/<handle>/` rather than in the client's own temp directory, so that row is compared with the two directories masked.
 `mp save` is the mirror image of it: the absolute destination is what crosses the socket, and the spelling the user typed is what the `✓` lines print.
-The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.
+The direct engine paths those commands used are gone (P4-U15).
 `tests/daemon_send_slice.rs` is the gate for the send slice, over a fixture that adds a Graph account, an SMTP account with no credentials and a seeded outbox in every state the listing renders.
 Its successful sends are routed-side assertions rather than parity rows, because they run through `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` and the pre-daemon oracle has no such hook.
 

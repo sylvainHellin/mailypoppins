@@ -3,11 +3,11 @@ id: 0123
 title: Phase 4 of the daemon migration, the CLI cutover
 type: feature
 priority: now
-status: in-progress
+status: done
 created: 2026-09-10
 ---
 
-Status: in progress. Eight of Phase 4's fifteen units have landed; this file grows as the rest do.
+Status: done. All fifteen units have landed; the gate evidence is [docs/baselines/phase4-gate-evidence.md](../baselines/phase4-gate-evidence.md).
 
 Sixth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.6), after #0118, #0119, #0120, #0121 and #0122.
 
@@ -34,9 +34,31 @@ The daemon stops being a cargo feature and becomes the default build.
 - **P4-U11 (T)** - `c9c91dc`, the send slice contract: `SEND_METHOD_SPECS`, the `mp_protocol::send` result types, the six `mp_client::format` wordings and the `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` hook.
 - **P4-U12 (I)** - the send slice on the daemon: `mp send [-y]`, `mp send --invite`, `mp send-approved [-y] [--all-accounts]` and `mp outbox list|retry|discard`. Six methods, all durable: three sends and a retry as operations, the listing as a query, the discard as a command. The preview, the `[y/N]` prompt, the invitation's `UID` and `--all-accounts` all stay in the client, which renders the preview from `draft.preview` and the batch listing from `draft.list`; the transport, the outbox and the drafts directory are the daemon's. `mailypoppins::invite::plan_invite` is the one validator both sides use, so `ANO-4` is refused in the same sentence and the same order on either. The CLI send paths take no hold (`ANO-7`), and a caller that sends one is `-32602`.
 
+- **P4-U13 (T)** - `e633d45`, the admin slice contract: `CONTACT_METHOD_SPECS`, `CALENDAR_METHOD_SPECS`, `DIAGNOSTIC_METHOD_SPECS`, and the config family from six methods to nine.
+- **P4-U14 (I)** - `4d8349e`, the admin slice on the daemon; see the section below.
+- **P4-U15 (I)** - the direct-path deletion and the gate; see the section below.
+
 `265f6f7` (test: stop auto-started daemons in legacy CLI suites) sits between P4-U4 and P4-U5 and belongs to no unit; see below.
 
-Still open: P4-U13..U15, the admin slice, then the direct-path deletion and the phase gate.
+### The unit table
+
+| unit | kind | commit | subject |
+|---|---|---|---|
+| P4-U1 | T+I | `f87988d`, `b8aa9a1` | the daemon required by default, the parity harness |
+| P4-U2 | I+T | `fc093f0`, `87754bd` | on-demand start, the no-daemon list, path absolutisation |
+| P4-U3 | T | `510eb94` | the read slice contract |
+| P4-U4 | I | `4ad0871` | the read slice on the daemon |
+| P4-U5 | T | `41ca076` | the draft slice contract |
+| P4-U6 | I | `3f27c54` | the draft slice on the daemon |
+| P4-U7 | T | `380427a` | the message-mutation slice contract |
+| P4-U8 | I | (see above) | the message-mutation slice on the daemon |
+| P4-U9 | T | `2ae504c` | the sync/watch slice contract |
+| P4-U10 | I | `dd8d63f` | the sync/watch slice on the daemon |
+| P4-U11 | T | `c9c91dc` | the send slice contract |
+| P4-U12 | I | `9d576c8` | the send slice on the daemon |
+| P4-U13 | T | `e633d45` | the admin slice contract |
+| P4-U14 | I | `4d8349e` | the admin slice on the daemon |
+| P4-U15 | I | `5859942`, `db2d67d` | direct-path deletion, the boundary test, the gate |
 
 ## Approved test edits
 
@@ -176,3 +198,93 @@ The constant grew to nine and two assertion messages dropped the word "six"; no 
 The help walk (`touch src/main.rs && cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt`) is empty.
 `timeout 600 cargo clippy --workspace --offline --all-targets` reports nothing on any touched file.
 `pgrep -af '[m]p daemon'` is empty after the full run.
+
+## P4-U15: the direct-path deletion and the gate
+
+Three commits: `5859942` (the deletions), `db2d67d` (the boundary test), and this one (the latency measurement and the documentation).
+
+### What was deleted
+
+1 029 lines out, 64 in, across eight files, and `cargo build --offline` reports **zero warnings**, dead-code warnings included.
+
+- `src/main.rs`, thirteen items that carried `#[allow(dead_code)]` naming this unit: `format_unix_time`, `ARCHIVE_MAILBOX`, `drafts_store`, `drafts_store_reporting`, `print_skipped_drafts`, `reindex_drafts`, `resolve_draft_arg`, `list_message_groups`, `resolve_received_arg`, `configured_mailbox_names`, `drain_queues_cli`, `sync_one_account`, `run_store_gc`, plus the three `use` lines they were the last users of.
+- `src/config_cmd/oauth2.rs` and `src/config_cmd/reset.rs`, whole: `config.oauth2_login` and `config.reset_secrets` serve those commands since P4-U14, and nothing else called `cmd_oauth2_login` or `cmd_reset_secrets`.
+- `src/config_cmd/password.rs`'s `cmd_set_password`. The file stays for `check_kind`, `prompt` and `stored_line`, which the routed client calls.
+- `src/contacts_cmd.rs`'s `handle_rebuild` and `handle_stats`, `src/calendar_cmd.rs`'s `handle_rebuild`, `src/cutover.rs`'s `handle_cutover`. Every `print_*` those handlers shared with the routed client stays, which is why no literal moved and no parity row does either.
+
+### What moved behind the daemon
+
+The post-sync retention sweep, the one store `mp sync` still opened (the P4-U10 follow-up that named this unit).
+It is `diagnostic.store_gc` now, on the connection the sync already follows, with the options it always used (`SweepOptions::default()`, neither a dry run nor forced) and `manual = false` on the report, so it stays as quiet as it was.
+`routed_store_gc`'s wire decode became `sweep_outcome`, shared by both callers, so the two paths cannot drift.
+An account the daemon calls storeless is the silent case the local `path.exists()` check used to be; a refusal is a `warn!` line, as a sweep failure always was.
+
+### The boundary test
+
+`tests/architecture_boundaries.rs` gains a second half: a walk of `src/main.rs`, `src/cutover.rs` and `src/config_cmd/` for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, compared against `CLI_ENGINE_RESIDUE`, an inline `(file, symbol, reason)` table.
+Comments and `#[cfg(test)] mod` blocks are stripped first, so a unit test that opens a store is not a CLI handler.
+The TUI is deliberately outside this list until Phase 5 (#0124), and the test says so; its residue is the first half of the same file.
+
+3 tests to 6, and `git diff --stat 4d8349e..HEAD -- tests/` is that one file.
+
+### The residue, and the deviation from "allow-list to zero"
+
+The gate asks for zero. It is at seventeen, in four groups, and **none of the four can be closed without editing a T unit's test file**, which an implementer may not do. That is the deviation, recorded here rather than left to a diff.
+
+- **(a) The server leg of `mp search`**, six rows. `docs/parity-matrix.md` LST-06 is `not started`: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, so no unit of Phase 4 ever owned the server search. `MESSAGE_READ_METHOD_SPECS` is pinned at three and `MESSAGE_SERVER_METHOD_SPECS` at one, so the `message.search_server` it wants cannot be added here. It is the one command surface Phase 4 leaves on the direct path.
+- **(b) The startup preamble**, three rows. `init_secrets_backend` and the `SmtpConfig::load` under it print the `⚠ Could not load SMTP config: …` pair and the undecryptable-store exit that every `mp` invocation has printed since long before the daemon. They run before any socket, and they run on the no-daemon list too (`mp config path`, `mp daemon *`), so routing them would either need a daemon for a command that must never need one or move bytes on it. `mp send-approved`'s per-account load is the same line one round trip too early to come off `send.approved`, and `config.get`'s key set is pinned at four so it cannot carry an `smtp_warnings` field either. `secrets_path()` is in the list because the scan looks for the module; it opens nothing.
+- **(c) `mp config show`'s three probes**, three rows. `tests/daemon_config.rs` contracts `config.get` *not* to look a secret up, in as many words and with the reason ("answering it for every account on every read is exactly the pattern that turns a redacted read into a secret read"), and `tests/daemon_admin_slice.rs` pins the config family at nine methods with a compile-time assertion.
+- **(d) The two wizards**, five rows. `config.init` and `config.add_account` exist and are what the wizards ask for their path and their account list; what has no wire shape is the prompting loop, whose intermediate results steer the next prompt.
+
+### Decisions this unit had to take
+
+- **The post-sync sweep goes over the wire rather than staying local.** It was the only residue with a wire shape already built for it, so it was the only one where "move it behind the daemon" was an implementation rather than a contract change. It costs `mp sync` one extra operation per account.
+- **No new method was added.** Every family the residue would need is closed by a compile-time assertion in a T unit's file (`CONFIG_METHOD_SPECS.len() == 9`, `DIAGNOSTIC_METHOD_SPECS.len() == 1`, and the `message.*` arrays). Adding one would have meant editing a pinned test to make an implementation fit, which is the thing the convention exists to prevent, so the residue is recorded instead.
+- **`src/config_cmd/password.rs` was kept and pruned rather than deleted.** Three of its four functions are the routed client's.
+- **The residue table is inline in the test, not a fixture file.** The reason column is the point of it, and a reason in a fixture file is a reason nobody reads at the failure site.
+
+### Latency
+
+Full table, method and provenance in [docs/baselines/phase4-gate-evidence.md](../baselines/phase4-gate-evidence.md); `hyperfine` is not installed on this host, so the harness is the Phase 0 `bench` helper unchanged, which is what makes the columns comparable.
+
+Median of eleven, milliseconds, on the Phase 0 fixture (5 501 messages) on tmpfs:
+
+| workload | oracle | warm | cold |
+|---|---:|---:|---:|
+| `mp --version` (floor) | 7 | 8 | 7 |
+| `mp list-messages --mailbox inbox -n 20` | 42 | **10** | 77 |
+| `mp show <ordinary body>` | 44 | **11** | 78 |
+| `mp show <10 MiB body>` | 76 | 73 | 146 |
+| `mp search --local 'body:zolvertrix' -n 100` | 41 | **10** | 77 |
+| `mp list` (drafts) | 42 | **9** | 39 |
+| `mp list-messages --mailbox Bulk -n 5000` | 51 | 56 | 133 |
+| `mp dump-mailbox --json -A alpha` | 86 | 121 | 199 |
+
+A small answer costs 9-15 ms routed against 41-46 ms in process: about 33 ms saved, which is the config load plus store open the daemon now holds.
+A multi-MiB answer costs about 35 ms more, so `mp dump-mailbox` is the one command that pays more than it saves; it is a batch export and it is in `BACKLOG.md`.
+Cold is warm plus a flat 62-68 ms, which is one daemon start, paid once per daemon lifetime.
+All ten workloads were checked byte-identical against the oracle before they were timed.
+
+W1, W2's TUI half, W5, W6's cold-cache half and W8 stay `NOT TAKEN` in `docs/baselines/pre-daemon/measurements.md`, unchanged and still owner action.
+
+### Follow-ups
+
+Consolidated into `BACKLOG.md` with the ones P4-U6, U8, U10 and U12 left. This unit's own additions:
+
+- The server leg of `mp search` (LST-06) is unmigrated and now has a name for what it needs (`message.search_server`).
+- The two wizards need a wizard protocol before they can leave the client.
+- `mp config show`'s three probes need a decision about whether a `config.*` method may probe a secret at all.
+- `mp dump-mailbox --json` is slower routed than in process; it is the one command a streaming answer would help.
+- No test drives two `mp` processes concurrently against one daemon, which is one of the six gate lines.
+- The plan's "runtime assertion that the client process holds no `store.lock`" has no dedicated row; `tests/engine_lock_ingest_cli.rs` proves the property from the other side.
+
+### Validation
+
+`timeout 1800 cargo test --workspace --offline --no-fail-fast` -> **2 071 passed, 0 failed, 4 ignored**, across 43 result lines (2 068 + the three new boundary tests).
+Each of the six slice suites green three times running: `daemon_read_slice` 22, `daemon_draft_slice` 34, `daemon_mutation_slice` 35, `daemon_sync_slice` 38, `daemon_send_slice` 50, `daemon_admin_slice` 44.
+The help walk (`touch src/main.rs && cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt`) is empty.
+`timeout 900 cargo clippy --workspace --offline --all-targets` -> 39 warnings, against 39 at `4d8349e`: no new warning, and none on a file this unit touched.
+`timeout 600 cargo build --offline` -> 0 warnings.
+`timeout 900 cargo install --path . --offline` -> replaced.
+`pgrep -af 'mp daemon'` empty after the full run and after the measurement run.
+`git diff --stat 4d8349e..HEAD -- tests/` is `tests/architecture_boundaries.rs` only.

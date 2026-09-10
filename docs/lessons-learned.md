@@ -1774,3 +1774,29 @@ Routing any of those commands means a second process holds the data, and the tem
 The copy is where a byte-parity slice dies: a glyph retyped from a terminal render is not the glyph in the file, and nobody sees the difference until the oracle does.
 So the renderers were extracted first - `contacts_cmd::print_search`, `calendar_cmd::print_report`, `cutover::print_report` - taking plain data rather than a store handle, with the direct path calling them with data it read and the routed path calling them with data off the wire.
 The extraction diff is deletions and re-indentation; not one literal was retyped.
+
+## Strip the `#[allow(dead_code)]`, then let the compiler write the deletion list
+
+Thirteen items in `src/main.rs` carried `#[allow(dead_code)]` with a comment naming the unit that would delete them, and reading the file to find which of their *callees* had also become unreachable would have been a manual reachability analysis over 4 400 lines.
+
+Removing every one of those attributes in one pass and running `cargo build` produces the list instead, and running it again after each round of deletions produces the next: thirteen items, then three unused imports, then nothing.
+Two of the thirteen (`drafts_store`, `drafts_store_reporting`) were reachable only from each other and would not have shown up until the first was gone.
+
+The same trick does not work in the library, because a `pub` item is never dead to rustc.
+There the question is "who calls this", and `rg` over `src/`, `crates/` and `tests/` answers it: `cmd_oauth2_login`, `cmd_set_password` and `cmd_reset_secrets` had no caller anywhere, which is what made deleting two whole modules safe.
+
+## A boundary allow-list is worth more with a reason column than at zero
+
+The Phase 4 gate asked for "no CLI handler opens a store, a secret backend, a network backend or an engine lock", allow-list driven to zero.
+It landed at seventeen, and every one of the four causes is a contract that a T unit's test file pins shut: `config.get` is contracted *not* to probe a secret, the config family is pinned at nine methods by a `const _: () = assert!(...)`, and the `message.*` arrays are pinned by their own slices.
+Closing any of them meant editing a pinned test to make an implementation fit, which is the thing the convention exists to prevent.
+
+So the list is `CLI_ENGINE_RESIDUE`, an inline `(file, symbol, reason)` table in `tests/architecture_boundaries.rs`, and the test fails as loudly on a row that *went away* as on one that appeared.
+A number with no reasons beside it says "seventeen"; the table says "six because `mp search`'s server leg was never contracted, three because a redacted read may not probe a keyring, five because a wizard is one interactive transaction, three because the preamble runs before any socket exists".
+The second is the one a later phase can act on.
+
+## Substring matching is enough to police a boundary, once comments and test modules are gone
+
+`CLI_ENGINE_RESIDUE`'s scan looks for literal substrings (`Store::open`, `get_secret(`, `imap_client::`) rather than parsing Rust, because a boundary test that needed a front end would be a second compiler to maintain.
+
+Two things make it hold. Line comments are stripped first, so a doc comment saying "the error surfaces later when `SmtpConfig::load` is called" is not a call. And `#[cfg(test)] mod … { … }` blocks are stripped whole with matched braces, because a unit test that opens a store is the engine's own test living in that file for want of anywhere better, not a CLI handler. `src/read_cmd.rs` and `src/cutover.rs` both have one, and both would otherwise be permanent false rows.
