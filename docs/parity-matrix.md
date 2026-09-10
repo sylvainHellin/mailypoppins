@@ -538,8 +538,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp new <name>` (`src/main.rs`), TUI `cn` (`src/tui/app/keymap.rs:583`)
 - Daemon surface: `draft.create`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 
 ### DFT-02 List the account's drafts, optionally filtered by status
 
@@ -547,8 +547,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp list [--status]`, `src/main.rs`
 - Daemon surface: `draft.list`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 
 ### DFT-03 Validate draft frontmatter
 
@@ -556,18 +556,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp validate [selector]`, `src/draft.rs`
 - Daemon surface: `draft.validate`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`, unit tests in `src/draft.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, unit tests in `src/draft.rs`
+- Status: routed (P4-U6); GUI not started
 - Note: an invalid draft stays editable and cannot be approved or sent.
 
 ### DFT-04 Approve a draft and demote it back to draft status
 
 - Classification: GUI parity
 - Source anchor: `mp mark-approved`, `mp mark-draft` (`src/main.rs`), TUI `cA` and `cD` (`src/tui/app/keymap.rs:667-668`)
-- Daemon surface: `draft.approve`, `draft.demote`
+- Daemon surface: `draft.approve`, `draft.demote`, resolved through `draft.path` first so the client knows the previous status
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 
 ### DFT-05 Preview a draft as a dry run through a bare selector
 
@@ -575,8 +575,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: the top-level positional `[SELECTOR]` argument in `src/main.rs`
 - Daemon surface: `draft.preview`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`
-- Status: not started
+- Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 
 ### DFT-06 Resolve a draft selector to its filesystem path
 
@@ -584,8 +584,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp path <selector>`, `src/main.rs`, `src/selector.rs`
 - Daemon surface: `draft.path`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`
-- Status: not started
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 - Note: the only selector-to-path edge, and the handle external editors and agents use, so it stays supported under the filesystem boundary.
 
 ### DFT-07 Edit a draft in the editor
@@ -594,8 +594,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp edit <selector>`, `src/main.rs`
 - Daemon surface: `draft.path`, then a client-side editor session on the canonical file
 - GUI location: TBD (Phase 9)
-- Validation: manual
-- Status: not started
+- Validation: `tests/daemon_draft_slice.rs`, with a stub editor that records the path it was handed
+- Status: routed (P4-U6); GUI not started
 - Note: the GUI equivalent is the embedded Neovim session on the same file.
 
 ### DFT-08 Create a reply or a reply-all draft from a received message
@@ -604,8 +604,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp reply <selector> [--all] [--mailbox]` (`src/main.rs`), TUI `r`, `cr` (`src/tui/app/keymap.rs:626`), `ca`, search overlay `r` and `R`
 - Daemon surface: `draft.reply`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 
 ### DFT-09 Forward a message to new recipients
 
@@ -613,8 +613,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp forward <selector> [--mailbox]` (`src/main.rs`), TUI `cf`, search overlay `w`
 - Daemon surface: `draft.forward`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`
-- Status: not started
+- Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`
+- Status: routed (P4-U6); GUI not started
 - Note: the forward carries the original attachments, which the GUI must reproduce rather than dropping.
 
 ### DFT-10 Compose wizard for new and forwarded mail

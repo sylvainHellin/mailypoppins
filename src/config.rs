@@ -2548,6 +2548,31 @@ pub fn resolve_signature_markdown(
     Some(signature_source_to_markdown(content))
 }
 
+/// The signature a new draft body carries (#0099), honouring the global
+/// `--no-signature` / `--signature <name>` flags and the `include_signature`
+/// setting.
+///
+/// `None` means no signature block: the user opted out, or nothing is
+/// configured. One owner for the rule, because both ends of the socket apply
+/// it now - the CLI for `mp send` and `mp invite`, the daemon for the drafts
+/// `draft.create`, `draft.reply` and `draft.forward` write (P4-U6) - and two
+/// copies would drift the day a flag gains a meaning.
+pub fn body_signature(
+    account: &AccountConfig,
+    no_signature: bool,
+    signature_name: Option<&str>,
+    email: &EmailSettings,
+) -> Option<String> {
+    if no_signature {
+        None
+    } else if email.include_signature {
+        resolve_signature_markdown(account, signature_name)
+    } else {
+        // include_signature is off, but an explicit --signature still selects one.
+        signature_name.and_then(|name| resolve_signature_markdown(account, Some(name)))
+    }
+}
+
 /// Normalise a signature source to Markdown with hard line breaks.
 ///
 /// A signature is stored verbatim (inline `text` or a file at `path`) and may be

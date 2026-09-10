@@ -10,6 +10,7 @@
 //! Changing a code, a field name, or the version range needs an entry in that
 //! document's protocol changelog.
 
+pub mod draft;
 pub mod events;
 pub mod frame;
 

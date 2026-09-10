@@ -16,9 +16,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 use log::{error, info, warn};
-use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "mailypoppins")]
@@ -1114,6 +1113,10 @@ fn drafts_store_reporting(
 /// what turns "my draft disappeared" into a fixable line. The exit code stays
 /// 0: the listing itself succeeded, and the broken file is a warning about the
 /// directory, not a failure of the command.
+// Unused from P4-U6, when `mp list` started answering from the daemon and
+// `draft_cmd::render_skipped` started rendering the block from the wire, and
+// deleted with the rest of the direct engine paths by P4-U15.
+#[allow(dead_code)]
 fn print_skipped_drafts(skipped: &[mailypoppins::store::drafts::SkippedDraft]) {
     if skipped.is_empty() {
         return;
@@ -1592,6 +1595,113 @@ async fn routed_search(
         .unwrap_or_default())
 }
 
+/// One typed answer from the daemon, on an existing connection.
+///
+/// The refusal comes back as the error the command has always raised (see
+/// [`refusal`]), so a routed failure reads exactly like the in-process one it
+/// replaced.
+async fn typed_call<T: serde::de::DeserializeOwned>(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<T> {
+    let result = daemon_try_call(connection, method, params)
+        .await
+        .map_err(|e| refusal(account, e))?;
+    serde_json::from_value(result).with_context(|| format!("reading the daemon's {method} answer"))
+}
+
+/// One typed answer from the daemon, on a connection of its own.
+async fn draft_call<T: serde::de::DeserializeOwned>(
+    account: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<T> {
+    let mut connection = daemon_connection().await;
+    typed_call(&mut connection, account, method, params).await
+}
+
+/// The two signature flags, as the `draft.*` writers take them.
+///
+/// They travel rather than being resolved here: the daemon writes the file, so
+/// the daemon splices the signature into the body, from the same configuration
+/// [`resolve_body_signature`] reads.
+fn signature_params(no_signature: bool, signature: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "no_signature": no_signature,
+        "signature": signature,
+    })
+}
+
+/// Merge `extra`'s keys into `params`, which is how a call adds the signature
+/// flags to its own parameters.
+fn with_params(mut params: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    if let (Some(target), Some(source)) = (params.as_object_mut(), extra.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    params
+}
+
+/// `mp mark-approved` and `mp mark-draft`: resolve, then rewrite.
+///
+/// Two calls on one connection, because `draft.path` is what tells the client
+/// the *previous* status and the rewrite's own four keys are frozen. A draft
+/// already in the target status is left alone and reported, which is the `ℹ`
+/// line; anything the daemon refuses (a sent draft) leaves through the error
+/// path the command has always used.
+async fn routed_mark(account: &str, selector: &str, approve: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let location: mp_protocol::draft::DraftLocation = typed_call(
+        &mut connection,
+        account,
+        "draft.path",
+        serde_json::json!({"account": account, "selector": selector}),
+    )
+    .await?;
+
+    let (method, target, already, done) = match approve {
+        true => ("draft.approve", "approved", "is already approved", "approved"),
+        false => ("draft.demote", "draft", "is already a draft", "demoted"),
+    };
+    if location.status == target {
+        println!("{} {} {already}", "\u{2139}".blue(), location.selector);
+        return Ok(());
+    }
+    daemon_try_call(
+        &mut connection,
+        method,
+        serde_json::json!({"account": account, "id": location.id}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    println!("{} {done} {}", "\u{2713}".green(), location.selector);
+    Ok(())
+}
+
+/// `mp reply` and `mp forward`: the draft the daemon built from a stored
+/// message, and the message it names.
+async fn routed_from_source(
+    account: &str,
+    method: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+    all: bool,
+    signature: serde_json::Value,
+) -> Result<mp_protocol::draft::DraftCreated> {
+    let mut source = serde_json::json!({"selector": selector});
+    if let Some(mailbox) = mailbox {
+        source["mailbox"] = serde_json::json!(mailbox);
+    }
+    let params = with_params(
+        serde_json::json!({"account": account, "source": source, "all": all}),
+        signature,
+    );
+    draft_call(account, method, params).await
+}
+
 fn resolve_received_arg(
     store: &Store,
     selector: &str,
@@ -1669,14 +1779,7 @@ fn resolve_body_signature(
     signature_name: Option<&str>,
     email: &EmailSettings,
 ) -> Option<String> {
-    if no_signature {
-        None
-    } else if email.include_signature {
-        resolve_signature_markdown(account, signature_name)
-    } else {
-        // include_signature is off, but an explicit --signature still selects one.
-        signature_name.and_then(|s| resolve_signature_markdown(account, Some(s)))
-    }
+    mailypoppins::config::body_signature(account, no_signature, signature_name, email)
 }
 
 /// The mailboxes an account is configured for, as a human-readable list for
@@ -2205,6 +2308,11 @@ async fn main() -> Result<()> {
         &global_config.email,
     );
 
+    // The same two flags, unresolved, for the draft writers the daemon owns:
+    // it writes the file, so it splices the signature (P4-U6). Taken before the
+    // match, which moves the command out of `cli`.
+    let draft_signature = signature_params(cli.no_signature, cli.signature.as_deref());
+
     match cli.command {
         Some(Commands::Send {
             selector,
@@ -2558,55 +2666,32 @@ async fn main() -> Result<()> {
             }
         }
 
+        // The draft slice (P4-U6): every one of these answers from the daemon,
+        // which owns the drafts directory, and renders what it answered through
+        // `draft_cmd`. A refusal travels typed and leaves through `main`'s own
+        // error path, exactly as the read slice's does.
         Some(Commands::List { status }) => {
-            let (store, skipped) = drafts_store_reporting(&account_config.name)?;
-            let rows = mailypoppins::store::drafts::list(
-                &store,
+            let listing: mp_protocol::draft::DraftListing = draft_call(
                 &account_config.name,
-                status.map(DraftStatusFilter::as_str),
-            )?;
-            if rows.is_empty() && skipped.is_empty() {
-                println!("No drafts for {}", account_config.name);
-                mailypoppins::daemon::client::enforce_routing(&command_label);
-                return Ok(());
-            }
-            if rows.is_empty() {
-                println!("No listable drafts for {}", account_config.name);
-                print_skipped_drafts(&skipped);
-                mailypoppins::daemon::client::enforce_routing(&command_label);
-                return Ok(());
-            }
-
-            println!("\n{}", "Drafts:".bold());
-            println!("{}", "\u{2500}".repeat(72));
-            let mut counts: std::collections::BTreeMap<String, usize> =
-                std::collections::BTreeMap::new();
-            for row in &rows {
-                *counts.entry(row.status.clone()).or_default() += 1;
-                let status_colored = match row.status.as_str() {
-                    "draft" => "draft".yellow(),
-                    "approved" => "approved".green(),
-                    "sent" => "sent".dimmed(),
-                    other => other.normal(),
-                };
-                println!(
-                    "[{}] {} \u{2192} {}",
-                    status_colored,
-                    Selector::for_draft(&account_config.name, &row.id),
-                    row.to.as_deref().unwrap_or("(bcc only)")
-                );
-                if let Some(subject) = row.subject.as_deref() {
-                    println!("      {}", subject.dimmed());
-                }
-            }
-            println!("{}", "\u{2500}".repeat(72));
-            let summary = counts
-                .iter()
-                .map(|(status, n)| format!("{status}: {n}"))
-                .collect::<Vec<_>>()
-                .join(" | ");
-            println!("Total: {} | {}", rows.len(), summary);
-            print_skipped_drafts(&skipped);
+                "draft.list",
+                serde_json::json!({
+                    "account": account_config.name,
+                    "status": status.map(DraftStatusFilter::as_str),
+                }),
+            )
+            .await?;
+            // The collisions first, because the index reported them before it
+            // was read; the skipped files after the listing they are missing
+            // from. Both are warnings about the directory: exit code 0.
+            eprint!(
+                "{}",
+                mailypoppins::draft_cmd::render_collisions(&listing.collisions)
+            );
+            print!("{}", mailypoppins::draft_cmd::render_list(&listing));
+            eprint!(
+                "{}",
+                mailypoppins::draft_cmd::render_skipped(&listing.skipped)
+            );
         }
 
         Some(Commands::Validate { selector }) => {
@@ -2614,189 +2699,117 @@ async fn main() -> Result<()> {
                 Some(sel) => account_for_selector(sel, &account_config, &global_config)?,
                 None => account_config.clone(),
             };
-            let store = drafts_store(&account_config.name)?;
-            let targets: Vec<(Selector, PathBuf)> = match selector {
-                Some(ref sel) => {
-                    let (row, canonical) = resolve_draft_arg(&store, sel, &account_config.name)?;
-                    vec![(canonical, row.path)]
-                }
-                None => mailypoppins::store::drafts::list(&store, &account_config.name, None)?
-                    .into_iter()
-                    .map(|row| (Selector::for_draft(&account_config.name, &row.id), row.path))
-                    .collect(),
-            };
-            if targets.is_empty() {
-                println!("No drafts to validate for {}", account_config.name);
-                mailypoppins::daemon::client::enforce_routing(&command_label);
-                return Ok(());
-            }
-
-            let mut valid_count = 0;
-            let mut invalid_count = 0;
-            for (canonical, path) in &targets {
-                match parse_email_draft(path).and_then(|draft| validate_draft(&draft)) {
-                    Ok(warnings) => {
-                        print!("{} {}", "\u{2713}".green(), canonical);
-                        if !warnings.is_empty() {
-                            print!(" ({})", warnings.join(", ").yellow());
-                        }
-                        println!();
-                        valid_count += 1;
-                    }
-                    Err(e) => {
-                        println!("{} {} - {}", "\u{2717}".red(), canonical, e);
-                        invalid_count += 1;
-                    }
-                }
-            }
-
-            println!(
-                "\nValidation complete: {} valid, {} invalid",
-                valid_count.to_string().green(),
-                invalid_count.to_string().red()
+            let validation: mp_protocol::draft::DraftValidation = draft_call(
+                &account_config.name,
+                "draft.validate",
+                serde_json::json!({"account": account_config.name, "selector": selector}),
+            )
+            .await?;
+            print!(
+                "{}",
+                mailypoppins::draft_cmd::render_validation(&validation)
             );
-
-            if invalid_count > 0 {
+            // The daemon refuses nothing about an invalid draft: reporting one
+            // is its answer, and the exit code is this process's decision.
+            if mailypoppins::draft_cmd::invalid_count(&validation) > 0 {
+                mailypoppins::daemon::client::enforce_routing(&command_label);
                 std::process::exit(1);
             }
         }
 
         Some(Commands::MarkApproved { selector }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = drafts_store(&account_config.name)?;
-            let (row, canonical) = resolve_draft_arg(&store, &selector, &account_config.name)?;
-            drop(store);
-            let msg = mark_as_approved(&row.path)?;
-            reindex_drafts(&account_config.name);
-            if msg.starts_with("Already") {
-                println!("{} {} is already approved", "\u{2139}".blue(), canonical);
-            } else {
-                println!("{} approved {}", "\u{2713}".green(), canonical);
-            }
+            routed_mark(&account_config.name, &selector, true).await?;
         }
 
         Some(Commands::MarkDraft { selector }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = drafts_store(&account_config.name)?;
-            let (row, canonical) = resolve_draft_arg(&store, &selector, &account_config.name)?;
-            drop(store);
-            let msg = mark_as_draft(&row.path)?;
-            reindex_drafts(&account_config.name);
-            if msg.starts_with("Already") {
-                println!("{} {} is already a draft", "\u{2139}".blue(), canonical);
-            } else {
-                println!("{} demoted {}", "\u{2713}".green(), canonical);
-            }
+            routed_mark(&account_config.name, &selector, false).await?;
         }
 
         Some(Commands::New { name }) => {
-            let file_name = if Path::new(&name).extension().is_some() {
-                name.clone()
-            } else {
-                format!("{}.md", name)
-            };
-            let dir = mailypoppins::config::drafts_dir(&account_config.name);
-            fs::create_dir_all(&dir)?;
-            let path = dir.join(&file_name);
-            if path.exists() {
-                return Err(anyhow!("A draft already exists at {}", path.display()));
-            }
-
-            // The id is minted here rather than by the index, so the selector
-            // printed below is the one in the file from the first byte.
-            let id = mailypoppins::store::drafts::new_id();
-            let now = chrono::Utc::now().to_rfc2822();
-            let skeleton = new_draft_skeleton_with_id(
-                &smtp_config.default_from,
-                &now,
-                &id,
-                signature_content.as_deref(),
-            );
-            fs::write(&path, skeleton)?;
-            reindex_drafts(&account_config.name);
-            println!(
-                "{} {}",
-                "\u{2713}".green(),
-                Selector::for_draft(&account_config.name, &id)
-            );
+            // The `.md` suffixing rule is the daemon's, because the daemon owns
+            // the directory the file lands in.
+            let created: mp_protocol::draft::DraftCreated = draft_call(
+                &account_config.name,
+                "draft.create",
+                with_params(
+                    serde_json::json!({"account": account_config.name, "name": name}),
+                    draft_signature,
+                ),
+            )
+            .await?;
+            println!("{} {}", "\u{2713}".green(), created.selector);
         }
 
         Some(Commands::Path { selector }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = drafts_store(&account_config.name)?;
-            let (row, _canonical) = resolve_draft_arg(&store, &selector, &account_config.name)?;
-            println!("{}", row.path.display());
+            let location: mp_protocol::draft::DraftLocation = draft_call(
+                &account_config.name,
+                "draft.path",
+                serde_json::json!({"account": account_config.name, "selector": selector}),
+            )
+            .await?;
+            println!("{}", location.path);
         }
 
         Some(Commands::Edit { selector }) => {
+            // The daemon names the file and this process runs the editor on it:
+            // an editor is a terminal session, which only the client has.
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = drafts_store(&account_config.name)?;
-            let (row, canonical) = resolve_draft_arg(&store, &selector, &account_config.name)?;
-            drop(store);
+            let location: mp_protocol::draft::DraftLocation = draft_call(
+                &account_config.name,
+                "draft.path",
+                serde_json::json!({"account": account_config.name, "selector": selector}),
+            )
+            .await?;
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "hx".to_string());
             let status = std::process::Command::new(&editor)
-                .arg(&row.path)
+                .arg(&location.path)
                 .status()
                 .with_context(|| format!("running {editor}"))?;
-            reindex_drafts(&account_config.name);
             if !status.success() {
                 return Err(anyhow!("{editor} exited with {status}"));
             }
-            println!("{} {}", "\u{2713}".green(), canonical);
+            println!("{} {}", "\u{2713}".green(), location.selector);
         }
 
         Some(Commands::Reply { selector, all, mailbox }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = received_store(&account_config.name)?;
-            let (row, canonical) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            let source = source_from_row(&store, &blobs, &row, false)?;
-            drop(store);
-
-            let (_path, draft) = mailypoppins::draft::create_draft_from_source(
+            let created = routed_from_source(
                 &account_config.name,
-                &account_config.default_from,
-                &source,
-                mailypoppins::draft::DraftFromSource::Reply { all },
-                None,
-                resolve_body_signature(
-                    &account_config,
-                    cli.no_signature,
-                    cli.signature.as_deref(),
-                    &global_config.email,
-                )
-                .as_deref(),
-            )?;
-            println!("{} reply to {}", "\u{2713}".green(), canonical);
-            println!("{}", draft);
+                "draft.reply",
+                &selector,
+                mailbox.as_deref(),
+                all,
+                draft_signature,
+            )
+            .await?;
+            println!(
+                "{} reply to {}",
+                "\u{2713}".green(),
+                created.source.map(|s| s.selector).unwrap_or_default()
+            );
+            println!("{}", created.selector);
         }
 
         Some(Commands::Forward { selector, mailbox }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let store = received_store(&account_config.name)?;
-            let (row, canonical) =
-                resolve_received_arg(&store, &selector, &account_config.name, mailbox.as_deref())?;
-            let blobs = mailypoppins::store::BlobStore::for_account(&account_config.name);
-            let source = source_from_row(&store, &blobs, &row, true)?;
-            drop(store);
-
-            let (_path, draft) = mailypoppins::draft::create_draft_from_source(
+            let created = routed_from_source(
                 &account_config.name,
-                &account_config.default_from,
-                &source,
-                mailypoppins::draft::DraftFromSource::Forward,
-                None,
-                resolve_body_signature(
-                    &account_config,
-                    cli.no_signature,
-                    cli.signature.as_deref(),
-                    &global_config.email,
-                )
-                .as_deref(),
-            )?;
-            println!("{} forward of {}", "\u{2713}".green(), canonical);
-            println!("{}", draft);
+                "draft.forward",
+                &selector,
+                mailbox.as_deref(),
+                false,
+                draft_signature,
+            )
+            .await?;
+            println!(
+                "{} forward of {}",
+                "\u{2713}".green(),
+                created.source.map(|s| s.selector).unwrap_or_default()
+            );
+            println!("{}", created.selector);
         }
 
         Some(Commands::Invite { action }) => {
@@ -3492,17 +3505,18 @@ async fn main() -> Result<()> {
 
         None => {
             if let Some(ref selector) = cli.selector {
-                // Preview mode (dry run): a draft selector, never a path.
+                // Preview mode (dry run): a draft selector, never a path. The
+                // daemon renders the record, including the body cut-offs, and
+                // passes no signature: the body already carries it (#0099).
                 let account_config =
                     account_for_selector(selector, &account_config, &global_config)?;
-                let store = drafts_store(&account_config.name)?;
-                let (row, _canonical) =
-                    resolve_draft_arg(&store, selector, &account_config.name)?;
-                drop(store);
-                let draft = parse_email_draft(&row.path)?;
-                // Same as the single-send preview: the body already carries
-                // the signature (#0099).
-                preview_draft(&draft, &smtp_config, &global_config.email, None, true)?;
+                let preview: mp_protocol::draft::DraftPreview = draft_call(
+                    &account_config.name,
+                    "draft.preview",
+                    serde_json::json!({"account": account_config.name, "selector": selector}),
+                )
+                .await?;
+                print!("{}", mailypoppins::draft_cmd::render_preview(&preview));
             } else {
                 // No file, no subcommand -> launch TUI
                 mailypoppins::tui::run()?;

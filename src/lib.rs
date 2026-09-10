@@ -19,6 +19,7 @@ pub mod cutover;
 pub mod imap_client;
 pub mod ingest;
 pub mod draft;
+pub mod draft_cmd;
 pub mod search;
 pub mod selector;
 pub mod dump;

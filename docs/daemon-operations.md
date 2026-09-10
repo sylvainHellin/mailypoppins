@@ -71,11 +71,21 @@ The migration moves the CLI one slice at a time, and a command routes the moment
 | `mp list-messages [--mailbox] [-n]` | `message.list` | P4-U4 |
 | `mp dump-mailbox --json [--mailbox ...]` | `message.list` with `projection: "envelope"` | P4-U4 |
 | `mp search --local` | `message.search` | P4-U4 |
+| `mp new <name>` | `draft.create` | P4-U6 |
+| `mp list [--status]` | `draft.list` | P4-U6 |
+| `mp validate [selector]` | `draft.validate` | P4-U6 |
+| `mp mark-approved`, `mp mark-draft` | `draft.path`, then `draft.approve` / `draft.demote` | P4-U6 |
+| `mp path <selector>` | `draft.path` | P4-U6 |
+| `mp edit <selector>` | `draft.path`, then `$EDITOR` in the client | P4-U6 |
+| `mp reply [--all] [--mailbox]` | `draft.reply` | P4-U6 |
+| `mp forward [--mailbox]` | `draft.forward` | P4-U6 |
+| `mp <selector>` (the dry run) | `draft.preview` | P4-U6 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 
 Every other command still answers in process and will until its own slice.
 A routed command produces the pre-daemon binary's bytes, refusals included: `tests/daemon_read_slice.rs` compares stdout, stderr and the exit code against `~/.cache/mp-oracle/pre-daemon/mp` over one seeded root, for every flag combination and every error case.
 That is why a refusal the daemon spelled out comes back typed rather than printed at the call site: `account_not_ready` becomes the sentence a store-less read has always produced, and the rest leaves through `main`'s ordinary error path, which is where the pre-daemon binary reported it.
+`tests/daemon_draft_slice.rs` is the same gate for the draft slice, over a fixture whose drafts directories are stashed and restored between the two binaries, because half of those commands write.
 The direct engine paths those commands used are dead code until P4-U15 deletes them; nothing calls them.
 
 ## Exit codes

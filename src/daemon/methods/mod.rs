@@ -74,11 +74,9 @@ pub fn register(
     message::register_handles(dispatcher, Arc::clone(&config), handles);
     self::draft::register(
         dispatcher,
-        Arc::new(self::draft::DraftApprove {
-            config: Arc::clone(&config),
-            watch: Arc::clone(&watch),
-            canonical: Arc::clone(&canonical),
-        }),
+        Arc::clone(&config),
+        Arc::clone(&watch),
+        Arc::clone(&canonical),
     );
     self::config::register(
         dispatcher,

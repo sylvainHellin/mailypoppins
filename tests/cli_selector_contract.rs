@@ -11,6 +11,13 @@
 //! the CLI surface: exit codes, the selectors printed on stdout and the errors
 //! printed on stderr. `HOME` and `MAILYPOPPINS_DATA_DIR` point into a temp
 //! tree, so nothing here reads the real mailstore or the network.
+//!
+//! Since P4-U6 the draft commands start a daemon on demand, and that daemon
+//! outlives the temp tree it was reading. Both fixtures therefore own a
+//! [`support::parity::SandboxRoot`], which stops it when the test ends;
+//! everything else about the suite is unchanged.
+
+mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,13 +30,15 @@ use mailypoppins::selector::{self, Namespace};
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
 
+use support::parity::SandboxRoot;
+
 const MP: &str = env!("CARGO_BIN_EXE_mp");
 const ACCOUNT: &str = "work";
 
 /// A temp `HOME` plus data directory with one configured account, which is all
 /// any command here needs: no password, no server, no network.
 struct Fixture {
-    tmp: TempDir,
+    tmp: SandboxRoot,
 }
 
 impl Fixture {
@@ -42,7 +51,10 @@ impl Fixture {
             format!("[[accounts]]\nname = \"{ACCOUNT}\"\ndefault_from = \"me@example.com\"\n"),
         )
         .expect("write config");
-        Self { tmp }
+        let data = tmp.path().join("data");
+        Self {
+            tmp: SandboxRoot::new(tmp, data),
+        }
     }
 
     fn home(&self) -> PathBuf {
@@ -379,7 +391,7 @@ fn an_unknown_key_names_the_namespace_it_searched() {
 /// thing telling the binary which account to touch: the property under test is
 /// that the account is resolved from the selector before any store is opened.
 struct XAcctFixture {
-    tmp: TempDir,
+    tmp: SandboxRoot,
 }
 
 impl XAcctFixture {
@@ -400,7 +412,10 @@ impl XAcctFixture {
             ),
         )
         .expect("write config");
-        Self { tmp }
+        let data = tmp.path().join("data");
+        Self {
+            tmp: SandboxRoot::new(tmp, data),
+        }
     }
 
     fn data(&self) -> PathBuf {

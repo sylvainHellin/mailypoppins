@@ -1669,3 +1669,26 @@ Only the P4 harness cleans up: `DaemonFixture` kills its child in `Drop`, and `s
 
 Every remaining slice inherits this the moment it migrates a command a pre-daemon suite runs as a subprocess.
 The two fixes are to give those suites a fixture (or `stop_daemon`), or to teach the daemon an idle shutdown; until one lands, a full `cargo test --workspace` needs `pkill -f 'target/debug/mp daemon run'` afterwards.
+
+## A daemon-side resolver has to be as fresh as the index rebuild it replaced
+
+The pre-daemon binary rebuilt the drafts index from the directory at the start of every draft command, which is what makes `mp new … && mp mark-approved …` work and what lets an agent write a file that the next `mp list` shows.
+`draft.approve` (P3b-U10) resolved through the watcher's *settled* inventory instead, which is right for a watcher and wrong for a resolver: a draft written a millisecond ago has not settled, and a poll plus a debounce is up to a second of "no such draft".
+It would also answer with a stale path for a second after a rename, which is exactly what `renaming_a_draft_keeps_its_selector_working` pins.
+
+So the draft slice resolves from a fresh scan (`store::drafts::index_dir`, which is `refresh_reporting` minus the SQL) and keeps the watcher only as the fallback of the two mutators, because a file that will not parse has no `id:` and is announced under its stem: that stem is the id `draft.approve` refuses `draft_invalid` for, and a scan reports such a file as skipped rather than as a row.
+The scan costs one `stat` plus one parse per file of one directory, opens no store and takes no engine lock, so the property P3b-U10 wanted survives.
+
+## A wire row may keep a distinction the index drops, and let the client re-apply it
+
+`store::drafts::DraftRow::subject` is `non_empty(...)`, so a draft with `subject: ""` has `None` there and `mp list` prints no subject line for it.
+`DraftEntry::subject` deliberately carries `Some("")` instead, because the row is also a GUI's model and "the file has an empty subject" is not "the file has no subject".
+The rendering rule moves to the client, which prints the line only for a subject that is there and not blank, and the CLI bytes stay what they were.
+The general shape: when a wire type is richer than the projection a command printed, the command's rule moves into the renderer rather than the payload being flattened to fit it.
+
+## `mp new`'s From line came from the SMTP config, and now comes from the account
+
+`mp new` wrote `from: {smtp_config.default_from}`, and `SmtpConfig::load` falls back to a placeholder `user@example.com` when it cannot read a password, so a machine with no secrets wrote drafts from a made-up address.
+`draft.create` writes `account.default_from`, which is what `SmtpConfig::load` copies when it succeeds and what the user actually configured when it does not.
+The same applies to the dry run's `From:` line for a draft with no `from:` field.
+Nothing in the parity table sees it (every fixture draft carries a `from:`), and it is a fix rather than a drift, but it is the one byte of the slice a broken secrets backend can move.

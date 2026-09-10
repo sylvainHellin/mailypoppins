@@ -101,7 +101,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations.
 - `signature.*` for list, read, create, update, rename, delete, and per-account default selection.
 - `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes.
-- `draft.*` for the draft lifecycle, of which this build serves `draft.approve`.
+- `draft.*` for the draft lifecycle, of which this build serves the nine methods of the draft slice.
 - `operation.*` for long-running operation status and cancellation.
 - `diagnostic.*` for logs, health, and support information.
 - `daemon.*` for status and graceful lifecycle control.
@@ -471,17 +471,42 @@ The backend is opened on first use rather than at startup, because a first run h
 The daemon watches every account's drafts directory and the signatures directory, so a draft written by `$EDITOR`, by an agent or by the daemon itself reaches every client as an event without anybody asking.
 The watcher is described in [daemon-operations.md](daemon-operations.md); what it produces on the wire is the three kinds below and the snapshot rows above.
 
-`draft.approve` is the one method of the family in this build.
+The family is the nine methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
 
 | method | kind | params | result |
 |---|---|---|---|
 | `draft.approve` | command | `{account, id}` | `{account, id, status: "approved", path}` |
+| `draft.create` | command | `{account, name, no_signature?, signature?}` | `DraftCreated` |
+| `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
+| `draft.forward` | command | `{account, source, no_signature?, signature?}` | `DraftCreated` |
+| `draft.list` | query | `{account, status?}` | `DraftListing` |
+| `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
+| `draft.preview` | query | `{account, id\|selector}` | `DraftPreview` |
+| `draft.reply` | command | `{account, source, all?, no_signature?, signature?}` | `DraftCreated` |
+| `draft.validate` | query | `{account, id?\|selector?}` | `DraftValidation` |
 
-It rewrites the `status:` line and nothing else, re-serialising no frontmatter, so a field the daemon does not model survives an approval.
-It publishes no event of its own: the watcher notices the daemon's write like any other and publishes the `draft.changed` that carries the new state, so an approval over the socket and an approval in an editor look identical from the outside.
+The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
+`DraftCreated` is `{account, id, selector, path, source}`, whose `source` is `{id, selector}` for a reply or a forward and absent for a draft made from nothing.
+`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, subject, valid, ready}` in the index's order (`mtime DESC, id ASC`); `to` and `subject` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
+`DraftValidation` is `{account, reports}`, whose reports are `{id, selector, valid, error, warnings}`.
+`DraftLocation` is `{account, id, selector, path, status}` and `DraftPreview` is the dry run's record, whose body is cut at 500 characters while `body_truncated` is decided on 500 bytes and whose `signature` is `null` for the CLI, because the body already carries it (#0099).
 
-An id resolves through the watcher's settled inventory rather than through the drafts index, which lives in a store behind an engine lock: approving costs no lock, and a draft the daemon has not announced yet resolves to nothing.
-An unknown account is `-32005` with `{account}`; an id nothing resolves to is `-32602` with `{account, id}`; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload; a draft already `sent` is `-32602` with `{account, id, status}`.
+**`draft.path` is the family's resolver.**
+It takes what the user typed (`<id>`, `drafts/<id>`, `mp://<account>/drafts/<id>`) and answers the canonical selector, the canonical path and the current status; which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
+The status is there because `mp mark-approved` needs the *previous* one to choose its line, and the approval's own four keys are frozen.
+
+Every query answers from a fresh scan of the account's drafts directory rather than from the watcher's settled inventory, which is what makes a draft written a millisecond ago addressable: the pre-daemon binary rebuilt the index at the start of every command, and a resolution that waited for a poll plus a debounce would answer "no such draft" for up to a second.
+The scan takes no engine lock and opens no store, exactly as the watcher's lookup did.
+The two mutators fall back to that inventory when the scan finds nothing, because a file that will not parse has no `id:` and is announced under its stem, which is the id `draft.approve` refuses `draft_invalid` for.
+
+`draft.approve` and `draft.demote` rewrite the `status:` line and nothing else, re-serialising no frontmatter, so a field the daemon does not model survives.
+They publish no event of their own: the watcher notices the daemon's write like any other and publishes the `draft.changed` that carries the new state, so an approval over the socket and an approval in an editor look identical from the outside.
+
+Every `path`, `kept` and `shadowed` field is absolute and under `<data_dir>/accounts/<account>/drafts/`, and nothing in the family names the store, the blobs or the runtime directory.
+
+An unknown account is `-32005` with `{account}`; an account with no store is `-32006` for the two methods that read one (`draft.reply`, `draft.forward`) and never for the seven that read the directory, because a drafts directory is local truth and an account that has never synced still has one.
+An id nothing resolves to is `-32602` with `{account, id}`; a name `draft.create` would overwrite is `-32602` with `{account, name, path}`; a draft already `sent` is `-32602` with `{account, id, status}` for both mutators; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload.
+An invalid draft is not a refusal: `draft.validate` reports it and the exit code stays the client's.
 
 ### Long-running operations
 
@@ -722,7 +747,7 @@ Every method declares a kind (`Query`, `Command`, `Operation`, `ClientIntegratio
 The `state.event` and `state.resync_required` notifications, and the `{instance_id, revision, kind, payload}` event envelope.
 The register-before-capture ordering and the watermark that drops every revision at or below the captured one, which together make a change around a bootstrap arrive exactly once.
 The event kinds: `state.invalidate` `{resource, scope}` and `state.remove` `{resource}`, the replacements `account.state_changed` `{account, state}`, `draft.changed` `{account, id, path, to, subject, status, valid, ready}` and `draft.invalid` `{account, id, path, diagnostics}`, and the lifecycle kinds `operation.progress`, `operation.finished`, `sync.completed`, `config.changed`, `config.invalid` and `signature.changed` `{name, path}` with the payloads above.
-The `draft.*` family, which is `draft.approve` `{account, id}` -> `{account, id, status, path}`, and the `draft_invalid` refusal it introduced.
+The `draft.*` family, which is the nine methods above with the `mp_protocol::draft` result types, the fresh-scan resolver behind `draft.path`, and the `draft_invalid` refusal `draft.approve` introduced.
 The three handle methods, `message.materialise_attachment` `{account, id, part}` and `message.materialise_html` `{account, id}` -> `{handle, path, bytes, expires_at}`, and `message.release_handle` `{handle}` -> `{}`, with the `"<mailbox>/<uid>"` message id, the ten-minute default lifetime, the `<data_dir>/runtime/handles/<handle>/<name>` layout, and the pin that keeps the retention sweep off a blob a client has open.
 The snapshot's draft row, `{id, path, to, subject, status, valid, ready}`, which a `draft.invalid` reduces into with `status: "invalid"` and `valid: false`.
 The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.

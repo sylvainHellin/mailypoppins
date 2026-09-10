@@ -318,6 +318,21 @@ pub fn resolve_draft(store: &Store, query: &SelectorQuery) -> Result<(DraftRow, 
     }
 }
 
+/// The zero-match error of a draft lookup, for a resolver that answers from a
+/// directory scan rather than from the index.
+///
+/// The daemon's `draft.path` is that resolver (P4-U6), and the sentence a user
+/// sees may not depend on which process did the looking, so it is minted here
+/// rather than spelled again over there.
+pub fn draft_not_found(account: &str, key: &str) -> anyhow::Error {
+    not_found(&SelectorQuery {
+        namespace: Namespace::Drafts,
+        account: account.to_string(),
+        mailbox: Some(DRAFTS_MAILBOX.to_string()),
+        key: key.to_string(),
+    })
+}
+
 /// The zero-match error: it names the namespace searched, so the reader can
 /// tell "no such message" from "you asked the wrong index".
 fn not_found(query: &SelectorQuery) -> anyhow::Error {

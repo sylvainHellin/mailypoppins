@@ -223,6 +223,20 @@ fn dedupe_by_id(rows: Vec<DraftRow>) -> (Vec<DraftRow>, Vec<IdCollision>) {
     (kept, collisions)
 }
 
+/// The index projection of one drafts directory, read without a store.
+///
+/// [`refresh_reporting`] minus the SQL: the same scan, the same collision rule
+/// and the same `mtime DESC, id ASC` order, so the rows are the ones `list`
+/// would hand back after a refresh. It is what the daemon's `draft.*` family
+/// answers from (P4-U6): a directory read is fresh by construction, which is
+/// the freshness rule every draft command has always had, and it costs neither
+/// an engine lock nor a store.
+pub fn index_dir(dir: &Path) -> (Vec<DraftRow>, Vec<IdCollision>, Vec<SkippedDraft>) {
+    let (parsed, skipped) = scan(dir);
+    let (rows, collisions) = dedupe_by_id(parsed);
+    (rows, collisions, skipped)
+}
+
 /// Refresh the index of an account from its configured drafts directory,
 /// opening the store itself. Best-effort: an account with no store yet (never
 /// synced) has nowhere to index into, which is not an error.
