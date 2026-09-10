@@ -14,6 +14,9 @@
 //! [`mutation_fixture`] is that root plus an ambiguous message, a message
 //! whose two attachments share a name and a draft id two accounts hold, for
 //! the message-mutation slice (plan unit P4-U7).
+//! [`sync_fixture`] is the read fixture's accounts plus one that configures a
+//! server it has no credentials for, for the sync/watch slice (plan unit
+//! P4-U9).
 
 #![allow(dead_code)]
 
@@ -21,3 +24,4 @@ pub mod draft_fixture;
 pub mod mutation_fixture;
 pub mod parity;
 pub mod read_fixture;
+pub mod sync_fixture;

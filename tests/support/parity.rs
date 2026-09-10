@@ -225,10 +225,24 @@ impl DaemonFixture {
     /// cwd mattered would produce a different answer here, which is the
     /// failure P4-U2's absolutisation rule prevents.
     pub fn start_in(tmp: &Path, cwd: Option<&Path>) -> Self {
+        Self::start_with(tmp, cwd, &[])
+    }
+
+    /// Boot a daemon against `tmp` with `env` set on top of the sandbox.
+    ///
+    /// [`sandbox_env`] removes every hook in [`DAEMON_ENV_HOOKS`], which is
+    /// what keeps a developer's exported variable out of a parity comparison.
+    /// A test that wants one of those hooks - an account runtime, a forced
+    /// sync outcome - therefore has to put it back deliberately, which is
+    /// this argument. It is applied after the sandbox, so it wins.
+    pub fn start_with(tmp: &Path, cwd: Option<&Path>, env: &[(&str, &str)]) -> Self {
         fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
         let mut cmd = mp_command(tmp);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
+        }
+        for (key, value) in env {
+            cmd.env(key, value);
         }
         let child = cmd
             .args(["daemon", "run"])
