@@ -19,6 +19,9 @@ cargo insta review                         # approve markdown_to_html snapshot d
 
 Skipping `cargo install --path .` after a code change is the single most common footgun.
 
+Test scratch goes to `/var/tmp`, set once in [.cargo/config.toml](.cargo/config.toml) so no run needs a flag: `/tmp` is a small RAM-backed tmpfs and ~2200 tests each building a tempdir sqlite store exhaust it, which surfaces as `Disk quota exceeded` / `SQLITE_IOERR` rather than as a real failure.
+Agent scratch belongs there too, as `/var/tmp/mp-<purpose>-<id>` for worktrees and `CARGO_TARGET_DIR`: a build tree is several GB, and `/var/tmp` is aged out after 30 days while `~/.cache` accumulates forever.
+
 Website: `cd website && pnpm install && pnpm dev` (preview) or `pnpm build` (production bundle in `website/dist/`).
 
 ## Further reading

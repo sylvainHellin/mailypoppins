@@ -1,0 +1,13 @@
+# Point the test suite's scratch at disk rather than at the /tmp tmpfs.
+#
+# The suite runs ~2200 tests, most of which build a sqlite store inside a
+# `tempfile::tempdir()`. On this box /tmp is a 4 GiB RAM-backed tmpfs with a
+# per-user quota at 80% of that, so a full parallel run exhausts it and the
+# failures read as `Disk quota exceeded` / `SQLITE_IOERR` rather than as a real
+# bug. /var/tmp sits on / with hundreds of GB free and is aged out after 30 days.
+#
+# Cargo applies [env] to the processes it spawns, test binaries included, so
+# `std::env::temp_dir()` resolves to /var/tmp with no flag at the call site.
+# force is left off deliberately: an explicit TMPDIR from the caller still wins.
+[env]
+TMPDIR = "/var/tmp"
