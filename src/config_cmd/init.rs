@@ -918,7 +918,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     toml_content.push_str("notifications = false\n\n");
     toml_content.push_str("[email]\n");
     toml_content.push_str("font_family = \"Helvetica, Arial, sans-serif\"\n");
-    toml_content.push_str("font_size = \"12pt\"\n");
+    toml_content.push_str("font_size = \"16px\"\n");
     toml_content.push_str("include_signature = true\n\n");
     toml_content.push_str(&build_graph_account_toml(
         &account_name, &default_from,
@@ -1144,7 +1144,7 @@ pub(crate) fn build_init_toml(
     out.push_str("notifications = false\n\n");
     out.push_str("[email]\n");
     out.push_str("font_family = \"Helvetica, Arial, sans-serif\"\n");
-    out.push_str("font_size = \"12pt\"\n");
+    out.push_str("font_size = \"16px\"\n");
     out.push_str("include_signature = true\n");
 
     out.push_str("\n[[accounts]]\n");

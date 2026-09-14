@@ -31,7 +31,7 @@ All configuration lives in `~/.config/mailypoppins/config.toml`:
 ```toml
 [email]
 font_family = "Helvetica, Arial, sans-serif"
-font_size = "12pt"
+font_size = "16px"
 include_signature = true
 send_hold_secs = 20          # Undo-send window in the TUI (0 = hand off immediately)
 
