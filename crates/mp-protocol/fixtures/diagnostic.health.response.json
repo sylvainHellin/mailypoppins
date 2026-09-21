@@ -1,0 +1,74 @@
+{
+  "id": 11,
+  "jsonrpc": "2.0",
+  "result": {
+    "accounts": [
+      {
+        "last_sync": {
+          "finished_at": "2026-09-11T07:58:12+02:00",
+          "outcome": "ok"
+        },
+        "name": "tum",
+        "runtime": "ready",
+        "watcher": "running"
+      },
+      {
+        "last_sync": {
+          "finished_at": null,
+          "outcome": null
+        },
+        "name": "proton",
+        "runtime": "blocked",
+        "watcher": "stopped"
+      }
+    ],
+    "checks": [
+      {
+        "detail": "/home/u/.config/mailypoppins/config.toml loaded, 2 account(s)",
+        "name": "config_loaded",
+        "status": "ok"
+      },
+      {
+        "detail": "2 of 2 account store(s) are open under /home/u/.local/share/mailypoppins/accounts",
+        "name": "store_open",
+        "status": "ok"
+      },
+      {
+        "detail": "/home/u/.local/share/mailypoppins/runtime/daemon.sock is this daemon's, mode 0600",
+        "name": "socket_owner",
+        "status": "ok"
+      },
+      {
+        "detail": "writing /home/u/.local/share/mailypoppins/logs/mailypoppins-2026-09-11.log",
+        "name": "log_writable",
+        "status": "ok"
+      },
+      {
+        "detail": "tum is serving",
+        "name": "account:tum",
+        "status": "ok"
+      },
+      {
+        "detail": "proton is blocked: another engine holds the store lock",
+        "name": "account:proton",
+        "status": "warn"
+      }
+    ],
+    "clients": 2,
+    "holds": 0,
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "log_path": "/home/u/.local/share/mailypoppins/logs/mailypoppins-2026-09-11.log",
+    "operations": {
+      "active": 1
+    },
+    "pid": 4242,
+    "protocol_version": 1,
+    "socket": "/home/u/.local/share/mailypoppins/runtime/daemon.sock",
+    "store": {
+      "path": "/home/u/.local/share/mailypoppins/accounts",
+      "size_bytes": 41943040
+    },
+    "uptime_secs": 8130,
+    "version": "0.9.0"
+  }
+}

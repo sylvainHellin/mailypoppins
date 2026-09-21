@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "diagnostic.check_changed",
+    "payload": {
+      "detail": "expected `]`, at line 1 of /home/u/.config/mailypoppins/config.toml",
+      "name": "config_loaded",
+      "status": "fail"
+    },
+    "revision": 4232
+  }
+}

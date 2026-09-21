@@ -1,0 +1,28 @@
+{
+  "id": 12,
+  "jsonrpc": "2.0",
+  "result": {
+    "lines": [
+      {
+        "level": "info",
+        "message": "[daemon] listening on /home/u/.local/share/mailypoppins/runtime/daemon.sock",
+        "target": "",
+        "ts": "2026-09-11T07:55:02.081+02:00"
+      },
+      {
+        "level": "debug",
+        "message": "a frame of 214 bytes",
+        "target": "mailypoppins::daemon::server",
+        "ts": "2026-09-11T07:55:02.114+02:00"
+      },
+      {
+        "level": null,
+        "message": "thread 'main' panicked at src/nowhere.rs:1:1:",
+        "target": "",
+        "ts": null
+      }
+    ],
+    "path": "/home/u/.local/share/mailypoppins/logs/mailypoppins-2026-09-11.log",
+    "truncated": true
+  }
+}
