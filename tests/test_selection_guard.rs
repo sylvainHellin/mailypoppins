@@ -53,9 +53,11 @@ const MIN_SNAPSHOT_FILES: usize = 20;
 /// `#[test]` / `#[tokio::test]` attributes under [`CORE_ROOT`].
 ///
 /// The arithmetic of the move: the root package's `--lib` run was 1 398 before
-/// P5-U10a and is 1 145 after, and `mp-core`'s is 253. 1 145 + 253 = 1 398, so
-/// not one test was left behind, and 253 is the floor that says so.
-const MIN_CORE_TESTS: usize = 253;
+/// P5-U10a and is 1 069 after, and `mp-core`'s is 329. 1 069 + 329 = 1 398, so
+/// not one test was left behind, and 329 is the floor that says so. The 329 is
+/// the eleven whole modules' 253, plus `selector`'s 11, `search`'s 40, the
+/// seven that came with the IMAP string helpers, and `invite`'s 18.
+const MIN_CORE_TESTS: usize = 329;
 
 /// The sentence every failure here must contain, so that a CI log search for
 /// it finds the guard regardless of which of the three counts moved.
