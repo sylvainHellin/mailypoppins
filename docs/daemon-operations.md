@@ -564,6 +564,22 @@ The flag-shaped ones read as set for any value other than empty, `0`, `false` or
 `MAILYPOPPINS_DAEMON_AUTOSTART` is the one that reads the other way round, being on by default.
 A test that runs `mp` as a subprocess should `env_remove` every hook it does not want, or an exported one in the developer's shell will change what the test observes.
 
+## The soak run
+
+`tests/daemon_soak.rs` is the sustained-load half of the Phase 6 gate: client churn, a stalled client under an event burst, repeated syncs, concurrent reads, draft-watch churn, hold churn, and a mixed run of all of them ending in a `daemon.stop`.
+Every row measures the daemon from the outside - `/proc/<pid>/fd`, `VmRSS`, `diagnostic.health` - takes a reading before and after, and prints what it measured.
+
+```sh
+TMPDIR=/var/tmp cargo test --offline --test daemon_soak -- --nocapture                          # ~15 s
+MAILYPOPPINS_SOAK_SECS=60 TMPDIR=/var/tmp cargo test --offline --test daemon_soak -- --nocapture # the long variant
+```
+
+`MAILYPOPPINS_SOAK_SECS=<n>` makes the mixed row run for `n` seconds and multiplies every other row's counts by `n / 10`; unset means ten seconds and the short counts, which is what the ordinary suite pays.
+`--nocapture` is not optional for an owner's run: libtest swallows the numbers otherwise, and the numbers are the point.
+The fixture is built once per machine into `$TMPDIR/mp-soak-fixture-v1` and copied per row, so the first run of the file pays about twenty seconds for it and no later run pays anything.
+
+The run that landed the file, its ceilings and the leak it found are in [baselines/phase6-soak.md](baselines/phase6-soak.md).
+
 ## The parity harness
 
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).

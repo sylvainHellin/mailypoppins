@@ -7,7 +7,7 @@ status: open
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 to P6-U6 have landed the daemon-owned hold, the graceful shutdown and the login-start service units, and P6-U7 has landed the diagnostics contract; the implementation behind it, the soak tests and the benchmarks have not started.
+Status: open. P6-U1 to P6-U8 have landed the daemon-owned hold, the graceful shutdown, the login-start service units and the diagnostics, and P6-U9 has landed the soak tests and the one leak they found; the benchmarks and the phase documentation have not started.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -26,7 +26,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U6 | I | this commit | login-start service units | done |
 | P6-U7 | T | this commit | diagnostics, the contract | done (tests) |
 | P6-U8 | I | this commit | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | done |
-| P6-U9 | I | - | soak tests | not started |
+| P6-U9 | I | this commit | soak tests | done |
 | P6-U10 | I | - | benchmarks and docs | not started |
 
 The phase exit gate for the hold, verbatim from the plan: *"The daemon-owned hold reproduces the behaviour the parity gate recorded, and the last client exiting mid-hold cancels the hold and leaves the draft approved."*
@@ -921,4 +921,64 @@ Splitting it would not have made it smaller: the checks, the ledger the flips ar
 `rustfmt --edition 2021` was run on `src/daemon/diagnostics.rs`, `src/daemon/lifecycle.rs` and `src/daemon/methods/diagnostic.rs`, all three rustfmt-clean before this unit; the one long signature this unit added to `src/daemon/state/mod.rs` was wrapped by hand, because that file is not rustfmt-clean and `cargo fmt` is never run here.
 
 The smoke run, over an `examples/mkfixture` root in a sandbox `HOME`, with `password = "P6U8-SMOKE-PASSWORD"` seeded into the fixture's `config.toml`: `mp daemon start`, then `mp daemon health` printing `✓ daemon healthy` with both accounts `ready` and all six checks `✓`, `mp daemon logs --lines 5` printing five lines and no banner, `mp daemon support-bundle /var/tmp/mp-p6u8-bundle` printing `✓ wrote …` / `files: 5` / `redactions: 1`, `rg -l 'P6U8-SMOKE-PASSWORD' /var/tmp/mp-p6u8-bundle` empty with `config.toml` reading `password = "<redacted>"`, `mp daemon stop` -> `✓ daemon stopped`, and `mp daemon health` afterwards printing the two-line refusal and exiting 1.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
+
+## P6-U9: soak tests
+
+One new file, `tests/daemon_soak.rs` (7 rows), plus one production fix the rows found (below).
+The unit's two gate lines are the only two of Phase 6 that no functional test can speak to: *"The daemon can run unattended across client churn"* and *"Memory remains bounded under slow clients and repeated syncs"*.
+The measured run, the host, the ceilings and the leak are recorded in [docs/baselines/phase6-soak.md](../baselines/phase6-soak.md); this section is why the rows are shaped the way they are.
+
+### The rows
+
+| row | work | what it pins |
+|---|---|---|
+| a | 200 connect/bootstrap/disconnect cycles from 8 threads | descriptors and `diagnostic.health.clients` return to a warm baseline |
+| b | 50 syncs, 4 readers and one client that never reads, under a 4000-event burst per bootstrap | RSS bounded, exactly one resync per client, every `sync.completed` delivered |
+| c | 200 `sync.quick` passes | RSS bounded, `operations.active` back to 0, `store.size_bytes` unmoved |
+| d | 300 `message.list`/`message.search` from 4 concurrent clients | no error frame, p95 under 250 ms, RSS bounded |
+| e | 100 drafts written then deleted under the watched directory | one event per draft either way, no watcher descriptor left behind |
+| f | 50 holds armed and cancelled from alternating clients | `holds` back to 0, hold listing empty, outbox empty, draft still `approved` |
+| g | everything at once for `MAILYPOPPINS_SOAK_SECS` seconds | RSS and descriptors stable, and `daemon.stop` answering `clean: true` |
+
+Default counts cost 15 s for the whole file, each row under 5 s; `MAILYPOPPINS_SOAK_SECS=<n>` runs row (g) for `n` seconds and scales every other row by `n / 10`, which is the owner's variant and is the command in `docs/daemon-operations.md`.
+
+### The finding: the operation registry never forgot anything
+
+`OperationRegistry` kept every operation the process had ever started, live or settled, so `operation.status` could answer for any of them forever.
+Row (c) measured it directly: +0.6 MiB at 200 passes, +0.7 at 1200, +2.7 at 3600, about **0.8 KiB per settled operation, never returned**.
+Row (g) showed the same curve from the other side: +61.9 MiB at 10 s, +77.9 at 60 s, +86.1 at 180 s.
+That is a leak in the precise sense the gate is about - it grows with the work, not with the working set - so the ceiling was not loosened.
+
+The fix is small and in one place (`src/daemon/operations.rs`, own commit): `HISTORY = 256`, and a `start` that finds more settled entries than that forgets the oldest of them first.
+Live operations are never forgotten, because the table is also what a disconnect and a shutdown cancel through, and the trim runs in `start` so a daemon that starts no operation does no work.
+An id past the window answers as an id the daemon never issued, which `docs/daemon-protocol.md` now says and which a client that outlived a restart already handles.
+One unit test in the module pins it; `docs/lessons-learned.md` carries the shape.
+
+Afterwards the mixed row's growth stops tracking duration (+61.1 MiB at 10 s, +62.8 at 60 s, +83.7 at 180 s while doing 4.4x the work of the pre-fix 180 s run) and the daemon is much faster under sustained load, because `live()` and every disconnect walked that table: 113 holds a second became 767.
+
+### Four decisions the plan did not settle
+
+- **The fixture is generated in process, not by running `examples/mkfixture`.** `cargo test --test daemon_soak` does not build examples, a nested `cargo` blocks on the build lock the outer `cargo test` holds, `include!` refuses the example's leading `//!` block (`E0753`), and `#[path]` would make every item of it private to a module the test cannot reach into. So the generator is copied into the file - same seed, epoch, plans, vocabulary, needle and `config.toml` - and `assert_fixture_shape` asserts the counts the rows depend on, so a drift fails at build time rather than as a mystifying number. The template is built once per machine under a `flock` and copied per row, because two daemons cannot share a data directory.
+- **The baseline is taken warm, and both readings wait for stability.** A daemon that has just bound its socket holds 22 descriptors here; the first few dozen concurrent clients take it to 37 and four thousand more leave it at 37, because the account runtimes come up off the startup path and SQLite keeps a handle per concurrent reader. A cold "before" reading reports that startup as a leak, which is exactly what the first draft of row (a) did.
+- **Rows (b) and (c) use a real `sync.quick`, not `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME`.** The hook fires once per `state.bootstrap`, so 200 outcomes would need 200 bootstraps, each of which also fires the event burst. Giving `alpha` an `[accounts.imap]` host that does not resolve makes the real pass run, fail on the missing secret in about ten milliseconds and commit a real `sync.completed` with `severity: error` - the engine path, at a cost that lets a row fire two hundred of them in a second.
+- **Row (b) does not separate the fast readers from the stalled client.** The burst hook commits in a tight loop off the bootstrap's path, faster than any client drains, so at 4000 events per bootstrap every subscriber overflows and is told to resync once. What the row pins instead is the invariant that would break silently: a `sync.completed` is a lifecycle event, the discard keeps those while throwing the domain events away, and all fifty outcomes reach all four readers through the overflow. That a stalled reader does not delay another client's round trip is already `tests/daemon_events.rs`'s row.
+
+### Two things the rows discovered about the daemon's own contract
+
+- **Six hundred drafts written at once overflow a subscriber's queue.** The first draft of row (e) wrote every file and then waited for every event, which at `MAILYPOPPINS_SOAK_SECS=60` is 600 `draft.changed` events against a 512-event queue: the daemon discarded them and asked for a resync, correctly, and the row waited for events it was no longer entitled to. It now writes `DRAFT_BATCH = 100` at a time and drains each batch, and it fails loudly naming the cap if a resync arrives.
+- **Descriptor counts are a high-water mark, not a level.** 37 on this host, reached within a few dozen concurrent clients and unchanged by four thousand more. `FD_MARGIN` is 12 against a measured drift of 3 to 4; a leak of one descriptor per cycle would be two hundred.
+
+### No test file was edited
+
+`git diff --stat 6ffd0c2..HEAD -- tests/` is `tests/daemon_soak.rs` and nothing else.
+The unit test for the registry cap lives in `src/daemon/operations.rs`'s own `mod tests`, which is the implementer's business rather than a T unit's product.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 900 cargo test --offline --test daemon_soak` -> **7 passed**, three runs at 14.1 s, 14.2 s and 13.8 s wall.
+`MAILYPOPPINS_SOAK_SECS=60` -> **7 passed**, 65.6 s wall, the numbers in the baseline file.
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2343 passed, 0 failed**, 5 ignored, 55.8 s wall, which is 2335 at `6ffd0c2` plus this file's 7 rows and the registry unit test.
+`cargo clippy --workspace --offline --all-targets` -> 38 warnings, the count at `6ffd0c2`, none in either file this unit touched; the copied generator carries `#[allow(clippy::manual_is_multiple_of)]` so that keeping it diffable against the example costs no warning.
+`rustfmt --edition 2021` was run on both files, each rustfmt-clean afterwards.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
