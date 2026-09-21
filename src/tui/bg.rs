@@ -66,13 +66,6 @@ fn refresh_after_server_sync(app: &mut App, account_index: usize) {
     }
 }
 
-/// Re-read one account's outbox counts for the status-bar badge (#0037).
-fn refresh_outbox(app: &mut App, account_index: usize) {
-    if let Some(acct) = app.accounts.get_mut(account_index) {
-        acct.outbox = crate::outbox::counts_for_account(&acct.account_config.name);
-    }
-}
-
 /// Render a settled `contact.rebuild` the way the pre-daemon rebuild rendered
 /// its own verdict (#0126).
 ///
@@ -159,15 +152,6 @@ fn record_sync_health(app: &mut App, account_index: usize, outcome: Result<(), &
 
 pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
     app.bg_count = app.bg_count.saturating_sub(1);
-    match &result {
-        BgResult::Send { account_index, .. }
-        | BgResult::SendApproved { account_index, .. }
-        | BgResult::Rsvp { account_index, .. }
-        | BgResult::Sync { account_index, .. }
-        | BgResult::Fetch { account_index, .. } => refresh_outbox(app, *account_index),
-        _ => {}
-    }
-
     match result {
         BgResult::Send { account_index, result } => {
             match result {
@@ -371,14 +355,13 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
             apply_search_hit_fetch(app, &message_id, result);
         }
 
-        BgResult::AccountOpened { account_index, counts, outbox } => {
+        BgResult::AccountOpened { account_index, counts } => {
             // Phase two of startup (#0003): this account's store opened on a
             // background thread, ran its integrity check (and, on failure, the
             // drop-and-rebuild path of #0066) and read the real counts. Fill
             // them in and drop the loading marker.
             let is_remote = if let Some(acct) = app.accounts.get_mut(account_index) {
                 acct.mailbox_counts = counts.clone();
-                acct.outbox = outbox;
                 acct.opening = false;
                 acct.imap_config.is_some() || acct.graph_config.is_some()
             } else {
@@ -749,7 +732,6 @@ mod tests {
             search_query: String::new(),
             watcher_active: false,
             opening: false,
-            outbox: crate::outbox::OutboxCounts::default(),
             has_unseen: false,
             sync_health: crate::sync_health::SyncHealth::default(),
         }
@@ -955,7 +937,6 @@ mod tests {
             BgResult::AccountOpened {
                 account_index: 1,
                 counts: vec![42],
-                outbox: crate::outbox::OutboxCounts::default(),
             },
         );
 
@@ -1007,7 +988,6 @@ mod tests {
             BgResult::AccountOpened {
                 account_index: 0,
                 counts: vec![5, 9],
-                outbox: crate::outbox::OutboxCounts::default(),
             },
         );
 

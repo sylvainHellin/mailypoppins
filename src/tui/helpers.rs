@@ -313,7 +313,6 @@ mod tests {
             search_query: String::new(),
             watcher_active: false,
             opening: false,
-            outbox: crate::outbox::OutboxCounts::default(),
             has_unseen: false,
             sync_health: crate::sync_health::SyncHealth::default(),
         }

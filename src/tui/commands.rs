@@ -1048,6 +1048,29 @@ pub(super) fn draft_from_source(
     Ok((path, selector))
 }
 
+/// The skeleton draft `n` creates, as its path and the file name to report.
+///
+/// `draft.create` `{account, name}`, which is what the handler did by hand:
+/// mint an id through the drafts index, write `mp_core::draft`'s skeleton with
+/// it and the account's signature already in the file, and hand back the
+/// selector that names it. The `.md` suffixing is the daemon's, because the
+/// daemon owns the directory the file lands in, and the account's
+/// `default_from` and signature are resolved there off the same configured
+/// account this client reads (P5-U10d, #0126).
+pub(super) fn create_draft(
+    commands: &dyn Queries,
+    account: &str,
+    name: &str,
+) -> Result<PathBuf, String> {
+    let created = commands
+        .call("draft.create", json!({"account": account, "name": name}))
+        .map_err(|e| format!("{e:#}"))?;
+    created["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| "draft.create wrote a draft it did not name".to_string())
+}
+
 /// The draft a reply, a reply-all or a forward of a message the client *holds*
 /// writes, as its path and its selector (`DFT-08`, `DFT-09`, #0126).
 ///
@@ -1639,15 +1662,14 @@ fn delete_drafts_batch(app: &mut App, commands: &dyn Queries, ids: &[String]) {
     refresh_drafts_after_flip(app);
 }
 
-/// Re-index the drafts directory after a change and put the list, the sidebar
-/// counts and the cached Drafts mailbox back in step with the files.
+/// Put the list, the sidebar counts and the cached Drafts mailbox back in step
+/// with the files after a status flip.
 ///
-/// Same sequence as `mp mark-approved`'s `reindex_drafts`, plus the refresh of
-/// the two things the CLI does not have: an open list and a sidebar count.
+/// The index refresh this used to open with is the daemon's since P5-U10d
+/// (#0126): `draft.list` answers from a fresh scan of the directory and
+/// `mailbox.list` refreshes the table it counts from, so the two reads below
+/// already see the flip.
 pub(super) fn refresh_drafts_after_flip(app: &mut App) {
-    if let Err(e) = crate::store::drafts::refresh_account(&app.account_config.name) {
-        log::warn!("[drafts] refreshing after a status flip failed: {e:#}");
-    }
     if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
         app.invalidate_cache_idx(idx);
     }

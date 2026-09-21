@@ -763,15 +763,10 @@ pub struct AccountState {
     /// (#0003 two-phase startup). `AccountState::new` no longer opens the
     /// store -- the per-account `PRAGMA integrity_check` (~240 ms on a 44 MB
     /// store) used to sum serially before the first paint. It starts `true`,
-    /// with `mailbox_counts` all-zero and `outbox` empty, and is cleared by
+    /// with `mailbox_counts` all-zero, and is cleared by
     /// `BgResult::AccountOpened` once the background open has read the real
     /// counts. The sidebar shows a loading marker while it is set.
     pub opening: bool,
-    /// Non-`done` outbox rows for this account (#0037 item 5). Refreshed at
-    /// startup and after every send or sync; rendered as a status-bar badge so
-    /// a message stuck between SMTP and its Sent copy is visible rather than
-    /// silent.
-    pub outbox: crate::outbox::OutboxCounts,
     /// Outcome of this account's last completed sync (#0071). Written when
     /// that account's own `BgResult::Fetch`/`BgResult::Sync` lands, so it
     /// survives every later success of a *different* account: the exact race
@@ -846,7 +841,6 @@ impl AccountState {
             watcher_active: false,
             has_unseen: false,
             opening: true,
-            outbox: crate::outbox::OutboxCounts::default(),
             sync_health: crate::sync_health::SyncHealth::default(),
         }
     }
@@ -942,17 +936,22 @@ pub enum BgResult {
     /// counts read (#0003 two-phase startup). `AccountState::new` defers the
     /// per-account store open (and its `PRAGMA integrity_check`) off the
     /// first-paint path; `run_loop` spawns one open per account after the
-    /// first `terminal.draw`, and this carries the grouped mailbox counts and
-    /// the outbox badge back so the sidebar fills in. The handler clears
-    /// `AccountState::opening`, loads the active account's open mailbox, and
-    /// kicks the startup auto-fetch for that account (once the store is known
-    /// good, not before). The store open runs the integrity check and, on
-    /// failure, the drop-and-rebuild path (#0066) exactly as a foreground open
-    /// would -- only the thread it runs on changed.
+    /// first `terminal.draw`, and this carries the grouped mailbox counts back
+    /// so the sidebar fills in. The handler clears `AccountState::opening`,
+    /// loads the active account's open mailbox, and kicks the startup
+    /// auto-fetch for that account (once the store is known good, not before).
+    /// The store open runs the integrity check and, on failure, the
+    /// drop-and-rebuild path (#0066) exactly as a foreground open would -- only
+    /// the thread it runs on changed.
+    ///
+    /// It carried the outbox badge too until P5-U10d (#0126). That badge left
+    /// with the status bar, so `AccountState::outbox` was written here and on
+    /// every sync completion and read nowhere; what a badge would read today
+    /// is the bootstrap snapshot's `outbox` section and
+    /// `Change::OutboxCounts`, both of which are on the wire already.
     AccountOpened {
         account_index: usize,
         counts: Vec<usize>,
-        outbox: crate::outbox::OutboxCounts,
     },
 }
 

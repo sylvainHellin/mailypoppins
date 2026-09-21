@@ -30,25 +30,9 @@ use anyhow::Result;
 use mp_protocol::state::Bootstrap;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use app::{App, BgResult, MailboxKind};
+use app::{App, BgResult};
 use helpers::{init_terminal, install_panic_hook, restore_terminal};
 use session::QueryHandle;
-
-use crate::store::drafts;
-
-/// How often the drafts directory is stat-scanned for writes made behind the
-/// application's back (#0050 scope item 5, closing [TKT-0045]).
-///
-/// Drafts are the one part of the model another process owns as much as we do:
-/// an agent writes a `.md` into `drafts/` and `$EDITOR` rewrites one while the
-/// TUI has it on screen. The IMAP watcher says nothing about either, so
-/// without this the Drafts list was only as fresh as the last restart.
-///
-/// One second, by a `max_depth(1)` stat scan of tens of files
-/// ([`drafts::fingerprint`]), rather than a `notify` watcher: the scan costs
-/// one `readdir` plus one `stat` per entry against a 250 ms event tick, and the
-/// watcher is a new dependency the ticket deliberately defers.
-const DRAFTS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How many terminal events one iteration folds into a single paint (#0108).
 ///
@@ -146,13 +130,6 @@ fn run_loop(
         });
     }
 
-    // Baseline for the drafts poll: whatever the directory looks like now is
-    // what the first listing will show, so the first change to react to is the
-    // next one.
-    let mut drafts_account = app.account_config.name.clone();
-    let mut drafts_fingerprint = drafts::fingerprint(&crate::config::drafts_dir(&drafts_account));
-    let mut last_drafts_poll = Instant::now();
-
     // Two-phase startup (#0003). `App::new` built every `AccountState` cheaply
     // -- config only, no store opened -- so the shell above painted with
     // zeroed counts and an empty list. Now, after the first frame is on its
@@ -162,13 +139,13 @@ fn run_loop(
     // accounts inside `App::new` that was ~1.2 s of blank terminal. Here the
     // opens overlap and none of them gate the paint.
     //
-    // Each thread reads the grouped mailbox counts and the outbox badge and
-    // reports `BgResult::AccountOpened`. Its handler (in `tui/bg.rs`) fills
-    // those in, clears `AccountState::opening`, loads the active account's
-    // open mailbox against the now-validated store, and kicks the startup
-    // auto-fetch (#0001) for that account. Deferring the fetch until the store
-    // is known good is deliberate: it avoids a sync racing the very first open
-    // of the same file and a redundant second integrity check.
+    // Each thread reads the grouped mailbox counts and reports
+    // `BgResult::AccountOpened`. Its handler (in `tui/bg.rs`) fills them in,
+    // clears `AccountState::opening`, loads the active account's open mailbox
+    // against the now-validated store, and kicks the startup auto-fetch
+    // (#0001) for that account. Deferring the fetch until the store is known
+    // good is deliberate: it avoids a sync racing the very first open of the
+    // same file and a redundant second integrity check.
     //
     // `bg_count` is bumped per account so the existing spinner shows "working"
     // until every store is open; the message-ID index scan that used to run
@@ -184,8 +161,7 @@ fn run_loop(
             // The daemon does the store open, the integrity check and the
             // grouped query behind it, so the shape of this phase is unchanged:
             // the opens overlap, none of them gates the paint, and the account
-            // reports `AccountOpened` when its counts land. The outbox read is
-            // still this process's own, until the send slice moves with P5-U6.
+            // reports `AccountOpened` when its counts land.
             let counts = match &queries {
                 Some(queries) => {
                     queries::mailbox_counts(queries, &account_name, &mailboxes).unwrap_or_else(|e| {
@@ -195,11 +171,9 @@ fn run_loop(
                 }
                 None => app::count_all_emails(&account_name, &mailboxes),
             };
-            let outbox = crate::outbox::counts_for_account(&account_name);
             let _ = tx.send(BgResult::AccountOpened {
                 account_index: i,
                 counts,
-                outbox,
             });
         });
     }
@@ -336,37 +310,6 @@ fn run_loop(
         }
         if got_bg_result {
             dirty = true;
-        }
-
-        // The drafts directory, scanned once a second (#0050). The fingerprint
-        // is stat-only, so an unchanged directory costs nothing beyond the
-        // walk; a change re-indexes and reloads the list the user is looking
-        // at, without a restart.
-        if last_drafts_poll.elapsed() >= DRAFTS_POLL_INTERVAL {
-            last_drafts_poll = Instant::now();
-            let account = app.account_config.name.clone();
-            let fingerprint = drafts::fingerprint(&crate::config::drafts_dir(&account));
-            if account != drafts_account {
-                // Account switch: adopt the new directory's state silently.
-                // The switch reloaded the mailboxes itself, so there is
-                // nothing here to react to.
-                drafts_account = account;
-                drafts_fingerprint = fingerprint;
-            } else if fingerprint != drafts_fingerprint {
-                drafts_fingerprint = fingerprint;
-                if let Err(e) = drafts::refresh_account(&drafts_account) {
-                    log::warn!("[drafts] refreshing the index of {drafts_account} failed: {e:#}");
-                }
-                if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
-                    app.invalidate_cache_idx(idx);
-                    if app.active_mailbox == idx {
-                        app.reload_current_mailbox();
-                    }
-                }
-                app.recount_all_mailboxes();
-                // A drafts change reindexed and possibly reloaded the list.
-                dirty = true;
-            }
         }
 
         // Auto-execute the parked action once the condition it parked on has

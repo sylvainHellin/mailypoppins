@@ -16,7 +16,7 @@ use super::helpers::{
 use super::commands;
 use super::session::QueryHandle;
 
-use crate::draft::{new_draft_skeleton, DraftFromSource, DraftRecipientEdit};
+use crate::draft::{DraftFromSource, DraftRecipientEdit};
 // The builder itself, for the test modules that assert the daemon's draft
 // against the file `mp reply` and `mp forward` write. No production path here
 // reaches it any more: a reply to a stored row is `draft.reply` and a reply to
@@ -530,11 +530,14 @@ fn write_fetched_draft_and_edit(
 }
 
 /// Hand a freshly written draft to `$EDITOR` and put `ready` on the status
-/// line, with the list, the index and the sidebar caught up afterwards.
+/// line, with the list and the sidebar caught up afterwards.
 ///
-/// The index is refreshed a second time on the way out because the editor
-/// session is a write this application did not make: the subject and the
-/// recipients the user just typed are what the Drafts list has to show.
+/// The recount and the reload on the way out are what shows the subject and
+/// the recipients the user just typed: the editor session is a write this
+/// application did not make, and both calls answer from the daemon's own fresh
+/// scan of the drafts directory (P5-U10d, #0126). There is no index refresh to
+/// pay first; the daemon owns that table and refreshes it for the count it
+/// serves.
 fn edit_new_draft(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -550,9 +553,6 @@ fn edit_new_draft(
     match result {
         Ok(()) => app.set_status(ready),
         Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
-    }
-    if let Err(e) = crate::store::drafts::refresh_account(&app.account_config.name) {
-        log::warn!("[drafts] refreshing after the editor session failed: {e:#}");
     }
     app.recount_all_mailboxes();
     app.reload_current_mailbox();
@@ -759,40 +759,32 @@ pub(super) fn handle_action(
             }
             commands::start_draft_send(app, &door, &account_config.name, account_index, &id);
         }
+        // `draft.create` since P5-U10d (#0126), which `ACTION_ROUTING` has
+        // claimed since the table was written: minting the id, writing the
+        // skeleton with the account's `default_from` and signature already in
+        // it, and the `.md` suffixing are the daemon's, because the daemon
+        // owns the drafts directory the file lands in.
+        //
+        // One refusal where there were two: a name the directory already holds
+        // and a write that failed both come back as the method's own sentence,
+        // which names the path in the first case.
         Action::NewDraft => {
+            let account = app.account_config.name.clone();
             let name = chrono::Local::now()
                 .format("draft-%Y%m%d-%H%M%S")
                 .to_string();
-            let file_name = format!("{name}.md");
-            let dir = app.drafts_dir();
-            let path = dir.join(&file_name);
-
-            if path.exists() {
-                app.set_status(format!("File already exists: {}", path.display()));
-            } else {
-                let now = chrono::Utc::now().to_rfc2822();
-                let default_from = app
-                    .smtp_config
-                    .as_ref()
-                    .map(|s| s.default_from.clone())
-                    .unwrap_or_else(|| app.account_config.default_from.clone());
-                let from = default_from.as_str();
-                let skeleton = new_draft_skeleton(from, &now, app.signature_content.as_deref());
-                match std::fs::write(&path, skeleton) {
-                    Ok(()) => {
-                        suspend_terminal(terminal)?;
-                        let _ = edit_file(&path);
-                        resume_terminal(terminal)?;
-                        app.set_status(format!("Created: {}", file_name));
-                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
-                            app.invalidate_cache_idx(idx);
-                        }
-                        app.reload_current_mailbox();
+            match commands::create_draft(&daemon_door(app), &account, &name) {
+                Ok(path) => {
+                    suspend_terminal(terminal)?;
+                    let _ = edit_file(&path);
+                    resume_terminal(terminal)?;
+                    app.set_status(format!("Created: {name}.md"));
+                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                        app.invalidate_cache_idx(idx);
                     }
-                    Err(e) => {
-                        app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error)
-                    }
+                    app.reload_current_mailbox();
                 }
+                Err(e) => app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error),
             }
         }
 
@@ -1328,7 +1320,7 @@ fn send_contact_as_vcard(
     }
 
     // Create a new draft addressed to the contact with the .vcf attached.
-    let recipient = crate::send::format_recipient(&contact.display_name, &contact.address);
+    let recipient = mp_core::addresses::format_recipient(&contact.display_name, &contact.address);
     let subject = format!("Contact: {}", vcard_display_name(contact));
     let path = match write_vcard_draft(app, &dir, &recipient, &subject, &vcf_path) {
         Ok(p) => p,
@@ -1597,11 +1589,10 @@ fn submit_compose_wizard(
                     }
                 }
                 let account = app.account_config.name.clone();
-                // The file changed, so the row the index holds for it is
-                // stale; the selector is the draft's own id either way.
-                if let Err(e) = crate::store::drafts::refresh_account(&account) {
-                    log::warn!("[drafts] refreshing after a recipient edit failed: {e:#}");
-                }
+                // The file changed, so the cached listing is stale; the
+                // reload reads it back through `draft.list`, which scans the
+                // directory fresh, and the selector is the draft's own id
+                // either way.
                 if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
                     app.invalidate_cache_idx(idx);
                 }

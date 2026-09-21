@@ -408,8 +408,10 @@ impl App {
             A::ContactsCompose => {
                 self.pending_prefix = None;
                 if let Some(contact) = self.selected_contact() {
-                    let to =
-                        crate::send::format_recipient(&contact.display_name, &contact.address);
+                    let to = mp_core::addresses::format_recipient(
+                        &contact.display_name,
+                        &contact.address,
+                    );
                     self.push_action(Action::ComposeToContact { to });
                 }
             }
@@ -4210,7 +4212,6 @@ mod tests {
             search_query: String::new(),
             watcher_active: false,
             opening: false,
-            outbox: crate::outbox::OutboxCounts::default(),
             has_unseen: false,
             sync_health: crate::sync_health::SyncHealth::default(),
         }

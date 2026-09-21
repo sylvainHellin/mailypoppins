@@ -47,14 +47,14 @@ use serde_json::json;
 
 use mp_protocol::events::{
     Arrival, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
-    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
-    KIND_SYNC_COMPLETED,
+    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
-use super::app::{App, StatusLevel};
+use super::app::{App, MailboxKind, StatusLevel};
 use super::queries::{MessageRowDelta, Queries};
 use super::{COALESCE_BUDGET, MAX_COALESCED_EVENTS};
 
@@ -63,6 +63,12 @@ const KIND_OPERATION_FINISHED: &str = "operation.finished";
 
 /// The `kind` an invalidation travels as.
 const KIND_INVALIDATE: &str = "state.invalidate";
+
+/// The `kind` a resource that is gone travels as.
+const KIND_REMOVE: &str = "state.remove";
+
+/// The prefix of the resource a removed draft is named by.
+const DRAFT_RESOURCE: &str = "draft:";
 
 /// The `kind` one hit of a live `message.search_server` travels as
 /// (`LST-08`, #0126).
@@ -317,6 +323,16 @@ impl App {
             KIND_INVALIDATE if event.payload["scope"]["query"] == json!("counts") => {
                 self.apply_counts(event)
             }
+            // A draft was written, rewritten or removed behind this client's
+            // back (P5-U10d, #0126): by `$EDITOR`, by an agent, by another
+            // window or by the daemon itself. This is where the one-second
+            // fingerprint poll of the active account's drafts directory went.
+            KIND_DRAFT_CHANGED | KIND_DRAFT_INVALID => {
+                self.apply_draft_change(event.payload["account"].as_str())
+            }
+            KIND_REMOVE if draft_resource_account(event).is_some() => {
+                self.apply_draft_change(draft_resource_account(event))
+            }
             _ => match MessageRowDelta::decode(event) {
                 Some(delta) => {
                     super::bg::apply_row_delta(self, &delta);
@@ -456,6 +472,39 @@ impl App {
         Applied::Ignored
     }
 
+    /// A draft of `account` was written, rewritten or removed, so the Drafts
+    /// listing and the sidebar count are read again from the daemon (#0126).
+    ///
+    /// Exactly what the drafts poll did on a changed fingerprint, minus the
+    /// `store::drafts::refresh_account` that came first: the daemon's watcher
+    /// is what noticed, `draft.list` answers from a fresh directory scan and
+    /// `mailbox.list` refreshes the index it counts from, so there is no local
+    /// index left for this client to put back in step.
+    ///
+    /// Only the active account, as the poll was: it scanned one directory, and
+    /// the sidebar it feeds is the active account's. A draft written into an
+    /// account nobody is looking at is announced too, and the switch to that
+    /// account reloads its mailboxes itself.
+    fn apply_draft_change(&mut self, account: Option<&str>) -> Applied {
+        if account != Some(self.account_config.name.as_str()) {
+            return Applied::Ignored;
+        }
+        let Some(idx) = self.find_mailbox_by_kind(MailboxKind::Drafts) else {
+            return Applied::Ignored;
+        };
+        self.invalidate_cache_idx(idx);
+        let reloaded = self.active_mailbox == idx;
+        if reloaded {
+            self.reload_current_mailbox();
+        }
+        self.recount_all_mailboxes();
+        if reloaded {
+            Applied::Rows
+        } else {
+            Applied::Counts
+        }
+    }
+
     /// A mailbox's counts moved, so the sidebar is read again from the daemon.
     ///
     /// One `mailbox.list` for the account, not one per mailbox: the answer
@@ -512,6 +561,16 @@ pub(super) fn land_check(app: &mut App, payload: &serde_json::Value) {
         _ => return,
     };
     app.push_status(format!("{name}: {detail}"), level);
+}
+
+/// The account of a `draft:<account>/<id>` resource, or `None` for a resource
+/// that names something else.
+fn draft_resource_account(event: &EventEnvelope) -> Option<&str> {
+    event.payload["resource"]
+        .as_str()?
+        .strip_prefix(DRAFT_RESOURCE)?
+        .split('/')
+        .next()
 }
 
 /// The notifier's shape for the arrivals a tick reported.
