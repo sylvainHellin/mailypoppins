@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "method": "daemon.stopped",
+  "params": {
+    "clean": false,
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "unsettled": [
+      {
+        "error": null,
+        "method": "sync.full",
+        "operation_id": "3b91c07d5e8f42a6b1c4d09e7f2a5638",
+        "progress": {
+          "done": 412,
+          "message": "fetching bodies",
+          "phase": "bodies",
+          "total": 900
+        },
+        "result": null,
+        "scope": "durable",
+        "state": "running"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "method": "daemon.stop",
+  "params": {
+    "grace_secs": 10
+  }
+}

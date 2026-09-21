@@ -18,10 +18,12 @@
 //!   over an empty section it would have ignored anyway turns an additive
 //!   protocol change into a client that will not start.
 //! - **`holds`, `operations` and `diagnostics` stay [`Value`].** Nothing in
-//!   this build fills the first and the third, and an `operations` entry is an
-//!   `operation.status` result whose owner is the daemon's operation registry;
-//!   typing them here before a client reads them would pin a shape from the
-//!   wrong end.
+//!   this build fills the third; a `holds` entry is a
+//!   [`HoldStatus`](crate::send::HoldStatus) and an `operations` entry is an
+//!   `operation.status` result whose owner is the daemon's operation registry.
+//!   Typing either here before a client reads it out of the *snapshot* would
+//!   pin a shape from the wrong end: the TUI reads a hold off the event and
+//!   off `send.hold_status`, both of which are typed already.
 //!
 //! An account `state` and a `sync_health.state` are enums rather than strings:
 //! they are closed sets the protocol version fixes, a client branches on them,
@@ -182,7 +184,9 @@ pub struct Snapshot {
     /// One entry per listed account.
     #[serde(default)]
     pub outbox: BTreeMap<String, OutboxCounts>,
-    /// Undo-send holds; nothing in this build fills it.
+    /// The undo-send windows the daemon is counting down, in arm order, each
+    /// one the [`HoldStatus`](crate::send::HoldStatus) the four `send.hold_*`
+    /// events and `send.hold_status` carry (P6-U4).
     #[serde(default)]
     pub holds: Vec<Value>,
     /// Every long-running operation the daemon has not settled, in start

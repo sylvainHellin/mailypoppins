@@ -1,0 +1,24 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "grace_secs": 10,
+    "pending": [
+      {
+        "error": null,
+        "method": "sync.full",
+        "operation_id": "3b91c07d5e8f42a6b1c4d09e7f2a5638",
+        "progress": {
+          "done": 412,
+          "message": "fetching bodies",
+          "phase": "bodies",
+          "total": 900
+        },
+        "result": null,
+        "scope": "durable",
+        "state": "running"
+      }
+    ],
+    "stopping": true
+  }
+}

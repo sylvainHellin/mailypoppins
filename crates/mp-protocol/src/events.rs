@@ -140,6 +140,15 @@ pub const KIND_SEND_HOLD_FIRED: &str = "send.hold_fired";
 /// The `kind` a cancelled hold travels as; the draft is untouched.
 pub const KIND_SEND_HOLD_CANCELLED: &str = "send.hold_cancelled";
 
+/// The `kind` a daemon that has accepted a `daemon.stop` travels as (P6-U4).
+///
+/// A `state.event` like any other, so no client needs a second code path to
+/// receive it, and the last thing a bootstrapped connection is told before its
+/// socket closes. The payload is `{grace_secs, pending}`: how long the daemon
+/// will wait for what is still running, and which operations those are, each
+/// the `operation.status` object the bootstrap snapshot already carries.
+pub const KIND_DAEMON_SHUTTING_DOWN: &str = "daemon.shutting_down";
+
 /// The `kind` a watched draft that parsed travels as.
 pub const KIND_DRAFT_CHANGED: &str = "draft.changed";
 

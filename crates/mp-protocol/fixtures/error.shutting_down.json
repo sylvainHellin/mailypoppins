@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": -32009,
+    "data": {},
+    "message": "the daemon is shutting down"
+  },
+  "id": 12,
+  "jsonrpc": "2.0"
+}

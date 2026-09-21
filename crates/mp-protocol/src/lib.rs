@@ -52,5 +52,15 @@ pub const METHOD_STATE_EVENT: &str = "state.event";
 /// Method of the control notification that tells a client to re-bootstrap.
 pub const METHOD_STATE_RESYNC_REQUIRED: &str = "state.resync_required";
 
+/// Method of the notification a stopping daemon sends to the connection that
+/// asked it to stop, as the last frame before that connection closes (P6-U4).
+///
+/// A third notification method beside the two above, and not a `state.event`,
+/// because the asking connection is pre-handshake and therefore not
+/// subscribed: the report has to reach `mp daemon stop`, and the stop's own
+/// answer is flushed long before the daemon knows how the shutdown went.
+/// `params` are `{instance_id, clean, unsettled}`.
+pub const METHOD_DAEMON_STOPPED: &str = "daemon.stopped";
+
 /// The JSON-RPC version string every message on this protocol declares.
 pub const JSONRPC_VERSION: &str = "2.0";
