@@ -67,12 +67,44 @@ What did not change is the help surface: `mp daemon`, `mp account` and the globa
 It counts `#[test]` attributes by scanning `src/tui/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
 The three floors are 464 TUI tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
 
+### What the daemon owns since Phase 6
+
+Phase 6 (#0125) is the phase that makes the daemon something which can be left running, and it added five things to `src/daemon/` rather than to any client.
+
+**The undo-send hold is a scheduler** (`src/daemon/hold.rs`).
+A held send is an operation with a deadline: `send.draft` and `send.approved` answer `{operation_id, held: true}` at once, a task publishes one `send.hold_tick` a second, and at the deadline it awaits the very future the unheld path would have spawned, so there is one send path and not two.
+The window is `email.send_hold_secs`, resolved by the daemon from the configuration it already owns, which is why `hold` is a boolean on the wire and why `mp send` bypasses the hold by passing nothing.
+One hold ends exactly once because the table is the authority: `fire` and `cancel` both remove the row under one mutex, so the timer task needs no cancellation token.
+The TUI only renders it; `u` is a round trip (`Action::CancelHeldSend`) and the countdown stays on screen until the daemon says it is cancelled.
+
+**Shutdown is a sequence, and the order is the contract** (`src/daemon/shutdown.rs`).
+Mark shutting down, cancel every armed hold, announce `daemon.shutting_down`, answer the `daemon.stop`, wait out the grace, stop the watchers and the runtimes, report `daemon.stopped` on the asking connection and close every connection, unlink the three runtime files.
+Steps 1 to 4 run inside the connection task that answered, so the answer cannot describe a daemon that has already moved past them; steps 5 and 6 run in a driver task, because the grace may be ten seconds and the stop's answer may not wait for it.
+The grace is a ceiling and never a sleep, which is what keeps stopping an idle daemon as cheap as every fixture in the test tree needs it to be.
+`SIGTERM` and `SIGINT` run the same steps, so a unit stopped by systemd is as graceful as a typed `mp daemon stop`.
+
+**Diagnostics are an assembly, not a family of getters** (`src/daemon/diagnostics.rs`).
+One module holds the checks, the ledger a check's status is compared against, the log reader and the redacting bundle writer; everything else is routing, four method arms and three CLI commands.
+A check is re-evaluated when an account runtime reports, when a `config.reload` happens or is refused, and every 60 seconds as a safety net, and only a status that *moved* publishes `diagnostic.check_changed`.
+Reads evaluate and publish nothing, which is what keeps a bootstrap from announcing the very checks it is handing over in the same frame.
+
+**The login service is two templates and a writer** (`src/daemon/service.rs`, `src/daemon/templates/`).
+`mp daemon install-service` writes a systemd user unit or a launchd agent, both running `mp daemon run` by the absolute path `current_exe()` resolved to, and both carrying the two directory variables the installing `mp` resolved.
+The templates are compiled in rather than `include_str!`ed from `tests/fixtures/service/`, so the library does not need its own test fixtures to build, and one module test asserts the two copies are byte-identical.
+
+**The operation registry forgets** (`src/daemon/operations.rs`).
+It kept every operation the process had ever started, which the soak measured at about 0.8 KiB per settled operation, never returned; a `start` that finds more than `HISTORY` (256) settled entries now forgets the oldest of them first.
+Live operations are never forgotten, because the table is also what a disconnect and a shutdown cancel through, and an id past the window answers as an id this daemon never issued, which a client that outlived a restart already handles.
+
+The operator's half of all five - the commands, their stdout, the environment hooks and the recovery paths - is [daemon-operations.md](daemon-operations.md).
+
 ### The engine-import allow-list, and the CLI's engine-touch residue
 
 `tests/architecture_boundaries.rs` holds both halves of the client/engine boundary.
 
 The first walks `src/tui/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
-The file holds 11 pairs over 8 files today, and that 11 is the number the deferred P5-U10 has to drive to zero as the last of the TUI's engine calls become daemon calls (see "TUI layering" below).
+The file holds 10 pairs over 8 files today, and that 10 is the number the deferred P5-U10 has to drive to zero as the last of the TUI's engine calls become daemon calls (see "TUI layering" below).
+It was 11 until P6-U2 moved the undo-send hold into the daemon and the action layer's last `crate::send` import left with it.
 
 It is a record, not a ceiling: a removed import fails the test as loudly as a new one, because the count is the migration's progress bar.
 Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.
@@ -89,7 +121,7 @@ There is no `UPDATE_` switch for it: an entry is added by hand, with its reason,
 
 Three surfaces carry `hide = true`, so `mp --help` is byte-identical to `docs/baselines/pre-daemon/cli-help.txt`.
 
-- `mp daemon run | start | status | stop | restart`, the lifecycle commands.
+- `mp daemon run | start | status | stop | restart`, the lifecycle commands, plus `install-service | uninstall-service` (the login units) and `health | logs | support-bundle` (the diagnostics), all added in Phase 6 under the same hidden subtree.
 - `mp --daemon`, a global flag that routes a command through the daemon instead of answering it in process. It never falls back; a routed command that cannot reach a daemon exits 4.
 - `mp account list`, which lands with the daemon work because it is the oracle `mp --daemon account list` must match.
 
@@ -533,7 +565,7 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 
 ## Testing
 
-- **2071 tests**, run by `cargo test --workspace`, the parity harness and the six daemon slice suites included.
+- **2343 tests**, run by `cargo test --workspace`, the parity harness, the six daemon slice suites and the soak file included.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`src/tui/ui/golden_frames.rs`).
