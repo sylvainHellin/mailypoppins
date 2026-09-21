@@ -30,7 +30,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U7 | T | this commit | diagnostics, the contract | done (tests) |
 | P6-U8 | I | this commit | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | done |
 | P6-U9 | I | this commit | soak tests | done |
-| P6-U10 | I | `699d0d8`, `0d48b4e`, `480b730`, `3ab3666`, `73999d9`, `c91862e`, this commit | benchmarks and docs | done |
+| P6-U10 | I | `699d0d8`, `0d48b4e`, `480b730`, `3ab3666`, `73999d9`, `c91862e`, `e7d4a94`, `0e1fed4` | benchmarks and docs | done |
 
 The phase exit gate for the hold, verbatim from the plan: *"The daemon-owned hold reproduces the behaviour the parity gate recorded, and the last client exiting mid-hold cancels the hold and leaves the draft approved."*
 The second half of that sentence is P6-U3/P6-U4's and is already asserted from the outside by `tests/phase5_undo_send_hold.rs`; the first half is P6-U1/P6-U2's and is the two files below.
@@ -989,7 +989,7 @@ The unit test for the registry cap lives in `src/daemon/operations.rs`'s own `mo
 ## P6-U10: benchmarks and docs
 
 The phase's last unit, whose product is a measurement nobody had taken against the complete dispatcher plus the documents the other nine left owing.
-Seven commits and not one line of production code: `699d0d8` the gate evidence and the benchmarks, `0d48b4e` `docs/architecture.md`, `480b730` `docs/daemon-operations.md`, `3ab3666` `docs/release-process.md` and `docs/plans/preview-latency.md`, `73999d9` the CHANGELOG entry, `c91862e` the BACKLOG block, and this commit the ticket.
+Seven commits and not one line of production code: `699d0d8` the gate evidence and the benchmarks, `0d48b4e` `docs/architecture.md`, `480b730` `docs/daemon-operations.md`, `3ab3666` `docs/release-process.md` and `docs/plans/preview-latency.md`, `73999d9` the CHANGELOG entry, `c91862e` the BACKLOG block, `e7d4a94` this ticket and `0e1fed4` two entries in `docs/lessons-learned.md`.
 
 ### The benchmark rerun
 
