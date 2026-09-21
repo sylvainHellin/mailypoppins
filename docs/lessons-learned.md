@@ -2036,3 +2036,18 @@ The TUI's search overlay tells a stale result from a live one with a generation 
 It does not survive the move to streamed events: a `state.event` carries the daemon's revision and whatever the kind's payload holds, and nothing on it knows about a counter the client invented.
 `message.server_hit` therefore carries `{operation_id, hit}` and the client remembers the id the call answered with (#0126).
 The general shape: when a per-call client-side sequence number becomes a daemon-side stream, the discriminator has to move onto the wire, and the operation id is already there for it.
+
+## A helper whose last step refreshes an index also creates the store it indexes into
+
+`draft::create_draft_from_source` ends with `store::drafts::refresh_account`, which opens the account's store through `Store::open` (not `open_store`), and SQLite creates a database file that is not there.
+So the innocuous-looking "build the draft the way `mp reply` does" call hands an account that has never synced a store, which turns the read family's `-32006` into empty answers for every later call about it (the rule P5-U10 fixed).
+`draft.create_from_message` (#0126) builds with `create_reply_draft_from` / `create_forward_draft_from` and mints the id inline instead, which is what `draft.create` had already been doing for the same reason.
+
+The general shape: a daemon method that may legitimately serve an account with no store has to be read to its last statement, because the store-creating call is rarely the one the method looks like it is making.
+The pin is cheap and worth writing: call the method against the storeless account and assert `account.list` still reports it `blocked`.
+
+## A family's spec array is usually pinned, so a new method in it needs an array of its own
+
+`MESSAGE_READ_METHOD_SPECS` is pinned at three names by `tests/daemon_read_slice.rs` and `DRAFT_METHOD_SPECS` at ten by three test files, two of them with a `const _: () = assert!(ARRAY.len() == NAMES.len())` that fails the *compile* rather than a test.
+Adding `message.thread` and `draft.create_from_message` to those arrays would have meant editing pinned tests to say something they were not written to say, so each got a one-element array of its own, registered by chaining onto the family's loop and served by the family's own type (#0126, P5-U10d, after `MESSAGE_MARKDOWN_METHOD_SPECS` in P5-U10c).
+Three instances now, which makes it the default rather than the exception: grep the array's name across `tests/` before growing it.

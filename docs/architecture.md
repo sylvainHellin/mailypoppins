@@ -123,19 +123,23 @@ Live operations are never forgotten, because the table is also what a disconnect
 
 The operator's half of all five - the commands, their stdout, the environment hooks and the recovery paths - is [daemon-operations.md](daemon-operations.md).
 
-### The engine-import allow-list, and the CLI's engine-touch residue
+### The engine-import allow-list, the engine-path allow-list, and the CLI's engine-touch residue
 
-`tests/architecture_boundaries.rs` holds both halves of the client/engine boundary.
+`tests/architecture_boundaries.rs` holds all three halves of the client/engine boundary.
 
 The first walks `src/tui/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
-The file holds 10 pairs over 8 files today, and that 10 is the number the deferred P5-U10 has to drive to zero as the last of the TUI's engine calls become daemon calls (see "TUI layering" below).
-It was 11 until P6-U2 moved the undo-send hold into the daemon and the action layer's last `crate::send` import left with it.
+The file holds 5 pairs over 4 files today, and that 5 is the number the deferred P5-U10 has to drive to zero as the last of the TUI's engine calls become daemon calls (see "TUI layering" below).
 
-It is a record, not a ceiling: a removed import fails the test as loudly as a new one, because the count is the migration's progress bar.
-Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.
-The test is not feature-gated and passes on the pre-daemon tree, and `engine_imports` takes the client source root as an argument so Phase 5 can re-point it at a `crates/mp-tui/` without a rewrite.
+The second (P5-U10d-T) is what the import scan could not see: most of the calls that block the crate move are spelled as fully-qualified paths no `use` line mentions, so the import list read six while the work was six *groups* of call sites.
+It walks the same tree for those paths, over production code only, and asserts the set equals `tests/fixtures/tui-engine-paths.txt`, 5 rows over 4 files today, down from the 15 P5-U10d-T recorded.
+Three kinds of path: the eleven `ENGINE_MODULES` names reached through `crate::…`, the root crate's own halves of the shared modules (`crate::agenda::` and the five `draft` operations, named as the symbols they are called by), and `crate::daemon::` itself.
+Test modules are stripped, whole test files are stripped by deriving them from the `#[cfg(test)] mod x;` lines that declare them, and `use` lines are stripped so nothing is counted by both guards.
 
-The second (P4-U15) walks the client-side sources - `src/main.rs`, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
+Both are records, not ceilings: a removed import or a removed call fails the test as loudly as a new one, because the counts are the migration's progress bar.
+Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`, which rewrites both fixtures.
+Neither is feature-gated and both pass on the pre-daemon tree, and `engine_imports` takes the client source root as an argument so Phase 5 can re-point it at a `crates/mp-tui/` without a rewrite.
+
+The third (P4-U15) walks the client-side sources - `src/main.rs`, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
 Seventeen rows in four groups: the server leg of `mp search` (`docs/parity-matrix.md` LST-06, which no Phase 4 slice contracted), the startup preamble (which runs before any socket and on the no-daemon list too), `mp config show`'s secret and token probes (`config.get` is contracted *not* to look a secret up), and the two `config.toml` wizards (one interactive transaction).
 The TUI is deliberately outside this second list until Phase 5; the first half is what records its residue meanwhile.
 There is no `UPDATE_` switch for it: an entry is added by hand, with its reason, or it is not added.
@@ -441,7 +445,7 @@ A closed socket refuses every in-flight call at once rather than waiting out the
 
 `src/tui/queries.rs` is every read.
 `Queries` is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
-Over it sit the typed readers the call sites need: `list_emails` (`message.list`), `mailbox_counts` (`mailbox.list`), `message_body` (`message.get`), and the three invitation reads P5-U10 added (`calendar.events`, `message.ics`, `message.invite`).
+Over it sit the typed readers the call sites need: `list_emails` (`message.list`), `mailbox_counts` (`mailbox.list`), `message_body` (`message.get`), `thread` (`message.thread`, P5-U10d), and the three invitation reads P5-U10 added (`calendar.events`, `message.ics`, `message.invite`).
 
 A wire row becomes a `MessageRow` and goes through `entry_from_row`, the same function the store-backed path uses, so the two are equal by construction rather than by inspection.
 A held list is keyed by `messages.id` and the daemon removes a row by `(mailbox, uid)`, so the query layer keeps a process-wide `(account, mailbox) -> (uid -> id)` table; a uid it does not know owes a refetch rather than a guess.
@@ -479,16 +483,19 @@ They are the equality oracle `queries_tests.rs` and `invites_tests.rs` compare e
 That fallback is **not** the direct fallback the plan forbids: nothing recovers a *failed* daemon call by reading the store.
 A failed call degrades exactly as it did before, as an empty list, a zeroed count, an empty preview and a line in the log, and `tests/tui_daemon_recovery.rs` asserts it as a lock, by taking the account's engine lock during the outage from a second open file description.
 
-### The residue, at six rows
+### The residue, at five imports and five paths
 
-`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 6 pairs over 5 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
-The plan drives it to zero in P5-U10, which is in progress; what is left waits on the crate move rather than on a method.
+`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 5 pairs over 4 files, and `tests/fixtures/tui-engine-paths.txt` is the engine-path allow-list, 5 rows over 4 files.
+Both are the migration's progress bar: a removed row fails the test as loudly as a new one.
+The plan drives both to zero in P5-U10, which is in progress; everything left waits on the crate move rather than on a method.
 
-- `app/mod.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
+- `app/mod.rs store`, `app/store_rows.rs store` and their two path twins are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
   P5-U10b routed the last reader that had no daemon-backed twin: `App::draft_body` calls `draft.path` and parses the file the daemon names, and `load_draft_body` stays as its oracle. That one opened the store with `Store::open` rather than `open_store`, so `TUI_APP_STORE_RESIDUE` never listed it and still does not.
-- `app/types.rs store` is three `#[cfg(test)]` imports and `indexed_drafts`, the Drafts oracle; `app/types.rs ingest` is a test module. Both die with the move.
+- `app/types.rs store` is three `#[cfg(test)]` imports plus `row_to_wire`'s signature and `indexed_drafts`, the Drafts oracle; `app/types.rs ingest` is a test module. Both die with the move.
 - `actions.rs store` is three `#[cfg(test)]` imports and nothing else: the arms themselves reach no store since P5-U10c-I2.
-- `mod.rs store` is the drafts-directory poll loop's `drafts::fingerprint` / `drafts::refresh_account`, which is `draft.watch`'s business.
+- `app/mod.rs crate::agenda::` is the sessionless agenda oracle, and `session.rs crate::daemon::` is the connect helper, which has nowhere better to live until `crates/mp-tui` exists.
+
+`mod.rs store`, the drafts-directory poll's `drafts::fingerprint` / `drafts::refresh_account`, went in P5-U10d-I with the poll itself, and so did the ten paths that guard recorded at 15: the two editor-return refreshes, `create_draft_from_source`, `new_draft_skeleton`, the three `crate::outbox::` sites of the dead badge, `app/keys.rs`'s thread read, and both `crate::send::format_recipient` spellings.
 
 `queries.rs store`, `helpers.rs store` and `helpers.rs imap_client` went in P5-U10c-I1, with the four surfaces: a listing row is `mp_protocol::listing::MessageListRow` and a draft row is `mp_protocol::draft::DraftEntry`, and the server search leg is two daemon operations.
 `app/calendar_view.rs store` went in P5-U10c-I2, with the agenda loader itself: it is `src/agenda.rs`, in the crate that owns the store it reads, and it answers `mp_protocol::calendar::AgendaEvent` to `calendar.events` and to the TUI alike.
@@ -506,19 +513,17 @@ The obstacle is not the engine residue above; it is the shared modules the allow
 The three-unit sequencing that does it is in `docs/tickets/0124-tui-cutover.md`.
 **P5-U10a and P5-U10b's splits landed** (#0126): eleven of those modules whole, and the engine-free halves of `selector`, `search`, `invite`, `reconcile`, `contacts` and `draft`, are `crates/mp-core` above.
 **P5-U10c-I1's four surfaces landed too**: `RD-06`'s `message.materialise_markdown`, `RD-07`'s `selector` on the listing row, and `LST-08`/`LST-09`'s `message.search_server` and `message.fetch`, which took the allow-list from ten rows to seven and the action residue from seven to two.
-**P5-U10c-I2 took the contacts refresh onto `contact.rebuild`, the agenda out of the TUI and the invite blob onto `message.ics`**, which is the allow-list at six and the action residue at zero.
+**P5-U10c-I2 took the contacts refresh onto `contact.rebuild`, the agenda out of the TUI and the invite blob onto `message.ics`**, which is the import allow-list at six and the action residue at zero.
 
-The move itself did not land, and the reason is worth recording rather than rediscovering: the allow-list is an *import* scan, and the calls that block the move are mostly fully-qualified paths it never sees.
-The production call sites in `src/tui/` that a `crates/mp-tui` could not compile, measured at #0126's P5-U10c-I2:
+The move itself did not land there, and the reason is worth recording rather than rediscovering: the import allow-list is a `use` scan, and the calls that block the move are mostly fully-qualified paths it never sees.
+P5-U10d-T wrote them down as a second guard (fifteen rows over six groups) and P5-U10d-I closed four of the six: `message.thread` for the conversation overlay, `draft.create_from_message` for the reply to a server-only hit, the drafts poll against the watcher and `draft.list`'s fresh scan, and the outbox badge as a deletion, since `AccountState::outbox` was written twice and read nowhere.
+
+What is left of the production call sites in `src/tui/` that a `crates/mp-tui` could not compile:
 
 | group | where | what it needs |
 |---|---|---|
-| the outbox badge | `bg.rs`, `mod.rs`, `AccountState::outbox` in `app/types.rs` | `outbox::counts_for_account` is a store read per sync and per account open, and `OutboxCounts` is a field of the model; a wire badge or the type in `mp-core` |
-| the drafts index | the poll loop in `mod.rs`, both editor returns in `actions.rs`, `commands.rs` | `store::drafts::{fingerprint, refresh_account}`, which is `draft.watch`'s business |
-| the conversation overlay | `app/keys.rs`'s `open_thread_overlay` | `read::thread_messages`; no `message.thread` method exists |
-| the sessionless oracles | `app/store_rows.rs`, five readers in `app/mod.rs`, `row_to_wire` in `app/types.rs` | the test move, and the decision to drop the fallbacks the plan's "no direct fallback" already implies |
-| the draft from a server hit | `write_fetched_draft_and_edit` in `actions.rs` | a method: `draft.reply`/`draft.forward` address a row, and this is the one draft built from a fetch that has no row |
-| the connect helper | `session.rs` | `daemon::client::{client_session, reopen_session}`, the exit-4 diagnostic the CLI shares |
+| the sessionless oracles | `app/store_rows.rs`, five readers in `app/mod.rs`, `row_to_wire` and `indexed_drafts` in `app/types.rs` | the test move, and the decision to drop the fallbacks the plan's "no direct fallback" already implies (P5-U10e) |
+| the connect helper | `session.rs` | `daemon::client::{client_session, reopen_session}`, the exit-4 diagnostic the CLI shares; the recommendation is that the binary injects a connector, which is the crate move's own decision (P5-U10f) |
 
 One consequence to carry into those units: `secrets` and `oauth2` are named in `ENGINE_MODULES` and now live in `mp-core`.
 No file under `src/tui/` imports either, so the allow-list did not move, but a `crates/mp-tui` depending on `mp-core` would be able to reach both without the textual scan (which looks for `use crate::` / `use mailypoppins::`) ever seeing it.

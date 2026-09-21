@@ -7,12 +7,13 @@ status: in progress
 created: 2026-09-22
 ---
 
-Status: in progress. The move itself is still ahead: P5-U10c-I2 measured that the `git mv` is three more units, and P5-U10d-T has written the contract for the first of them.
+Status: in progress. The move itself is still ahead: P5-U10c-I2 measured that the `git mv` is three more units, P5-U10d has landed the first of them, and what is left is the oracle relocation (P5-U10e) and the move (P5-U10f).
 
 P5-U10a and P5-U10b have landed: `crates/mp-core` holds the engine-free closure the TUI reaches, eleven modules whole and the engine-free half of six more.
 No call site outside the moved files changed, and no behaviour changed: the help surface, the key dump and the twenty golden frames are byte-identical, and the workspace test count did not drop.
 **P5-U10b landed its splits and not its surfaces**: `RD-06`, `RD-07`, `LST-08`, `LST-09` and the wire-row types are unbuilt, so the allow-list is ten rows still and P5-U10c carries them along with the move.
 P5-U10c-T has since written their contract: the protocol entries, the fixtures, the wire types and the failing tests are in the tree, and both guards are at their post-unit expectation, so they fail until the implementer serves the methods.
+P5-U10d then closed four of the six groups that block the `git mv`: `message.thread`, `draft.create_from_message`, the drafts poll and the dead outbox field, leaving both allow-lists at five rows, all ten of which are the sessionless oracles and the connect helper.
 
 Ninth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), carrying the unit the plan wrote as one and [#0124](0124-tui-cutover.md) found to be three.
 
@@ -31,7 +32,7 @@ That ticket's proposed sequencing is this one's unit table.
 | P5-U10c-I1 | I | `52a68cb`, `dd35b18`, `9e06bcf` | the four surfaces: `RD-06`, `RD-07`, `LST-08`, `LST-09`, the wire rows, and both guards at their post-unit counts | done |
 | P5-U10c-I2 | I | `ec364ff`, `9258140`, `1182dfe` | the last engine call sites in `src/tui/`: `contact.rebuild`, the agenda out of the TUI, the invite blob onto `message.ics` | done, partially: the move itself did not land |
 | P5-U10d-T | T | `40e2d72`, `061ba7d`, `f946a0f`, `459d7bd` | the contract for the five non-oracle groups: `message.thread`, `draft.create_from_message`, four fixtures, three test files, and the path guard the move is actually measured by | done |
-| P5-U10d-I | I | - | the two methods, the dead outbox field, the drafts poll, and both guards at their post-unit counts | pending |
+| P5-U10d-I | I | `3c8a88a`, `51f181f`, `dd4a30f` | the two methods, the dead outbox field, the drafts poll, and both guards at their post-unit counts | done |
 | P5-U10e | I | - | the sessionless oracles and their test modules, into the root crate | pending |
 | P5-U10f | I | - | the move itself, plus the connect helper's new home | pending |
 
@@ -793,4 +794,111 @@ The 21 are this unit's contract rows and nothing else: nine in `daemon_thread_sl
 
 `cargo clippy --workspace --offline --all-targets` reports nothing on any line this unit wrote.
 
+`pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
+
+## P5-U10d-I: the two methods, the poll, the dead field and two respellings
+
+The implementer half of the contract above, in four steps, each green before the next.
+Every row the T unit wrote is green and no test file of its own was edited: `git diff a15245e..HEAD --stat -- tests/` is empty.
+
+### Step 1: `message.thread`, and the overlay through it
+
+`MESSAGE_THREAD_METHOD_SPECS`, its own array beside `MESSAGE_READ_METHOD_SPECS` and served by the same `MessageReadMethod`, because `tests/daemon_read_slice.rs` pins that array at exactly the three names P4-U4 shipped.
+That is `MESSAGE_MARKDOWN_METHOD_SPECS`'s precedent applied a second time, and it is the shape every later addition to a pinned family should take.
+
+The body is the read family's: `ready_account`, `Store::open`, `address` for the three-way address and its refusals, then `read::thread_messages` over the row's `thread_id` with `current` decided on the `Message-ID`.
+One guard the contract implies and the fold does not give: `thread_messages` reads the `thread_id` *column*, so a row ingest left `NULL` there matches nothing, and the answer would be the empty array the contract calls a different claim. The addressed row is pushed in when the fold comes back empty.
+
+`App::open_thread_overlay` asks `queries::thread` on the session the `App` holds and builds the same `ThreadEntry`s from the wire: `extract_display_name` over the served `from`, `resolve_date` over the served `date_display`, the four flag axes, the `(no subject)` placeholder and the cursor on the `current` row.
+No oracle and no sessionless fallback, which is why the guard's `app/keys.rs crate::store::` row dies rather than moving: the T unit's oracle table does not list a thread reader, and nothing compares this answer against a store-backed twin.
+
+### Step 2: `draft.create_from_message`, and the reply to a server-only hit
+
+`DRAFT_FROM_MESSAGE_METHOD_SPECS`, its own array for the same reason and a stronger one: three test files pin `DRAFT_METHOD_SPECS` at ten names and two of them do it at compile time with a `const _: () = assert!(…)`.
+
+`commands::draft_from_message` sends the overlay's `FetchedEmail` as the contract's `DraftMessage` and `write_fetched_draft_and_edit` takes the fetch rather than a `SourceMessage`, so `crate::draft::source_from_fetched` leaves the production tree with `create_draft_from_source`.
+The attachment argument leaves with it and loses nothing: `commands::hit_entry` has set `attachments: Vec::new()` since P5-U10c-I1, so the client had no parts to pass.
+
+### Step 3: the drafts index, the dead field, `Action::NewDraft`, and `format_recipient`
+
+**The drafts index.** The poll, `DRAFTS_POLL_INTERVAL`, the three locals that carried its baseline and the three `store::drafts::refresh_account` calls are gone.
+What replaces the poll is a reducer in `App::apply_admitted`: `draft.changed`, `draft.invalid` and `state.remove` of a `draft:<account>/<id>` resource all run `apply_draft_change`, which is the poll's own body minus the index refresh - invalidate the Drafts cache, reload it when it is the open mailbox, recount the sidebar.
+What replaces the three refreshes is nothing: each of them was followed by a `recount_all_mailboxes` and a `reload_current_mailbox` that already read `mailbox.list` and `draft.list`, both of which scan the directory fresh.
+
+**The outbox badge.** The field, `BgResult::AccountOpened`'s member, `refresh_outbox`, its call for five `BgResult` variants and both `outbox::counts_for_account` reads are gone, as are the six struct literals that had to fill it. No frame moved.
+
+**`Action::NewDraft`.** `commands::create_draft` over `draft.create`, which `ACTION_ROUTING` has claimed since the table was written.
+
+**`format_recipient`.** `mp_core::addresses::format_recipient` in both places, which is where the function has lived since P5-U10b moved it out of `send`.
+
+### Step 4: the guards
+
+Nothing to do: both were at the T unit's rows the moment step 3 compiled.
+`tests/fixtures/tui-engine-imports.txt` is the five the T unit named and `tests/fixtures/tui-engine-paths.txt` is its five, neither file edited by this unit.
+Every one of the ten paths the T unit expected to die did, for the reason it gave.
+
+### The open decisions, decided
+
+**`message.thread` does not answer for a draft.** Left as the T unit left it: the overlay refuses a draft with "A draft has no conversation to show" before it looks anything up, and a draft has no `messages` row to address.
+
+**The `draft.changed` reducer invalidates the Drafts mailbox rather than replacing a row.** The T unit's own reasoning, unchanged: the listing the TUI holds is `EmailEntry`s built by `entry_from_draft` from a `DraftEntry`, which is a different shape from the event's `DraftChanged`, so a replace would be a second mapper to keep in step with the first.
+It is also what the poll did, which is what makes this a deletion rather than a behaviour change.
+
+**`draft.create_from_message` does not refuse a `message` whose `from` is empty.** The builder writes a draft addressed to nobody for it, which is what the client does today, and validation is `draft.validate`'s job.
+
+**The outbox snapshot section is left as it is**, empty and shaped `{queued, failed}` where the engine's is `{open, failed, partial}`. Nothing reads it, so nothing is broken by leaving it; the unit that renders a badge is the one that should fix both facts, and it will find them written down in the T unit's section above.
+
+### Deviations
+
+**The conversation overlay's two store-side refusals collapse into one line.** `open_store` returning `None` said "This account has no store yet" and a row the store no longer holds said "That message is no longer in the store"; both are the daemon's `-32006` and `-32602` now, and the TUI has no structured code to branch on - `Session::call` flattens an `RpcError` into a string.
+So both read `Could not load the conversation: …` with the daemon's own sentence and code in it.
+This is P5-U10c-I1's `indexed_draft_path` trade made a second time, and it is the honest one: the client cannot tell the two apart without a typed error path that no routed read has.
+
+**A sessionless `App` no longer opens a conversation.** It says `Could not load the conversation: there is no daemon session to ask`. The only sessionless `App` is a wedged `Session::connect` (P5-U2) and a unit test, and no test opens this overlay.
+
+**`draft.create_from_message` does not refresh the drafts index**, where the T unit's prose said "the id minted and the index refreshed before the selector is handed out".
+It cannot: `create_draft_from_source` closes with `store::drafts::refresh_account`, which calls `Store::open` and therefore *creates* the account's store, and `an_account_with_no_store_can_still_quote_a_message` asserts the account is still `blocked` afterwards.
+So the draft is built with `create_reply_draft_from` / `create_forward_draft_from` and the id minted inline, which is exactly what `draft.create` does and for exactly the same reason: every query of this family answers from a fresh directory scan, so there is no index to be ahead of.
+
+**`Action::NewDraft` has one refusal where it had two.** A name the directory already holds was a plain status line, `File already exists: <path>`; it is `New draft failed: …` at error level now, carrying the method's own `A draft already exists at <path>`. Reaching it takes two drafts created in the same second.
+
+**`default_from` in `src/tui/actions.rs` is deleted.** `write_fetched_draft_and_edit` was its last caller, and the daemon resolves the same address off the same configured account.
+The one difference is that it preferred `SmtpConfig::default_from` over `AccountConfig`'s, which is the same preference `draft.reply` and `draft.forward` have ignored since P5-U6 (`SmtpConfig::default_from` is a copy of `AccountConfig`'s).
+
+**A drafts change in a non-active account still changes nothing on screen.** The daemon announces it and `apply_draft_change` ignores it, which is what the poll did by construction: it scanned one directory. The switch to that account reloads its mailboxes itself.
+
+**Six struct literals lost a field and one test file was touched for it.** `src/tui/events_tests.rs` is one of them; the edit is the removal of `outbox: crate::outbox::OutboxCounts::default(),` from an `AccountState` literal and nothing else.
+
+### The guards, as they stand
+
+`tests/fixtures/tui-engine-imports.txt`, five rows: `actions.rs store` (three `#[cfg(test)]` imports), `app/mod.rs store`, `app/store_rows.rs store`, `app/types.rs store`, `app/types.rs ingest`.
+`tests/fixtures/tui-engine-paths.txt`, five rows: `app/mod.rs crate::agenda::`, `app/mod.rs crate::store::`, `app/store_rows.rs crate::store::`, `app/types.rs crate::store::`, `session.rs crate::daemon::`.
+Four of the five paths and four of the five imports are the sessionless oracles, which are P5-U10e's; the fifth path is the connect helper, which is P5-U10f's.
+
+`TUI_ACTION_ENGINE_RESIDUE` is empty still and `CLI_ENGINE_RESIDUE` is seventeen rows still; neither moved.
+
+### Follow-ups
+
+- P5-U10e, the sessionless oracles and their test modules into the root crate. The dependency list is in the T unit's section above and should be read as the order to move them in.
+- P5-U10f, the move itself plus the connect helper. The T unit's recommendation is shape (1), the binary injecting a connector, and nothing this unit did argues against it.
+- `ENGINE_MODULES` still names `secrets` and `oauth2`, which live in `mp-core`. Raised by P5-U10a, repeated by P5-U10b, P5-U10c-I1 and P5-U10c-I2, and still not needed: no file under `src/tui/` imports either. It is P5-U10f's, because a `crates/mp-tui` depending on `mp-core` can reach both and neither scan would see it.
+- `src/daemon/methods/mailbox.rs` counts the Drafts mailbox through `crate::tui::app::draft_count`, which is a daemon method reading its answer out of a client, the shape P5-U10c-I2 fixed for the agenda. It moves with the oracles in P5-U10e or the daemon keeps a `draft_count` of its own.
+- `LST-06`'s CLI residue is unchanged and still five rows.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2 411 passed, 0 failed, 5 ignored**, across 61 binaries.
+That is P5-U10d-T's 2 390 plus its 21 red rows and nothing else: this unit added no test and lost none.
+Per crate: `mailypoppins` lib 988, `mp-core` 416, `mp-protocol` 25, `mp-client` 7, `mp` bin 2, the 52 integration binaries the rest, and one `mp_client` doc test.
+
+`--test daemon_thread_slice` -> 10. `--test daemon_draft_from_message_slice` -> 10. `--test daemon_draft_index_slice` -> 2, still passing for the reason the T unit wrote it.
+`--test architecture_boundaries` -> 9, both allow-lists at five rows. `--test daemon_protocol_fixtures` -> 20. `--test phase5_parity_gate` -> 11. `--test test_selection_guard` -> 6. `--test daemon_read_slice` -> 22, `MESSAGE_READ_METHOD_SPECS` unmoved at three. `--test daemon_draft_slice` -> 34 and `--test daemon_mutation_slice` -> 35, `DRAFT_METHOD_SPECS` unmoved at ten.
+`--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, with no snapshot re-approved and no `.snap.new`.
+
+`scripts/capture-cli-help.sh` and `mp dump-keys --json`, from a binary rebuilt in the same run, diff empty against `docs/baselines/pre-daemon/cli-help.txt` and `docs/baselines/pre-daemon/tui-keys.json`.
+
+`cargo clippy --workspace --offline --all-targets` -> **37 distinct `(lint, file, line)`**, which is also 37 warning blocks: P5-U10c-I2's count exactly, none of them on a line this unit wrote and none of them in a file the T unit added.
+The T unit reported 42 locations by a wider count that includes cargo's own `generated N warnings` summary lines; by `(lint, file, line)` its files carry nothing.
+
+`cargo install --path . --offline` -> replaced, release profile, 30 s.
 `pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
