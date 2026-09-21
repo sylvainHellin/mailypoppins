@@ -1,7 +1,18 @@
-//! `mp daemon run | start | status | stop | restart` (P2-U7), and
+//! `mp daemon run | start | status | stop | restart` (P2-U7),
 //! `install-service | uninstall-service` (P6-U6), which [`super::service`]
-//! owns: they write a login-start unit and call a service manager, and touch
-//! neither the socket nor a daemon.
+//! owns - they write a login-start unit and call a service manager, and touch
+//! neither the socket nor a daemon - and `health | logs | support-bundle`
+//! (P6-U8), which [`super::diagnostics`] answers.
+//!
+//! ## The three diagnostic commands
+//!
+//! They are the only commands in this file that handshake: health, the log and
+//! a support bundle are domain methods behind the `initialize` gate, where
+//! `daemon.status` and `daemon.stop` are lifecycle surface that answers in
+//! front of it. None of them starts a daemon - `needs_daemon` answers `false`
+//! for the whole `daemon` subtree - because a command that reports on a daemon
+//! must not conjure the thing it reports on. All three refuse identically when
+//! nothing answers, with the two lines `mp daemon status` already prints.
 //!
 //! ## The startup sequence, in order
 //!
@@ -61,7 +72,7 @@ use log::{error, info, warn};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use mp_client::Connection;
+use mp_client::{ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
 use super::config::{start_account, ConfigState, ConfigStore};
@@ -191,6 +202,32 @@ pub enum DaemonAction {
     },
     /// Disable the login-start service and remove its file
     UninstallService,
+    /// Report the running daemon's health, its counters and its checks
+    Health {
+        /// Print one JSON object instead of a human-readable block
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the tail of the daemon's own structured log
+    Logs {
+        /// How many lines to print, at most 5000
+        #[arg(long, default_value_t = 200)]
+        lines: u64,
+        /// Print only lines at or above this level (trace, debug, info, warn, error)
+        #[arg(long)]
+        level: Option<String>,
+        /// Print the wire answer as one JSON object instead of the lines
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a redacted support bundle and say what went into it
+    SupportBundle {
+        /// Where the bundle directory goes; below the data directory by default
+        out: Option<PathBuf>,
+        /// Copy every value verbatim, credentials included
+        #[arg(long)]
+        no_redact: bool,
+    },
 }
 
 /// Run one lifecycle command and return the process exit code.
@@ -206,6 +243,9 @@ pub async fn dispatch(action: DaemonAction) -> i32 {
         DaemonAction::Restart => restart().await,
         DaemonAction::InstallService { force, check } => super::service::install(force, check),
         DaemonAction::UninstallService => super::service::uninstall(),
+        DaemonAction::Health { json } => health(json).await,
+        DaemonAction::Logs { lines, level, json } => logs(lines, level, json).await,
+        DaemonAction::SupportBundle { out, no_redact } => support_bundle(out, no_redact).await,
     };
     match outcome {
         Ok(code) => code,
@@ -332,6 +372,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
         Arc::clone(&state.canonical),
         state.shutdown.watchers_stopped(),
     );
+    spawn_diagnostic_sweep(Arc::clone(&state));
     let (shutdown, _) = watch::channel(false);
     spawn_signal_watch(Arc::clone(&state), shutdown.clone())?;
 
@@ -460,8 +501,39 @@ fn spawn_account_runtimes(state: Arc<DaemonState>) {
                 state.config.account_runtimes,
             )
             .await;
+            // The runtime that just reported is half of `account:<name>`'s
+            // verdict and all of `store_open`'s, so this is where a check flips
+            // and where the event that announces it belongs.
+            state.diagnostics.refresh();
         });
     }
+}
+
+/// Re-evaluate the health checks every
+/// [`REFRESH_INTERVAL`](super::diagnostics::REFRESH_INTERVAL) until the daemon
+/// stops (P6-U8).
+///
+/// A safety net rather than the trigger: an account runtime that reported and a
+/// configuration reload both refresh at once, and what this catches is the
+/// socket or the log file going away under a daemon nobody is talking to. It
+/// stops at the same signal the draft watcher does, so a shutdown does not
+/// publish a check about a daemon that is already leaving.
+fn spawn_diagnostic_sweep(state: Arc<DaemonState>) {
+    let mut stopping = state.shutdown.watchers_stopped();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                changed = stopping.changed() => {
+                    if changed.is_err() || *stopping.borrow() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(super::diagnostics::REFRESH_INTERVAL) => {
+                    state.diagnostics.refresh();
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +878,287 @@ fn process_alive(pid: u32) -> bool {
     // SAFETY: signal 0 delivers nothing and only reports whether the pid exists
     // and is signalable by this uid.
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+// ---------------------------------------------------------------------------
+// health, logs and the support bundle (P6-U8)
+// ---------------------------------------------------------------------------
+
+/// The width every label in this file's blocks is padded to, which is what
+/// makes `mp daemon status`, `mp daemon health` and `mp daemon support-bundle`
+/// read as one command's output.
+const LABEL: usize = 12;
+
+/// The two lines all three diagnostic commands print when nothing answers, and
+/// the exit code that goes with them.
+fn no_daemon() -> i32 {
+    println!("{} no daemon running", "\u{2717}".red());
+    println!("  {:<LABEL$}mp daemon start", "start one:");
+    EXIT_ERROR
+}
+
+/// A handshaken connection to the running daemon, or `None` when none answers.
+///
+/// Unlike [`rpc`] this one *does* `initialize`: the `diagnostic.*` family is
+/// domain surface and the gate refuses it otherwise. It never starts a daemon,
+/// which is the whole point of these three commands.
+async fn attach() -> Option<Connection> {
+    let socket = socket_path();
+    let handshake = async {
+        let mut connection = Connection::connect(&socket).await.ok()?;
+        connection
+            .initialize(
+                ClientInfo {
+                    kind: ClientKind::Cli,
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                Identity {
+                    data_dir: crate::config::mailypoppins_data_dir(),
+                    config_dir: crate::config::config_dir(),
+                },
+                &[],
+                &[],
+            )
+            .await
+            .ok()?;
+        Some(connection)
+    };
+    tokio::time::timeout(RPC_TIMEOUT, handshake).await.ok()?
+}
+
+/// One call on an attached connection, as an `anyhow` failure.
+async fn ask(connection: &mut Connection, method: &str, params: Value) -> Result<Value> {
+    match tokio::time::timeout(RPC_TIMEOUT, connection.call(method, params)).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => bail!("{method}: {e}"),
+        Err(_) => bail!(
+            "the daemon did not answer {method} within {}s",
+            RPC_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+/// `mp daemon health`: the verdict, the block, the accounts, the checks.
+///
+/// A warning is not a failure and does not cost an exit code: a lock held
+/// elsewhere is a normal state of this machine. A failing check is exit 1, so a
+/// script running this as a probe learns something.
+async fn health(as_json: bool) -> Result<i32> {
+    let Some(mut connection) = attach().await else {
+        return Ok(no_daemon());
+    };
+    let report = ask(&mut connection, "diagnostic.health", json!({})).await?;
+    if as_json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        print_health(&report);
+    }
+    let failing = counted(&report, "fail");
+    Ok(if failing > 0 { EXIT_ERROR } else { EXIT_OK })
+}
+
+/// How many checks carry `status`.
+fn counted(report: &Value, status: &str) -> usize {
+    report["checks"]
+        .as_array()
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|check| check["status"] == json!(status))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// The human-readable block, in the style `mp daemon status` prints its own.
+fn print_health(report: &Value) {
+    let failing = counted(report, "fail");
+    let warning = counted(report, "warn");
+    if failing > 0 {
+        println!(
+            "{} daemon unhealthy, {failing} {} failing",
+            "\u{2717}".red(),
+            if failing == 1 { "check" } else { "checks" }
+        );
+    } else if warning > 0 {
+        println!(
+            "{} daemon healthy, {warning} {} attention",
+            "\u{2713}".green(),
+            if warning == 1 {
+                "check needs"
+            } else {
+                "checks need"
+            }
+        );
+    } else {
+        println!("{} daemon healthy", "\u{2713}".green());
+    }
+
+    label("instance:", string_of(&report["instance_id"]));
+    label("version:", string_of(&report["version"]));
+    label("protocol:", string_of(&report["protocol_version"]));
+    label("pid:", string_of(&report["pid"]));
+    label(
+        "uptime:",
+        human_uptime(report["uptime_secs"].as_u64().unwrap_or(0)),
+    );
+    label("socket:", string_of(&report["socket"]));
+    label("log:", string_of(&report["log_path"]));
+    label("clients:", string_of(&report["clients"]));
+    label("holds:", string_of(&report["holds"]));
+    label("operations:", string_of(&report["operations"]["active"]));
+    label(
+        "store:",
+        format!(
+            "{} ({})",
+            string_of(&report["store"]["path"]),
+            crate::store::sweep::human_bytes(report["store"]["size_bytes"].as_u64().unwrap_or(0))
+        ),
+    );
+    for account in report["accounts"].as_array().cloned().unwrap_or_default() {
+        label(
+            "account:",
+            format!(
+                "{} ({}, watcher {}, last sync {})",
+                string_of(&account["name"]),
+                string_of(&account["runtime"]),
+                string_of(&account["watcher"]),
+                match account["last_sync"]["finished_at"].as_str() {
+                    Some(at) => format!("{at} {}", string_of(&account["last_sync"]["outcome"])),
+                    None => "never".to_string(),
+                }
+            ),
+        );
+    }
+    for check in report["checks"].as_array().cloned().unwrap_or_default() {
+        let mark = match check["status"].as_str() {
+            Some("ok") => "\u{2713}".green(),
+            Some("warn") => "\u{26a0}".yellow(),
+            _ => "\u{2717}".red(),
+        };
+        println!(
+            "  {mark} {}: {}",
+            string_of(&check["name"]),
+            string_of(&check["detail"])
+        );
+    }
+}
+
+/// One padded label line of a block.
+fn label(name: &str, value: impl std::fmt::Display) {
+    println!("  {name:<LABEL$}{value}");
+}
+
+/// An uptime a person reads, rather than a number of seconds they divide.
+fn human_uptime(secs: u64) -> String {
+    let (days, hours, minutes, seconds) = (
+        secs / 86_400,
+        (secs / 3_600) % 24,
+        (secs / 60) % 60,
+        secs % 60,
+    );
+    if days > 0 {
+        format!("{days}d {hours:02}h {minutes:02}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// `mp daemon logs`: the lines and **nothing** around them.
+///
+/// No banner, because a header would end up in every `mp daemon logs | grep`.
+async fn logs(lines: u64, level: Option<String>, as_json: bool) -> Result<i32> {
+    let Some(mut connection) = attach().await else {
+        return Ok(no_daemon());
+    };
+    let mut params = json!({"lines": lines});
+    if let Some(level) = level {
+        params["level"] = json!(level);
+    }
+    let answer = ask(&mut connection, "diagnostic.logs", params).await?;
+    if as_json {
+        println!("{}", serde_json::to_string(&answer)?);
+        return Ok(EXIT_OK);
+    }
+    for line in answer["lines"].as_array().cloned().unwrap_or_default() {
+        println!(
+            "{}",
+            super::diagnostics::render_log_line(
+                line["ts"].as_str().unwrap_or(""),
+                &line["level"]
+                    .as_str()
+                    .map(str::to_uppercase)
+                    .unwrap_or_default(),
+                line["target"].as_str().unwrap_or(""),
+                line["message"].as_str().unwrap_or(""),
+            )
+        );
+    }
+    Ok(EXIT_OK)
+}
+
+/// `mp daemon support-bundle`: what was written, how many files, how many
+/// values were struck.
+///
+/// `--no-redact` says so on the line where the count would have been, never a
+/// `0`: a bundle full of credentials must not look like any other bundle.
+async fn support_bundle(out: Option<PathBuf>, no_redact: bool) -> Result<i32> {
+    let Some(mut connection) = attach().await else {
+        return Ok(no_daemon());
+    };
+    let mut params = json!({"redact": !no_redact});
+    if let Some(out) = out {
+        // Absolutised here, because the daemon's working directory is not the
+        // caller's and a relative path would resolve somewhere nobody chose.
+        params["out"] = json!(super::client::absolutise(&out).display().to_string());
+    }
+    let started = ask(&mut connection, "diagnostic.support_bundle", params).await?;
+    let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
+        bail!("the daemon answered no operation id: {started}");
+    };
+    let result = settle(&mut connection, &id).await?;
+
+    println!(
+        "{} wrote {}",
+        "\u{2713}".green(),
+        string_of(&result["path"])
+    );
+    label(
+        "files:",
+        result["files"].as_array().map(Vec::len).unwrap_or(0),
+    );
+    label(
+        "redactions:",
+        if no_redact {
+            "none, --no-redact was given".to_string()
+        } else {
+            string_of(&result["redactions"])
+        },
+    );
+    Ok(EXIT_OK)
+}
+
+/// Poll one operation until it settles, and answer its result.
+async fn settle(connection: &mut Connection, id: &str) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let status = ask(connection, "operation.status", json!({"operation_id": id})).await?;
+        match status["state"].as_str() {
+            Some("succeeded") => return Ok(status["result"].clone()),
+            Some("failed" | "cancelled") => {
+                bail!("{}", string_of(&status["error"]["message"]))
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            bail!("the daemon did not finish the support bundle within 60s");
+        }
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
