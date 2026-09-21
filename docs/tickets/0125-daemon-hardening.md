@@ -1076,3 +1076,116 @@ One comment-only source edit, reported here because this unit is not supposed to
 `timeout 600 cargo clippy --workspace --offline --all-targets` -> **38 distinct warnings**, the phase's baseline, none on a line this unit wrote.
 `TMPDIR=/var/tmp timeout 900 cargo install --path . --offline` -> installs the Phase 6 daemon-backed `mp`.
 `pgrep -af '[m]p daemon'` after every test run, every benchmark pass and both smoke runs: one line, pid 3667325, the owner's own daemon, which no sandbox in this work could reach.
+
+## Phase 6 review
+
+Five findings from a review of Phase 6 as landed at `1957f9e`, each verified against the tree before it was acted on, one commit each.
+One is a deadlock reachable from two live connections, one is a pair of generated files that break on a path a user is allowed to have, two are tests that asserted less than they read as asserting, and one is documentation that claimed evidence nobody took.
+
+### 1. `HoldScheduler` inverted its own lock order in `cancel_all`
+
+`61afcc5`.
+`arm`, `listing` and `take` all hold `armed` while they reach for `order`; `cancel_all` held `order` for the whole of its `let doomed = … collect();` and took `armed` inside the filter closure.
+Both sides are reachable at the same instant from a live socket: `cancel_all` runs from step 2 of `shutdown::request` and from the last-client rule in `server::handle_connection`, `listing` from `send.hold_status`, `diagnostic.health` and `state.bootstrap` on another connection.
+Nothing in the suite could see it, because every functional row drives one connection at a time.
+
+The snapshot is taken under `order` alone now and that guard is dropped before `cancel` reaches for `armed`.
+The `contains_key` filter went with it and is not missed: an id that left the map between the snapshot and the cancel is exactly what `cancel`'s `false` already means, which is what the returned count filters on.
+The struct carries the rule (`armed` before `order`, never the reverse), naming both callers, because a reader checking a fifth method against three agreeing ones will not notice that a fourth disagrees.
+
+`cancel_all_and_listing_do_not_deadlock` is the guard: two threads, 200 rounds of arm-and-cancel against 400 listings, each reporting through an `mpsc` channel so the failure is a `recv_timeout` rather than a binary that hangs until the harness is killed.
+Against the inverted version it fails in 30 seconds with that message; against the fixed one it takes about a hundredth of a second.
+
+### 2. The service files substituted three paths raw
+
+`a64a1e5`.
+`ExecStart={{MP}} daemon run` and `Environment=MAILYPOPPINS_DATA_DIR={{DATA_DIR}}` were written with the value dropped in unquoted, and the plist's three `<string>` bodies the same way.
+A `$HOME` or a `MAILYPOPPINS_DATA_DIR` with a space in it therefore split the `ExecStart` into two argv entries and truncated the `Environment=` assignment at the space, silently; an `&` or a `<` in a path made the plist unparseable, which is a `launchctl bootstrap` that fails at the next login rather than at install.
+None of it is exotic: a macOS `$HOME` with a space in it is ordinary, and the data directory is whatever the user exported.
+
+The templates quote every placeholder and `escape` makes the value unable to leave the construct it sits in: `\` and `"` backslash-escaped for a double-quoted systemd value (`systemd.syntax(7)`), `&`, `<`, `>` and `"` as entities for a plist `<string>`.
+The escaping is per target, so `render_template` takes the `Target` and picks both the template and the escaper.
+`the_templates_are_the_committed_fixtures` is green: `tests/fixtures/service/mailypoppins.service` carries the quoted lines byte for byte.
+
+Two unit tests are new, `a_path_with_a_space_and_an_ampersand_renders_as_one_value` and `the_escape_is_the_one_each_format_needs`, and the existing `rendering_leaves_no_placeholder_behind` iterates targets rather than template strings.
+
+**The approved fixture edit, and the two assertions it moved.**
+`tests/daemon_service.rs` asserted `ExecStart` as `<mp> daemon run` and the two `Environment=` values bare; both now carry the quotes, and nothing else in the file moved.
+The sandbox paths hold no character either format reads specially, so `Sandbox::expected` still substitutes raw and the fixture comparison stays byte-exact; the file's header says so.
+
+Verified outside the suite in a sandbox `HOME` at `/var/tmp/mp review sandbox & co`: `systemd-analyze verify` accepts the unit, and reads a quoted path with a space in it as one command (it names the whole path in `Command … is not executable` when the path is made up), and the plist parses as XML.
+
+### 3. The redaction row proved nothing about four of the five bundle files
+
+`35f35a0`.
+Every marker of `tests/daemon_diagnostics.rs` is seeded into `config.toml` and into no other file a bundle holds, so `a_redacted_bundle_carries_no_secret` asserting `redactions == 5` was a statement about one file.
+A `redact_tree` that skipped `log.txt`, `health.json` and `daemon-status.json` passed it unchanged.
+
+`redact_tree` does walk all five, so no production code moved.
+What moved is the row: `log_a_secret` appends one marker to the daemon's own log file in the format its writer produces, the way a library that did not know it was a secret would leave one there, and the row then asserts the line reached `log.txt` with the secret struck and the rest of the sentence intact, and counts six replacements.
+`an_unredacted_bundle_is_the_control` does the same and asserts the line arrived whole with none struck, so the control still controls.
+
+Approved test edit.
+Exercised against a `redact_tree` narrowed to `config.toml`, where the row fails on the marker surviving into the bundle.
+
+### 4. No row ever read a `send.hold_tick` off the wire
+
+`380f577`.
+Seven socket rows pinned the hold's start, its cancel, its fire, its listing and its bootstrap, and not one of them read a tick.
+A scheduler that armed the window and published no tick left the file green while every client's countdown sat frozen at the number it was armed with, which is the one thing the presentation is for.
+
+`a_second_client_sees_the_countdown_and_cancels_the_send` now waits for one tick on B with the file's own bounded `await_kind`, between the listing assertions and the cancel, and asserts it names the operation that started, carries the same `hold_secs` as the `send.hold_started` payload, and reports a remainder strictly below it and above zero.
+The wait is the file's usual bounded one rather than a sleep, because a fixed sleep either races the tick or sits out the window it is trying to observe.
+`HOLD_SECS` stays at two, which puts the one tick a two-second window produces a full second before the deadline the cancel has to beat.
+
+Approved test edit.
+Against a `run_held` whose tick publish is removed the row fails on the wait.
+
+### 5. Three documents that said less than the tree does
+
+`b548975`.
+
+**The `-32009` scope.**
+`docs/daemon-protocol.md` said step 1 refuses *"every other method"*, and eight hundred lines later *"every method but those two"* without either passage naming them.
+Both now name `daemon.status`, which is how `mp daemon stop` watches the shutdown it asked for, and a repeated `daemon.stop`, which is not an error; that is what `server::dispatch`'s shutdown gate exempts and what `docs/daemon-operations.md` already said.
+`src/daemon/shutdown.rs`'s own eight-step header and the P6-U3 contract section above carried the same gap and were corrected with it.
+
+**The service-manager gate row claimed evidence nobody took.**
+It was recorded as a pass on systemd with launchd escalated, and every `systemctl` in the phase was a dry run or a stub: twenty rows and the by-hand smoke set `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1`, three rows point `PATH` at a fake `systemctl` that records its argv.
+What that proves is that the unit is written, that it is the committed fixture byte for byte, and that the command sequence is the contract's.
+What it does not prove is that systemd accepts the unit, that `enable --now` starts a daemon, or that the daemon comes back at the next login.
+The gate evidence, the gate row above and the ticket's status line say so now, the row reads NOT TAKEN (owner action) for both platforms rather than pass-on-one, and `BACKLOG.md` carries the systemd owner action beside the launchd one.
+No test takes it because a real `enable --now` starts a daemon against the developer's own data directory.
+
+**The runtime-file cleanup is two guards, not one.**
+`lifecycle::cleanup`'s comment and `docs/daemon-operations.md` both said all three files share the instance check.
+The socket and `daemon.json` go while `daemon.json` still names this instance; `daemon.pid` goes while it still holds this process's pid, which is the fact that file carries.
+Both passages say that now.
+
+### The templates in the P6-U5 contract section
+
+The unit template quoted verbatim in P6-U5's "The files" section is the file, so it carries the quoted lines, and the list of decisions beneath it gains the one finding 2 made.
+A contract section that reproduces a file and then stops matching it is a second source of truth for the same bytes.
+
+### Follow-ups
+
+- Nothing here changes a protocol shape, a snapshot or a wire fixture.
+- The three `daemon_service.rs` rows that run against a stub `systemctl` are what the gate row now rests on; a row that ran a real one would have to own a session of its own, which is why the live check stays owner action rather than becoming a test.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2346 passed, 0 failed**, 5 ignored over 54 result lines.
+That is P6-U10's 2343 plus three unit tests: the hold's concurrency row and the service module's two escaping rows.
+
+`--lib daemon::hold` 5, five runs; `--test daemon_send_hold` 7, three runs; `--test daemon_diagnostics` 36, three runs; `--test daemon_service` 23; `--lib daemon::service` 10; `--test daemon_shutdown` 12; `--test daemon_lifecycle` 10.
+Each of the three new or strengthened rows was run against the defect it names, and fails there: the deadlock on a `recv_timeout`, the redaction on a marker surviving into the bundle, the countdown on a tick that never arrives.
+
+`touch src/main.rs && timeout 600 cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` -> empty, and `diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` -> empty.
+
+`timeout 600 cargo clippy --workspace --offline --all-targets` -> **38 distinct warnings**, the phase's baseline, none in a file this review touched.
+The concurrency row's first draft added a 39th (`needless_borrows_for_generic_args` on an `OperationId::new(&format!(…))`) and it was taken back out.
+
+`rustfmt --edition 2021` clean on `src/daemon/hold.rs`, `src/daemon/service.rs`, `src/daemon/lifecycle.rs`, `src/daemon/shutdown.rs`, `tests/daemon_service.rs`, `tests/daemon_diagnostics.rs` and `tests/daemon_send_hold.rs`, all seven rustfmt-clean before this review.
+
+`timeout 900 cargo install --path . --offline` -> replaced.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, the owner's own daemon, which no sandbox in this work could reach.
