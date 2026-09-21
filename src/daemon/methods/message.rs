@@ -152,7 +152,7 @@ fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
     let messages: Vec<Value> = rows
         .iter()
         .take(limit.unwrap_or(total))
-        .map(to_json)
+        .map(|row| to_json(&name, row))
         .collect();
     Ok(json!({
         "account": name,
@@ -186,7 +186,16 @@ fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
 /// survives no rebuild (`docs/plans/preview-latency.md`, "hole 1"), and a
 /// client that persisted one would be naming a row that may since have become
 /// another message.
-pub fn to_json(row: &MessageRow) -> Value {
+///
+/// `selector` is the canonical `mp://<account>/<mailbox>/<key>` of the row,
+/// rendered here by [`Selector::for_message`] rather than composed by a client
+/// out of `message_id` and the answer's mailbox (`RD-07`, #0126). A client
+/// could compose it, since `mp_core::selector` is a shared module; it may not,
+/// because that would be a second implementation of the percent-encoding and
+/// of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins
+/// only the CLI's spelling. The cost is the sixteenth key of a row, about
+/// forty bytes of ASCII, paid once per listing rather than once per copy.
+pub fn to_json(account: &str, row: &MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
     json!({
@@ -209,6 +218,7 @@ pub fn to_json(row: &MessageRow) -> Value {
         },
         "has_attachments": row.has_attachments,
         "is_invite": row.is_invite,
+        "selector": Selector::for_message(account, row).to_string(),
     })
 }
 
@@ -382,7 +392,7 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
         .map(|hit| {
             // A listing row plus the mailbox it was found in, which is what
             // `Selector::for_message` needs to render the line.
-            let mut wire = to_json(&hit.row);
+            let mut wire = to_json(&name, &hit.row);
             wire["mailbox"] = json!(hit.row.mailbox);
             if wants_body {
                 wire["body"] = json!(read::load_body(&store, &blobs, hit.row.id));

@@ -718,31 +718,18 @@ fn store_for_mutation(app: &mut App, what: &str) -> Option<(crate::store::Store,
 /// The canonical `mp://` selector of the entry under the cursor (#0050 scope
 /// item 7), or `None` when the entry has no name to copy.
 ///
-/// A drafts entry answers from its indexed `id:` without touching the store,
-/// because a draft has no `messages` row. A received entry answers from a
-/// lookup by row id, because the selector needs the Message-ID and the mailbox
-/// and the list carries neither: [`MessageRef`] is deliberately just the
-/// synthetic key. That is one indexed read per keypress, which is the right
-/// side of the trade against widening every list row.
+/// The row carries it (`RD-07`, #0126): `message.list` and `draft.list` both
+/// render the selector daemon-side and `entry_from_row` puts it on the entry,
+/// so `y` costs neither a round trip nor a store read. It was one indexed
+/// lookup per keypress until this unit, because [`MessageRef`] is deliberately
+/// just the synthetic key and the listing carried neither the Message-ID nor
+/// the mailbox the selector needs.
 ///
-/// `None` is the server-search hit that does not resolve locally: it has no
-/// store row, so there is no selector that would name it for the CLI.
-fn selected_selector(app: &App) -> Option<crate::selector::Selector> {
-    let account = &app.account_config.name;
-    let email = app.selected_email()?;
-    if let Some(id) = email.draft_id.as_deref() {
-        return Some(crate::selector::Selector::for_draft(account, id));
-    }
-    let msg = email.msg?;
-    let store = open_store(account)?;
-    let row = match crate::store::read::find_by_id(&store, msg.row_id()) {
-        Ok(row) => row?,
-        Err(e) => {
-            log::warn!("[store] reading {msg} for its selector failed: {e:#}");
-            return None;
-        }
-    };
-    Some(crate::selector::Selector::for_message(account, &row))
+/// `None` is the row with no name to copy: the server-search hit that does not
+/// resolve locally, which has no `messages` row for a selector to point at,
+/// and the parse-skipped draft file, which has no `id:` to be named by.
+fn selected_selector(app: &App) -> Option<String> {
+    app.selected_email()?.selector.clone()
 }
 
 // The server half of a mutation is no longer fired from here (#0039): a
@@ -797,7 +784,12 @@ pub(super) fn handle_action(
             // to let the user reach the broken YAML and fix it. The index
             // refresh on the way out then lists it as a normal draft.
             if let Some(skip) = app.selected_email().and_then(|e| e.skip.clone()) {
-                edit_new_draft(app, terminal, &skip.path, "Returned from editor".to_string())?;
+                edit_new_draft(
+                    app,
+                    terminal,
+                    std::path::Path::new(&skip.path),
+                    "Returned from editor".to_string(),
+                )?;
                 return Ok(());
             }
             let Some((_id, path)) = cursor_draft(app, "Open in $EDITOR needs a message or a draft")
@@ -893,8 +885,7 @@ pub(super) fn handle_action(
         }
 
         Action::CopyMessageRef => match selected_selector(app) {
-            Some(selector) => {
-                let text = selector.to_string();
+            Some(text) => {
                 match super::helpers::copy_to_clipboard(&text) {
                     Ok(()) => app.set_status(format!("{text} copied to clipboard")),
                     Err(e) => app.set_status_level(
@@ -3010,6 +3001,7 @@ mod store_backed_mutations {
             msg: None,
             draft_id: Some(id.to_string()),
             skip: None,
+            selector: None,
             from: String::new(),
             to: "alice@example.com".to_string(),
             cc: None,
@@ -3285,6 +3277,7 @@ mod store_backed_files {
             msg: Some(MessageRef::new(row.id)),
             draft_id: None,
             skip: None,
+            selector: None,
             from: row.from.clone().unwrap_or_default(),
             to: row.to.clone().unwrap_or_default(),
             cc: None,
@@ -3399,6 +3392,7 @@ mod store_backed_files {
             msg: None,
             draft_id: draft_id.map(str::to_string),
             skip: None,
+            selector: None,
             from: String::new(),
             to: "alice@example.com".to_string(),
             cc: None,

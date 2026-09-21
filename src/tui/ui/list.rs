@@ -402,6 +402,7 @@ mod badge_tests {
             msg: Some(crate::tui::app::MessageRef::new(1)),
             draft_id: None,
             skip: None,
+            selector: None,
             from: "a".into(), to: "b".into(), cc: None,
             reply_to: None, bcc: None,
             subject: "S".into(), status: "inbox".into(),
@@ -439,8 +440,8 @@ mod badge_tests {
         crate::tui::theme::init(crate::tui::theme::DEFAULT_THEME_NAME);
         let mut e = entry(true, true);
         e.msg = None;
-        e.skip = Some(crate::store::drafts::SkippedDraft {
-            path: std::path::PathBuf::from("/d/broken.md"),
+        e.skip = Some(mp_protocol::draft::DraftSkip {
+            path: "/d/broken.md".to_string(),
             error: "boom".into(),
         });
 

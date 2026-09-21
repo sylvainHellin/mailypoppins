@@ -292,6 +292,10 @@ fn fetched_to_email_entry(account: &str, fetched: &FetchedEmail) -> EmailEntry {
         msg,
         draft_id: None,
         skip: None,
+        // A server hit that resolved locally carries the selector the daemon
+        // rendered for its row; one that never synced has no `messages` row
+        // for a selector to point at.
+        selector: None,
         from: fetched.from.clone(),
         to: fetched.to.clone(),
         cc: fetched.cc.clone(),

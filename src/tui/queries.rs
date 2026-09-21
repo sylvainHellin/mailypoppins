@@ -52,16 +52,14 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 
 use mp_protocol::draft::DraftListing;
+use mp_protocol::listing::MessageListRow;
 use mp_protocol::EventEnvelope;
 
 use crate::selector::DRAFTS_MAILBOX;
-use crate::store::drafts::{DraftRow, SkippedDraft};
-use crate::store::read::MessageRow;
 use crate::tui::app::{
     entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox,
     CalendarEvent, EmailEntry, MailboxInfo, MessageRef,
 };
-use crate::types::MessageFlags;
 
 /// Something that answers a daemon method call and blocks for the answer.
 ///
@@ -132,9 +130,9 @@ pub fn decode_list(account: &str, mailbox: &str, answer: &Value) -> Result<Vec<E
 
 /// The `messages` array of a `message.list` answer, as list rows.
 fn decode_messages(account: &str, mailbox: &str, answer: &Value) -> Vec<EmailEntry> {
-    let rows: Vec<MessageRow> = answer["messages"]
+    let rows: Vec<MessageListRow> = answer["messages"]
         .as_array()
-        .map(|rows| rows.iter().map(|row| row_from_wire(row, mailbox)).collect())
+        .map(|rows| rows.iter().map(row_from_wire).collect())
         .unwrap_or_default();
     remember_mailbox(account, mailbox, &rows);
     let status = status_for_mailbox(mailbox);
@@ -148,77 +146,23 @@ fn decode_messages(account: &str, mailbox: &str, answer: &Value) -> Vec<EmailEnt
 /// order (`mtime DESC, id ASC`).
 fn decode_drafts(answer: &Value) -> Result<Vec<EmailEntry>> {
     let listing: DraftListing = serde_json::from_value(answer.clone())?;
-    let skipped = listing.skipped.into_iter().map(|skip| {
-        entry_from_skip(SkippedDraft {
-            path: PathBuf::from(skip.path),
-            error: skip.error,
-        })
-    });
-    let rows = listing.drafts.into_iter().map(|row| {
-        entry_from_draft(DraftRow {
-            id: row.id,
-            // The three columns the index keeps for itself and no row reads:
-            // the display stem, the file size and the mtime the daemon already
-            // sorted by.
-            slug: String::new(),
-            path: PathBuf::from(row.path),
-            mtime: 0,
-            size: 0,
-            status: row.status,
-            to: row.to,
-            cc: row.cc,
-            subject: row.subject,
-            date: row.date,
-            snippet: None,
-        })
-    });
+    let skipped = listing.skipped.into_iter().map(entry_from_skip);
+    let rows = listing.drafts.into_iter().map(entry_from_draft);
     Ok(skipped.chain(rows).collect())
 }
 
-/// One listed row as the store row it was read from.
+/// One listed row as the typed wire row it is.
 ///
-/// `from`, `to`, `subject` and `date_display` are flattened to `""` on the
-/// wire and become `None` again here; `cc`, `reply_to` and `bcc` travel
-/// nullable, because the header pane prints each of them only when the message
-/// carried one and an empty header is not an absent one.
-fn row_from_wire(row: &Value, mailbox: &str) -> MessageRow {
-    let flattened = |key: &str| {
-        row[key]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    let nullable = |key: &str| row[key].as_str().map(str::to_string);
-    let flag = |key: &str| row["flags"][key].as_bool().unwrap_or(false);
-    MessageRow {
-        id: row["id"].as_i64().unwrap_or_default(),
-        mailbox: mailbox.to_string(),
-        uid: row["uid"].as_i64().unwrap_or_default(),
-        message_id: row["message_id"].as_str().unwrap_or_default().to_string(),
-        from: flattened("from"),
-        to: flattened("to"),
-        cc: nullable("cc"),
-        reply_to: nullable("reply_to"),
-        bcc: nullable("bcc"),
-        subject: flattened("subject"),
-        date_display: flattened("date_display"),
-        flags: Some(
-            MessageFlags {
-                seen: flag("seen"),
-                answered: flag("answered"),
-                forwarded: flag("forwarded"),
-                flagged: flag("flagged"),
-            }
-            .to_flag_string(),
-        ),
-        has_attachments: row["has_attachments"].as_bool().unwrap_or(false),
-        // Neither is carried by a listing and neither is read by a list row:
-        // the body is the preview's one blob, and the thread is the
-        // conversation overlay's own query.
-        body_blob: None,
-        thread_id: None,
-        is_invite: row["is_invite"].as_bool().unwrap_or(false),
-    }
+/// Decoded with [`MessageListRow`]'s own `serde` derive rather than indexed
+/// key by key, so a row a daemon older than P5-U10c produced still decodes:
+/// every field but the identity defaults, and a client that refused a row over
+/// a field it would have rendered as empty would turn an additive protocol
+/// change into a list that will not paint.
+fn row_from_wire(row: &Value) -> MessageListRow {
+    serde_json::from_value(row.clone()).unwrap_or_else(|e| {
+        log::warn!("[queries] a listed row did not decode: {e}");
+        MessageListRow::default()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +178,7 @@ fn row_from_wire(row: &Value, mailbox: &str) -> MessageRow {
 /// overlay renders a hit out of the [`crate::parse::FetchedEmail`] it holds
 /// rather than out of a second read.
 ///
-/// The row is decoded into a [`MessageRow`] and handed to `entry_from_row`,
+/// The row is decoded into a [`MessageListRow`] and handed to `entry_from_row`,
 /// which is the same construction `decode_messages` uses and for the same
 /// reason: one mapper, so the overlay row and the list row cannot drift.
 pub fn decode_search_hits(answer: &Value) -> Vec<crate::tui::app::SearchResultEntry> {
@@ -247,21 +191,26 @@ pub fn decode_search_hits(answer: &Value) -> Vec<crate::tui::app::SearchResultEn
 /// One `message.search` hit as an overlay row.
 fn search_hit(hit: &Value) -> crate::tui::app::SearchResultEntry {
     let mailbox = hit["mailbox"].as_str().unwrap_or_default().to_string();
-    let row = row_from_wire(hit, &mailbox);
+    let row = row_from_wire(hit);
     let fetched = crate::parse::FetchedEmail {
-        from: row.from.clone().unwrap_or_default(),
-        to: row.to.clone().unwrap_or_default(),
+        from: row.from.clone(),
+        to: row.to.clone(),
         cc: row.cc.clone(),
         reply_to: row.reply_to.clone(),
         bcc: row.bcc.clone(),
-        subject: row.subject.clone().unwrap_or_default(),
-        date: row.date_display.clone().unwrap_or_default(),
+        subject: row.subject.clone(),
+        date: row.date_display.clone(),
         body_text: hit["body"].as_str().unwrap_or_default().to_string(),
         html_body: None,
         has_attachments: row.has_attachments,
         message_id: Some(row.message_id.clone()),
         attachments: Vec::new(),
-        flags: row.flags(),
+        flags: crate::types::MessageFlags {
+            seen: row.flags.seen,
+            answered: row.flags.answered,
+            forwarded: row.flags.forwarded,
+            flagged: row.flags.flagged,
+        },
         calendar_ics: None,
         event: None,
     };
@@ -492,7 +441,7 @@ impl MessageRowDelta {
             "message.row" => {
                 let account = event.payload["account"].as_str()?.to_string();
                 let mailbox = event.payload["mailbox"].as_str()?.to_string();
-                let row = row_from_wire(&event.payload["message"], &mailbox);
+                let row = row_from_wire(&event.payload["message"]);
                 remember_row(&account, &mailbox, &row);
                 let entry = entry_from_row(row, &status_for_mailbox(&mailbox));
                 Some(MessageRowDelta::Replace {
@@ -630,7 +579,7 @@ fn row_ids() -> &'static Mutex<RowIdIndex> {
 /// Record a whole listing, replacing whatever was known about that mailbox: a
 /// listing is the current truth about it, and keeping the previous one would
 /// grow without bound across a session.
-fn remember_mailbox(account: &str, mailbox: &str, rows: &[MessageRow]) {
+fn remember_mailbox(account: &str, mailbox: &str, rows: &[MessageListRow]) {
     let table = rows.iter().map(|row| (row.uid, row.id)).collect();
     if let Ok(mut index) = row_ids().lock() {
         index.insert((account.to_string(), mailbox.to_string()), table);
@@ -638,7 +587,7 @@ fn remember_mailbox(account: &str, mailbox: &str, rows: &[MessageRow]) {
 }
 
 /// Record one row, which is what a replace delta carries.
-fn remember_row(account: &str, mailbox: &str, row: &MessageRow) {
+fn remember_row(account: &str, mailbox: &str, row: &MessageListRow) {
     if let Ok(mut index) = row_ids().lock() {
         index
             .entry((account.to_string(), mailbox.to_string()))

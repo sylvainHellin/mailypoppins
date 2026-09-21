@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use chrono::NaiveDate;
 
+use mp_protocol::draft::{DraftEntry, DraftSkip};
+use mp_protocol::listing::MessageListRow;
+
 use crate::parse::FetchedEmail;
-use crate::store::read::MessageRow;
 use crate::store::{drafts, Store};
 use crate::types::MailboxRole;
 
@@ -142,7 +144,21 @@ pub struct EmailEntry {
     /// show it as an unopenable error row where the user expects the draft to
     /// be, rather than let the file vanish. It is mutually exclusive with both
     /// `msg` and `draft_id`: a row is a message, a parsed draft, or a skip.
-    pub skip: Option<crate::store::drafts::SkippedDraft>,
+    pub skip: Option<DraftSkip>,
+    /// The canonical `mp://` name of this row, as the daemon spelled it
+    /// (`RD-07`, #0126).
+    ///
+    /// A listed message carries `message.list`'s own `selector`, a draft
+    /// carries `draft.list`'s, and both are the daemon's rendering of
+    /// `mp_core::selector` rather than a second one composed here. `None` is
+    /// the row that has no name to copy: a parse-skipped file, which has no
+    /// `id:` to be named by, and a server-search hit that does not resolve to
+    /// a local row, which has no `messages` row for a selector to point at.
+    ///
+    /// It is on the row rather than behind a query because the daemon already
+    /// had the string in hand when it built the row; `y` therefore costs no
+    /// round trip and no store read.
+    pub selector: Option<String>,
     pub from: String,
     pub to: String,
     pub cc: Option<String>,
@@ -251,7 +267,7 @@ pub(super) fn load_drafts(account: &str) -> Vec<EmailEntry> {
 /// never synced has no store *file* and still has drafts, and a count that
 /// opened differently or skipped the refresh would contradict the list it
 /// labels.
-fn indexed_drafts(account: &str) -> (Vec<drafts::DraftRow>, Vec<drafts::SkippedDraft>) {
+fn indexed_drafts(account: &str) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
     let store = match Store::open(crate::config::store_path(account)) {
         Ok(store) => store,
         Err(e) => {
@@ -263,19 +279,90 @@ fn indexed_drafts(account: &str) -> (Vec<drafts::DraftRow>, Vec<drafts::SkippedD
     // The reporting refresh hands back the files it skipped for a parse
     // failure, so the Drafts list can show them as error rows instead of
     // silently dropping them (#0080).
-    let skipped = match drafts::refresh_reporting(&store, account, &dir) {
-        Ok((_, _, skipped)) => skipped,
+    let skipped: Vec<DraftSkip> = match drafts::refresh_reporting(&store, account, &dir) {
+        Ok((_, _, skipped)) => skipped.iter().map(skip_to_wire).collect(),
         Err(e) => {
             log::warn!("[drafts] refreshing the index of {account} failed: {e:#}");
             Vec::new()
         }
     };
     match drafts::list(&store, account, None) {
-        Ok(rows) => (rows, skipped),
+        Ok(rows) => (
+            rows.iter().map(|row| draft_to_wire(account, row)).collect(),
+            skipped,
+        ),
         Err(e) => {
             log::warn!("[drafts] listing the index of {account} failed: {e:#}");
             (Vec::new(), skipped)
         }
+    }
+}
+
+/// One indexed draft row as `draft.list` would have sent it.
+///
+/// The oracle's half of the equality `src/tui/app/queries_tests.rs` asserts:
+/// the daemon's `entry` (`src/daemon/methods/draft.rs`) builds the same value
+/// out of the same row, re-parse included, so the sessionless path and the
+/// routed one cannot answer differently about the same file.
+fn draft_to_wire(account: &str, row: &drafts::DraftRow) -> DraftEntry {
+    let draft = crate::draft::parse_email_draft(&row.path);
+    DraftEntry {
+        id: row.id.clone(),
+        selector: crate::selector::Selector::for_draft(account, &row.id).to_string(),
+        path: row.path.display().to_string(),
+        status: row.status.clone(),
+        to: row.to.clone(),
+        cc: row.cc.clone(),
+        subject: draft
+            .as_ref()
+            .ok()
+            .map(|draft| draft.frontmatter.subject.clone()),
+        date: row.date.clone(),
+        valid: draft.is_ok(),
+        ready: draft
+            .as_ref()
+            .is_ok_and(|draft| crate::draft::validate_draft(draft).is_ok()),
+    }
+}
+
+/// One skipped file as `draft.list` would have sent it.
+fn skip_to_wire(skip: &drafts::SkippedDraft) -> DraftSkip {
+    DraftSkip {
+        path: skip.path.display().to_string(),
+        error: skip.error.clone(),
+    }
+}
+
+/// One stored row as `message.list` would have sent it.
+///
+/// The oracle's half of the listing equality, the same construction
+/// `src/daemon/methods/message.rs`'s `to_json` performs over the same row.
+/// `mailbox` is not a field of the wire row: a listing answer names the
+/// mailbox once, and the selector the daemon rendered carries it.
+pub(crate) fn row_to_wire(account: &str, row: &crate::store::read::MessageRow) -> MessageListRow {
+    let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
+    let flags = row.flags();
+    MessageListRow {
+        id: row.id,
+        uid: row.uid,
+        message_id: row.message_id.clone(),
+        from: row.from.clone().unwrap_or_default(),
+        to: row.to.clone().unwrap_or_default(),
+        cc: row.cc.clone(),
+        reply_to: row.reply_to.clone(),
+        bcc: row.bcc.clone(),
+        subject: row.subject.clone().unwrap_or_default(),
+        date_sort,
+        date_display: row.date_display.clone().unwrap_or_default(),
+        flags: mp_protocol::listing::MessageFlags {
+            seen: flags.seen,
+            answered: flags.answered,
+            forwarded: flags.forwarded,
+            flagged: flags.flagged,
+        },
+        has_attachments: row.has_attachments,
+        is_invite: row.is_invite,
+        selector: crate::selector::Selector::for_message(account, row).to_string(),
     }
 }
 
@@ -326,29 +413,40 @@ pub(crate) fn status_for_mailbox(mailbox: &str) -> String {
 /// `is_invite` comes off the listing query, so the badge costs no blob read;
 /// the event card behind it is parsed lazily from the ics blob of the one row
 /// the preview shows (#0038 scope item 6, [`PreviewInvite`]).
-pub(crate) fn entry_from_row(row: MessageRow, status: &str) -> EmailEntry {
-    let (date_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
-    let flags = row.flags();
+/// The row is the wire row (`RD-07`, #0126), not the store's: every value an
+/// entry reads off a listing is on it, `selector` included, so a client builds
+/// its list out of what the daemon sent and never opens a store to do it.
+/// `date_sort` is recomputed here rather than taken from the wire because
+/// [`resolve_date`] also produces the display string, and deriving one of the
+/// pair from the row and the other from the wire would be two rules.
+pub(crate) fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
+    let (date_display, date_sort) = resolve_date(
+        &Some(row.date_display.clone()).filter(|d| !d.is_empty()),
+        &None,
+        Path::new(""),
+    );
     EmailEntry {
         msg: Some(MessageRef::new(row.id)),
         draft_id: None,
         skip: None,
-        from: extract_display_name(row.from.as_deref().unwrap_or_default()),
-        to: extract_display_name(row.to.as_deref().unwrap_or_default()),
+        selector: Some(row.selector),
+        from: extract_display_name(&row.from),
+        to: extract_display_name(&row.to),
         cc: row.cc,
         reply_to: row.reply_to,
         bcc: row.bcc,
-        subject: row
-            .subject
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "(no subject)".to_string()),
+        subject: if row.subject.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            row.subject
+        },
         status: status.to_string(),
         date_display,
         date_sort,
-        read: flags.seen,
-        answered: flags.answered,
-        forwarded: flags.forwarded,
-        flagged: flags.flagged,
+        read: row.flags.seen,
+        answered: row.flags.answered,
+        forwarded: row.flags.forwarded,
+        flagged: row.flags.flagged,
         has_attachments: row.has_attachments,
         is_invite: row.is_invite,
     }
@@ -364,12 +462,13 @@ pub(crate) fn entry_from_row(row: MessageRow, status: &str) -> EmailEntry {
 /// The date falls back to the filename through the same [`resolve_date`] the
 /// file build used, so a draft whose frontmatter has no `date:` yet still
 /// sorts by its `YYYY-MM-DD-...` stem rather than collapsing to the bottom.
-pub(crate) fn entry_from_draft(row: crate::store::drafts::DraftRow) -> EmailEntry {
-    let (date_display, date_sort) = resolve_date(&row.date, &None, &row.path);
+pub(crate) fn entry_from_draft(row: DraftEntry) -> EmailEntry {
+    let (date_display, date_sort) = resolve_date(&row.date, &None, Path::new(&row.path));
     EmailEntry {
         msg: None,
         draft_id: Some(row.id),
         skip: None,
+        selector: Some(row.selector),
         from: String::new(),
         to: extract_display_name(row.to.as_deref().unwrap_or_default()),
         cc: row.cc,
@@ -403,10 +502,10 @@ pub(crate) fn entry_from_draft(row: crate::store::drafts::DraftRow) -> EmailEntr
 /// the `skip` for the preview pane and the row's error styling. `read` is true
 /// so the list does not render it bold as if it were unread mail; the error
 /// colour is what marks it, decided by [`crate::tui::ui::list`].
-pub(crate) fn entry_from_skip(skip: crate::store::drafts::SkippedDraft) -> EmailEntry {
-    let (date_display, date_sort) = resolve_date(&None, &None, &skip.path);
-    let filename = skip
-        .path
+pub(crate) fn entry_from_skip(skip: DraftSkip) -> EmailEntry {
+    let path = PathBuf::from(&skip.path);
+    let (date_display, date_sort) = resolve_date(&None, &None, &path);
+    let filename = path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
@@ -415,6 +514,7 @@ pub(crate) fn entry_from_skip(skip: crate::store::drafts::SkippedDraft) -> Email
         msg: None,
         draft_id: None,
         skip: Some(skip),
+        selector: None,
         from: String::new(),
         to: String::new(),
         cc: None,

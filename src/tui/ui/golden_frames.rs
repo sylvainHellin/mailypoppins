@@ -221,6 +221,7 @@ fn email(
         msg: Some(MessageRef::new(row)),
         draft_id: None,
         skip: None,
+        selector: None,
         from: from.to_string(),
         to: "sylvain@example.org".to_string(),
         cc: None,
@@ -471,13 +472,13 @@ pub(super) fn drafts_fixture() -> App {
     let skip = EmailEntry {
         msg: None,
         draft_id: None,
-        skip: Some(crate::store::drafts::SkippedDraft {
-            path: std::path::PathBuf::from(
-                "/home/u/.local/share/mailypoppins/work/drafts/2026-07-30-reply-to-anna.md",
-            ),
+        skip: Some(mp_protocol::draft::DraftSkip {
+            path: "/home/u/.local/share/mailypoppins/work/drafts/2026-07-30-reply-to-anna.md"
+                .to_string(),
             error: "Failed to parse frontmatter: attachments[0]: invalid type: string \"/x\""
                 .to_string(),
         }),
+        selector: None,
         from: String::new(),
         to: String::new(),
         cc: None,
@@ -498,6 +499,7 @@ pub(super) fn drafts_fixture() -> App {
         msg: None,
         draft_id: Some("draft-1".to_string()),
         skip: None,
+        selector: None,
         from: String::new(),
         to: "anna.weber@example.com".to_string(),
         cc: None,

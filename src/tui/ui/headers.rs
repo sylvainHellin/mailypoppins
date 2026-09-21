@@ -155,6 +155,7 @@ mod tests {
             msg: Some(MessageRef::new(1)),
             draft_id: None,
             skip: None,
+            selector: None,
             from: "Alice <alice@example.com>".to_string(),
             to: "Bob <bob@example.com>".to_string(),
             cc: None,

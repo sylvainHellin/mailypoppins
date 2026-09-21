@@ -28,8 +28,8 @@ use crate::store::open_store;
 use crate::store::read;
 
 use super::types::{
-    draft_count, entry_from_row, load_drafts, mailbox_key, status_for_mailbox, EmailEntry,
-    MailboxInfo, MessageRef,
+    draft_count, entry_from_row, load_drafts, mailbox_key, row_to_wire, status_for_mailbox,
+    EmailEntry, MailboxInfo, MessageRef,
 };
 
 /// Load one mailbox of one account from the store, newest first.
@@ -68,8 +68,8 @@ pub fn load_emails(account: &str, mailbox: &str) -> Vec<EmailEntry> {
     span.mark(&format!("{} row(s), no blob reads", rows.len()));
 
     let status = status_for_mailbox(mailbox);
-    rows.into_iter()
-        .map(|row| entry_from_row(row, &status))
+    rows.iter()
+        .map(|row| entry_from_row(row_to_wire(account, row), &status))
         .collect()
 }
 

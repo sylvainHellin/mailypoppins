@@ -219,7 +219,7 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
                 .and_then(|e| e.skip.as_ref().map(|s| s.path.clone()));
             let draft_id = app.selected_email().and_then(|e| e.draft_id.clone());
             if let Some(path) = skip_path {
-                delete_skip_file(app, &path);
+                delete_skip_file(app, std::path::Path::new(&path));
             } else if let Some(id) = draft_id {
                 delete_draft(app, commands, &id);
             } else if let Some(msg) = app.selected_email_ref() {
@@ -1449,6 +1449,7 @@ mod tests {
             msg: Some(MessageRef::new(id)),
             draft_id: None,
             skip: None,
+            selector: None,
             from: "Sender <s@example.com>".to_string(),
             to: "me@example.com".to_string(),
             cc: None,
@@ -1473,6 +1474,7 @@ mod tests {
             msg: None,
             draft_id: Some(id.to_string()),
             skip: None,
+            selector: None,
             from: String::new(),
             to: "alice@example.com".to_string(),
             cc: None,
