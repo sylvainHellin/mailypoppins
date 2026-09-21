@@ -148,6 +148,48 @@ pub struct OutboxListing {
     pub counts: OutboxCounts,
 }
 
+// ---------------------------------------------------------------------------
+// The undo-send hold
+// ---------------------------------------------------------------------------
+
+/// One send waiting out its undo window (`SND-04`, P6-U2).
+///
+/// The payload of all four `send.hold_*` events and one row of
+/// [`HoldListing`], so a client decodes one shape whether it watched the
+/// countdown start or joined halfway through it.
+///
+/// `remaining_secs` is the daemon's own remainder and is `0` on a hold that
+/// fired or was cancelled: the client never subtracts, because a countdown
+/// computed from a local clock drifts against the daemon that owns the timer
+/// and two windows would then disagree about one hold.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldStatus {
+    /// The operation id `send.draft` or `send.approved` answered with, which
+    /// is what `send.cancel_hold` names.
+    pub operation_id: String,
+    /// The account the message would go out from.
+    pub account: String,
+    /// The `id:` of the draft that is waiting; the first of them for a batch.
+    pub draft_id: String,
+    /// Its subject, empty when it has none.
+    pub subject: String,
+    /// The window it was armed with, which is `email.send_hold_secs`.
+    pub hold_secs: u64,
+    /// What is left of that window, `0` once it fired or was cancelled.
+    pub remaining_secs: u64,
+    /// When it fires, RFC3339 in UTC, so a late client renders a deadline.
+    pub fires_at: String,
+    /// The kind word of the client that asked: `tui`, `cli` or `gui`.
+    pub origin: String,
+}
+
+/// The `result` of `send.hold_status`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldListing {
+    /// Every hold the daemon is carrying, in arm order.
+    pub holds: Vec<HoldStatus>,
+}
+
 /// The `result` of a settled `send.outbox_retry`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxRetryOutcome {

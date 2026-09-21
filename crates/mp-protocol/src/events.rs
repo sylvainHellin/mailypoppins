@@ -128,6 +128,18 @@ pub struct ConfigChanged {
     pub config_revision: u64,
 }
 
+/// The `kind` an armed undo-send hold travels as (`SND-04`, P6-U2).
+pub const KIND_SEND_HOLD_STARTED: &str = "send.hold_started";
+
+/// The `kind` one second of a running hold travels as.
+pub const KIND_SEND_HOLD_TICK: &str = "send.hold_tick";
+
+/// The `kind` a hold whose window elapsed travels as; the send is on its way.
+pub const KIND_SEND_HOLD_FIRED: &str = "send.hold_fired";
+
+/// The `kind` a cancelled hold travels as; the draft is untouched.
+pub const KIND_SEND_HOLD_CANCELLED: &str = "send.hold_cancelled";
+
 /// The `kind` a watched draft that parsed travels as.
 pub const KIND_DRAFT_CHANGED: &str = "draft.changed";
 

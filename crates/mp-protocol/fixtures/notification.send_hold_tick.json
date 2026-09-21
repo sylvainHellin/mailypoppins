@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "method": "state.event",
+  "params": {
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "kind": "send.hold_tick",
+    "payload": {
+      "account": "tum",
+      "draft_id": "b0000000000000a1",
+      "fires_at": "2026-09-11T08:00:20Z",
+      "hold_secs": 20,
+      "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc",
+      "origin": "tui",
+      "remaining_secs": 14,
+      "subject": "Freigabe"
+    },
+    "revision": 4231
+  }
+}

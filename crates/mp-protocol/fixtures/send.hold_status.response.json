@@ -1,0 +1,18 @@
+{
+  "id": 10,
+  "jsonrpc": "2.0",
+  "result": {
+    "holds": [
+      {
+        "account": "tum",
+        "draft_id": "b0000000000000a1",
+        "fires_at": "2026-09-11T08:00:20Z",
+        "hold_secs": 20,
+        "operation_id": "8f2c41d6b0e94a7fa3c5d81e6b0947fc",
+        "origin": "tui",
+        "remaining_secs": 14,
+        "subject": "Freigabe"
+      }
+    ]
+  }
+}
