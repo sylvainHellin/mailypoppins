@@ -583,60 +583,11 @@ impl App {
         self.contacts_view = ContactsView::default();
     }
 
-    /// Rebuild the active account's contact index from its message rows and
-    /// persist the cache (manual refresh key). The index build is one store
-    /// query (~100 ms even on the largest local account), so it runs
-    /// synchronously; failures surface as a status message and leave the
-    /// previously-loaded index intact.
-    ///
-    /// A rebuild that comes back empty over a populated cache is refused by
-    /// `save_rebuilt_cache`, and the view keeps the loaded index too: the
-    /// refusal means the rebuild read nothing, not that the account has no
-    /// correspondents (#0053).
-    pub fn refresh_contacts(&mut self) {
-        match crate::contacts::build_index_for_account(&self.account_config) {
-            Ok(index) => {
-                let root = crate::config::account_dir(&self.account_config.name);
-                match crate::contacts::save_rebuilt_cache(&root, &index) {
-                    Ok(crate::contacts::CacheSave::RefusedEmpty { kept }) => {
-                        self.set_status_level(
-                            format!("Contacts rebuild found none, kept {kept} cached"),
-                            StatusLevel::Warning,
-                        );
-                        return;
-                    }
-                    Ok(crate::contacts::CacheSave::RefusedShrunk { kept, rebuilt }) => {
-                        self.set_status_level(
-                            format!("Contacts rebuild found only {rebuilt}, kept {kept} cached"),
-                            StatusLevel::Warning,
-                        );
-                        return;
-                    }
-                    Ok(crate::contacts::CacheSave::Written) => {}
-                    // Return, or the success status two lines down overwrites
-                    // the error and the failed save is invisible (#0067).
-                    Err(e) => {
-                        self.set_status_level(
-                            format!("Contacts cache save failed: {e}"),
-                            StatusLevel::Error,
-                        );
-                        return;
-                    }
-                }
-                let count = index.contacts.len();
-                self.contacts_view.index = Some(index);
-                self.contacts_view.loaded = true;
-                self.recompute_contact_matches();
-                self.set_status(format!("Contacts refreshed ({count})"));
-            }
-            Err(e) => {
-                self.set_status_level(
-                    format!("Contacts refresh failed: {e}"),
-                    StatusLevel::Error,
-                );
-            }
-        }
-    }
+    // The manual refresh key's rebuild is `Action::RefreshContacts` and
+    // `contact.rebuild` since #0126: a walk over every row of every mailbox is
+    // a durable operation the daemon reports, not a synchronous store query
+    // this process runs on the UI thread. Its four status lines, #0053's two
+    // refusals among them, are `tui::bg::apply_contacts_rebuild`'s.
 
     /// Recompute the fuzzy-matched address list for the current query, clamping
     /// the cursor. Called after any query edit, index (re)load, or refresh.

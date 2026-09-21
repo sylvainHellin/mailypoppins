@@ -153,7 +153,8 @@ use crate::selector::DRAFTS_MAILBOX;
 use crate::tui::app::{
     build_mailboxes, Action, App, ComposeMode, MailboxKind, MessageRef, RsvpChoice, SearchTarget,
 };
-use crate::tui::commands::{dispatch, route, ActionRoute};
+use crate::tui::commands::{dispatch, route, settled, ActionRoute};
+use crate::tui::events::Awaited;
 use crate::tui::queries::{list_emails, Queries};
 
 /// The one account every fixture configures, and the one every call names.
@@ -396,6 +397,11 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         false,
     ),
     (
+        "RefreshContacts",
+        ActionRoute::Daemon(&["contact.rebuild"]),
+        false,
+    ),
+    (
         "OpenEventSource",
         ActionRoute::ClientOnly("$EDITOR, over the invite the agenda row came from"),
         true,
@@ -495,6 +501,7 @@ fn one_of_each_action() -> Vec<Action> {
         Action::CopyContactEmail {
             address: "a@example.com".to_string(),
         },
+        Action::RefreshContacts,
         Action::OpenEventSource {
             msg: MessageRef::new(1),
         },
@@ -568,6 +575,7 @@ fn variant_name(action: &Action) -> &'static str {
         Action::ComposeToContact { .. } => "ComposeToContact",
         Action::SendContactVcard { .. } => "SendContactVcard",
         Action::CopyContactEmail { .. } => "CopyContactEmail",
+        Action::RefreshContacts => "RefreshContacts",
         Action::OpenEventSource { .. } => "OpenEventSource",
         Action::EditSignatureFile { .. } => "EditSignatureFile",
         Action::AttachFileToDraft { .. } => "AttachFileToDraft",
@@ -1039,6 +1047,134 @@ fn deleting_a_drafts_row_calls_draft_discard() {
     );
 }
 
+/// The Contacts view's `r` calls `contact.rebuild` for the active account,
+/// and the daemon really writes the cache.
+///
+/// #0126's last-but-one engine call site. Three assertions, the shape every
+/// row above has: the method, the parameter (the account, which is all a
+/// rebuild is addressed by), and the effect - the settle says `written` and
+/// the cache file the two ends share is on disk. A rebuild is an operation, so
+/// the effect is read at the settle rather than at the call.
+#[test]
+fn refreshing_the_contacts_view_calls_contact_rebuild_for_the_account() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    fixture.forget();
+
+    assert!(
+        dispatch(&mut app, &fixture, &Action::RefreshContacts),
+        "Action::RefreshContacts is daemon-routed, so dispatch owns it"
+    );
+
+    let params = fixture.only_call("contact.rebuild");
+    assert_eq!(params["account"], json!(ACCOUNT));
+    assert_eq!(
+        app.bg_count, 1,
+        "a started operation is background work until its finish arrives"
+    );
+
+    let settled = settle_of(&fixture);
+    assert_eq!(settled["state"], json!("succeeded"));
+    assert_eq!(
+        settled["result"]["saved"],
+        json!("written"),
+        "the rebuild refused the cache it was meant to write"
+    );
+    let cache = settled["result"]["cache_path"]
+        .as_str()
+        .expect("the settle names the cache it wrote");
+    assert!(
+        Path::new(cache).exists(),
+        "the daemon settled `written` and wrote no file at {cache}"
+    );
+}
+
+/// The four lines a settled rebuild paints are the four the pre-daemon
+/// rebuild painted (#0126).
+///
+/// `written` refreshes and reloads the cache the daemon wrote, #0053's two
+/// refusals keep the loaded index and warn, and a failed operation is the red
+/// line - which now also carries the cache-save error that was a line of its
+/// own in #0067, because a save that fails fails the operation.
+#[test]
+fn a_settled_rebuild_paints_the_lines_the_synchronous_one_painted() {
+    let fixture = Fixture::new();
+    let mut app = app_on_inbox(&fixture);
+    let awaited = Awaited::ContactRebuild {
+        account_index: app.active_account,
+    };
+
+    // `(payload, line, level)`, the level by its `Debug` name because
+    // `StatusLevel` is not `PartialEq` and this file does not make it one.
+    let cases: [(Value, &str, &str); 4] = [
+        (
+            json!({"state": "succeeded", "result": {"contacts": 7, "kept": 0, "saved": "written"}}),
+            "Contacts refreshed (7)",
+            "Info",
+        ),
+        (
+            json!({"state": "succeeded",
+                   "result": {"contacts": 0, "kept": 12, "saved": "refused_empty"}}),
+            "Contacts rebuild found none, kept 12 cached",
+            "Warning",
+        ),
+        (
+            json!({"state": "succeeded",
+                   "result": {"contacts": 3, "kept": 12, "saved": "refused_shrunk"}}),
+            "Contacts rebuild found only 3, kept 12 cached",
+            "Warning",
+        ),
+        (
+            json!({"state": "failed", "error": {"message": "the cache save failed"}}),
+            "Contacts refresh failed: the cache save failed",
+            "Error",
+        ),
+    ];
+
+    for (payload, line, level) in cases {
+        app.bg_count = 1;
+        super::bg::handle_bg_result(&mut app, settled(&awaited, &payload));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(line),
+            "the settle {payload} painted the wrong line"
+        );
+        assert_eq!(
+            app.status_log
+                .back()
+                .map(|entry| format!("{:?}", entry.level)),
+            Some(level.to_string()),
+            "the settle {payload} painted {line:?} at the wrong level"
+        );
+    }
+}
+
+/// The finished-operation payload of the operation the fixture last started,
+/// driving its runtime until the operation is terminal.
+///
+/// A rebuild hops to `spawn_blocking`, so the current-thread runtime has to be
+/// given something to sleep on for the task to make progress.
+fn settle_of(fixture: &Fixture) -> Value {
+    let id = fixture
+        .started
+        .borrow()
+        .clone()
+        .expect("the call answered an operation id");
+    let id = crate::daemon::operations::OperationId::new(id);
+    fixture.runtime.block_on(async {
+        for _ in 0..3_000 {
+            if let Some(status) = fixture.daemon.operations.status(&id) {
+                if status.state.is_terminal() {
+                    return status.to_json();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        panic!("the rebuild did not settle in three seconds");
+    })
+}
+
 /// An action `dispatch` does not own is handed back rather than swallowed.
 ///
 /// The operation-kind actions that still keep the arm they have in
@@ -1502,6 +1638,9 @@ struct Fixture {
     daemon: DaemonState,
     runtime: tokio::runtime::Runtime,
     calls: RefCell<Vec<(String, Value)>>,
+    /// The operation id of the last call that answered one, which is how a row
+    /// over an operation-kind method reaches the settle (`settle_of`).
+    started: RefCell<Option<String>>,
     _data: crate::config::test_env::TestDataDir,
 }
 
@@ -1561,6 +1700,7 @@ impl Fixture {
                     .expect("a current-thread runtime")
             },
             calls: RefCell::new(Vec::new()),
+            started: RefCell::new(None),
             _data: data,
         }
     }
@@ -1630,6 +1770,9 @@ impl Queries for Fixture {
             .runtime
             .block_on(self.daemon.dispatcher.dispatch(&Fixture::ctx(), request))
             .map_err(|e| anyhow::anyhow!("{method}: {e}"))?;
+        if let Some(id) = outcome.result["operation_id"].as_str() {
+            *self.started.borrow_mut() = Some(id.to_string());
+        }
         Ok(outcome.result)
     }
 }

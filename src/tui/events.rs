@@ -190,6 +190,12 @@ pub(super) enum Awaited {
         /// search the user has since re-submitted is dropped.
         generation: u64,
     },
+    /// `contact.rebuild`, the Contacts view's `r` (#0126).
+    ContactRebuild {
+        /// The account whose index is being rebuilt, so the settle can refuse
+        /// to paint it into another account's view.
+        account_index: usize,
+    },
     /// `message.fetch`, the overlay's `f` (`LST-09`, #0126).
     SearchHitFetch {
         /// Matched against `App::server_search_generation`.

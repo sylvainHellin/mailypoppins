@@ -1176,6 +1176,7 @@ pub(super) fn handle_action(
         | Action::MarkAsRead(_)
         | Action::BatchToggleRead(_)
         | Action::ToggleFlag
+        | Action::RefreshContacts
         | Action::BatchToggleFlag(_) => {
             log::error!("[actions] {action:?} reached handle_action; tui::commands owns it");
         }

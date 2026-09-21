@@ -73,6 +73,65 @@ fn refresh_outbox(app: &mut App, account_index: usize) {
     }
 }
 
+/// Render a settled `contact.rebuild` the way the pre-daemon rebuild rendered
+/// its own verdict (#0126).
+///
+/// The four lines are `App::refresh_contacts`'s, unchanged: `written` is the
+/// refreshed count, the two refusals are #0053's guard keeping the cache that
+/// is on disk, and a failure is the red line. The one that moved is the save
+/// error, which was a line of its own (#0067) and is the operation's failure
+/// now, with the save's own error behind it.
+///
+/// A rebuild that settles after the user switched accounts still says what it
+/// did and does not touch the view: the Contacts pane is the *active*
+/// account's, and `reset_contacts_view` has already emptied it.
+fn apply_contacts_rebuild(
+    app: &mut App,
+    account_index: usize,
+    result: Result<serde_json::Value, String>,
+) {
+    let settled = match result {
+        Ok(settled) => settled,
+        Err(e) => {
+            return app.set_status_level(
+                format!("Contacts refresh failed: {e}"),
+                StatusLevel::Error,
+            );
+        }
+    };
+    let contacts = settled["contacts"].as_u64().unwrap_or(0);
+    let kept = settled["kept"].as_u64().unwrap_or(0);
+    match settled["saved"].as_str() {
+        Some("refused_empty") => {
+            return app.set_status_level(
+                format!("Contacts rebuild found none, kept {kept} cached"),
+                StatusLevel::Warning,
+            );
+        }
+        Some("refused_shrunk") => {
+            return app.set_status_level(
+                format!("Contacts rebuild found only {contacts}, kept {kept} cached"),
+                StatusLevel::Warning,
+            );
+        }
+        Some("written") => {}
+        other => log::warn!(
+            "[tui] contact.rebuild settled with an unknown verdict {other:?}; \
+             treating it as written"
+        ),
+    }
+    // The index does not travel: the daemon has just written the cache file
+    // both ends read, and loading it here is the read `ensure_contacts_loaded`
+    // already does (one JSON read).
+    if account_index == app.active_account {
+        let root = crate::config::account_dir(&app.account_config.name);
+        app.contacts_view.index = crate::contacts::load_cache(&root).ok().flatten();
+        app.contacts_view.loaded = true;
+        app.recompute_contact_matches();
+    }
+    app.set_status(format!("Contacts refreshed ({contacts})"));
+}
+
 /// ` (name)` for a known account of a multi-account setup, empty otherwise,
 /// for status lines that would not otherwise say which account they are about.
 fn account_label(app: &App, account_index: usize) -> String {
@@ -295,6 +354,11 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
                 }
             }
         }
+
+        BgResult::ContactsRebuilt {
+            account_index,
+            result,
+        } => apply_contacts_rebuild(app, account_index, result),
 
         BgResult::SearchHitFetched {
             generation,

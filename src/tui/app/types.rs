@@ -902,6 +902,22 @@ pub enum BgResult {
         generation: u64,
         result: Result<serde_json::Value, String>,
     },
+    /// A `contact.rebuild` settled (#0126).
+    ///
+    /// The payload is `{account, contacts, kept, saved, cache_path}`, which is
+    /// everything the pre-daemon `App::refresh_contacts` rendered: `saved`
+    /// decides between the refreshed line and the two refusals, and the
+    /// written cache is the file the view reloads. Carried raw rather than
+    /// pre-rendered because the three outcomes have three status levels and
+    /// one of them also replaces the loaded index; `tui::bg` is where that
+    /// presentation lives.
+    ContactsRebuilt {
+        /// The account the rebuild was started for, so a settle that arrives
+        /// after the user switched accounts does not paint another account's
+        /// correspondents into the view.
+        account_index: usize,
+        result: Result<serde_json::Value, String>,
+    },
     /// A server-only search hit was fetched and ingested into the store
     /// (#0104). `message_id` names the hit (indices shift when another hit is
     /// archived mid-flight); the result carries the new `messages.id` row.
@@ -1719,6 +1735,15 @@ pub enum Action {
     CopyContactEmail {
         address: String,
     },
+    /// Rebuild the active account's contact index (#0033's `r` key), as the
+    /// `contact.rebuild` operation it is since #0126.
+    ///
+    /// An action rather than a call from the key executor, because a rebuild
+    /// walks every row of every mailbox: the daemon reports it as a durable
+    /// operation and the settle arrives as
+    /// [`BgResult::ContactsRebuilt`], where the pre-daemon path ran the walk
+    /// on the UI thread and rendered its verdict in place.
+    RefreshContacts,
     /// Open the invite email an agenda row was derived from in `$EDITOR`
     /// (#0034). Carries its own message reference: the event may live in any
     /// mailbox of the active account, not just the one the mail list shows.
@@ -1832,6 +1857,7 @@ impl Action {
             | Action::Rsvp { .. }
             | Action::ComposeToContact { .. }
             | Action::CopyContactEmail { .. }
+            | Action::RefreshContacts
             | Action::AttachFileToDraft { .. } => false,
         }
     }

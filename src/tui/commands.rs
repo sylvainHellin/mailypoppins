@@ -164,6 +164,7 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::ComposeToContact { .. } => ActionRoute::Local,
         Action::SendContactVcard { .. } => ActionRoute::Daemon(&["draft.create"]),
         Action::CopyContactEmail { .. } => ActionRoute::ClientOnly("the system clipboard"),
+        Action::RefreshContacts => ActionRoute::Daemon(&["contact.rebuild"]),
         Action::OpenEventSource { .. } => {
             ActionRoute::ClientOnly("$EDITOR, over the invite the agenda row came from")
         }
@@ -319,6 +320,10 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             rsvp(app, commands, *msg, *choice);
             true
         }
+        Action::RefreshContacts => {
+            rebuild_contacts(app, commands);
+            true
+        }
         Action::BatchToggleFlag(msgs) => {
             let any_unflagged = msgs
                 .iter()
@@ -445,6 +450,10 @@ pub(super) fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
         },
         Awaited::ServerSearch { generation } => BgResult::ServerSearch {
             generation: *generation,
+            result,
+        },
+        Awaited::ContactRebuild { account_index } => BgResult::ContactsRebuilt {
+            account_index: *account_index,
             result,
         },
         Awaited::SearchHitFetch {
@@ -711,6 +720,28 @@ fn rsvp(app: &mut App, commands: &dyn Queries, msg: MessageRef, choice: RsvpChoi
         "calendar.rsvp",
         json!({"account": account, "row_id": msg.row_id(), "response": response}),
         Awaited::Rsvp { account_index },
+    );
+}
+
+/// The Contacts view's `r`, as the operation it is since #0126.
+///
+/// The pre-daemon key handler walked every row of every mailbox on the UI
+/// thread and rendered the verdict in place; the walk is
+/// [`contact.rebuild`](../../daemon/methods/contact/index.html) now, and the
+/// verdict arrives as [`BgResult::ContactsRebuilt`].
+///
+/// Nothing is put on the status line here. The pre-daemon rebuild showed no
+/// line while it ran either, and the spinner `start_operation` bumps is what
+/// says work is in flight.
+fn rebuild_contacts(app: &mut App, commands: &dyn Queries) {
+    let account = app.account_config.name.clone();
+    let account_index = app.active_account;
+    start_operation(
+        app,
+        commands,
+        "contact.rebuild",
+        json!({"account": account}),
+        Awaited::ContactRebuild { account_index },
     );
 }
 

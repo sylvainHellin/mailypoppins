@@ -433,7 +433,7 @@ impl App {
             }
             A::ContactsRefresh => {
                 self.pending_prefix = None;
-                self.refresh_contacts();
+                self.push_action(Action::RefreshContacts);
             }
             // -- Calendar view (#0034) ---------------------------------------
             A::CalendarDown => {
