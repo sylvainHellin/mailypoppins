@@ -889,13 +889,18 @@ pub enum BgResult {
     // here. It enqueues into the durable `pending_ops` queue and the drain
     // retires it at the sync/fetch resume point, surfacing failures through
     // the sync result rather than a dedicated BgResult.
+    /// A `message.search_server` settled (`LST-08`, #0126).
+    ///
+    /// The hits are not here: they streamed as `message.server_hit` events
+    /// while it ran and are already in the list. What settles is
+    /// `{account, query, hits, deduplicated, unreachable}`, which is the
+    /// footer's count and the per-mailbox failures.
     ServerSearch {
-        /// Matched against `App::server_search_generation`: a result from a
-        /// search the user has since re-submitted is stale and dropped, which
-        /// matters now that server hits merge into the local-first list
-        /// (#0105) instead of replacing it wholesale.
+        /// Matched against `App::server_search_generation`: a settle for a
+        /// search the user has since re-submitted is stale and dropped
+        /// (#0105).
         generation: u64,
-        result: Result<Vec<SearchHit>, String>,
+        result: Result<serde_json::Value, String>,
     },
     /// A server-only search hit was fetched and ingested into the store
     /// (#0104). `message_id` names the hit (indices shift when another hit is
@@ -940,14 +945,6 @@ pub enum BgResult {
 pub struct SearchTarget {
     pub server_name: String,
     pub label: String,
-}
-
-/// A single search result with source metadata (returned from background task).
-#[derive(Debug, Clone)]
-pub struct SearchHit {
-    pub entry: EmailEntry,
-    pub fetched: FetchedEmail,
-    pub source_label: String,
 }
 
 /// A single server search result held in memory.

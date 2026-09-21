@@ -1436,7 +1436,7 @@ fn limit_param(params: &Value) -> Result<Option<usize>, RpcError> {
 /// unknown one is `-32602` naming the mailboxes this account has, because the
 /// caller asked for something that does not exist rather than for something the
 /// daemon refuses.
-fn resolve_mailbox(account: &AccountConfig, wanted: &str) -> Result<String, RpcError> {
+pub(super) fn resolve_mailbox(account: &AccountConfig, wanted: &str) -> Result<String, RpcError> {
     let mailboxes: Vec<_> = build_mailboxes(account)
         .into_iter()
         .filter(|mailbox| mailbox.id != DRAFTS_MAILBOX)

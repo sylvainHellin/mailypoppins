@@ -28,6 +28,7 @@ pub mod diagnostic;
 pub mod draft;
 pub mod mailbox;
 pub mod message;
+pub mod message_server;
 pub mod send;
 pub mod state;
 pub mod sync;
@@ -112,6 +113,12 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     dispatcher.register(Arc::new(message::MessageListServer {
         config: Arc::clone(&config),
     }));
+    message_server::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&canonical),
+        Arc::clone(&operations),
+    );
     self::sync::register(
         dispatcher,
         Arc::clone(&config),
@@ -234,9 +241,6 @@ fn server_error(account: &str, error: &anyhow::Error) -> RpcError {
 /// The secrets backend, opened on first use rather than at startup: the same
 /// rule `config.set_password` and the mutation slice follow, because a first run
 /// has no configuration to select one from and the opener is idempotent.
-fn open_secrets(
-    account: &str,
-    kind: crate::secrets::SecretsBackendKind,
-) -> Result<(), RpcError> {
+fn open_secrets(account: &str, kind: crate::secrets::SecretsBackendKind) -> Result<(), RpcError> {
     crate::secrets::init(kind).map_err(|e| server_error(account, &anyhow::anyhow!("{e}")))
 }

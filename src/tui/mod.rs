@@ -16,7 +16,6 @@ mod helpers;
 #[cfg(test)]
 mod hold_tests;
 pub mod queries;
-mod runtime;
 pub mod session;
 #[cfg(test)]
 mod test_daemon;

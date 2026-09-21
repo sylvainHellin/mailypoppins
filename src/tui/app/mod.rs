@@ -203,6 +203,14 @@ pub struct App {
     /// `BgResult::SearchHitFetched` carrying an older value is stale and
     /// dropped (#0105).
     pub server_search_generation: u64,
+    /// The `message.search_server` operation whose hits the overlay is
+    /// currently showing, `None` between searches (`LST-08`, #0126).
+    ///
+    /// A `message.server_hit` event carries the operation id and no
+    /// generation, which is what a fast retype needs: two searches in flight
+    /// are two ids, and the one this is not is dropped. The generation counter
+    /// stays for the settle, which lands through the operation table.
+    pub server_search_operation: Option<String>,
 
     // Config (loaded once at startup)
     pub global_config: crate::config::GlobalConfig,
@@ -376,6 +384,7 @@ impl App {
             server_search_status: None,
             server_search_scope_label: "All".to_string(),
             server_search_generation: 0,
+            server_search_operation: None,
             global_config,
             session: None,
             events: super::events::EventState::default(),
@@ -456,6 +465,7 @@ impl App {
             server_search_status: None,
             server_search_scope_label: "All".to_string(),
             server_search_generation: 0,
+            server_search_operation: None,
             global_config: crate::config::GlobalConfig::default(),
             session: None,
             events: super::events::EventState::default(),

@@ -452,25 +452,31 @@ const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 17] = [
         "token_cache_path(",
         "mp config show's token = not cached line; the same contract",
     ),
-    // (a) The server leg of `mp search` (LST-06), which no slice migrated.
-    //     `docs/parity-matrix.md` carries it as "not started": the read slice
-    //     (P4-U3/U4) contracted `mp search --local` and nothing else, and the
-    //     `message.*` family is closed by `tests/daemon_read_slice.rs` and
-    //     `tests/daemon_sync_slice.rs`.
+    // (a) The server leg of `mp search` (LST-06). The method it wants exists
+    //     since P5-U10c - `message.search_server`, which the TUI's overlay is
+    //     routed through - and three differences stand between this leg and
+    //     it, each user-visible and none of them a call-site change:
+    //     `mp search` prints `Search in <mailbox> failed` to stderr per
+    //     mailbox as it goes, where the operation reports `unreachable` at the
+    //     settle; `--mailbox` here names the server mailbox directly, so a
+    //     name the account does not configure is searched rather than refused;
+    //     and the plain-IMAP `has:attachment` warning is a sentence about a
+    //     post-filter the daemon now applies itself. Routing it is a unit of
+    //     its own, recorded in `docs/tickets/0126-tui-crate-move.md`.
     (
         "src/main.rs",
         "GraphClient::",
-        "mp search (server leg): LST-06 is unmigrated, no message.search_server exists",
+        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
     ),
     (
         "src/main.rs",
         "GraphConfig::load",
-        "mp search (server leg): LST-06 is unmigrated, no message.search_server exists",
+        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
     ),
     (
         "src/main.rs",
         "ImapConfig::load",
-        "mp search (server leg): LST-06 is unmigrated, no message.search_server exists",
+        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
     ),
     // (b) The startup preamble, which runs before any socket and on the
     //     no-daemon list too (`mp config path`, `mp daemon *`). Routing it would
@@ -488,7 +494,7 @@ const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 17] = [
     (
         "src/main.rs",
         "imap_client::",
-        "mp search (server leg): LST-06 is unmigrated, no message.search_server exists",
+        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
     ),
     (
         "src/main.rs",

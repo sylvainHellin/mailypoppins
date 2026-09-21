@@ -362,11 +362,27 @@ pub(super) fn start_operation(
     params: Value,
     awaited: Awaited,
 ) -> bool {
+    start_operation_id(app, commands, method, params, awaited).is_some()
+}
+
+/// [`start_operation`], answering the id it started rather than whether it
+/// did.
+///
+/// One caller wants the id: the overlay's server leg has to tell one search's
+/// streamed hits from a faster retype's, and the `message.server_hit` events
+/// carry the operation id and no generation.
+pub(super) fn start_operation_id(
+    app: &mut App,
+    commands: &dyn Queries,
+    method: &str,
+    params: Value,
+    awaited: Awaited,
+) -> Option<String> {
     let started = match commands.call(method, params) {
         Ok(started) => started,
         Err(e) => {
             app.set_status_level(format!("{method}: {e:#}"), StatusLevel::Error);
-            return false;
+            return None;
         }
     };
     let Some(id) = started["operation_id"].as_str().map(str::to_string) else {
@@ -374,11 +390,11 @@ pub(super) fn start_operation(
             format!("{method} answered no operation id"),
             StatusLevel::Error,
         );
-        return false;
+        return None;
     };
     app.bg_count += 1;
-    app.events.started(id, awaited);
-    true
+    app.events.started(id.clone(), awaited);
+    Some(id)
 }
 
 /// One finished operation as the [`BgResult`] its arm used to post.
@@ -427,7 +443,70 @@ pub(super) fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
             account_index: *account_index,
             result: result.and_then(|settled| rsvp_line(&settled)),
         },
+        Awaited::ServerSearch { generation } => BgResult::ServerSearch {
+            generation: *generation,
+            result,
+        },
+        Awaited::SearchHitFetch {
+            generation,
+            message_id,
+        } => BgResult::SearchHitFetched {
+            generation: *generation,
+            message_id: message_id.clone(),
+            result: result.and_then(|settled| {
+                settled["row_id"]
+                    .as_i64()
+                    .ok_or_else(|| "the fetch settled without naming a row".to_string())
+            }),
+        },
     }
+}
+
+/// The overlay's server leg, as the operation it is since P5-U10c.
+///
+/// `false` means no search started and the caller has already been told why,
+/// which is what lets the overlay clear its spinner: a refusal at the call is
+/// an account with no server or a query the grammar could not parse, and both
+/// are sentences `start_operation` has already put on the status line.
+///
+/// The in-flight id is remembered on the `App`, because the hits arrive as
+/// `message.server_hit` events carrying it and a fast retype leaves two
+/// searches running: the generation counter cannot tell them apart, since the
+/// events do not carry one.
+pub(super) fn start_server_search(
+    app: &mut App,
+    commands: &dyn Queries,
+    params: Value,
+    generation: u64,
+) -> bool {
+    app.server_search_operation = start_operation_id(
+        app,
+        commands,
+        "message.search_server",
+        params,
+        Awaited::ServerSearch { generation },
+    );
+    app.server_search_operation.is_some()
+}
+
+/// The overlay's `f`, as the operation it is since P5-U10c.
+pub(super) fn start_hit_fetch(
+    app: &mut App,
+    commands: &dyn Queries,
+    params: Value,
+    generation: u64,
+    message_id: String,
+) {
+    start_operation(
+        app,
+        commands,
+        "message.fetch",
+        params,
+        Awaited::SearchHitFetch {
+            generation,
+            message_id,
+        },
+    );
 }
 
 /// The sentence a settled-badly operation carries, which is the engine's own
@@ -950,6 +1029,51 @@ pub(super) fn draft_from_source(
 /// a `message.get` per hit. The query is rendered back into the grammar the
 /// method parses ([`crate::search::to_query_string`]), which is what keeps the
 /// AST off the wire.
+/// One streamed `message.server_hit` as the overlay's row (`LST-08`, #0126).
+///
+/// The [`FetchedEmail`](crate::parse::FetchedEmail) is rebuilt here because
+/// the overlay renders a hit out of one: the preview pane reads `body_text`,
+/// the `b` key hands `html_body` to a browser, and a reply to a server-only
+/// hit is built from it. The list row is then
+/// `helpers::fetched_to_email_entry` exactly as it was, with the daemon's
+/// resolution handed in rather than looked up in the store.
+pub(super) fn hit_entry(
+    hit: &mp_protocol::listing::ServerSearchHit,
+) -> super::app::SearchResultEntry {
+    let fetched = crate::parse::FetchedEmail {
+        from: hit.from.clone(),
+        to: hit.to.clone(),
+        cc: hit.cc.clone(),
+        reply_to: hit.reply_to.clone(),
+        bcc: hit.bcc.clone(),
+        subject: hit.subject.clone(),
+        date: hit.date_display.clone(),
+        body_text: hit.body_text.clone(),
+        html_body: hit.html_body.clone(),
+        has_attachments: hit.has_attachments,
+        message_id: hit.message_id.clone(),
+        attachments: Vec::new(),
+        flags: crate::types::MessageFlags {
+            seen: hit.flags.seen,
+            answered: hit.flags.answered,
+            forwarded: hit.flags.forwarded,
+            flagged: hit.flags.flagged,
+        },
+        calendar_ics: None,
+        event: None,
+    };
+    let entry = super::helpers::fetched_to_email_entry(
+        hit.row_id.map(super::app::MessageRef::new),
+        hit.selector.clone(),
+        &fetched,
+    );
+    super::app::SearchResultEntry {
+        entry,
+        fetched,
+        source_label: hit.mailbox.clone(),
+    }
+}
+
 pub(super) fn local_search(
     commands: &dyn Queries,
     account: &str,

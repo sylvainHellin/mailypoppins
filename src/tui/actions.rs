@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use serde_json::json;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{
@@ -10,7 +11,7 @@ use super::app::{
     MailboxKind, MessageRef, Overlay, SearchOverlayFocus, StatusLevel,
 };
 use super::helpers::{
-    edit_file, lib_do_multi_search_graph, resume_terminal, suspend_terminal,
+    edit_file, resume_terminal, suspend_terminal,
 };
 use super::commands;
 use super::session::QueryHandle;
@@ -1018,54 +1019,33 @@ pub(super) fn handle_action(
                 app.server_search_focus = SearchOverlayFocus::List;
             }
 
+            // The server leg is `message.search_server` since P5-U10c
+            // (`LST-08`, #0126): one durable operation on the daemon, which
+            // opens the session, splits the budget across the mailboxes and
+            // streams one `message.server_hit` per hit, where this spawned a
+            // thread and painted the whole batch when the last mailbox
+            // answered. The Message-IDs the local pass is already showing
+            // travel as `exclude_message_ids`, so the dedup is the daemon's
+            // and the count it settles with is a fact any client reproduces.
             app.server_search_loading = true;
-            app.bg_count += 1;
-            let tx = bg_tx.clone();
-
-            if app.is_graph() {
-                let graph_config = app.graph_config.clone().unwrap();
-                std::thread::spawn(move || {
-                    let rt =
-                        super::runtime::shared();
-                    let result = rt.block_on(lib_do_multi_search_graph(
-                        &account,
-                        &graph_config,
-                        &query,
-                        &targets,
-                    ));
-                    let _ = tx.send(BgResult::ServerSearch {
-                        generation,
-                        result: result.map_err(|e| e.to_string()),
-                    });
-                });
-            } else {
-                let imap_config = match app.imap_config.clone() {
-                    Some(c) => c,
-                    None => {
-                        app.set_status_level(
-                            "IMAP not configured".to_string(),
-                            StatusLevel::Error,
-                        );
-                        app.server_search_loading = false;
-                        app.server_search_status = None;
-                        app.bg_count -= 1;
-                        return Ok(());
-                    }
-                };
-                std::thread::spawn(move || {
-                    let rt =
-                        super::runtime::shared();
-                    let result = rt.block_on(super::helpers::lib_do_multi_search(
-                        &account,
-                        &imap_config,
-                        &query,
-                        &targets,
-                    ));
-                    let _ = tx.send(BgResult::ServerSearch {
-                        generation,
-                        result: result.map_err(|e| e.to_string()),
-                    });
-                });
+            let excluded: Vec<String> = app
+                .server_search_results
+                .iter()
+                .filter_map(|hit| hit.fetched.message_id.clone())
+                .collect();
+            let mailboxes: Vec<String> = targets
+                .iter()
+                .map(|target| target.server_name.clone())
+                .collect();
+            let params = json!({
+                "account": account,
+                "query": crate::search::to_query_string(&query),
+                "mailboxes": mailboxes,
+                "exclude_message_ids": excluded,
+            });
+            let started = commands::start_server_search(app, &daemon_door(app), params, generation);
+            if !started {
+                app.server_search_loading = false;
             }
         }
 
@@ -1080,7 +1060,7 @@ pub(super) fn handle_action(
         }
 
         Action::SearchResultFetch => {
-            fetch_search_hit(app, bg_tx);
+            fetch_search_hit(app);
         }
 
         Action::OpenComposeWizard(mode) => {
@@ -2074,40 +2054,19 @@ fn search_result_draft(
     write_fetched_draft_and_edit(app, terminal, &source, kind, what)
 }
 
-/// Ingest one server-only search hit into the store (#0104), returning the
-/// row that now holds it.
-fn ingest_search_hit(
-    account: &str,
-    mailbox: &str,
-    uid: i64,
-    email: &crate::parse::FetchedEmail,
-    raw: Option<&[u8]>,
-) -> anyhow::Result<i64> {
-    let store = open_store(account)
-        .ok_or_else(|| anyhow::anyhow!("no store for {account} yet (sync first)"))?;
-    let blobs = BlobStore::for_account(account);
-    let outcome = crate::ingest::ingest_message(
-        &store,
-        &blobs,
-        &crate::ingest::IngestInput {
-            account,
-            mailbox,
-            uid,
-            email,
-            raw,
-        },
-    )?;
-    Ok(outcome.row_id)
-}
-
 /// The `f` key of the search overlay (#0104): ingest a server-only hit.
 ///
-/// Graph already fetched the full payload and its backend ingests under the
-/// synthetic uid derived from the Message-ID, so that path is a local write.
-/// IMAP needs the UID the mailbox holds the message under (a made-up uid
-/// would be pruned or duplicated by the next sync), so a background round
-/// trip asks for it by Message-ID and ingests with the raw bytes it fetched.
-fn fetch_search_hit(app: &mut App, bg_tx: &mpsc::Sender<BgResult>) {
+/// `message.fetch` since P5-U10c (`LST-09`, #0126): one durable operation on
+/// the daemon, which asks the server for the uid the mailbox holds the message
+/// under and ingests the raw bytes it gets back, where this opened an IMAP
+/// session on a thread of its own. The Graph/IMAP split went with it, uid
+/// derivation included.
+///
+/// The client keeps its "Already in the local store" line and keeps it as a
+/// guard rather than a refusal to match: the method is idempotent, so a hit
+/// the overlay has already resolved never costs a round trip, and a client
+/// that raced a sync is handed the row rather than an error.
+fn fetch_search_hit(app: &mut App) {
     let Some(hit) = app.server_search_results.get(app.server_search_index) else {
         return;
     };
@@ -2120,65 +2079,30 @@ fn fetch_search_hit(app: &mut App, bg_tx: &mpsc::Sender<BgResult>) {
             Some("This hit carries no Message-ID; cannot fetch it".to_string());
         return;
     };
-    // The mailbox the hit came from, spelled both ways: the local key ingest
-    // records rows under, and the server name the IMAP round trip selects.
+    // The mailbox the hit came from, as the sidebar label the daemon resolves
+    // to both the store key it records the row under and the server name it
+    // selects.
     let source_label = hit.source_label.clone();
-    let fetched = hit.fetched.clone();
-    let Some((local_key, server_name)) = app
-        .mailboxes
-        .iter()
-        .find(|m| m.label == source_label)
-        .map(|m| (mailbox_key(m), m.server_name.clone()))
-    else {
+    if !app.mailboxes.iter().any(|m| m.label == source_label) {
         app.server_search_status = Some(format!(
             "Cannot fetch: mailbox {source_label} is not in the sidebar"
         ));
         return;
-    };
+    }
     let account = app.account_config.name.clone();
     let generation = app.server_search_generation;
-
-    if app.is_graph() {
-        let uid = crate::ingest::graph_uid(&message_id);
-        let result = ingest_search_hit(&account, &local_key, uid, &fetched, None)
-            .map_err(|e| format!("{e:#}"));
-        super::bg::apply_search_hit_fetch(app, &message_id, result);
-        return;
-    }
-
-    let Some(server_name) = server_name else {
-        app.server_search_status =
-            Some(format!("Cannot fetch: {source_label} has no server mailbox"));
-        return;
-    };
-    let Some(imap_config) = app.imap_config.clone() else {
-        app.server_search_status = Some("IMAP not configured".to_string());
-        return;
-    };
     app.server_search_status = Some("Fetching...".to_string());
-    app.bg_count += 1;
-    let tx = bg_tx.clone();
-    std::thread::spawn(move || {
-        let rt = super::runtime::shared();
-        let result = rt.block_on(async {
-            let mut session = crate::imap_client::open_imap_session(&imap_config).await?;
-            let fetched = crate::imap_client::fetch_raw_by_message_id(
-                &mut session,
-                &server_name,
-                &message_id,
-            )
-            .await;
-            session.logout().await.ok();
-            let (uid, raw, email) = fetched?
-                .ok_or_else(|| anyhow::anyhow!("the server no longer has that message"))?;
-            ingest_search_hit(&account, &local_key, uid as i64, &email, Some(&raw))
-        });
-        let _ = tx.send(BgResult::SearchHitFetched {
-            generation,
-            message_id,
-            result: result.map_err(|e| format!("{e:#}")),
-        });
-    });
+    commands::start_hit_fetch(
+        app,
+        &daemon_door(app),
+        json!({
+            "account": account,
+            "mailbox": source_label,
+            "message_id": message_id,
+        }),
+        generation,
+        message_id,
+    );
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use super::app::{
-    App, BgResult, MailboxKind, MessageRef, SearchOverlayFocus, SearchResultEntry,
+    App, BgResult, MailboxKind, MessageRef, SearchOverlayFocus,
     StatusLevel,
 };
 
@@ -258,62 +258,34 @@ pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
         }
 
         BgResult::ServerSearch { generation, result } => {
-            // A result from a search the user has since re-submitted must not
-            // merge into the newer search's list (#0105).
+            // A settle for a search the user has since re-submitted must not
+            // relabel the newer search's footer (#0105).
             if generation != app.server_search_generation {
                 return;
             }
             app.server_search_loading = false;
+            app.server_search_operation = None;
             match result {
-                Ok(hits) => {
-                    // Merge into the local-first list (#0105): a server hit
-                    // whose Message-ID a local row already answered is
-                    // dropped, the rest append, and the cursor stays on the
-                    // entry it was on.
-                    let selected_id = app
-                        .server_search_results
-                        .get(app.server_search_index)
-                        .and_then(|r| r.fetched.message_id.clone());
-                    let known: std::collections::HashSet<String> = app
-                        .server_search_results
-                        .iter()
-                        .filter_map(|r| {
-                            r.fetched
-                                .message_id
-                                .as_deref()
-                                .map(crate::store::read::normalize_message_id_key)
-                        })
-                        .collect();
-                    for hit in hits {
-                        let dup = hit.fetched.message_id.as_deref().is_some_and(|m| {
-                            known.contains(&crate::store::read::normalize_message_id_key(m))
-                        });
-                        if dup {
-                            continue;
-                        }
-                        app.server_search_results.push(SearchResultEntry {
-                            entry: hit.entry,
-                            fetched: hit.fetched,
-                            source_label: hit.source_label,
-                        });
-                    }
-                    app.server_search_results
-                        .sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
+                Ok(settled) => {
+                    // The hits are already in the list: each one arrived as a
+                    // `message.server_hit` event while the search ran, and the
+                    // dedup against the local pass was the daemon's. What is
+                    // left is the count the footer prints and the mailboxes
+                    // that refused, which do not fail the search.
                     let count = app.server_search_results.len();
-                    app.server_search_index = selected_id
-                        .and_then(|id| {
-                            app.server_search_results.iter().position(|r| {
-                                r.fetched.message_id.as_deref() == Some(id.as_str())
-                            })
-                        })
+                    let unreachable = settled["unreachable"]
+                        .as_array()
+                        .map(Vec::len)
                         .unwrap_or(0);
-                    app.server_search_scroll = 0;
-                    app.server_search_headers_scroll = 0;
-                    app.server_search_status = Some(format!(
-                        "{} result{}",
-                        count,
-                        if count == 1 { "" } else { "s" }
-                    ));
+                    let mut line =
+                        format!("{count} result{}", if count == 1 { "" } else { "s" });
+                    if unreachable > 0 {
+                        line.push_str(&format!(
+                            "; {unreachable} mailbox{} unreachable",
+                            if unreachable == 1 { "" } else { "es" }
+                        ));
+                    }
+                    app.server_search_status = Some(line);
                     if count > 0 {
                         app.server_search_focus = SearchOverlayFocus::List;
                     }
@@ -457,8 +429,8 @@ pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowD
 
 /// Land a fetch-into-store result on the overlay (#0104): the hit named by
 /// its Message-ID becomes a resolved row, and the mailbox lists pick the new
-/// row up. Shared by the Graph inline path (`actions::fetch_search_hit`) and
-/// the IMAP round trip's [`BgResult::SearchHitFetched`].
+/// row up. The fetch is `message.fetch` since P5-U10c, so this lands one
+/// settled operation rather than two client-side paths.
 pub(super) fn apply_search_hit_fetch(
     app: &mut App,
     message_id: &str,
@@ -482,6 +454,56 @@ pub(super) fn apply_search_hit_fetch(
         Err(e) => {
             app.server_search_status = Some(format!("Fetch failed: {e}"));
         }
+    }
+}
+
+/// One streamed `message.server_hit` (`LST-08`, #0126).
+///
+/// The overlay's list is the local-first pass's (#0105) with the server's hits
+/// appended as they arrive, where it used to grow by one batch when the last
+/// mailbox answered. The daemon did the dedup against the Message-IDs the
+/// local pass was showing, so what is left here is the ordering and the
+/// running footer.
+///
+/// A hit for an operation this overlay is not showing is dropped: a fast
+/// retype leaves two searches in flight, and the id is what tells them apart.
+pub(super) fn apply_server_hit(app: &mut App, payload: &serde_json::Value) {
+    let operation = payload["operation_id"].as_str();
+    if operation.is_none() || operation != app.server_search_operation.as_deref() {
+        return;
+    }
+    let hit: mp_protocol::listing::ServerSearchHit =
+        match serde_json::from_value(payload["hit"].clone()) {
+            Ok(hit) => hit,
+            Err(e) => {
+                log::warn!("[events] a message.server_hit did not decode: {e}");
+                return;
+            }
+        };
+    let entry = super::commands::hit_entry(&hit);
+    // The cursor stays on the entry it was on, which is what makes a list
+    // that grows under the user usable at all.
+    let selected_id = app
+        .server_search_results
+        .get(app.server_search_index)
+        .and_then(|r| r.fetched.message_id.clone());
+    app.server_search_results.push(entry);
+    app.server_search_results
+        .sort_by(|a, b| b.entry.date_sort.cmp(&a.entry.date_sort));
+    app.server_search_index = selected_id
+        .and_then(|id| {
+            app.server_search_results
+                .iter()
+                .position(|r| r.fetched.message_id.as_deref() == Some(id.as_str()))
+        })
+        .unwrap_or(0);
+    let count = app.server_search_results.len();
+    app.server_search_status = Some(format!(
+        "{count} result{}; searching server...",
+        if count == 1 { "" } else { "s" }
+    ));
+    if app.server_search_focus != SearchOverlayFocus::List {
+        app.server_search_focus = SearchOverlayFocus::List;
     }
 }
 

@@ -276,7 +276,7 @@ fn pass_request(
 /// Unknown is `-32005`; configured with no server at all is `-32006` carrying
 /// `state: "local_only"`, which is the client's cue to print the skip line and
 /// keep the run's exit code at zero.
-fn syncable_account<'a>(
+pub(super) fn syncable_account<'a>(
     accounts: &'a [AccountConfig],
     name: &str,
 ) -> Result<&'a AccountConfig, RpcError> {

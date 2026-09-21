@@ -64,6 +64,10 @@ const KIND_OPERATION_FINISHED: &str = "operation.finished";
 /// The `kind` an invalidation travels as.
 const KIND_INVALIDATE: &str = "state.invalidate";
 
+/// The `kind` one hit of a live `message.search_server` travels as
+/// (`LST-08`, #0126).
+const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
+
 /// One thing the session thread has to tell the UI thread.
 #[derive(Debug)]
 pub enum Incoming {
@@ -176,6 +180,24 @@ pub(super) enum Awaited {
         /// The account the reply was sent from.
         account_index: usize,
     },
+    /// `message.search_server`, the overlay's server leg (`LST-08`, #0126).
+    ///
+    /// Its hits do not arrive here: they stream as `message.server_hit`
+    /// events while it runs, and what settles is the count, the dedup and the
+    /// mailboxes that refused.
+    ServerSearch {
+        /// Matched against `App::server_search_generation`, so a settle for a
+        /// search the user has since re-submitted is dropped.
+        generation: u64,
+    },
+    /// `message.fetch`, the overlay's `f` (`LST-09`, #0126).
+    SearchHitFetch {
+        /// Matched against `App::server_search_generation`.
+        generation: u64,
+        /// The hit this fetch is about, named by its Message-ID because
+        /// indices shift when another hit is archived mid-flight.
+        message_id: String,
+    },
 }
 
 /// Whether one event may be applied, decided before its kind is looked at.
@@ -273,6 +295,14 @@ impl App {
             KIND_DAEMON_SHUTTING_DOWN => self.apply_shutting_down(),
             KIND_DIAGNOSTIC_CHECK_CHANGED => {
                 land_check(self, &event.payload);
+                Applied::Ignored
+            }
+            // One hit of the search this overlay is showing, appended as it
+            // arrives. `Ignored` because it reloads nothing and refetches
+            // nothing, which is what that variant promises the drain: the
+            // overlay is not a held listing and owes no `message.list`.
+            KIND_SERVER_SEARCH_HIT => {
+                super::bg::apply_server_hit(self, &event.payload);
                 Applied::Ignored
             }
             // The counts scope is the sidebar's and not the list's: a hundred
