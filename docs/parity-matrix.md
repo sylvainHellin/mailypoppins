@@ -1279,7 +1279,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 ## Daemon administration and lifecycle
 
-Every capability in this group is new in this plan and has no current source anchor: no daemon, serve, or IPC surface exists in the tree, so this layer is greenfield and carries no legacy compatibility burden (`ANO-10`).
+Every capability in this group is new in this plan and had no pre-daemon source anchor, so this layer is greenfield and carries no legacy compatibility burden (`ANO-10`).
+The source anchors below are the entry points the plan created; the daemon, the socket and the lifecycle commands are all in the tree now.
 
 ### LIF-01 Run the daemon in the foreground
 
@@ -1287,8 +1288,8 @@ Every capability in this group is new in this plan and has no current source anc
 - Source anchor: none, new in this plan; entry point `mp daemon run`
 - Daemon surface: the process itself, binding `<data_dir>/runtime/daemon.sock`
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_lifecycle.rs`, `tests/daemon_runtime_paths.rs`
+- Status: shipped (P2-U7, ticket #0120)
 
 ### LIF-02 Start a detached daemon and wait for readiness
 
@@ -1296,8 +1297,8 @@ Every capability in this group is new in this plan and has no current source anc
 - Source anchor: none, new in this plan; entry point `mp daemon start`
 - Daemon surface: `daemon.start.lock` for startup exclusion, then a handshake on the socket
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_lifecycle.rs`, `tests/daemon_runtime_paths.rs`
+- Status: shipped (P2-U7, ticket #0120)
 
 ### LIF-03 Report daemon status, version, instance, and account health
 
@@ -1305,17 +1306,18 @@ Every capability in this group is new in this plan and has no current source anc
 - Source anchor: none, new in this plan; entry point `mp daemon status`
 - Daemon surface: `daemon.status` over `daemon.json`
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_lifecycle.rs` (the `--json` key set exactly)
+- Status: shipped (P2-U7, ticket #0120)
 
 ### LIF-04 Stop the daemon gracefully
 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry point `mp daemon stop`
-- Daemon surface: `daemon.stop`, naming the operations that prevented a clean stop
+- Daemon surface: `daemon.stop {grace_secs?}`, answering with what is still in flight and reporting through a `daemon.stopped` notification what did not settle
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_shutdown.rs` (12 rows over a real socket), `tests/daemon_lifecycle.rs`
+- Status: shipped (P2-U7, ticket #0120); made graceful by P6-U4, ticket #0125
+- Note: the eight shutdown steps and the `--grace-secs` flag are P6-U4's; `mp daemon stop` exits 0 whether or not everything settled.
 
 ### LIF-05 Restart the daemon explicitly
 
@@ -1323,8 +1325,8 @@ Every capability in this group is new in this plan and has no current source anc
 - Source anchor: none, new in this plan; entry point `mp daemon restart`
 - Daemon surface: `daemon.stop` then a fresh start; exit code 3 names this command on an incompatible daemon
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_lifecycle.rs` (`restart_yields_a_new_instance_id`)
+- Status: shipped (P2-U7, ticket #0120)
 - Note: also invoked by the GUI mismatch screen after user confirmation.
 
 ### LIF-06 Install or remove the login-start service
@@ -1334,8 +1336,8 @@ Every capability in this group is new in this plan and has no current source anc
 - Daemon surface: none, and deliberately so: the commands write a systemd user unit or a launchd user agent themselves, and the file they write is what starts a daemon, so there is nobody to ask
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_service.rs` over `tests/fixtures/service/`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U5)
-- Status: contract pinned (P6-U5); implementation not started (P6-U6)
-- Note: the launchd half cannot be smoke-tested on the machine this project is developed on; the plist is pinned as a fixture and the live check is owner action on macOS.
+- Status: routed (P6-U6)
+- Note: the launchd half cannot be smoke-tested on the machine this project is developed on; the plist is pinned as a fixture and the live check is owner action on macOS, still outstanding.
 
 ### LIF-07 Health and support diagnostics
 
@@ -1352,8 +1354,8 @@ Every capability in this group is new in this plan and has no current source anc
 - Source anchor: none, new in this plan
 - Daemon surface: the client spawns `mp daemon run` and waits for readiness; exit code 4 on failure
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_autostart.rs`
+- Status: shipped (P4-U2, ticket #0123)
 - Note: excludes the lifecycle commands themselves and the commands that read no domain state (`ACC-04`, `OBS-06`).
 
 ## Migration-only surfaces

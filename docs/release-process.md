@@ -118,6 +118,25 @@ with checksum assets):
 scripts/update-homebrew-formula.sh 0.9.0
 ```
 
+## Upgrades and the login-start service
+
+`mp daemon install-service` bakes the absolute path of the installing binary
+into `ExecStart` / `ProgramArguments` (see
+[daemon-operations.md](daemon-operations.md#login-mode)), so a binary that is
+reinstalled **at a different path** leaves a service pointing at the old one.
+The repair is `mp daemon install-service --force`, which rewrites the file and
+re-enables it.
+
+Installing from source keeps `~/.cargo/bin/mp` and never moves, so nothing has
+to be done there. A Homebrew upgrade moves the real binary into a new
+version-stamped Cellar directory while `bin/mp` stays a symlink at a stable
+path; the service carries whatever `std::env::current_exe()` resolved to, and
+whether that is the symlink or the Cellar path is **an open question on macOS**
+that no test on the development host can answer. The live launchd check listed
+in [tickets/0125](tickets/0125-daemon-hardening.md) answers it; until it is
+taken, a Homebrew user who upgrades should re-run
+`mp daemon install-service --force` and `mp daemon restart`.
+
 ## Unsigned macOS binaries (until #0012)
 
 Release binaries are not yet codesigned/notarized. `brew install` works

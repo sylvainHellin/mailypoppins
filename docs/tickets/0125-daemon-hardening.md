@@ -7,7 +7,7 @@ status: open
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 to P6-U4 have landed the daemon-owned hold and the graceful shutdown, and P6-U5 has landed the login-start contract; P6-U6 and the rest of the phase have not started.
+Status: open. P6-U1 to P6-U6 have landed the daemon-owned hold, the graceful shutdown and the login-start service units; the rest of the phase has not started.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -23,7 +23,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U3 | T | this commit | graceful shutdown, the contract | done (tests) |
 | P6-U4 | I | this commit | graceful shutdown | done |
 | P6-U5 | T | this commit | login-start service units (LIF-06), the contract | done (tests) |
-| P6-U6 | I | - | login-start service units | not started |
+| P6-U6 | I | this commit | login-start service units | done |
 | P6-U7 | T | - | diagnostics, the contract | not started |
 | P6-U8 | I | - | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | not started |
 | P6-U9 | I | - | soak tests | not started |
@@ -636,4 +636,70 @@ The live check - `mp daemon install-service` on macOS, log out and back in, `mp 
 `TMPDIR=/var/tmp cargo test --workspace --offline` with the file moved aside -> **2248 passed**, 0 failed, 5 ignored, the count at `29691c0`; with it present and `--no-fail-fast` -> 2249 passed, 22 failed, which is 2248 plus the one regression row and the twenty-two contract rows, nothing else disturbed.
 `cargo clippy --offline --test daemon_service` reports nothing in the new file.
 `rustfmt --edition 2021 tests/daemon_service.rs` leaves it unchanged.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
+
+## P6-U6: login-start service units
+
+`tests/daemon_service.rs` is green, twenty-three of twenty-three, three runs.
+The commands are `src/daemon/service.rs`, 469 production lines of which 56 are the module header, plus 150 of unit test, and two template files that are byte-for-byte copies of the committed fixtures.
+
+### The templates live in `src/`, not in `tests/`
+
+The contract offered `include_str!` of the fixtures themselves.
+It was not taken: a library that only builds when its test fixtures are present has a second source tree, and `tests/` is excluded from what a published crate has to be able to compile.
+`src/daemon/templates/mailypoppins.service` and `src/daemon/templates/dev.mailypoppins.daemon.plist` are the compiled-in copies, and `the_templates_are_the_committed_fixtures` reads both fixtures at test time and asserts equality, so a fixture edit that does not reach `src/` fails in the module rather than twenty-three rows later.
+
+`TimeoutStopSec` and `ExitTimeOut` stay literals in those templates, as they are in the fixtures, and `the_stop_timeout_follows_the_shutdown_grace` ties both to `DEFAULT_GRACE_SECS + STOP_MARGIN_SECS`.
+Rendering them from the constant instead would have made the in-crate copy stop being a byte-for-byte copy, for no gain: a raised grace fails the same two tests either way, and the fix is one line in each template.
+
+### Five decisions the contract did not settle
+
+- **The stdout block is built before it is printed.**
+  An uninstall prints `✓ removed <path>` above the two `systemctl` lines, but it has to *run* the disable before the removal and the reload after it, so printing as it goes would either print the header before the removal it claims or print the commands out of the order the contract fixes. The lines are assembled once the mode is known, the work runs, and the block is printed at the end - including on the failure path, so a failed enable still shows what was written and what was attempted before the `✗` on stderr.
+- **`--check` prints its `✗` to stdout.**
+  Every other refusal in these two commands goes to stderr through `dispatch`'s error arm. `--check` is a report the user asked for rather than a failure of the command, the row compares `stdout_lines` against both lines, and the exit code is what a script branches on.
+- **A missing service manager is decided by `PATH` and nothing else.**
+  `on_path` looks for an executable file named `systemctl` or `launchctl` on the process's own `PATH`, which is what the three contained rows manipulate. No `which` crate, and no probe of whether the session is actually systemd's: a user session with `systemctl` present and no user bus gets the command's real exit code, which is more informative than a guess made before running it.
+- **The refusals travel as `anyhow` errors.**
+  An unrecognised `MAILYPOPPINS_DAEMON_SERVICE_OS`, a file whose content differs, and a service-manager command that exits nonzero are all `bail!`, so `lifecycle::dispatch`'s existing arm prints `✗ {e:#}` on stderr and returns 1. Three refusal paths with one spelling, and the `✗` is the one every other lifecycle command already prints.
+- **A re-install does not `bootout` before `bootstrap` on darwin.**
+  The contract pins exactly one `launchctl` line per operation and the row compares stdout exactly, so a defensive `bootout` would be a fourth line nobody asked for. Whether `bootstrap` refuses a label it has already loaded is one of the two questions the live check answers.
+
+### Test edits made
+
+**None.** `git diff --stat 33d209e..HEAD -- tests/` is empty: no row moved, neither fixture moved, and no method-spec array or count tripwire was touched, because this unit adds no wire method.
+
+One pre-approved edit was deliberately **not** made. P6-U5 asked for the two new hooks to join `DaemonFixture::start`'s clearing list, and that list is `HOOKS` in `tests/support/parity.rs`, inside the frozen tree.
+No fixture installs a login service, and `tests/daemon_service.rs` sets both hooks explicitly on every child it runs, so the clearing buys nothing; the doc paragraph says so instead of the code lying about it.
+That paragraph also said "all ten environment hooks" while the list has carried twelve since P3b, and is corrected to twelve.
+
+The other four pre-approved edits were made: `src/daemon/lifecycle.rs` (two `DaemonAction` variants, their `dispatch` arms and the module header), `docs/daemon-operations.md`, `docs/parity-matrix.md` and `docs/release-process.md`.
+
+Two corrections outside that list, both of a document that no longer described the tree:
+
+- `docs/daemon-operations.md`'s hook section counted thirteen variables and now counts fifteen.
+- `docs/parity-matrix.md`'s lifecycle group opened with "no daemon, serve, or IPC surface exists in the tree", and `LIF-01` to `LIF-05` and `LIF-08` all still read "Status: not started" although P2-U7 (#0120) and P4-U2 (#0123) shipped them. Each now names its unit, its ticket and the suite that covers it; `LIF-04` also names P6-U4, which is what made it graceful.
+
+No CHANGELOG entry. The phase's entry is P6-U10's, which is how P6-U2 and P6-U4 left it: there is no `#0125` section to append a unit to, and one written now would be rewritten at the exit sweep.
+
+### Escalation: the live launchd check is NOT TAKEN
+
+Unchanged from what P6-U5 recorded, and now with a second question on it.
+`launchctl` and `plutil` are both absent from this host, so `MAILYPOPPINS_DAEMON_SERVICE_OS=darwin` proves the bytes and nothing else.
+Owner action on the Mac: install the service, log out and back in, `mp daemon status` reporting a running daemon, then remove it again.
+
+1. Does `bootstrap` refuse a label it has already loaded? If it does, a re-install over an identical plist wants a `bootout` first and the contract's one-line stdout has to grow.
+2. What does `current_exe()` resolve to under a Homebrew `mp`? If it is the version-stamped Cellar path rather than the `bin/mp` symlink, the agent breaks at the next `brew upgrade` and the repair is a forced re-install. `docs/release-process.md` carries that as an open item.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_service` -> **23 passed**, three runs, 0.05 s each.
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2279 passed, 0 failed**, 5 ignored, which is 2248 at `29691c0` plus the twenty-three contract rows and the eight unit tests this unit added.
+`--test daemon_lifecycle` 10; `--test daemon_shutdown` 12; `--lib daemon::service` 8.
+`git diff --stat 33d209e..HEAD -- tests/` empty.
+`cargo clippy --workspace --offline --all-targets` -> 38 warnings, the count at `7c96613`, none in a file this unit touched.
+`MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` and `diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` both empty: the `daemon` subtree is hidden, so two more subcommands are invisible to the walk by the same construction that has kept `mp daemon` out of it since P2-U7.
+
+The smoke run, in a sandbox `HOME` with `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1`: install, install again, `--check`, uninstall, then the same four with `MAILYPOPPINS_DAEMON_SERVICE_OS=darwin`, each printing the block the table above fixes and each exiting 0 except the `--check` with nothing installed.
+No real `systemctl --user enable` was run on this host.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.

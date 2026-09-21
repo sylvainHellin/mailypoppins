@@ -433,7 +433,7 @@ A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the g
 
 ## Test-only environment hooks
 
-Thirteen environment variables exist for the contract tests and for the migration.
+Fifteen environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
@@ -505,6 +505,15 @@ Unset, unparseable or zero means the default, as with the watcher's two hooks: a
 It exists because a test of "an expired handle is no longer releasable" would otherwise cost ten minutes; `tests/daemon_handles.rs` runs its sandboxes at 60000 ms and its one expiry case at 400 ms.
 The lifetime is read once, at startup, so a handle cannot be minted under one lifetime and released under another; its name is `mailypoppins::daemon::handles::HANDLE_TTL_ENV`.
 
+`MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1` makes `mp daemon install-service` and `mp daemon uninstall-service` render, write and remove the service file exactly as usual and run no `systemctl` and no `launchctl`.
+The command still prints the lines it would have run, plus `  dry run: MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN is set, nothing was run`.
+It is what keeps `tests/daemon_service.rs` off the developer's own user session: twenty of its twenty-three rows write into a `TempDir` and never reach a service manager at all.
+Its name is `mailypoppins::daemon::service::DRY_RUN_ENV`.
+
+`MAILYPOPPINS_DAEMON_SERVICE_OS=linux|darwin` selects which half of the login service is installed; unset means this build's target OS, and an unrecognised value is an error naming the variable and the two values it takes.
+It exists because the launchd half cannot be smoke-tested on the machine this project is developed on, so without it the plist would be pinned nowhere at all: with it, a Linux run renders the agent, compares it to the committed fixture and checks its XML.
+Its name is `mailypoppins::daemon::service::OS_ENV`.
+
 `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` is the internal handshake between `mp daemon start` and the `mp daemon run` it spawns: the parent holds the start lock, so the child must not block on it.
 No user sets this one.
 
@@ -516,7 +525,8 @@ A test that runs `mp` as a subprocess should `env_remove` every hook it does not
 
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
-`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears all ten environment hooks above so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
+`DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the twelve environment hooks its own `HOOKS` list carries so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
+The two service hooks are not among them: no fixture installs a login service, and `tests/daemon_service.rs` sets both explicitly on every child it runs.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.
 
@@ -540,7 +550,48 @@ Two places carry user paths today and both apply the rule from P4-U2 on, before 
 
 ## Login mode
 
-Not implemented.
-A lifecycle command that installs and removes a user-level service, a systemd user unit on Linux and a launchd user agent on macOS, both running `mp daemon run` in foreground mode, is P6-U5 and P6-U6 of the plan.
-Login mode changes no socket, no protocol and no client behaviour when it lands; it only changes who runs `mp daemon run`.
-The macOS half cannot be smoke-tested on the machine this project is developed on, so the plan already carries the live launchd check as an escalation.
+```sh
+mp daemon install-service [--force] [--check]
+mp daemon uninstall-service
+```
+
+Login mode changes no socket, no protocol and no client behaviour: it only changes who runs `mp daemon run`.
+The two commands are local, need no running daemon and add no wire method, because the file they write is the thing that starts a daemon.
+
+| target | file | enabled with |
+|---|---|---|
+| Linux | `$XDG_CONFIG_HOME/systemd/user/mailypoppins.service`, falling back to `$HOME/.config` | `systemctl --user daemon-reload`, then `systemctl --user enable --now mailypoppins.service` |
+| macOS | `$HOME/Library/LaunchAgents/dev.mailypoppins.daemon.plist` | `launchctl bootstrap gui/<uid> <plist>` |
+
+Both files are written 0644 and both run `mp daemon run`, the foreground daemon, by the absolute path `std::env::current_exe()` resolved to.
+Never `mp daemon start`: a `Type=simple` unit whose `ExecStart` forked and returned would be restarted forever by `Restart=on-failure`, and the daemon left behind would be one systemd does not own.
+Both carry `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` as the installing `mp` resolved them, and nothing else: a login-started daemon inherits the session manager's environment rather than the shell's, so a user whose data directory is exported from a shell rc file would otherwise get a daemon serving a different tree than the one his `mp` talks to.
+`TimeoutStopSec` and `ExitTimeOut` are the shutdown grace plus five seconds, so the service manager cannot `SIGKILL` a daemon in the middle of the eight steps; `KillSignal=SIGTERM` and `KeepAlive {SuccessfulExit: false}` are what make a crash restart and a `mp daemon stop` stay stopped.
+The macOS install also creates `<data_dir>/logs`, which `StandardOutPath` names and launchd refuses a job without.
+
+Uninstalling disables first and removes the file second (`systemctl --user disable --now`, then the removal, then `daemon-reload`), because a reload that ran before the file was gone would re-read it; `launchctl bootout gui/<uid>/dev.mailypoppins.daemon` takes the service target rather than the path.
+
+What the commands print, and what they exit:
+
+| case | first line | exit |
+|---|---|---|
+| fresh install | `✓ wrote <path>` | 0 |
+| an identical file already there | `✓ <path> is already installed`, and the enable still runs | 0 |
+| a file whose content differs | `✗ … differs …--force` on stderr, the file untouched | 1 |
+| uninstall | `✓ removed <path>` | 0 |
+| uninstall with nothing installed | `✓ no service installed`, and nothing is run | 0 |
+| `--check`, installed | `✓ service installed at <path>` | 0 |
+| `--check`, absent | `✗ no service installed` | 1 |
+
+The service-manager lines follow the first line, indented, whether they were run or not.
+A `systemctl` that is not on `PATH` is not a failure of the write - that is a container, a minimal image, or a session that is not systemd's - so the unit is written, the lines are printed to run by hand, and the command exits 0.
+A `systemctl` that runs and fails is exit 1 with the file left on disk: the file is what the command owns, enabling it is what it asked the session manager for, and removing the half that worked would leave the user with neither.
+
+An install over a file whose content differs is refused rather than overwritten, because a user may have edited it; `--force` replaces it and reports a write.
+An identical file is not rewritten at all, but the enable runs again, because a user who disabled the unit by hand expects `install-service` to put it back.
+
+### The macOS half is not smoke-tested here
+
+The plist is generated on Linux through `MAILYPOPPINS_DAEMON_SERVICE_OS=darwin` and compared byte for byte against `tests/fixtures/service/dev.mailypoppins.daemon.plist`, which proves the right bytes and nothing else: `launchctl` and `plutil` are both absent from this host.
+The live check - `mp daemon install-service` on macOS, log out and back in, `mp daemon status` reporting a running daemon, then `mp daemon uninstall-service` - is owner action on a Mac, as plan risk 8 anticipated. **Not taken.**
+Two questions ride on it: whether `bootstrap` refuses a label it has already loaded (in which case a re-install wants a `bootout` first, which no row pins today), and whether `current_exe()` under a Homebrew `mp` resolves to the version-stamped Cellar path rather than to the `bin/mp` symlink, which would make the agent break at the next `brew upgrade` (`docs/release-process.md`).
