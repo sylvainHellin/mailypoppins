@@ -3,12 +3,14 @@ id: 0124
 title: Phase 5 of the daemon migration, the TUI cutover
 type: feature
 priority: now
-status: in-progress
+status: done
 created: 2026-09-10
 ---
 
-Status: in-progress. P5-U1 to P5-U9 have landed; P5-U10 landed its first third (the three invitation reads) and split the rest into P5-U10a/b/c, recorded in its section below.
-A review of Phase 5 as landed at `691c5ea` produced six findings, all applied, in the "Phase 5 review" section at the end.
+Status: done. P5-U1 to P5-U9 and P5-U11 have landed, and the Phase 5 parity gate is green, five oracles and all.
+P5-U10 landed its first third (the three invitation reads) and is deferred as P5-U10a/b/c, recorded in its section below; the orchestrator's decision is to run the three after Phase 6.
+A review of Phase 5 as landed at `691c5ea` produced six findings, all applied, in the "Phase 5 review" section; the gate run, the measurements and the docs are P5-U11's section after it.
+The gate evidence is [docs/baselines/phase5-gate-evidence.md](../baselines/phase5-gate-evidence.md).
 
 Seventh ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), after #0118, #0119, #0120, #0121, #0122 and #0123.
 
@@ -29,8 +31,8 @@ The gate is the parity-gate oracle suite, five oracles, of which the daemon-back
 | P5-U7 | T | this commit | events replace watcher threads, the contract | done (tests) |
 | P5-U8 | I | `115aef0`, `33e42aa`, `e28ed30`, `bca8413` | events replace watcher threads | done |
 | P5-U9 | T | `9f6757b` | the parity-gate oracle suite | done (tests) |
-| P5-U10 | I | `83cc594` | the crate boundary for the TUI | partial: the three invitation reads landed, the crate did not (see below) |
-| P5-U11 | I | | the gate run, the report, the docs | open |
+| P5-U10 | I | `83cc594` | the crate boundary for the TUI | deferred: the three invitation reads landed, the crate did not (see below) |
+| P5-U11 | I | `170afc1`, `cf25695`, `a356c47`, `5ed8372`, `fe7d7bc`, `26b74d7` | the gate run, the report, the docs | done |
 
 ## P5-U1: the daemon-backed golden frames
 
@@ -1267,3 +1269,105 @@ The row of finding 1 was exercised against the old wiring, where it fails on the
 `rustfmt --edition 2021` on `src/tui/app/bootstrap.rs`, `src/tui/events.rs`, `src/tui/events_resync_tests.rs`, `src/daemon/methods/sync.rs`, `tests/phase5_parity_gate.rs` and `tests/test_selection_guard.rs`, all clean; `src/tui/mod.rs` was not rustfmt-clean at `691c5ea` and was left alone.
 
 `timeout 900 cargo install --path . --offline` -> replaced.
+
+## P5-U11: the gate run, the measurements, the docs
+
+The phase's last unit, and the only one whose product is a set of documents plus one number nobody had.
+
+Six commits.
+`170afc1` is the stale `Session::handle` doc comment the review left as a follow-up, `cf25695` the manual key checklist, `a356c47` the gate evidence, `5ed8372` the `docs/architecture.md` rewrite, `fe7d7bc` the CHANGELOG entry and `26b74d7` the BACKLOG items.
+One line of production code moved, and it is a comment.
+
+### The gate is green
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2 204 passed, 0 failed, 5 ignored** over 49 result lines, `pgrep -af '[m]p daemon'` empty of this tree's afterwards.
+That is the review's 2 203 plus the one row this unit turns green: `the_phase_five_manual_checklist_is_complete_and_carries_no_failure`, red from `9f6757b` by construction, which makes this the first whole-tree run of the phase with nothing failing.
+
+`--test phase5_parity_gate` -> **11 passed**, three times over, and `--test phase5_undo_send_hold` -> 2.
+The five oracles, the suite counts and what each one reports are in [the gate evidence](../baselines/phase5-gate-evidence.md) rather than duplicated here.
+
+### The checklist
+
+[docs/baselines/phase5-manual-keys.md](../baselines/phase5-manual-keys.md), twenty rows, **17 `pass` and 3 `NOT TAKEN (owner-only)`**, no failing row.
+
+The walk was a real daemon-backed TUI in a 120x40 pty over an `examples/mkfixture` root (two accounts, 5 501 messages, one attachment on every seventeenth message), with `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` inside the sandbox and `MAILYPOPPINS_DAEMON_REQUIRE=1` set, so a call answered in the client's own process would have failed rather than passed.
+The daemon was started beside the TUI rather than by it, because an auto-started daemon inherits that variable and refuses to start under it, which P5-U4 recorded and which is worth reading before anyone reruns this.
+
+Four things the walk had to arrange, each recorded in the file because a checklist nobody can reproduce is an assertion:
+
+- **The activity log had three entries**, and scrolling a three-entry log proves nothing. It was filled to its 100-entry cap with a ladder of distinguishable lines (`gt` with a token of its own each time, so each press leaves `Cannot read 'nNN' as a date`), after which `j`, `k`, `d`, `u`, `gg`, `G` and `/` are all readable off the screen rather than inferred.
+- **`d`/`u` in the search result list scroll the hit preview, not the cursor**, which is what `manual-keys.md` says and what the first attempt at evidence got wrong: the headers pane does not move, the body pane does.
+- **`$EDITOR` and the system opener were recording stubs.** A headless host has neither an editor nor a viewer, so both were replaced by scripts that append their argument to a file and exit 0. Every other leg of `e`, `r`, `R`, `w` and `o` is the product's own, and what the stub records is the artifact the product produced: a rendition path under `/tmp/mailypoppins-<pid>/render/`, three draft files under `accounts/alpha/drafts/`, and an attachment inside a daemon handle directory.
+- **The hits had to carry attachments** for `o` and `O`, which is what the form's attachment toggle is for.
+
+The three `NOT TAKEN` rows are the three whose effect leaves the process: `y` (the clipboard, where `arboard` reports `X11 server connection timed out` on a host with no display), `f` (a server-only hit, where every hit over an offline fixture answers `Already in the local store`) and `b` (a message with an HTML part, where the fixture generates none and the daemon refuses with `this message carries no HTML to render`).
+Each row carries the sentence the TUI actually printed, so the owner reruns three keys rather than twenty.
+
+Two findings came out of the walk and are in `BACKLOG.md` rather than fixed here.
+`b` in the search overlay logs its refusal and puts nothing on the overlay's status line, where the same key outside the overlay says so on screen.
+And `parse::open_file_with_system` shells out to `open`, which is macOS-only, so every viewer hand-off on Linux fails with `Failed to run 'open'` instead of going through `xdg-open`; it predates the daemon by a long way and the walk is what surfaced it.
+
+### Cold first paint, and the method it needed
+
+`docs/baselines/pre-daemon/measurements.md` W5 is `NOT TAKEN (no account / headless host)`, so there was no Phase 0 number to be within and no Phase 0 method to reuse.
+The method is therefore defined in the gate evidence, in that file's own terms, and all three columns were taken in one session over one fixture so they are comparable with each other.
+
+One run is one `mp` launched inside a 120x40 pty and quit with `q` once it has painted.
+The launch instant is taken **inside** the pty immediately before the exec, so the pty setup and the shell are outside the measurement, and the first frame is the process's own `[TIMING] tui_draw` line in its log, the instrument #0108 added.
+Median of eleven runs after one discarded warm-up, the `bench` harness `workloads.md` fixes.
+
+| column | median | min | max |
+|---|---:|---:|---:|
+| pre-daemon (`f8af44b`, from `~/.cache/mp-oracle`) | 6 ms | 5 | 7 |
+| daemon-backed, warm daemon | 7 ms | 6 | 7 |
+| daemon-backed, no daemon running | 35 ms | 34 | 36 |
+
+A warm daemon costs the first frame one millisecond, inside the spread of both columns: the TUI pays a connect and a handshake where it used to pay a config load.
+A cold start costs 28 ms more, once per daemon lifetime, and the log of a cold run says where they go: the process starts at +6 ms, spawns a daemon at +7, the daemon is listening at +11, `initialize` completes at +34 and the frame is on the screen at +35.
+The two stores are opened by the account runtimes *after* the daemon is serving, so a 5 501-message fixture does not gate the paint, and both accounts settle `ready` about 50 ms after the first frame, which is when the `··` markers fill in.
+
+Two cautions for whoever reruns it.
+The figures above are a quiescent machine with everything in the page cache; the first pass of the same harness, taken minutes after the release build and the fixture build, reported a cold median of 85 ms with a max of 153, and the medians only settled once the box was idle.
+And the log is append-only and two processes write to it, so a torn line can make a naive parser read the *second* paint instead of the first; the harness matches only a line that begins with a timestamp, which is what removed a family of 250 ms outliers that were an artifact rather than a measurement.
+
+### The docs
+
+**`docs/architecture.md`'s TUI-layering section was rewritten.**
+It described an `app/` that opens the account store through six `open_store` call sites and background work that reports over an `mpsc` channel, neither of which has been true since P5-U4.
+It now has a section each for the session thread, the query layer, the command router, the event drain, the watchers in the daemon's account runtime, the sessionless store fallback and why it is not the direct fallback the plan forbids, the eleven-row residue allow-list with the surface each group waits on, and the deferred crate move.
+The stale numbers around it went with it, because they were all read off the same tree: the allow-list is 11 pairs over 8 files where the doc said 12 over 7, the `test_selection_guard` floors are 464/20/20 where the doc said 368/20/18, the TUI module map gained `session.rs`, `queries.rs`, `commands.rs`, `events.rs`, `test_daemon.rs`, `app/bootstrap.rs` and `app/store_rows.rs` and lost `src/tui/mutations.rs`, the Watchers section is the daemon's runtime, and a materialised attachment lands in a handle directory rather than in a per-row temp directory.
+
+**`CHANGELOG.md`** carries the #0124 entry at the head of Unreleased, in the register the #0123 entry set: what a user can see (the TUI and `mp` stop being rivals over one account, mail arrives as an event), what did not move (the golden frames, the help, the keys, the first frame), what recovery looks like when the daemon dies, and the two behaviours that did change (an account with no store comes up `blocked`, and a materialised attachment lives in a handle directory for ten minutes).
+
+**`BACKLOG.md`** carries the deferred P5-U10a/b/c with their sequencing, the eleven-row allow-list, `LST-08`'s unmigrated server leg, the daemon calling into `src/tui/` for `calendar.events`, and the smaller follow-ups this ticket names that had no item of their own.
+Its #0118 block claimed five `NOT TAKEN` measurement rows; cold first paint is not one of them any more.
+
+### The one production edit
+
+`Session::handle`'s doc comment justified the weak sender with "a sync arm polling `operation.status` to a terminal state", which P5-U8 replaced with the `operation.finished` subscription.
+It is the follow-up the Phase 5 review left open, deliberately, because finding 4 was scoped to `docs/daemon-operations.md`.
+The rule and the code are unchanged; the example is now the two worker threads that are left, the background mailbox load and the startup per-account count.
+
+### What this unit did not do
+
+- **It did not build the oracle.** `~/.cache/mp-oracle/pre-daemon/mp` was already present, which is what let the pre-daemon column of the first-paint table be taken at all; a machine with a cold cache would have to build it before the gate run, and `the_eight_legacy_suites_answer_through_a_live_daemon` fails rather than skips when it is absent.
+- **It did not touch a test file.** `git diff --stat` over `tests/` and over the five `*_tests.rs` modules is empty for every one of its commits.
+- **It did not close P5-U10.** The allow-list is at 11 rows and the crate is not moved; the deferral, its three-unit sequencing and the decision to run them after Phase 6 are recorded above, in the gate evidence and in `BACKLOG.md`.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2 204 passed, 0 failed, 5 ignored**, 49 result lines.
+`--test phase5_parity_gate` 11, `--test phase5_undo_send_hold` 2, `--test tui_daemon_recovery` 3, `--test architecture_boundaries` 6, `--test test_selection_guard` 5.
+`--lib 'ui::golden_frames::'` 20, `--lib golden_frames_daemon` 22, `--lib queries_tests` 18, `--lib actions_tests` 22, `--lib events_tests` 20, `--lib events_resync_tests` 1, `--lib invites_tests` 8; no snapshot re-approved.
+Every `daemon_*_slice` suite green with its own count: read 22, draft 34, mutation 35, sync 38, send 50, admin 44.
+
+`touch src/main.rs && timeout 600 cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` -> empty.
+`diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` -> empty.
+
+`timeout 600 cargo clippy --workspace --offline --all-targets` -> **34 distinct warnings**, the P5-U8 baseline, none on a line this unit wrote.
+`timeout 900 cargo install --path . --offline` -> replaced, and the installed binary is what the manual walk and the measurements ran against in their release form.
+
+`pgrep -af '[m]p daemon'` returns nothing of this tree's after the full run, after the measurement runs and after the walk.
+One unrelated daemon is running on this host, Sylvain's own against `~/.local/share/mailypoppins`, started ten days before this unit; it was left alone and no sandbox in this work could reach it.
+
+`rustfmt` was not run: the only code change is a doc comment in a rustfmt-clean file, which stays clean.
