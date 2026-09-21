@@ -52,7 +52,7 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 
 use mp_protocol::draft::DraftListing;
-use mp_protocol::listing::MessageListRow;
+use mp_protocol::listing::{MessageListRow, ThreadListing};
 use mp_protocol::EventEnvelope;
 
 use crate::selector::DRAFTS_MAILBOX;
@@ -322,6 +322,20 @@ pub fn draft_body(q: &dyn Queries, account: &str, id: &str) -> Result<Option<Str
             Ok(None)
         }
     }
+}
+
+/// The conversation one message belongs to, through `message.thread`
+/// (`LST-10`, P5-U10d).
+///
+/// The whole fold, done where the store is: which messages share a `thread_id`
+/// is a query over every mailbox of the account, keyed on a column ingest
+/// wrote, and a client holds one mailbox's listing at a time. The answer is
+/// ordered oldest first and already deduped by `Message-ID`, and it marks the
+/// message the conversation was opened from, so the overlay renders it without
+/// deciding anything.
+pub fn thread(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<ThreadListing> {
+    let params = json!({"account": account, "row_id": msg.row_id()});
+    Ok(serde_json::from_value(q.call("message.thread", params)?)?)
 }
 
 // ---------------------------------------------------------------------------

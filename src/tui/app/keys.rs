@@ -1633,12 +1633,22 @@ impl App {
 
     /// Build and open the conversation overlay for the cursor message (#0008).
     ///
-    /// The thread is read straight out of the store: the selected row's
-    /// `thread_id`, then every message ingest gave that same id, oldest first
-    /// (see [`crate::store::read::thread_messages`]). Nothing re-parses headers
-    /// here; the grouping was decided at ingest. A message with no related mail
-    /// in the store (a lone message, or a reply whose parents are not
-    /// downloaded) says so rather than opening a one-line overlay.
+    /// `message.thread` on the session the `App` holds (`LST-10`, P5-U10d):
+    /// the selected row's `thread_id` and every message ingest gave that same
+    /// id, oldest first and one row per `Message-ID`. Nothing re-parses headers
+    /// anywhere; the grouping was decided at ingest and the daemon reads it out
+    /// of the indexed column. The fold is the daemon's because it is a query
+    /// over every mailbox of the account and this client holds one mailbox's
+    /// listing at a time.
+    ///
+    /// A message with no related mail in the store (a lone message, or a reply
+    /// whose parents are not downloaded) answers with itself alone, and that is
+    /// the sentence below rather than a one-line overlay.
+    ///
+    /// The refusals collapse into one line, which is the trade every routed
+    /// read of this migration has made: the account with no store and the row
+    /// that is gone are both the daemon's own sentence now, with the code in
+    /// it, where the store read branched on two outcomes of its own.
     fn open_thread_overlay(&mut self) {
         let Some(msg) = self.selected_email_ref() else {
             // A draft or an unresolved server-search hit has no store row.
@@ -1648,64 +1658,48 @@ impl App {
             return;
         };
         let account = self.account_config.name.clone();
-        let Some(store) = crate::store::open_store(&account) else {
-            self.set_status("This account has no store yet".to_string());
-            return;
+        let answer = match self.queries() {
+            Some(queries) => crate::tui::queries::thread(queries, &account, msg),
+            None => Err(anyhow::anyhow!("there is no daemon session to ask")),
         };
-        let row = match crate::store::read::find_by_id(&store, msg.row_id()) {
-            Ok(Some(row)) => row,
-            _ => {
-                self.set_status("That message is no longer in the store".to_string());
-                return;
-            }
-        };
-        let thread_id = row
-            .thread_id
-            .clone()
-            .unwrap_or_else(|| row.message_id.clone());
-        let rows = match crate::store::read::thread_messages(&store, &account, &thread_id) {
-            Ok(rows) => rows,
+        let thread = match answer {
+            Ok(thread) => thread,
             Err(e) => {
                 self.set_status(format!("Could not load the conversation: {e:#}"));
                 return;
             }
         };
-        if rows.len() <= 1 {
+        if thread.messages.len() <= 1 {
             self.set_status("No related emails for this message in the store".to_string());
             return;
         }
-        let current_mid = row.message_id.clone();
-        let subject = row
-            .subject
-            .clone()
+        let subject = Some(thread.subject.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "(no subject)".to_string());
         let mut selected = 0;
-        let messages: Vec<ThreadEntry> = rows
+        let messages: Vec<ThreadEntry> = thread
+            .messages
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let flags = r.flags();
-                if r.message_id == current_mid {
+                if r.current {
                     selected = i;
                 }
                 ThreadEntry {
                     msg: MessageRef::new(r.id),
                     mailbox: r.mailbox.clone(),
-                    from: super::extract_display_name(
-                        r.from.as_deref().unwrap_or_default(),
-                    ),
+                    from: super::extract_display_name(&r.from),
                     date_display: super::resolve_date(
-                        &r.date_display,
+                        &Some(r.date_display.clone()),
                         &None,
                         std::path::Path::new(""),
                     )
                     .0,
-                    read: flags.seen,
-                    answered: flags.answered,
-                    forwarded: flags.forwarded,
-                    flagged: flags.flagged,
-                    current: r.message_id == current_mid,
+                    read: r.flags.seen,
+                    answered: r.flags.answered,
+                    forwarded: r.flags.forwarded,
+                    flagged: r.flags.flagged,
+                    current: r.current,
                 }
             })
             .collect();

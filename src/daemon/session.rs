@@ -529,6 +529,7 @@ mod tests {
                 "message.search_server".to_string(),
                 "message.set_flag".to_string(),
                 "message.set_read".to_string(),
+                "message.thread".to_string(),
                 "operation.cancel".to_string(),
                 "operation.status".to_string(),
                 "send.approved".to_string(),

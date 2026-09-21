@@ -41,6 +41,7 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
+use mp_protocol::listing::{ThreadListing, ThreadMessage};
 use mp_protocol::RpcError;
 
 use crate::config::AccountConfig;
@@ -72,13 +73,24 @@ pub const MESSAGE_READ_METHOD_SPECS: [MethodSpec; 3] = [
     MethodSpec::new("message.search", MethodKind::Query, 1),
 ];
 
-/// One of the three, selected by its own [`MethodSpec`].
+/// The conversation read, declared on its own (`LST-10`, P5-U10d, #0126).
 ///
-/// One type for three methods because they share their one dependency and
-/// differ only in which of the three bodies below they run; the dispatcher
-/// registers three instances, so each still declares itself separately.
+/// A query and durable like the three above, served by the same type, and in a
+/// separate array for the reason [`MESSAGE_MARKDOWN_METHOD_SPECS`] is one:
+/// `tests/daemon_read_slice.rs` pins [`MESSAGE_READ_METHOD_SPECS`] at exactly
+/// the three names P4-U4 shipped, so growing it would edit a pinned test to
+/// say something it was not written to say.
+pub const MESSAGE_THREAD_METHOD_SPECS: [MethodSpec; 1] =
+    [MethodSpec::new("message.thread", MethodKind::Query, 1)];
+
+/// One of the four, selected by its own [`MethodSpec`].
+///
+/// One type for four methods because they share their one dependency and
+/// differ only in which of the four bodies below they run; the dispatcher
+/// registers four instances, so each still declares itself separately.
 pub struct MessageReadMethod {
-    /// Which of [`MESSAGE_READ_METHOD_SPECS`] this instance serves.
+    /// Which of [`MESSAGE_READ_METHOD_SPECS`] or
+    /// [`MESSAGE_THREAD_METHOD_SPECS`] this instance serves.
     pub spec: MethodSpec,
     /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
@@ -104,6 +116,7 @@ impl Method for MessageReadMethod {
             let result = match self.spec.name {
                 "message.get" => get(&params, &accounts),
                 "message.list" => list(&params, &accounts),
+                "message.thread" => thread(&params, &accounts),
                 _ => search(&params, &accounts),
             };
             result.map(Outcome::query).map_err(DomainError::from)
@@ -111,9 +124,12 @@ impl Method for MessageReadMethod {
     }
 }
 
-/// Register the three read methods on `dispatcher`.
+/// Register the four read methods on `dispatcher`.
 pub fn register_reads(dispatcher: &mut Dispatcher, config: Arc<super::super::config::ConfigStore>) {
-    for spec in MESSAGE_READ_METHOD_SPECS {
+    for spec in MESSAGE_READ_METHOD_SPECS
+        .into_iter()
+        .chain(MESSAGE_THREAD_METHOD_SPECS)
+    {
         dispatcher.register(Arc::new(MessageReadMethod {
             spec,
             config: Arc::clone(&config),
@@ -341,6 +357,82 @@ fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, R
                 .map_err(|e| invalid_params(format!("{e:#}")))
         }
     }
+}
+
+/// The `result` of `message.thread`: the conversation the addressed message
+/// belongs to, oldest first (`LST-10`, #0126).
+///
+/// The grouping is [`read::thread_messages`]'s, which is the set of rows ingest
+/// gave the same `thread_id`: decided once at ingest and read back out of the
+/// indexed column rather than recomputed from headers here. A message ingest
+/// assigned no thread to is the root of its own, so the id falls back to its
+/// own `Message-ID`, and the answer is that message alone.
+///
+/// A row type of its own rather than [`to_json`]'s: a listing names its mailbox
+/// once and every row of it is in that mailbox, while a conversation holds the
+/// Inbox copy and the archived original side by side, so each row says which
+/// mailbox it is in. It carries nothing the overlay does not render - no `uid`,
+/// no `selector`, no recipients, and no `date_sort`, because the daemon orders
+/// the conversation and a client that re-sorted it would be inventing an order
+/// the overlay does not have.
+///
+/// `current` is decided on the `Message-ID` rather than on the row id, because
+/// the fold keeps the first copy its order yields: the surviving row for the
+/// addressed message can carry an `id` the call did not name, and a client
+/// computing the flag from what it asked about would mark nothing.
+pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    super::account::ready_account(accounts, &name)?;
+
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let row = address(params, &store, &name)?;
+    let thread_id = row
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| row.message_id.clone());
+    let mut rows = read::thread_messages(&store, &name, &thread_id)
+        .map_err(|e| internal(format!("folding the conversation {thread_id} of {name}: {e:#}")))?;
+    // The addressed message is always in its own conversation. The fold reads
+    // the `thread_id` column, so a row ingest left `NULL` there matches
+    // nothing and would answer an empty array, which is the different claim
+    // that the store holds not even the message that was addressed.
+    if rows.is_empty() {
+        rows.push(row.clone());
+    }
+
+    let messages: Vec<ThreadMessage> = rows
+        .iter()
+        .map(|member| {
+            let flags = member.flags();
+            ThreadMessage {
+                id: member.id,
+                mailbox: member.mailbox.clone(),
+                message_id: member.message_id.clone(),
+                from: member.from.clone().unwrap_or_default(),
+                date_display: member.date_display.clone().unwrap_or_default(),
+                flags: mp_protocol::listing::MessageFlags {
+                    seen: flags.seen,
+                    answered: flags.answered,
+                    forwarded: flags.forwarded,
+                    flagged: flags.flagged,
+                },
+                current: member.message_id == row.message_id,
+            }
+        })
+        .collect();
+
+    let listing = ThreadListing {
+        account: name.clone(),
+        thread_id,
+        // The opened message's own subject, `""` when it carried none: the
+        // overlay's title renders its own placeholder and the wire invents
+        // none.
+        subject: row.subject.clone().unwrap_or_default(),
+        messages,
+    };
+    serde_json::to_value(&listing)
+        .map_err(|e| internal(format!("serialising the conversation of {name}: {e}")))
 }
 
 /// The `result` of `message.search`: the ranked hits of the local index.
