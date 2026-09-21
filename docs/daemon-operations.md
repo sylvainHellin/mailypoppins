@@ -271,7 +271,7 @@ A hold is cancelled at step 2 and therefore never appears in `pending` or in `un
 The grace is a ceiling and never a sleep.
 With nothing live at step 4 the daemon does not enter it at all, which is what keeps stopping an idle daemon as cheap as it has always been: every fixture in the test tree stops one.
 
-All three runtime files are unlinked only while `daemon.json` still names this instance, so a daemon that started after us has neither its metadata nor its socket deleted by our exit.
+Two guards cover the three files. The socket and `daemon.json` are unlinked only while `daemon.json` still names this instance; `daemon.pid` only while it still holds this process's pid. Either way a daemon that started after us keeps its metadata, its pid file and its socket through our exit.
 `SIGTERM` and `SIGINT` run the same eight steps with the default grace, so a unit stopped by systemd or launchd and a foreground daemon killed with Ctrl-C are as graceful as a typed `mp daemon stop`; the only step a signal skips is the report, which has no connection to travel on.
 
 ## Configuration ownership

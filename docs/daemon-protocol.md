@@ -156,7 +156,7 @@ The response is written and flushed before the grace begins, so the caller alway
 
 The sequence behind it is fixed, because every clause of it is observable:
 
-1. mark shutting down: from here every other method is `-32009`;
+1. mark shutting down: from here every method but `daemon.status` and a repeated `daemon.stop` is `-32009`, `initialize` included;
 2. cancel every armed undo-send hold, publishing `send.hold_cancelled`, leaving the drafts `approved`;
 3. publish `daemon.shutting_down` to every bootstrapped connection;
 4. answer the `daemon.stop` with the effective grace and what is still live;
@@ -1034,7 +1034,7 @@ P6-U4 made the shutdown graceful: one parameter, two members of an existing resu
 Absent means the default of 10 seconds and an explicit `0` means no waiting: a parameter is explicit where an environment hook is ambient, so zero is honoured rather than read as unset.
 `pending` and `unsettled` both carry the `operation.status` object, in start order, so nothing new has to be parsed to render either.
 The kind `daemon.shutting_down` carries `{grace_secs, pending}` to every bootstrapped connection, and the notification method `daemon.stopped` carries `{instance_id, clean, unsettled}` to the connection that asked, as its last frame; the fixtures are `crates/mp-protocol/fixtures/daemon.stop.request.json`, `daemon.stop.response.json`, `notification.daemon_shutting_down.json`, `notification.daemon_stopped.json` and `error.shutting_down.json`.
-`-32009 shutting_down`, reserved since the error table was written and unreachable until now, is the answer to every method but those two from the instant a stop is accepted, `initialize` included: the handshake gate exempts `initialize` by construction, so a client arriving during the grace is refused at the handshake rather than admitted to a daemon that is leaving.
+`-32009 shutting_down`, reserved since the error table was written and unreachable until now, is the answer to every method from the instant a stop is accepted, `initialize` included, with exactly two exemptions: `daemon.status`, which is how `mp daemon stop` watches the shutdown it asked for, and a repeated `daemon.stop`, which is not an error. The shutdown gate sits ahead of the handshake gate on purpose, since the handshake gate exempts `initialize` by construction and a client arriving during the grace would otherwise be admitted to a daemon that is leaving.
 The bootstrap snapshot's `holds` array stopped being empty: it carries every window the daemon is counting down, each one the same `HoldStatus` the events and `send.hold_status` carry, so a client that joins mid-hold renders the countdown from its own bootstrap.
 
 P6-U8 added four methods to the `diagnostic.*` family, one event kind and one filled snapshot array, all additive.

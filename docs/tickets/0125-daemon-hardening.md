@@ -8,7 +8,8 @@ created: 2026-09-21
 ---
 
 Status: done. All ten units have landed: the daemon-owned hold, the graceful shutdown, the login-start service units, the diagnostics, the soak tests and the one leak they found, and the benchmark rerun with the phase's documentation.
-Three of the four gate lines pass as written and the fourth, the platform smoke tests, passes on this host's systemd half with launchd escalated as the plan's own line anticipated.
+Three of the four gate lines pass as written; the fourth, the platform smoke tests, passes for the lifecycle commands and is NOT TAKEN for the service managers, whose live install is owner action on systemd as on launchd.
+A review of the phase as landed at `1957f9e` produced five findings, all applied, in the "Phase 6 review" section at the end.
 The gate evidence is [docs/baselines/phase6-gate-evidence.md](../baselines/phase6-gate-evidence.md) and the soak run [docs/baselines/phase6-soak.md](../baselines/phase6-soak.md).
 P5-U10a/b/c, the crate boundary deferred out of Phase 5 to run after this phase, is the next sequence.
 
@@ -299,7 +300,7 @@ daemon.stopped {instance_id, clean: bool, unsettled: [operation…]}   // a noti
 
 The rows are decidable only because the sequence is fixed:
 
-1. mark shutting down - from here every other method is `-32009`;
+1. mark shutting down - from here every method but `daemon.status` and a repeated `daemon.stop` is `-32009`, `initialize` included;
 2. cancel every armed hold, publishing `send.hold_cancelled`, drafts left `approved`;
 3. publish `daemon.shutting_down` to every bootstrapped connection;
 4. answer the `daemon.stop` with the effective grace and what is still live;
@@ -1033,7 +1034,7 @@ W1 itself, W2's TUI half, W6's cold-cache half and W8 all stay `NOT TAKEN` and o
 |---|---|---|
 | The daemon can run unattended across client churn | **pass** | `tests/daemon_soak.rs` 7 rows, three runs at ~15 s, plus a 65.6 s run at `MAILYPOPPINS_SOAK_SECS=60`; numbers in `phase6-soak.md` |
 | Memory remains bounded under slow clients and repeated syncs | **pass**, with the leak it found fixed | soak rows (b), (c), (g); `operations::HISTORY = 256` and its unit test |
-| Lifecycle commands and service-manager modes pass platform smoke tests | **pass** on systemd, **escalated** for launchd | `tests/daemon_service.rs` 23, a by-hand dry-run install/re-install/check/uninstall on both halves, and the lifecycle smoke; `launchctl` and `plutil` absent from this host |
+| Lifecycle commands and service-manager modes pass platform smoke tests | **pass** for the lifecycle commands; the service-manager half is **NOT TAKEN (owner action)** on both platforms | `tests/daemon_service.rs` 23 and a by-hand dry-run install/re-install/check/uninstall write the unit and the agent, and the command sequence is pinned by a stub `systemctl`; the live `systemctl --user enable --now` and the login start were never run, on systemd as on launchd, where `launchctl` and `plutil` are absent from this host |
 | The daemon-owned hold reproduces the parity gate's behaviour, and the last client exiting mid-hold cancels the hold and leaves the draft approved | **pass** | `tests/daemon_send_hold.rs` 7, `src/tui/hold_tests.rs` 16, `tests/daemon_shutdown.rs` 12, and `tests/phase5_undo_send_hold.rs` 2 rerun with not a line of it moved |
 
 ### The deviations

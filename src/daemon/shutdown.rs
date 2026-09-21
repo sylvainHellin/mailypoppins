@@ -6,7 +6,8 @@
 //! socket, releases locks"*, and the order it runs in is the contract, because
 //! it is what makes each of those clauses observable:
 //!
-//! 1. mark shutting down - from here every other method is `-32009`;
+//! 1. mark shutting down - from here every method but `daemon.status` and a
+//!    repeated `daemon.stop` is `-32009`, `initialize` included;
 //! 2. cancel every armed hold, publishing `send.hold_cancelled`, drafts left
 //!    `approved`;
 //! 3. publish `daemon.shutting_down` to every bootstrapped connection;

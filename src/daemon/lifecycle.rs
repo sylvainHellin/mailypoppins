@@ -423,12 +423,15 @@ fn write_runtime_files(meta: &InstanceMeta) -> Result<()> {
 /// covers the other two: a daemon that started after us must not have its
 /// metadata deleted by our shutdown.
 ///
-/// All three are guarded by the same instance check, `daemon.json` being what
-/// says whose runtime directory this currently is. The socket used to be
-/// removed unconditionally, which is the one path by which a slow shutdown
-/// could unlink a *successor's* socket: a daemon that started after us wrote
-/// its own `daemon.json` over ours, so the file that named us names it, and
-/// the check that already protected its metadata now protects its socket too.
+/// Two guards, not one. The socket and `daemon.json` go only while
+/// `daemon.json` still names *this* instance, which is what says whose runtime
+/// directory this currently is; `daemon.pid` goes only while it still holds
+/// *this* process's pid, which is the fact that file carries and the one a
+/// successor would have overwritten. The socket used to be removed
+/// unconditionally, which is the one path by which a slow shutdown could
+/// unlink a *successor's* socket: a daemon that started after us wrote its own
+/// `daemon.json` over ours, so the file that named us names it, and the check
+/// that already protected its metadata now protects its socket too.
 fn cleanup(meta: &InstanceMeta) {
     let ours = read_instance_meta().is_some_and(|other| other.instance_id == meta.instance_id);
     if ours {

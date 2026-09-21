@@ -7,7 +7,8 @@ Evidence taken on 2026-09-21 at `1ee6bcb` on branch `daemon`, thirty-one commits
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, `cargo 1.96.0 (30a34c682 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS, 16 threads, 28 GiB RAM.
 
 Three of the four pass as written.
-The third, "lifecycle commands and service-manager modes pass platform smoke tests", passes on this host's systemd half and is **escalated** for launchd, exactly as the plan's own line anticipated.
+The third, "lifecycle commands and service-manager modes pass platform smoke tests", is **partly NOT TAKEN**: the lifecycle commands were smoked live, but neither service manager was.
+The unit and the agent are written and the command sequence is pinned by a stub `systemctl`; the live `systemctl --user enable --now` and the login start are owner action on both platforms.
 
 The benchmark rerun the unit owes is the second half of this file, and it is the first one taken against the complete dispatcher.
 
@@ -80,7 +81,7 @@ TMPDIR=/var/tmp cargo test --offline --test daemon_service
 23 passed, 0 failed.
 Twenty of the rows write into a `TempDir` under `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1` and reach no service manager at all; three run with the dry run off and `PATH` pointing at a sandbox holding a fake `systemctl` that records its argv and exits with a chosen code, which is what pins *which* commands run and in what order.
 
-### The systemd smoke, by hand
+### The systemd dry-run smoke, by hand
 
 Run at `1ee6bcb` from the release binary, in a sandbox `HOME`, `XDG_CONFIG_HOME`, `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` under `/var/tmp/mp-p6u10-service`, with the dry run armed so no user unit of this machine was touched:
 
@@ -104,7 +105,17 @@ The lifecycle commands were smoked over the benchmark fixture in the same sessio
 The live check is owner action on the Mac, as plan risk 8 anticipated: `mp daemon install-service`, log out and back in, `mp daemon status` reporting a running daemon, then `mp daemon uninstall-service`.
 Two questions ride on it and are written up in `docs/daemon-operations.md`: whether `bootstrap` refuses a label it has already loaded, and what `current_exe()` resolves to under a Homebrew `mp`.
 
-Passes on Linux; the macOS half is escalated, not claimed.
+### The live systemd check is NOT TAKEN too
+
+Every `systemctl` in this unit's evidence was a dry run or a stub.
+The twenty dry-run rows and the by-hand smoke above set `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1` and reach no service manager at all; the three remaining rows point `PATH` at a sandbox holding a fake `systemctl` that records its argv and exits with a chosen code.
+So what is proved is that the unit is written, that it is the committed fixture byte for byte, and that the command sequence is the one the contract fixes.
+What is **not** proved is that `systemd` accepts the unit, that `enable --now` starts a daemon, or that the daemon comes back at the next login.
+
+The live check is owner action, on this host: `mp daemon install-service` with the dry run unset, `systemctl --user status mailypoppins.service`, log out and back in, `mp daemon status` reporting a running daemon, then `mp daemon uninstall-service`.
+A real `enable --now` on the developer's own session starts a daemon against his real data directory, which is why no test takes it.
+
+**Neither half of this line was smoke-tested against a live service manager. NOT TAKEN (owner action), on systemd as on launchd.**
 
 ## The daemon-owned hold reproduces the behaviour the parity gate recorded, and the last client exiting mid-hold cancels the hold and leaves the draft approved
 
@@ -274,7 +285,8 @@ Nothing on this list blocks the exit; the first three are the ones a Phase 7 uni
 | The activity overlay's `/filter` matches the level's `Debug` spelling as a substring of the same query that matches the message | `BACKLOG.md` |
 | No protocol fixture pins a `state.bootstrap` whose `snapshot.diagnostics` is non-empty | `BACKLOG.md` |
 | Every `mp daemon` subcommand inherits the global `-s/--signature`, `--no-signature` and `-A/--account` flags, which mean nothing to a lifecycle command | `BACKLOG.md` |
-| The live launchd check (install, log out and back in, `status`, uninstall) and the two questions on it | **owner action**, escalated above, in `docs/daemon-operations.md` and `docs/release-process.md` |
+| The live `systemctl --user enable --now` and the login start (install, `systemctl --user status`, log out and back in, `mp daemon status`, uninstall) | **owner action**, NOT TAKEN above, in `BACKLOG.md` |
+| The live launchd check (install, log out and back in, `status`, uninstall) and the two questions on it | **owner action**, NOT TAKEN above, in `BACKLOG.md`, `docs/daemon-operations.md` and `docs/release-process.md` |
 | A draft whose `from:` names an account other than the one whose drafts directory holds it is now refused by `send.draft` | **accepted**, recorded in the P6-U2 section of the ticket |
 | The two service hooks are deliberately not in `DaemonFixture`'s clearing list | **accepted**, recorded in the P6-U6 section of the ticket and in `docs/daemon-operations.md` |
 | The periodic tick with no client anywhere ("Phase 6's" in three documents) is not built | `BACKLOG.md`, retargeted off Phase 6 |
@@ -282,7 +294,7 @@ Nothing on this list blocks the exit; the first three are the ones a Phase 7 uni
 
 ## What Phase 6 does not answer
 
-- **The macOS half of the service units** is written, fixture-pinned and never run. So is the macOS half of Phase 2's crash and stale-socket recovery line, unchanged and still escalated.
+- **Neither half of the service units was run against a live service manager.** Both files are written, fixture-pinned and rendered by hand, and the command sequence is pinned by a stub `systemctl`, but no `systemctl --user enable --now` and no `launchctl bootstrap` has ever executed. The macOS half of Phase 2's crash and stale-socket recovery line is unchanged and still escalated.
 - **P5-U10a/b/c**, the crate boundary for the TUI, is still the next sequence and still deferred; P6-U2 removed one of its eleven allow-list rows by moving the hold, which is why the list is at ten.
 - **A periodic scheduler** is still not built. The daemon's account runtime watches, and a tick with no client anywhere is the shape that would keep a store fresh; the plan put it in Phase 5/6 and neither built it.
 - **W1, W2's TUI half, W6's cold-cache half and W8** are still owner action.
