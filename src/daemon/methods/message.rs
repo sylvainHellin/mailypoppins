@@ -1008,13 +1008,34 @@ pub const MESSAGE_HANDLE_METHOD_SPECS: [MethodSpec; 3] = [
     MethodSpec::new("message.release_handle", MethodKind::Query, 1),
 ];
 
-/// One of the three, selected by its own [`MethodSpec`].
+/// The Markdown rendition, in an array of its own (`RD-06`, #0126).
 ///
-/// One type for three methods because they share every dependency and differ
-/// only in which of the three bodies below they run; the dispatcher registers
-/// three instances, so each still declares itself separately.
+/// A fourth member of the family above in every way that matters - same result
+/// shape, same handle directory, same ten-minute lifetime, same
+/// `message.release_handle`, same `ANO-6` pin - and a separate array for the
+/// reason [`MESSAGE_QUEUE_METHOD_SPECS`] is one: `tests/daemon_handles.rs`
+/// pins [`MESSAGE_HANDLE_METHOD_SPECS`] at exactly the three names P3b-U12
+/// shipped, and growing it would edit a pinned test to say something it was
+/// not written to say.
+///
+/// `ClientIntegration` and `Durable`, as the two materialisers are: the daemon
+/// prepares the file and only the client's own process can open it in
+/// `$EDITOR`, and a viewer holding it open may not lose it because the socket
+/// that asked for it went away.
+pub const MESSAGE_MARKDOWN_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    "message.materialise_markdown",
+    MethodKind::ClientIntegration,
+    1,
+)];
+
+/// One of the four, selected by its own [`MethodSpec`].
+///
+/// One type for four methods because they share every dependency and differ
+/// only in which of the bodies below they run; the dispatcher registers four
+/// instances, so each still declares itself separately.
 pub struct MessageHandleMethod {
-    /// Which of [`MESSAGE_HANDLE_METHOD_SPECS`] this instance serves.
+    /// Which of [`MESSAGE_HANDLE_METHOD_SPECS`] or
+    /// [`MESSAGE_MARKDOWN_METHOD_SPECS`] this instance serves.
     pub spec: MethodSpec,
     /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
@@ -1051,6 +1072,12 @@ impl Method for MessageHandleMethod {
                     &self.handles,
                     HandleKind::Html,
                 ),
+                "message.materialise_markdown" => materialise(
+                    &params,
+                    &self.config.accounts(),
+                    &self.handles,
+                    HandleKind::Markdown,
+                ),
                 _ => release_handle(&params, &self.handles),
             };
             result.map(Outcome::query).map_err(DomainError::from)
@@ -1058,13 +1085,16 @@ impl Method for MessageHandleMethod {
     }
 }
 
-/// Register the three handle methods on `dispatcher`.
+/// Register the four handle methods on `dispatcher`.
 pub fn register_handles(
     dispatcher: &mut Dispatcher,
     config: Arc<super::super::config::ConfigStore>,
     handles: Arc<HandleTable>,
 ) {
-    for spec in MESSAGE_HANDLE_METHOD_SPECS {
+    for spec in MESSAGE_HANDLE_METHOD_SPECS
+        .into_iter()
+        .chain(MESSAGE_MARKDOWN_METHOD_SPECS)
+    {
         dispatcher.register(Arc::new(MessageHandleMethod {
             spec,
             config: Arc::clone(&config),
@@ -1097,13 +1127,73 @@ fn materialise(
     let store = Store::open(crate::config::store_path(&name))
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
     let blobs = BlobStore::new(crate::config::blobs_dir(&name));
-    let row = address(params, &store, &name)?.id;
+    let row = address(params, &store, &name)?;
 
     let (filename, bytes, pinned) = match kind {
-        HandleKind::Attachment => attachment_file(params, &store, &blobs, row)?,
-        HandleKind::Html => html_file(&store, &blobs, row)?,
+        HandleKind::Attachment => attachment_file(params, &store, &blobs, row.id)?,
+        HandleKind::Html => html_file(&store, &blobs, row.id)?,
+        HandleKind::Markdown => markdown_file(&store, &blobs, &row),
     };
-    write_handle(handles, kind, &name, &filename, &bytes, &pinned)
+    let mode = match kind {
+        // #0075's rule, moved to the daemon with the bytes: `$EDITOR` opens
+        // the buffer read-only and says so, rather than letting someone
+        // believe an edit reaches the message.
+        HandleKind::Markdown => 0o444,
+        _ => 0o644,
+    };
+    write_handle(handles, kind, &name, &filename, &bytes, &pinned, mode)
+}
+
+/// The store's own Markdown view of one message, and the blob it read.
+///
+/// [`read::render_markdown`] verbatim, which is the rendition `mp show` and
+/// the pre-daemon `$EDITOR` view were both built from: YAML frontmatter folded
+/// out of the `messages` row, then the stored plain text. It cannot fail - a
+/// message with no readable body renders with an empty one, exactly as
+/// `mp show` prints its "no stored body" sentence for the same row - so a
+/// bodyless message is a rendition and not a refusal.
+///
+/// The pinned blob is the row's own `body_blob`, so a retention sweep running
+/// beside an open editor cannot evict the bytes the file was built from
+/// (`ANO-6`), exactly as the html rendition pins its markup.
+///
+/// The name is the subject slugified, or `message-<row_id>.md` for a message
+/// with no subject, so a user reading three open buffers can tell them apart.
+fn markdown_file(
+    store: &Store,
+    blobs: &BlobStore,
+    row: &MessageRow,
+) -> (String, Vec<u8>, Vec<String>) {
+    let rendition = read::render_markdown(store, blobs, row);
+    let pinned = row.body_blob.iter().cloned().collect();
+    (
+        markdown_name(row.subject.as_deref().unwrap_or_default(), row.id),
+        rendition.into_bytes(),
+        pinned,
+    )
+}
+
+/// The file name of a Markdown rendition: the subject slugified, or
+/// `message-<row_id>.md` when the slug is empty.
+///
+/// The row id is in the fallback rather than in every name because a subject
+/// is what a user recognises; two messages sharing one subject collide on a
+/// name and not on a path, since every handle owns its own directory.
+fn markdown_name(subject: &str, row_id: i64) -> String {
+    let slug: String = subject
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug: String = crate::types::collapse_hyphens(&slug)
+        .chars()
+        .take(40)
+        .collect();
+    if slug.is_empty() {
+        format!("message-{row_id}.md")
+    } else {
+        format!("{slug}.md")
+    }
 }
 
 /// `id`, which is `"<mailbox>/<uid>"`.
@@ -1232,6 +1322,7 @@ fn write_handle(
     filename: &str,
     bytes: &[u8],
     pinned: &[String],
+    mode: u32,
 ) -> Result<Value, RpcError> {
     let id = handles.mint_id();
     let dir = handle_dir(&id);
@@ -1240,7 +1331,11 @@ fn write_handle(
         fs::create_dir_all(&dir)?;
         fs::set_permissions(&dir, Permissions::from_mode(0o700))?;
         fs::write(&path, bytes)?;
-        Ok(fs::metadata(&path)?.len())
+        let len = fs::metadata(&path)?.len();
+        // Last, because a 0444 file cannot be written to: the mode is the
+        // rendition's property and the write is what produces it.
+        fs::set_permissions(&path, Permissions::from_mode(mode))?;
+        Ok(len)
     })();
     let written = match written {
         Ok(written) => written,

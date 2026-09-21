@@ -69,6 +69,9 @@ pub enum HandleKind {
     Attachment,
     /// The browser rendition of a message, as `message.html`.
     Html,
+    /// The store's own Markdown view of a message, as `<subject>.md`
+    /// (`RD-06`, #0126, #0075).
+    Markdown,
 }
 
 impl HandleKind {
@@ -77,6 +80,7 @@ impl HandleKind {
         match self {
             HandleKind::Attachment => "attachment",
             HandleKind::Html => "html",
+            HandleKind::Markdown => "markdown",
         }
     }
 }

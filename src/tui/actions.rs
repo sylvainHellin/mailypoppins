@@ -331,86 +331,35 @@ pub(super) fn html_rendition(app: &mut App, html: &str, stem: &str) -> Option<Pa
     }
 }
 
-/// The name the read-only view carries, which is the title the editor puts on
-/// the buffer (#0075).
-///
-/// The subject, so the window says which message is on screen; the row id when
-/// there is no subject to slug. Uniqueness is not this name's job -- the
-/// directory it lands in is already keyed by the row -- so two messages
-/// sharing a subject cannot collide.
-fn readonly_view_name(subject: &str, row_id: i64) -> String {
-    let slug = slugify_subject_for_filename(subject);
-    if slug.is_empty() {
-        format!("message-{row_id}.md")
-    } else {
-        format!("{slug}.md")
-    }
-}
-
-/// Write `contents` where the user cannot save over it (#0075).
-///
-/// 0444, so `$EDITOR` opens the buffer read-only and says so, rather than
-/// letting someone believe an edit reaches the message. The mode is a signal,
-/// not the guarantee: the guarantee is that nothing reads the file back, and
-/// the file is gone when the editor exits.
-///
-/// A previous view of the same row left a file that mode also makes
-/// unwritable, so it is removed rather than truncated -- the rendition is
-/// rebuilt from the store on every open, and a stale one must not survive.
-fn write_readonly(path: &Path, contents: &str) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => anyhow::bail!("clearing {}: {e}", path.display()),
-    }
-    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444))
-            .with_context(|| format!("making {} read-only", path.display()))?;
-    }
-    Ok(())
-}
-
 /// The read-only Markdown view of a stored row, or `None` with the status line
 /// saying why there is none (#0075).
 ///
-/// It lands beside the browser rendition and the invite source, under the
-/// private per-row directory `parse::materialisation_dir` validates, and it is
-/// deliberately nowhere the drafts index or the reconciler walks: the store is
-/// the source of truth and this file is scratch.
-pub(super) fn readonly_view_for_row(app: &mut App, row_id: i64) -> Option<PathBuf> {
-    // The store connection is scoped to the read, the way the event source
-    // scopes its own: `$EDITOR` owns the terminal for as long as the user
-    // wants it, and holding SQLite open across that is pointless.
-    let rendered = {
-        let (store, blobs) = store_for_mutation(app, "Open")?;
-        match crate::store::read::find_by_id(&store, row_id) {
-            Ok(Some(row)) => {
-                let name = readonly_view_name(row.subject.as_deref().unwrap_or_default(), row.id);
-                Some((crate::store::read::render_markdown(&store, &blobs, &row), name))
-            }
-            Ok(None) => None,
-            Err(e) => {
-                app.set_status_level(format!("Open failed: {e:#}"), StatusLevel::Error);
-                return None;
-            }
-        }
-    };
-    let Some((markdown, name)) = rendered else {
-        app.set_status_level(
-            "Open failed: that message is no longer in the store".to_string(),
-            StatusLevel::Error,
-        );
-        return None;
-    };
-    let written = render_temp_file(&row_id.to_string(), &name)
-        .and_then(|path| write_readonly(&path, &markdown).map(|()| path));
-    match written {
-        Ok(path) => Some(path),
+/// Daemon-routed since P5-U10c (`RD-06`, #0126): `message.materialise_markdown`
+/// writes the very same rendition, `store::read::render_markdown` over the
+/// same row at mode 0444 under a name slugged from the subject. The file moved
+/// with it, from the per-row `parse::materialisation_dir` to the handle
+/// directory of the daemon's own runtime, which is where the browser rendition
+/// and every materialised attachment already land; both are private, and what
+/// the editor is handed is a file either way.
+///
+/// The caller owes the handle a [`release`](commands::release_rendition) when
+/// the editor exits, which is what makes the rendition scratch: it unlinks the
+/// directory, where the pre-daemon flow unlinked the file.
+///
+/// A refusal is the one sentence this has always printed. `-32602` for a row
+/// nothing resolves to is the only case a user can meet - a message the store
+/// no longer holds - and a transport failure is indistinguishable from it at
+/// this seam, which is the reason `draft_path`'s two lines became one.
+pub(super) fn readonly_view_for_row(app: &mut App, row_id: i64) -> Option<commands::Rendition> {
+    let account = app.account_config.name.clone();
+    match commands::markdown_rendition(&daemon_door(app), &account, row_id) {
+        Ok(rendition) => Some(rendition),
         Err(e) => {
-            app.set_status_level(format!("Open failed: {e:#}"), StatusLevel::Error);
+            log::warn!("[actions] no read-only view for row {row_id}: {e}");
+            app.set_status_level(
+                "Open failed: that message is no longer in the store".to_string(),
+                StatusLevel::Error,
+            );
             None
         }
     }
@@ -451,42 +400,35 @@ fn open_readonly_view(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     row_id: i64,
 ) -> Result<()> {
-    let Some(path) = readonly_view_for_row(app, row_id) else {
+    let Some(rendition) = readonly_view_for_row(app, row_id) else {
         return Ok(());
     };
     // Neither half of the terminal dance may return before the rendition is
     // discarded: a terminal that cannot be suspended or restored must not
     // also leave the 0444 file behind for the next open to trip over.
     if let Err(e) = suspend_terminal(terminal) {
-        discard_readonly_view(&path);
+        discard_readonly_view(app, &rendition);
         return Err(e);
     }
-    let result = edit_file(&path);
+    let result = edit_file(&rendition.path);
     let resumed = resume_terminal(terminal);
-    finish_readonly_view(app, &path, result);
+    finish_readonly_view(app, &rendition, result);
     resumed
 }
 
-/// Remove the read-only view, saying so in the log when it survives (#0075).
+/// Release the read-only view's handle, which is what unlinks it (#0075).
 ///
-/// The removal is unconditional: a clean exit, an editor that never launched
+/// The release is unconditional: a clean exit, an editor that never launched
 /// and one that exited non-zero all land here, because the file is scratch in
-/// every case. A removal that fails is logged rather than swallowed, and no
-/// further: the next open rebuilds over whatever is left (`write_readonly`
-/// removes first), so it is a trace for the log, not an error the user can
-/// act on.
-fn discard_readonly_view(path: &Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        log::warn!(
-            "[open] the read-only view left {} behind: {e}",
-            path.display()
-        );
-    }
+/// every case. A refusal is a log line and no more, which is what an expired
+/// handle answers and what a user can do nothing about.
+fn discard_readonly_view(app: &mut App, rendition: &commands::Rendition) {
+    commands::release_rendition(&daemon_door(app), &rendition.handle);
 }
 
 /// Discard the read-only view and say how the editor session ended (#0075).
-fn finish_readonly_view(app: &mut App, path: &Path, result: Result<()>) {
-    discard_readonly_view(path);
+fn finish_readonly_view(app: &mut App, rendition: &commands::Rendition, result: Result<()>) {
+    discard_readonly_view(app, rendition);
     match result {
         Ok(()) => app.set_status(
             "Returned from the read-only copy (edits do not reach the message)".to_string(),
@@ -1978,22 +1920,22 @@ fn handle_search_result_action(
                 );
                 return Ok(());
             };
-            let mailbox = {
-                let Some((store, _blobs)) = store_for_mutation(app, "Open") else {
-                    return Ok(());
-                };
-                match crate::store::read::find_by_id(&store, msg.row_id()) {
-                    Ok(Some(row)) => row.mailbox,
-                    Ok(None) => {
-                        app.server_search_status =
-                            Some("That message is no longer in the store".to_string());
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        app.server_search_status = Some(format!("Open failed: {e:#}"));
-                        return Ok(());
-                    }
-                }
+            // The hit names its own mailbox: `source_label` is the sidebar
+            // label it was found under, and the sidebar is what turns that
+            // into the `messages.mailbox` key. The store read this arm made
+            // to learn the same thing went with `RD-07` (#0126).
+            let label = app.server_search_results[app.server_search_index]
+                .source_label
+                .clone();
+            let Some(mailbox) = app
+                .mailboxes
+                .iter()
+                .find(|m| m.label == label)
+                .map(mailbox_key)
+            else {
+                app.server_search_status =
+                    Some(format!("Cannot open: mailbox {label} is not in the sidebar"));
+                return Ok(());
             };
             app.close_overlay();
             app.open_message(msg, &mailbox);
@@ -2012,12 +1954,12 @@ fn handle_search_result_action(
                 );
                 return Ok(());
             };
-            let Some(path) = readonly_view_for_row(app, msg.row_id()) else {
+            let Some(rendition) = readonly_view_for_row(app, msg.row_id()) else {
                 app.server_search_status =
                     Some("Yank failed; see the activity log".to_string());
                 return Ok(());
             };
-            let shown = path.display().to_string();
+            let shown = rendition.path.display().to_string();
             app.server_search_status = match super::helpers::copy_to_clipboard(&shown) {
                 Ok(()) => Some(format!("Copied {shown}")),
                 Err(e) => Some(format!("Copy failed: {e:#}")),
@@ -3629,9 +3571,16 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
     }
 
     /// `e` on a received row writes the store's own rendition of the message
-    /// where the browser rendition and the invite source go, names it after
-    /// the subject so the editor's buffer title is recognisable, and makes it
-    /// unwritable (#0075).
+    /// where the browser rendition and every materialised attachment go, names
+    /// it after the subject so the editor's buffer title is recognisable, and
+    /// makes it unwritable (#0075).
+    ///
+    /// The directory moved in P5-U10c: `message.materialise_markdown` writes
+    /// it into a handle directory of the daemon's own runtime, where the
+    /// store-backed helper wrote it under `parse::materialisation_dir(<row>)`.
+    /// Both are private and what `$EDITOR` is handed is a file either way; the
+    /// new one is released rather than unlinked, which is what the release row
+    /// below asserts.
     #[test]
     fn the_read_only_view_lands_beside_the_other_renditions() {
         let fx = Fixture::new();
@@ -3641,15 +3590,18 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let row = fx.ingest(&email);
         let mut app = app_on_row(&fx, &row);
 
-        let path = readonly_view_for_row(&mut app, row.id).unwrap();
+        let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
+        let path = rendition.path.clone();
 
         assert_eq!(
-            path,
-            crate::parse::test_temp_root()
-                .join(format!("mailypoppins-{}", row.id))
-                .join("render")
-                .join("quarterly-report-q3.md"),
-            "the subject names the buffer, under the per-row render directory"
+            path.file_name().unwrap().to_string_lossy(),
+            "quarterly-report-q3.md",
+            "the subject names the buffer"
+        );
+        assert!(
+            path.starts_with(crate::config::mailypoppins_data_dir().join("runtime/handles")),
+            "a rendition lands in the handle family's own directory, got {}",
+            path.display()
         );
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("---\n"), "{content}");
@@ -3670,13 +3622,17 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             assert_eq!(mode & 0o777, 0o444, "{mode:o}");
         }
 
-        // A second open of the same row rebuilds the file rather than failing
-        // on the mode the first one left, and the copy is scratch: removing it
-        // is what the action does when the editor exits.
+        // A second open is a second handle over the same row, in a directory
+        // of its own: the mode the first one left cannot stop it, which is
+        // what the pre-daemon `write_readonly` had to remove the file for.
         let again = readonly_view_for_row(&mut app, row.id).unwrap();
-        assert_eq!(again, path);
-        std::fs::remove_file(&path).unwrap();
-        assert!(!path.exists());
+        assert_ne!(again.handle, rendition.handle);
+        assert_ne!(again.path, path);
+        assert_eq!(
+            std::fs::read_to_string(&again.path).unwrap(),
+            content,
+            "the rendition is rebuilt from the store on every open"
+        );
     }
 
     /// The rendition is scratch whichever way the editor session ends: a
@@ -3688,10 +3644,13 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let row = fx.ingest(&fixture_email("Quarterly Report"));
         let mut app = app_on_row(&fx, &row);
 
-        let path = readonly_view_for_row(&mut app, row.id).unwrap();
-        assert!(path.exists());
-        finish_readonly_view(&mut app, &path, Ok(()));
-        assert!(!path.exists(), "a clean exit takes the rendition with it");
+        let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
+        assert!(rendition.path.exists());
+        finish_readonly_view(&mut app, &rendition, Ok(()));
+        assert!(
+            !rendition.path.exists(),
+            "a clean exit releases the handle, which unlinks the rendition"
+        );
         assert_eq!(
             app.status_message.as_deref(),
             Some("Returned from the read-only copy (edits do not reach the message)")
@@ -3699,11 +3658,15 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
 
         // An editor that never launched, or exited non-zero, leaves nothing
         // behind either -- the status line is the only difference.
-        let path = readonly_view_for_row(&mut app, row.id).unwrap();
-        assert!(path.exists());
-        finish_readonly_view(&mut app, &path, Err(anyhow::anyhow!("editor exited with 1")));
+        let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
+        assert!(rendition.path.exists());
+        finish_readonly_view(
+            &mut app,
+            &rendition,
+            Err(anyhow::anyhow!("editor exited with 1")),
+        );
         assert!(
-            !path.exists(),
+            !rendition.path.exists(),
             "a failed editor takes the rendition with it too"
         );
         assert_eq!(
@@ -3722,9 +3685,9 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let row = fx.ingest(&email);
         let mut app = app_on_row(&fx, &row);
 
-        let path = readonly_view_for_row(&mut app, row.id).unwrap();
+        let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
         assert_eq!(
-            path.file_name().unwrap().to_string_lossy(),
+            rendition.path.file_name().unwrap().to_string_lossy(),
             format!("message-{}.md", row.id)
         );
 

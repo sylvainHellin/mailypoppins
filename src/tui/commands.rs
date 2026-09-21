@@ -827,6 +827,54 @@ pub(super) fn html_rendition(
         .ok_or_else(|| "the rendition was materialised without a path".to_string())
 }
 
+/// One materialised handle: the id that releases it and the file it wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Rendition {
+    /// The opaque handle, which is what `message.release_handle` takes.
+    pub handle: String,
+    /// The file the client opens.
+    pub path: PathBuf,
+}
+
+/// The store's own Markdown view of one row, as a file `$EDITOR` can open
+/// (`RD-06`, #0126, #0075).
+///
+/// `message.materialise_markdown` is the third member of the handle family and
+/// writes exactly what the TUI used to build inline: `render_markdown` over
+/// the row, at mode 0444, named after the subject. The handle comes back with
+/// the path because the view is scratch and the caller owes it a release the
+/// moment the editor exits; a handle nobody releases dies of its own lifetime
+/// ten minutes later, which is the family's rule and not this caller's.
+pub(super) fn markdown_rendition(
+    commands: &dyn Queries,
+    account: &str,
+    row_id: i64,
+) -> Result<Rendition, String> {
+    let handle = commands
+        .call(
+            "message.materialise_markdown",
+            json!({"account": account, "row_id": row_id}),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    match (handle["handle"].as_str(), handle["path"].as_str()) {
+        (Some(id), Some(path)) => Ok(Rendition {
+            handle: id.to_string(),
+            path: PathBuf::from(path),
+        }),
+        _ => Err("the rendition was materialised without a handle".to_string()),
+    }
+}
+
+/// Release one materialised handle, which unlinks the directory it wrote.
+///
+/// A failure is a log line and no more: an expired handle is already gone, and
+/// there is nothing a user can do about either.
+pub(super) fn release_rendition(commands: &dyn Queries, handle: &str) {
+    if let Err(e) = commands.call("message.release_handle", json!({"handle": handle})) {
+        log::warn!("[commands] releasing handle {handle}: {e:#}");
+    }
+}
+
 /// The file behind an indexed draft id, without a status line: the batch flows
 /// count their misses instead of narrating each one.
 ///
