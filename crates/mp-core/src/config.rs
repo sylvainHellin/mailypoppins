@@ -635,7 +635,7 @@ pub fn init_secrets_backend(config: &GlobalConfig) -> std::result::Result<(), cr
 pub const CONFIG_DIR_ENV: &str = "MAILYPOPPINS_CONFIG_DIR";
 
 fn home_dir() -> PathBuf {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(p) = test_env::home() {
         return p;
     }
@@ -664,7 +664,7 @@ pub fn config_dir() -> PathBuf {
 
 /// The value of `$MAILYPOPPINS_CONFIG_DIR`, through the test seam.
 fn config_dir_env() -> Option<String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(v) = test_env::config_dir() {
         return v;
     }
@@ -858,7 +858,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
 /// Reject out-of-range retention values at load time rather than at the first
 /// eviction pass. The global table is checked on its own so a config with no
 /// accounts still fails loudly.
-pub(crate) fn validate_retention(config: &GlobalConfig) -> Result<()> {
+pub fn validate_retention(config: &GlobalConfig) -> Result<()> {
     RetentionPolicy::resolve(&config.retention, &RetentionConfig::default())?;
     for account in &config.accounts {
         retention_for(config, account)?;
@@ -869,7 +869,7 @@ pub(crate) fn validate_retention(config: &GlobalConfig) -> Result<()> {
 /// Refuse to parse legacy configs containing `[accounts.directories]` or
 /// per-mailbox `local = "..."` keys. Per the v1.0 "no migrations" invariant,
 /// fail loud and instruct the user to re-run `mp config init`.
-pub(crate) fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
+pub fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
     let mut hits: Vec<&'static str> = Vec::new();
     if content.contains("[accounts.directories]")
         || content.contains("[directories]")
@@ -1021,8 +1021,9 @@ impl ImapConfig {
 /// A thread-local override removes the shared state instead of guarding it:
 /// libtest runs each test on its own thread, so a fixture's value is invisible
 /// to every other test, no lock is needed, and tests stay parallel.
-#[cfg(test)]
-pub(crate) mod test_env {
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_env {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
@@ -1034,26 +1035,26 @@ pub(crate) mod test_env {
         static CONFIG_DIR: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
     }
 
-    pub(crate) fn data_dir() -> Option<PathBuf> {
+    pub fn data_dir() -> Option<PathBuf> {
         DATA_DIR.with(|c| c.borrow().clone())
     }
 
-    pub(crate) fn home() -> Option<PathBuf> {
+    pub fn home() -> Option<PathBuf> {
         HOME.with(|c| c.borrow().clone())
     }
 
-    pub(crate) fn config_dir() -> Option<Option<String>> {
+    pub fn config_dir() -> Option<Option<String>> {
         CONFIG_DIR.with(|c| c.borrow().clone())
     }
 
     /// Points the data dir at `path` for this thread, restoring the previous
     /// override on drop.
-    pub(crate) struct DataDirOverride {
+    pub struct DataDirOverride {
         previous: Option<PathBuf>,
     }
 
     impl DataDirOverride {
-        pub(crate) fn set(path: impl Into<PathBuf>) -> Self {
+        pub fn set(path: impl Into<PathBuf>) -> Self {
             let previous = DATA_DIR.with(|c| c.borrow_mut().replace(path.into()));
             Self { previous }
         }
@@ -1070,13 +1071,13 @@ pub(crate) mod test_env {
     ///
     /// The override is dropped before the directory is removed, so nothing
     /// resolves into a tree that is going away.
-    pub(crate) struct TestDataDir {
+    pub struct TestDataDir {
         _override: DataDirOverride,
         _dir: tempfile::TempDir,
     }
 
     impl TestDataDir {
-        pub(crate) fn new() -> Self {
+        pub fn new() -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             Self {
                 _override: DataDirOverride::set(dir.path()),
@@ -1087,13 +1088,13 @@ pub(crate) mod test_env {
 
     /// Points `$HOME` at `home` and clears `$MAILYPOPPINS_CONFIG_DIR`, for
     /// this thread only.
-    pub(crate) struct ConfigDirOverride {
+    pub struct ConfigDirOverride {
         prev_home: Option<PathBuf>,
         prev_config: Option<Option<String>>,
     }
 
     impl ConfigDirOverride {
-        pub(crate) fn new(home: &Path) -> Self {
+        pub fn new(home: &Path) -> Self {
             let prev_home = HOME.with(|c| c.borrow_mut().replace(home.to_path_buf()));
             let prev_config = CONFIG_DIR.with(|c| c.borrow_mut().replace(None));
             Self {
@@ -1103,7 +1104,7 @@ pub(crate) mod test_env {
         }
 
         /// Set `$MAILYPOPPINS_CONFIG_DIR` to `value` for this thread.
-        pub(crate) fn set_config_dir(&self, value: &Path) {
+        pub fn set_config_dir(&self, value: &Path) {
             let value = value.to_string_lossy().into_owned();
             CONFIG_DIR.with(|c| *c.borrow_mut() = Some(Some(value)));
         }
@@ -1121,7 +1122,7 @@ pub(crate) mod test_env {
 
 /// Root data directory for all app-owned files.
 pub fn mailypoppins_data_dir() -> PathBuf {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(p) = test_env::data_dir() {
         return p;
     }

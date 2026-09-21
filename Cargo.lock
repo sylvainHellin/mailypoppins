@@ -2004,6 +2004,7 @@ dependencies = [
  "mailparse",
  "mime_guess",
  "mp-client",
+ "mp-core",
  "mp-protocol",
  "nucleo-matcher",
  "openssl",
@@ -2121,6 +2122,41 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
+]
+
+[[package]]
+name = "mp-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chacha20poly1305",
+ "chrono",
+ "chrono-tz",
+ "colored",
+ "dirs 5.0.1",
+ "hkdf",
+ "html2text",
+ "icalendar",
+ "keyring",
+ "log",
+ "machine-uid",
+ "mailparse",
+ "mp-protocol",
+ "rand 0.8.5",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "shellexpand",
+ "simplelog",
+ "tempfile",
+ "time",
+ "tokio",
+ "toml 0.8.23",
+ "zeroize",
 ]
 
 [[package]]

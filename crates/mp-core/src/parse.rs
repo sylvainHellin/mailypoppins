@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Never lowercase or slice blindly for offset math: `to_lowercase()` can
 /// change byte length, and a mid-character slice panics.
-pub(crate) fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+pub fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     if max_bytes >= s.len() {
         return s.len();
     }
@@ -66,7 +66,7 @@ fn insert_at_document_start(html: &str, tag: &str) -> String {
 /// If the browser honours that stale declaration, or defaults to latin-1 when
 /// none is declared, it misrenders non-ASCII characters. This *replaces* any
 /// existing charset with UTF-8, or inserts one if none is present.
-pub(crate) fn ensure_utf8_charset(html: &str) -> String {
+pub fn ensure_utf8_charset(html: &str) -> String {
     use regex::Regex;
 
     let meta = r#"<meta charset="UTF-8">"#;
@@ -122,7 +122,7 @@ pub(crate) fn ensure_utf8_charset(html: &str) -> String {
 /// replaced with ours, so our policy always wins. (Even if a sender CSP
 /// survived stripping, meta CSPs only intersect -- it could not weaken ours.)
 /// Idempotent: re-rendering already-tagged HTML does not duplicate the tag.
-pub(crate) fn inject_csp_meta(html: &str) -> String {
+pub fn inject_csp_meta(html: &str) -> String {
     use regex::Regex;
 
     const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="script-src 'none'; connect-src 'none'; img-src data:">"#;
@@ -560,7 +560,7 @@ fn mime_ext_for(mime: &str) -> &str {
     }
 }
 
-pub(crate) fn sanitize_attachment_filename(name: &str) -> String {
+pub fn sanitize_attachment_filename(name: &str) -> String {
     let name = name.replace(['/', '\\', '\0'], "_");
     let name: String = name.chars().filter(|c| !c.is_control()).collect();
     let name = name.trim().to_string();
@@ -645,11 +645,11 @@ pub fn materialisation_dir(stem: &str) -> Result<PathBuf> {
 /// `mp open` of that row uses. Keying the root on the test thread also keeps
 /// two tests that materialise the same row id off each other's files.
 fn materialisation_root() -> PathBuf {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         test_temp_root()
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         std::env::temp_dir()
     }
@@ -660,8 +660,9 @@ fn materialisation_root() -> PathBuf {
 /// Never removed while the process runs: another thread may still be reading
 /// under it. Everything lands under one `mailypoppins-tests/` parent, so a
 /// run's leftovers are `rm -rf "${TMPDIR:-/tmp}/mailypoppins-tests"`.
-#[cfg(test)]
-pub(crate) fn test_temp_root() -> PathBuf {
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_temp_root() -> PathBuf {
     let thread = std::thread::current();
     let key = match thread.name() {
         Some(name) => name

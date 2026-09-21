@@ -1,17 +1,16 @@
-pub mod types;
-pub mod timing;
-pub mod config;
-pub mod app_state;
-pub mod signatures;
-pub mod secrets;
+// The engine-free shared modules live in `mp-core` since #0126 (P5-U10a) and
+// are re-exported here under the paths they had when they were files in this
+// crate, so that `crate::config::…` / `mailypoppins::parse::…` keep resolving
+// everywhere: the CLI, the daemon, the TUI and the integration tests.
+pub use mp_core::{
+    app_state, calendar, config, notify, oauth2, parse, secrets, signatures, sync_health, timing,
+    types,
+};
+
 pub mod config_cmd;
 pub mod contacts;
 pub mod contacts_cmd;
-pub mod oauth2;
-pub mod notify;
 pub mod graph;
-pub mod parse;
-pub mod calendar;
 pub mod invite;
 pub mod reconcile;
 pub mod calendar_cmd;
@@ -32,6 +31,5 @@ pub mod pending_ops;
 pub mod send;
 pub mod store;
 pub mod sync;
-pub mod sync_health;
 pub mod tui;
 pub mod daemon;

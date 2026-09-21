@@ -9,13 +9,13 @@
 //! exists so the numbers below are a true "before".
 //!
 //! Counting is by **source scan**, not by what the harness selected: the guard
-//! reads the `.rs` files under `src/tui/` and counts `#[test]` /
+//! reads the `.rs` files under `src/tui/` and `crates/mp-core/src/` and counts `#[test]` /
 //! `#[tokio::test]` attributes, so it reports the same numbers whether or not
 //! those tests are part of the current selection. A guard that counted
 //! *executed* tests would disappear along with the tests it is meant to
 //! defend.
 //!
-//! The three floors started as the counts on the pre-workspace tree and are
+//! The four floors started as the counts on the pre-workspace tree and are
 //! raised to the actual counts as the tree grows: a floor left far below what
 //! the tree carries stops defending anything, because a whole file of tests
 //! can vanish without crossing it. They are floors, not equalities: adding
@@ -28,6 +28,11 @@ use std::path::{Path, PathBuf};
 
 /// Every `.rs` file below here is scanned for test attributes.
 const TUI_ROOT: &str = "src/tui";
+/// The shared crate (#0126, P5-U10a). Eleven modules and three half-modules
+/// left `src/` for `crates/mp-core/src/`, and their `#[cfg(test)] mod tests`
+/// blocks went with them: a floor here is what keeps `cargo test --workspace`
+/// from quietly stopping at the root package.
+const CORE_ROOT: &str = "crates/mp-core/src";
 /// The golden-frame suite: the TUI's only end-to-end rendering coverage, and
 /// the first thing a bad workspace layout drops.
 const GOLDEN_FRAMES: &str = "src/tui/ui/golden_frames.rs";
@@ -45,6 +50,12 @@ const MIN_GOLDEN_FRAME_TESTS: usize = 20;
 /// 18; the daemon-backed frames of P5-U1 added the two `…_daemon.snap` scenes
 /// that have no hand-built pair, so the actual is 20.
 const MIN_SNAPSHOT_FILES: usize = 20;
+/// `#[test]` / `#[tokio::test]` attributes under [`CORE_ROOT`].
+///
+/// The arithmetic of the move: the root package's `--lib` run was 1 398 before
+/// P5-U10a and is 1 145 after, and `mp-core`'s is 253. 1 145 + 253 = 1 398, so
+/// not one test was left behind, and 253 is the floor that says so.
+const MIN_CORE_TESTS: usize = 253;
 
 /// The sentence every failure here must contain, so that a CI log search for
 /// it finds the guard regardless of which of the three counts moved.
@@ -58,6 +69,17 @@ fn tui_test_count_has_not_dropped() {
         found >= MIN_TUI_TESTS,
         "{DROPPED}: {TUI_ROOT} declares {found} `#[test]`/`#[tokio::test]` attributes, \
          expected at least {MIN_TUI_TESTS}"
+    );
+}
+
+#[test]
+fn core_test_count_has_not_dropped() {
+    let root = repo_root().join(CORE_ROOT);
+    let found = test_attributes_under(&root);
+    assert!(
+        found >= MIN_CORE_TESTS,
+        "{DROPPED}: {CORE_ROOT} declares {found} `#[test]`/`#[tokio::test]` attributes, \
+         expected at least {MIN_CORE_TESTS}"
     );
 }
 

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mp-protocol", "crates/mp-client"]
+members = [".", "crates/mp-core", "crates/mp-protocol", "crates/mp-client"]
 # The Phase 1a spike carries its own `[workspace]` and its own lock file; the
 # desktop shell (Phase 6) will be a separate build system.
 exclude = ["spikes/*", "desktop"]
@@ -82,6 +82,9 @@ openssl = { version = "0.10", optional = true }
 # `use mp_protocol::…` / `use mp_client::…`; neither depends on `mailypoppins`.
 mp-protocol = { path = "crates/mp-protocol" }
 mp-client = { path = "crates/mp-client" }
+# The engine-free shared modules (#0126, P5-U10a). Every one of them is
+# re-exported from `src/lib.rs` under the path it had inside this crate.
+mp-core = { path = "crates/mp-core" }
 
 [features]
 # Statically link OpenSSL (built from source). Required for the
@@ -91,3 +94,9 @@ vendored-openssl = ["openssl/vendored"]
 [dev-dependencies]
 tempfile = "3"
 insta = "1.39"
+# `#[cfg(test)]` does not cross a crate boundary, so the test seams the moved
+# modules carry (`config::test_env`, `parse::test_temp_root`) are a feature
+# instead. Resolver v2 keeps a dev-dependency's features out of a plain
+# `cargo build`, so `mp` ships without them exactly as it did when the seams
+# were `#[cfg(test)]` in this crate.
+mp-core = { path = "crates/mp-core", features = ["test-support"] }

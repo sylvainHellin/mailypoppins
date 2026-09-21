@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// Collapse consecutive hyphens and trim leading/trailing hyphens.
 /// Used by slugify functions across multiple modules.
-pub(crate) fn collapse_hyphens(input: &str) -> String {
+pub fn collapse_hyphens(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut prev_hyphen = false;
     for c in input.chars() {
