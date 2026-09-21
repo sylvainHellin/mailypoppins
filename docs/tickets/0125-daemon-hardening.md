@@ -989,7 +989,7 @@ The unit test for the registry cap lives in `src/daemon/operations.rs`'s own `mo
 ## P6-U10: benchmarks and docs
 
 The phase's last unit, whose product is a measurement nobody had taken against the complete dispatcher plus the documents the other nine left owing.
-Seven commits and not one line of production code: `699d0d8` the gate evidence and the benchmarks, `0d48b4e` `docs/architecture.md`, `480b730` `docs/daemon-operations.md`, `3ab3666` `docs/release-process.md` and `docs/plans/preview-latency.md`, `73999d9` the CHANGELOG entry, `c91862e` the BACKLOG block, `e7d4a94` this ticket and `0e1fed4` two entries in `docs/lessons-learned.md`.
+Eight commits and not one line of production code, the ninth being this table's own hashes: `699d0d8` the gate evidence and the benchmarks, `0d48b4e` `docs/architecture.md`, `480b730` `docs/daemon-operations.md`, `3ab3666` `docs/release-process.md` and `docs/plans/preview-latency.md`, `73999d9` the CHANGELOG entry, `c91862e` the BACKLOG block, `e7d4a94` this ticket and `0e1fed4` two entries in `docs/lessons-learned.md`.
 
 ### The benchmark rerun
 
