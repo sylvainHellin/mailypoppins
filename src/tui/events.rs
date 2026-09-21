@@ -46,8 +46,8 @@ use std::time::Instant;
 use serde_json::json;
 
 use mp_protocol::events::{
-    Arrival, SyncCompleted, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED,
-    KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+    Arrival, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN, KIND_SEND_HOLD_CANCELLED,
+    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -269,6 +269,7 @@ impl App {
             | KIND_SEND_HOLD_TICK
             | KIND_SEND_HOLD_FIRED
             | KIND_SEND_HOLD_CANCELLED => self.apply_hold(event),
+            KIND_DAEMON_SHUTTING_DOWN => self.apply_shutting_down(),
             // The counts scope is the sidebar's and not the list's: a hundred
             // count changes for one mailbox may not each refetch the open list,
             // which is why `MessageRowDelta::decode` returns `None` for it.
@@ -393,6 +394,25 @@ impl App {
             }
         }
         Applied::Hold(operation)
+    }
+
+    /// The daemon is going away (P6-U4).
+    ///
+    /// One status line and nothing else. The socket closes a moment later, and
+    /// [`Incoming::Disconnected`] and the reconnect loop in
+    /// [`super::session`] take it from there with the sentence they already
+    /// show; what this adds is the second of warning between "the daemon
+    /// decided to leave" and "the daemon is unreachable", which is the
+    /// difference between an orderly stop and a crash.
+    ///
+    /// [`Applied::Ignored`] rather than a variant of its own: the five the
+    /// P5-U7 contract fixes are the whole of that enum, and a sixth would be a
+    /// contract change for a line the drain does not branch on. Nothing is
+    /// reloaded and nothing is refetched, which is what `Ignored` promises a
+    /// caller.
+    fn apply_shutting_down(&mut self) -> Applied {
+        self.set_status_level("Daemon stopping".to_string(), StatusLevel::Warning);
+        Applied::Ignored
     }
 
     /// A mailbox's counts moved, so the sidebar is read again from the daemon.
