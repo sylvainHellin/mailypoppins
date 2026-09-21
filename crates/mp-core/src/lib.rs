@@ -22,6 +22,7 @@ pub mod invite;
 pub mod notify;
 pub mod oauth2;
 pub mod parse;
+pub mod reconcile;
 pub mod search;
 pub mod secrets;
 pub mod selector;
