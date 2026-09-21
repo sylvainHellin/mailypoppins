@@ -11,6 +11,8 @@ mod events_resync_tests;
 #[cfg(test)]
 mod events_tests;
 mod helpers;
+#[cfg(test)]
+mod hold_tests;
 pub mod queries;
 mod runtime;
 pub mod session;
