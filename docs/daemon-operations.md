@@ -7,7 +7,7 @@ Everything here ships in every build: P4-U1 removed the `daemon` cargo feature, 
 The subcommands are still hidden from `mp --help`, because `tests/cli_help_snapshot.rs` pins the help surface byte-identical to `docs/baselines/pre-daemon/cli-help.txt` and a later unit of the migration moves it deliberately (`.agents/workflow/native-gui-daemon/plan.md`).
 `mp daemon --help` and `mp account --help` still render; a hidden command is absent from the parent's `Commands:` block, not from the binary.
 
-## The five lifecycle commands
+## The lifecycle commands
 
 `mp daemon run` is foreground mode and the only one that becomes a daemon.
 It never connects to another daemon.
@@ -404,12 +404,55 @@ A client that connects while a window is running finds the hold in its own `stat
 
 ## Logs
 
-`mp daemon start` points the detached child's stdout and stderr at `<data_dir>/logs/daemon.log`, opened in append mode, and that is the path the exit-4 diagnostic prints.
-It holds whatever the process wrote outside the logging framework, including a panic.
-
-The structured log is the ordinary one, `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`, and every daemon line there is prefixed `[daemon]`.
+**The daemon's own log is `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`**, the ordinary structured log, and every daemon line there is prefixed `[daemon]`.
+It is what `diagnostic.log_path` answers, what `mp daemon logs` reads, what `sf` in the TUI opens (`INT-02`, `OBS-05`) and what a support bundle's `log.txt` carries.
 Filter a startup with `rg '\[daemon\]' <data_dir>/logs/mailypoppins-*.log`.
-The start-failure diagnostic names both files, since the reason is usually in the second one and the first is where an early crash lands.
+
+`<data_dir>/logs/daemon.log` is **not** that file and is not where the daemon logs.
+It is only where `mp daemon start` points a detached child's stdout and stderr, opened in append mode, so it holds whatever the process wrote outside the logging framework, a panic among them, and it is empty for a daemon started in the foreground.
+The exit-4 diagnostic prints both, since the reason is usually in the structured one and an early crash lands in the other.
+
+A line of the structured log is `2026-09-21 19:05:20.081 [INFO] [(thread) target: ]message`, the simplelog `WriteLogger` `crate::config::init_logging` installs; the thread id and the module path appear at `DEBUG` and below only, which is what that writer's level-dependent formatting produces.
+`src/timing.rs` is a producer of `[TIMING]` lines in that same file and not a second format.
+
+## Diagnostics
+
+Three hidden commands under `mp daemon`, all three reaching a running daemon and none of them starting one: a command that reports on a daemon must not conjure the thing it reports on.
+All three print the two lines `mp daemon status` prints when nothing answers, and exit 1:
+
+```text
+✗ no daemon running
+  start one:  mp daemon start
+```
+
+`mp daemon health [--json]` prints a verdict line, a labelled block, one line per account and one line per check prefixed `✓`, `⚠` or `✗`.
+Every check `ok` is `✓ daemon healthy` and exit 0; a warning is `✓ daemon healthy, 1 check needs attention` and still exit 0, because a lock held elsewhere is a normal state of this machine; any failure is `✗ daemon unhealthy, 1 check failing` and exit 1, so a script running this as a probe learns something.
+The checks are `config_loaded`, `store_open`, `socket_owner`, `log_writable` and one `account:<name>` per configured account; `docs/daemon-protocol.md` fixes what each one means.
+`config_loaded` re-reads the file on disk rather than reporting the live snapshot, which is why a `config.reload` refused with `-32007` leaves it failing while the daemon keeps serving the configuration it has.
+
+`mp daemon logs [--lines N] [--level L] [--json]` prints the tail of the structured log and **nothing** around it, because a header would end up in every `mp daemon logs | grep`.
+`--lines` defaults to 200 and above 5000 is refused naming the cap; `--level` is a minimum and takes `trace`, `debug`, `info`, `warn` or `error`.
+A line the format does not explain is printed whole and survives a `--level` filter: those lines are what a crash looks like.
+
+`mp daemon support-bundle [OUT] [--no-redact]` writes a **directory** of five files - `config.toml`, `daemon-status.json`, `health.json`, `log.txt`, `version.txt` - and reports what it did:
+
+```text
+✓ wrote /home/alice/.local/share/mailypoppins/support-bundle-20260921-194933-410
+  files:      5
+  redactions: 5
+```
+
+It is a directory and not an archive because this tree links neither `tar` nor `flate2`; a user who wants one attachment runs `tar czf bundle.tar.gz <the directory>`.
+`OUT` is made absolute against the shell's working directory before it crosses the socket, and the default lands under the data directory.
+
+Redaction is on by default and is two passes: the keys `password`, `client_secret`, `access_token`, `refresh_token` and any `*_secret` or `*_token` in `config.toml` decide what is a secret, and every value so identified is then struck from **every** file of the bundle, `log.txt` included, because a library that logged a credential did not know it was one.
+The replacement is the literal `<redacted>` and the key stays, so a reader sees that a password was set.
+Email addresses and OAuth2 client ids stay verbatim: a bundle without them is useless and neither is a credential.
+`secrets.enc` and `tokens/` are never copied, redacted or not, because ciphertext is still a credential.
+`--no-redact` copies every value verbatim and says so on the line where the count would have been - `  redactions: none, --no-redact was given` - never a `0`: a bundle full of credentials must not look like any other bundle.
+
+The daemon re-evaluates its checks when an account runtime reports, when a `config.reload` happens or is refused, and every 60 seconds as a safety net, and publishes `diagnostic.check_changed` for a check whose **status** moved.
+The TUI lands each one as an entry in its activity ring (`sl`), at the level the status maps to, and never on the status line: a check the user did not ask about may not overwrite the sentence his own last action put there.
 
 ## Recovery
 

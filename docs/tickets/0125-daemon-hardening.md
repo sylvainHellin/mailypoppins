@@ -25,7 +25,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U5 | T | this commit | login-start service units (LIF-06), the contract | done (tests) |
 | P6-U6 | I | this commit | login-start service units | done |
 | P6-U7 | T | this commit | diagnostics, the contract | done (tests) |
-| P6-U8 | I | - | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | not started |
+| P6-U8 | I | this commit | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | done |
 | P6-U9 | I | - | soak tests | not started |
 | P6-U10 | I | - | benchmarks and docs | not started |
 
@@ -865,4 +865,60 @@ The website pages under `website/src/pages/` are hand-derived from `mp --help`, 
 `TMPDIR=/var/tmp cargo test --workspace --offline` with both files set aside and `mod diagnostics_tests;` commented out -> **2279 passed**, 0 failed, 5 ignored, the count at `219811c`; with both present and `--no-fail-fast` -> 2284 passed, 40 failed, which is 2279 plus the five contract rows a missing implementation can still satisfy, and the forty that cannot. Nothing else is disturbed.
 `cargo clippy --offline --test daemon_diagnostics` and `--lib` report nothing in either new file.
 `rustfmt --edition 2021 --check` leaves both unchanged.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
+
+## P6-U8: diagnostics
+
+`src/daemon/diagnostics.rs` is the whole of the assembly - the checks, the ledger, the log reader, the bundle writer - and everything else is routing: four method arms, three CLI commands, one event kind, one filled snapshot array, one TUI arm.
+All 36 rows of `tests/daemon_diagnostics.rs` and all 9 of `src/tui/diagnostics_tests.rs` pass without either file moving.
+
+### Seven decisions the contract did not settle
+
+- **`config_loaded` re-reads the file, it does not report the live snapshot.** A `config.reload` refused with `-32007` leaves `ConfigStore` serving the previous configuration, correctly, so a check derived from the store would say `ok` while the file on disk is broken - which is precisely the state `a_check_that_flips_publishes_an_event` triggers. The check reads `config.toml` and runs `validate_document` against it, the same pure function `config.validate` uses, so the detail is the parser's own sentence and the check is about the file rather than about what the daemon happens to be holding.
+- **`store_open` counts stores that exist; it does not open them.** `Store::open` *creates* an empty SQLite database, so a check that opened one would make an account with no store pass the check and leave a file behind it. The check stats `store_path(account)` instead, which is exactly the condition `start_account` already refuses on.
+- **`watcher` is derived from the readiness, not from a task handle.** An account with no server is local-only and gets no watcher task at all (`watcher::spawn` returns early), and `health_reports_one_entry_per_account` asserts `running` for two seeded local-only accounts. The daemon watches exactly the accounts whose runtime came up `Ready`, so that is what the field reports; a blocked runtime watches nothing because the engine holding the lock is watching the same mailbox.
+- **A check name the ledger has never seen counts as having been `ok`.** The alternative, recording a first observation silently, would mean the `config_loaded` flip the rows trigger publishes nothing unless something seeded the ledger first, and a seeding pass at startup is a fifth trigger to get wrong. With this rule there is no seeding: the first evaluation announces what is wrong, says nothing about what is right, and an account added by a reload that cannot come up is announced rather than silently recorded.
+- **Reads evaluate and publish nothing.** `diagnostic.health` and the bootstrap's `snapshot.diagnostics` call `Diagnostics::checks`, which touches no ledger; only `Diagnostics::refresh` compares and publishes. That is what makes `a_check_that_did_not_flip_publishes_nothing` true of three `diagnostic.health` calls, and it keeps a bootstrap from announcing the very checks it is handing over in the same frame.
+- **`refresh` has three triggers and no more.** An account runtime that reported (in `spawn_account_runtimes`, after `start_account` returns), a `config.reload` (in the method arm, before the refusal is returned, so both outcomes refresh), and a 60-second sweep that stops at the same signal the draft watcher does. The sweep is a safety net for the socket or the log file going away under a daemon nobody is talking to, not the trigger: it is far too slow to be the one the rows depend on, deliberately.
+- **`last_sync` lives beside the canonical state, not in it.** `tests/daemon_sync_outcome.rs` pins that a `sync.completed` reduces into *no* snapshot, and reducing it into `AccountView.health` broke that row. `CanonicalState` keeps a `last_sync` map that `apply` writes when the change is a `SyncCompleted`: a health report is a statement about this process rather than state a client mirrors, so the one fact it needs is recorded where the change already passes through.
+
+### The log format, and the one thing the parser will not guess
+
+The writer is simplelog's `WriteLogger` at `LevelFilter::Debug` with the default `Config`, which emits the thread id and the target **only** at `DEBUG` and below (`config.thread` and `config.target` are both `LevelFilter::Debug`, and a field is written when `config.<field> <= record.level()`).
+So `parse_line` reads a thread and a target at those two levels and at no other: an `INFO` line reading `warning: the disk is full` carries a token ending in a colon too, and a parser that took it for a target would eat half the sentence.
+A line with no timestamp survives a `level` filter and is dropped by a `since` filter, which the contract only half fixes: a line that cannot be shown to have happened after an instant is not evidence that it did, and `logs_filters_by_since` asserts an empty answer for `since = now + 1h` over a file the daemon may well have written a continuation line into.
+
+### Test edits made
+
+Two, both forced by a name in the contract, neither in the pre-approved list:
+
+- **`tests/daemon_admin_slice.rs`**: `DIAGNOSTIC_METHODS` from one entry to five. It carries `const _: () = assert!(DIAGNOSTIC_METHOD_SPECS.len() == DIAGNOSTIC_METHODS.len())`, a compile-time assertion, so the tree does not build until it agrees with the family the P6-U7 contract grew. No row of that file reads the array for anything else.
+- **`tests/daemon_bootstrap.rs`**: `assert_opening_and_zeroed` no longer asserts `diagnostics == []`. That fixture's accounts have no store, which is exactly the `store_open` and `account:<name>` failure `tests/daemon_diagnostics.rs` pins, so the two contracts cannot both hold over it. The row now asserts the *shape* instead of the absence - every entry an object of three strings whose `status` is not `ok` - which is a real assertion about the array and not a hole, and the header carries the `P6-U8 edit:` note the file's own `P5-U8 edit:` note set the precedent for.
+
+The pre-approved edits were made as listed: `src/daemon/methods/diagnostic.rs` (module header, the spec array, `the_sweep_is_a_durable_operation`, which now finds the sweep by name instead of indexing `[0]`), `src/daemon/session.rs` (four names around `diagnostic.store_gc`, in method-name order), `src/daemon/state/snapshot.rs` (the literal and its doc comment), `src/daemon/lifecycle.rs` (three `DaemonAction` variants, their `dispatch` arms and the module header), `crates/mp-protocol/src/events.rs` (`KIND_DIAGNOSTIC_CHECK_CHANGED`), `docs/daemon-protocol.md`, `docs/daemon-operations.md` and `docs/parity-matrix.md`.
+
+**`CHANGELOG.md` was not touched.** No unit of this phase has written a `#0125` entry, and P6-U10 owns the ticket's changelog line; a half-phase entry now is one P6-U10 would have to rewrite.
+
+### Four new fixtures
+
+`crates/mp-protocol/fixtures/diagnostic.health.request.json`, `diagnostic.health.response.json`, `diagnostic.logs.response.json` and `notification.diagnostic_check_changed.json`, written canonically (`to_string_pretty`, sorted keys, trailing newline) and picked up by `tests/daemon_protocol_fixtures.rs` through its own discovery, which needs no list to be edited.
+The logs fixture carries all three line shapes the parser produces: an `INFO` line with no target, a `DEBUG` line with one, and a panic line with nulls.
+
+### Size
+
+**1725 production lines added, 176 of test**, against a budget of ~900.
+The overrun is `src/daemon/diagnostics.rs`, whose 969 non-test lines are 63 of module header and 248 of item comment, leaving about 620 of code for a health assembly, five checks, a log parser, a bundle writer and the redaction pass.
+Splitting it would not have made it smaller: the checks, the ledger the flips are compared against and the bundle that serialises the report are one subject, and the file is where that subject is written down.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_diagnostics` -> **36 passed**, three runs, 2.1 s each; `--lib diagnostics_tests` -> **9 passed**, three runs.
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2335 passed, 0 failed**, 5 ignored, which is 2279 at `62d9ae1` plus the 36 and the 9 contract rows and the 11 unit tests this unit added.
+`--test daemon_bootstrap` 28; `--test daemon_events` 29; `--test daemon_protocol_fixtures` 17; `--test daemon_shutdown` 12; `--lib events_tests` 20; the two golden-frame suites 20 and 22, with no snapshot re-approved and `git status --porcelain -- '*snapshots*'` empty.
+`git diff --stat 62d9ae1..HEAD -- tests/ src/tui/*_tests.rs` -> the two files above and nothing else.
+`cargo clippy --workspace --offline --all-targets` -> 38 warnings, the count at `219811c`, none in a file this unit touched.
+`MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` and `diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` both empty: three more subcommands under a hidden subtree are invisible to the walk.
+`rustfmt --edition 2021` was run on `src/daemon/diagnostics.rs`, `src/daemon/lifecycle.rs` and `src/daemon/methods/diagnostic.rs`, all three rustfmt-clean before this unit; the one long signature this unit added to `src/daemon/state/mod.rs` was wrapped by hand, because that file is not rustfmt-clean and `cargo fmt` is never run here.
+
+The smoke run, over an `examples/mkfixture` root in a sandbox `HOME`, with `password = "P6U8-SMOKE-PASSWORD"` seeded into the fixture's `config.toml`: `mp daemon start`, then `mp daemon health` printing `✓ daemon healthy` with both accounts `ready` and all six checks `✓`, `mp daemon logs --lines 5` printing five lines and no banner, `mp daemon support-bundle /var/tmp/mp-p6u8-bundle` printing `✓ wrote …` / `files: 5` / `redactions: 1`, `rg -l 'P6U8-SMOKE-PASSWORD' /var/tmp/mp-p6u8-bundle` empty with `config.toml` reading `password = "<redacted>"`, `mp daemon stop` -> `✓ daemon stopped`, and `mp daemon health` afterwards printing the two-line refusal and exiting 1.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.

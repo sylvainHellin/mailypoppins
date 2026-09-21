@@ -1159,7 +1159,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `diagnostic.log_path`, which answers the dated file the daemon is writing (`<data_dir>/logs/mailypoppins-<date>.log`), the same file the TUI's `sf` opens
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_diagnostics.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
-- Status: not started; the contract is pinned (P6-U7) and the implementation is P6-U8
+- Status: routed (P6-U8)
 - Note: the GUI provides a log view plus an explicit reveal or open-in-editor action; `mp daemon logs` is the same file paged over the socket.
 
 ### INT-03 Clipboard writes for selectors, paths, and addresses
@@ -1245,7 +1245,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `diagnostic.log_path` and `diagnostic.logs`; the daemon writes its own log, the dated `<data_dir>/logs/mailypoppins-<date>.log` that `src/config.rs` installs and `src/timing.rs` writes its `[TIMING]` lines into
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/timing.rs`; the wire surface in `tests/daemon_diagnostics.rs`, contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
-- Status: not started; the contract is pinned (P6-U7) and the implementation is P6-U8
+- Status: routed (P6-U8)
 - Note: `<data_dir>/logs/daemon.log` is a different file, the stdio of a detached `mp daemon start`, and is empty for a daemon started in the foreground.
 
 ### OBS-06 Dump the key bindings as Markdown or JSON
@@ -1347,7 +1347,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Daemon surface: `diagnostic.health`, `diagnostic.logs`, `diagnostic.log_path` and `diagnostic.support_bundle`, fronted by `mp daemon health`, `mp daemon logs` and `mp daemon support-bundle` under the hidden `daemon` subtree; the non-`ok` checks also fill `state.bootstrap`'s `diagnostics` array and travel as the `diagnostic.check_changed` event
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_diagnostics.rs` and `src/tui/diagnostics_tests.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
-- Status: not started; the contract is pinned (P6-U7) and the implementation is P6-U8
+- Status: routed (P6-U8)
 - Note: the support bundle is a directory of five files rather than an archive, because this tree links neither `tar` nor `flate2`, and every secret value the configuration carries is struck from every file in it.
 
 ### LIF-08 On-demand automatic start from any normal client
