@@ -10,6 +10,7 @@ created: 2026-09-22
 Status: in progress. P5-U10a and P5-U10b have landed: `crates/mp-core` holds the engine-free closure the TUI reaches, eleven modules whole and the engine-free half of six more.
 No call site outside the moved files changed, and no behaviour changed: the help surface, the key dump and the twenty golden frames are byte-identical, and the workspace test count did not drop.
 **P5-U10b landed its splits and not its surfaces**: `RD-06`, `RD-07`, `LST-08`, `LST-09` and the wire-row types are unbuilt, so the allow-list is ten rows still and P5-U10c carries them along with the move.
+P5-U10c-T has since written their contract: the protocol entries, the fixtures, the wire types and the failing tests are in the tree, and both guards are at their post-unit expectation, so they fail until the implementer serves the methods.
 
 Ninth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.7), carrying the unit the plan wrote as one and [#0124](0124-tui-cutover.md) found to be three.
 
@@ -24,6 +25,7 @@ That ticket's proposed sequencing is this one's unit table.
 |---|---|---|---|---|
 | P5-U10a | I | `0d712c7`, `11370eb`, `9311bef`, `84385b1`, `e9a2773` | the shared crate: `crates/mp-core`, the eleven-module engine-free closure plus the `selector`, `search` and `invite` splits | done |
 | P5-U10b | I | `3a93341`, `3a2dc58`, `e88eb89`, `de575de`, `25a6ee6` | the three remaining splits (`reconcile`, `contacts`, `draft`), the `addresses` move out of `send`, and the draft body through `draft.path` | done, partially: the four surfaces did not land |
+| P5-U10c-T | T | see below | the contract for the four surfaces: `docs/daemon-protocol.md`, seven fixtures, `mp_protocol::listing`, three test files and both guards moved to their post-unit state | done |
 | P5-U10c | I | - | `RD-06`, `RD-07`, `LST-08`, `LST-09`, the wire-row types, and then the move itself: `git mv src/tui crates/mp-tui/src`, the test modules that link the engine, and the P2-U1a guard's scan roots | pending |
 
 ## P5-U10a: the shared crate
@@ -259,3 +261,123 @@ The files this unit wrote (`crates/mp-core/src/contacts/mod.rs`, `src/contacts/m
 `scripts/capture-cli-help.sh` and `mp dump-keys --json`, from a binary rebuilt in the same run, diff empty against `docs/baselines/pre-daemon/cli-help.txt` and `docs/baselines/pre-daemon/tui-keys.json`.
 
 `cargo clippy --workspace --offline --all-targets` -> **37 distinct warnings**, the baseline's 38 minus the `items_after_test_module` above, none of them on a line this unit wrote.
+
+## P5-U10c-T: the contract for the four surfaces
+
+A T unit: the protocol doc entries, the fixtures, the wire types and the failing tests for the four surfaces that stand between `src/tui/` and a crate that does not link the engine.
+It implements nothing in `src/daemon/methods/`, `src/tui/`, `crates/mp-client/` or the engine, and the implementer does not edit the test files it wrote.
+
+### The contract
+
+| method | kind | params | result | errors | events |
+|---|---|---|---|---|---|
+| `message.materialise_markdown` | client_integration, durable | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` | `-32602` bad or absent or doubled address, `-32005` unknown account, `-32006` no store | none |
+| `message.fetch` | operation, durable | `{account, mailbox, message_id}` | `{operation_id}`, settling `{account, mailbox, uid, row_id, selector, already_present}` | `-32602` missing or unresolvable `mailbox`/`message_id`, `-32005`, `-32006` | `operation.finished`; `state.invalidate` of `mailbox:<account>/<slug>` with `{"query": "counts"}` when a row was written |
+| `message.search_server` | operation, durable | `{account, query, mailboxes?, limit?, exclude_message_ids?}` | `{operation_id}`, settling `{account, query, hits, deduplicated, unreachable: [{mailbox, error}]}` | `-32602` unparseable query, unknown mailbox, bad `limit` or non-string exclusions; `-32005`; `-32006` `local_only` | `message.server_hit` `{operation_id, hit}` per hit, then `operation.finished` |
+| `message.list` (and `message.search`) | query, unchanged | unchanged | row gains `selector` | unchanged | unchanged |
+
+`ServerSearchHit`, `MessageListRow`, `MessageListing` and `MessageFlags` are the new `mp_protocol::listing` module.
+
+### The decisions
+
+**`message.materialise_markdown`, not `message.markdown` or `message.materialize`.**
+The store keeps no Markdown file per message: `src/store/read.rs`'s `render_markdown` builds the frontmatter from the `messages` row and the body from the blob store on every call, and the file-era `.md` files died with #0037.
+So a path is not the answer and a handle is, which puts the method in the family that already owns handles: same result shape, same `<data_dir>/runtime/handles/<handle>/<name>` layout, same `message.release_handle`, same ten-minute lifetime, same `ANO-6` pin.
+A fourth spelling would be a second lifetime rule for one kind of scratch file.
+It is the one member of the family that takes `row_id`, because `readonly_view_for_row(app, row_id)` is the call site and the TUI holds a `MessageRef` and nothing else (#0050).
+The file is written 0444, which is #0075's rule moving to the daemon with the bytes.
+
+**`message.search_server`, not `message.list_server`.**
+`docs/parity-matrix.md`'s `LST-08` note names the method `message.list_server`; that name has been taken since P4-U10, by `mp fetch`'s one-mailbox query over `criteria`.
+`LST-06`'s own note in the same document already names the right one, "the twin of `message.list_server`", and both rows are corrected to it.
+
+**The selector goes on the row, not behind a method.**
+The daemon has the string in hand when it builds the row, so a `message.selector` query would be a round trip per keypress to learn something the listing could have said, and `message.get` would be a whole-message read.
+The cost is the sixteenth key of a row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fifteen, and this is about forty bytes of ASCII more per row, paid once per listing rather than once per copy.
+It is rendered daemon-side by `Selector::for_message` rather than composed client-side from `message_id` and the answer's `mailbox`, which a client could do: composing it would be a second implementation of the percent-encoding and of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins only the CLI's.
+
+**`message.fetch` is idempotent, not a refusal.**
+A message the store already holds answers with that row and `already_present: true` and opens no session.
+The overlay keeps its "Already in the local store" line by branching on the boolean.
+Two reasons: a client that raced a sync would otherwise be handed an error for the state it wanted, and the short-circuit runs before the backend is resolved, which is the only reason any success path of this method is reachable in a test.
+
+**A mailbox that fails does not fail a server search.**
+`lib_do_multi_search` logs a warning per mailbox and keeps going; `unreachable` is that list and the operation still `succeeded`.
+What fails the operation is a credential that cannot be resolved, which happens once, before any mailbox is selected.
+
+**The draft listing needed no protocol change.**
+The brief asked for `DraftRow`/`SkippedDraft` wire types; `mp_protocol::draft::DraftListing` is already one, and P5-U4 already gave `DraftEntry` the `cc` and `date` that `entry_from_draft` reads, with `DraftSkip` `{path, error}` for `entry_from_skip`.
+So the draft half of the wire rows is a routing change in `src/tui/queries.rs` and `src/tui/app/types.rs` and nothing else, and the two rows that assert it pass at HEAD deliberately, as the pin that says so.
+
+**Offline testability.**
+There is no fake IMAP server in this tree, so neither `message.fetch`'s nor `message.search_server`'s happy path can run offline; this is a known gap every server-leg slice shares.
+The seam the rows use instead is `tests/support/sync_fixture.rs`'s `gamma`, which configures a server on the discard port and has no credentials, so resolution refuses before a socket opens.
+What is pinned is the shape: registration, parameter validation, the two account refusals, the idempotent fetch (which needs no server at all), and an unreachable account settling as a **failed operation** rather than throwing at the call.
+The streamed hit, the dedup and the ingest are NOT TESTABLE offline; the owner's manual check is the five-step list in `tests/daemon_server_leg_slice.rs`'s header.
+
+### The tests, and what each one fails on at HEAD
+
+| file | test | fails at HEAD with |
+|---|---|---|
+| `tests/daemon_markdown_slice.rs` | `the_daemon_advertises_the_markdown_rendition` | the name is in no capability list |
+| | `the_rendition_is_the_store_s_own_markdown_in_a_read_only_file` | `-32601` |
+| | `the_rendition_is_released_by_the_family_s_release_method` | `-32601` |
+| | `the_three_addresses_reach_the_same_message` | `-32601` |
+| | `a_bad_address_is_invalid_params` | `-32601` where `-32602` is owed |
+| | `the_account_refusals_are_the_read_family_s` | `-32601` where `-32005` is owed |
+| | `a_message_with_no_stored_body_still_renders` | `-32601` |
+| `tests/daemon_server_leg_slice.rs` | `the_daemon_advertises_both_server_leg_methods` | neither name is registered |
+| | `a_fetch_validates_its_address` | `-32601` where `-32602` is owed |
+| | `fetching_a_message_the_store_already_holds_is_idempotent` | `-32601` |
+| | `a_fetch_from_an_unreachable_account_settles_as_a_failed_operation` | `-32601` |
+| | `the_server_search_validates_its_parameters` | `-32601` where `-32602` is owed |
+| | `a_server_search_over_an_unreachable_account_settles_as_a_failed_operation` | `-32601` |
+| | `the_server_search_settle_shape_is_the_documented_one` | `-32601` |
+| `tests/daemon_wire_rows.rs` | `every_listed_row_carries_the_selector_the_cli_would_print` | the served row has fourteen keys, not fifteen |
+| | `a_search_hit_carries_the_same_selector_the_listing_gave` | the hit has no `selector` |
+| | `the_wire_row_carries_every_field_a_list_entry_is_built_from` | `selector: ""` against `mp://alpha/inbox/bericht@example.com` |
+| | `the_draft_listing_carries_every_field_the_drafts_list_renders` | passes, deliberately |
+| | `a_parse_skipped_draft_travels_with_its_reason` | passes, deliberately |
+| `tests/daemon_read_only_methods.rs` | `message_list_reports_the_store_rows_newest_first` | the served row has no `selector` |
+| `tests/architecture_boundaries.rs` | `tui_engine_imports_match_the_allow_list` | 10 in the tree, 7 in the fixture |
+| `src/tui/actions_tests.rs` | `the_actions_that_could_be_routed_were` | 7 in the tree, 2 in the table |
+
+`tests/daemon_protocol_fixtures.rs` passes at HEAD and is meant to: a fixture and the key list that pins it are both static files, so the pair moves together and the *daemon's* disagreement with them surfaces in the slice rows above.
+
+### The guards, before and after
+
+`tests/fixtures/tui-engine-imports.txt`: **10 -> 7**.
+The three that go are `helpers.rs imap_client`, `helpers.rs store` (both `lib_do_multi_search` and `resolve_fetched_hit`, which `message.search_server` absorbs) and `queries.rs store` (the two type imports, which become `mp_protocol::listing` and `mp_protocol::draft`).
+
+The seven that stay, and why, because the P5-U10b table's "floor of four" undercounts by three:
+
+| row | why it survives this unit |
+|---|---|
+| `actions.rs store` | `store_for_mutation` still opens a store for the `OpenEventSource` arm's `invite.ics` blob, which none of the four surfaces touches, and `actions.rs` has two `#[cfg(test)] use crate::store::…` besides |
+| `app/calendar_view.rs store` | sessionless oracle |
+| `app/mod.rs store` | sessionless oracle |
+| `app/store_rows.rs store` | sessionless oracle |
+| `app/types.rs ingest` | test module |
+| `app/types.rs store` | production lines 8-9 go with the wire rows, but three `#[cfg(test)]` imports remain |
+| `mod.rs store` | the drafts-directory poll loop's `drafts::fingerprint` / `drafts::refresh_account`, which is `draft.watch`'s business and not the search leg's; the P5-U10b table filed it under `LST-08` by mistake |
+
+The allow-list format permits no comment line: `the_allow_list_is_sorted_deduped_and_names_only_engine_modules` asserts the file is exactly `render(parse(file))`, so the reasons live here.
+
+`src/tui/actions_tests.rs`'s `TUI_ACTION_ENGINE_RESIDUE`: **7 -> 2**.
+`fetch_search_hit`, `ingest_search_hit`, `readonly_view_for_row`, `handle_search_result_action` and `selected_selector` all go.
+What is left is `handle_action -> store_for_mutation(` (the invite blob) and `store_for_mutation -> open_store(` (the helper that arm still calls), and the second row's reason is rewritten: it was "it dies with the last of them", which stops being true the moment the renditions leave and the invite read stays.
+
+### What is left for the implementer
+
+- Serve the three methods, and put `selector` on the `message.list` row and the `message.search` hit.
+- `message.search_server` needs `search::to_imap` / `to_gmail_search_command`, the per-mailbox budget split and the plain-IMAP `has:attachment` post-filter, all of which are `src/tui/helpers.rs`'s `lib_do_multi_search` moving rather than being rewritten; the Graph leg is `lib_do_multi_search_graph`.
+- `message.fetch` is `src/tui/actions.rs`'s `fetch_search_hit` plus `ingest_search_hit`, with the Graph/IMAP split intact.
+- Route the client side: `readonly_view_for_row`, `handle_search_result_action`'s three arms, `selected_selector`, `fetch_search_hit`, `lib_do_multi_search`, `entry_from_row`'s signature, `indexed_drafts` and `src/main.rs`'s `row_from_wire`.
+- `src/tui/actions.rs`'s `SearchResultJump` reads a row's mailbox through `store_for_mutation` today; the hit carries its own `mailbox`, so that arm has no store read left.
+- Then strike the rows from both guards, which this unit has already done in advance: they fail now and pass then.
+
+### Open decisions left to the implementer
+
+- Whether `message.materialise_attachment` and `message.materialise_html` also gain `row_id`. This unit gives it to the third materialiser alone, because that is the only one with a `row_id`-holding call site today; widening the other two is additive and free.
+- Whether `message.search_server`'s `limit` is a total budget split per mailbox (which is what `lib_do_multi_search` does, and what the doc says) or a per-mailbox one. The rows assert neither.
+- Whether the streamed hit should carry the attachment list. The overlay does not render one for a server-only hit today, so `ServerSearchHit` does not carry it.
