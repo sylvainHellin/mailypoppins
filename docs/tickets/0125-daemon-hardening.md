@@ -7,7 +7,7 @@ status: open
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 and P6-U2 have landed the daemon-owned hold and P6-U3 has pinned the graceful-shutdown contract; P6-U4 and the rest of the phase have not started.
+Status: open. P6-U1 to P6-U4 have landed the daemon-owned hold and the graceful shutdown; P6-U5 and the rest of the phase have not started.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -21,7 +21,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U1 | T | this commit | daemon-owned undo-send hold, the contract | done (tests) |
 | P6-U2 | I | this commit | daemon-owned undo-send hold (SND-04) | done |
 | P6-U3 | T | this commit | graceful shutdown, the contract | done (tests) |
-| P6-U4 | I | - | graceful shutdown | not started |
+| P6-U4 | I | this commit | graceful shutdown | done |
 | P6-U5 | T | - | login-start service units (LIF-06), the contract | not started |
 | P6-U6 | I | - | login-start service units | not started |
 | P6-U7 | T | - | diagnostics, the contract | not started |
@@ -394,3 +394,93 @@ Optional and equally mechanical: `src/daemon/state/events.rs`, `src/daemon/state
 `TMPDIR=/var/tmp cargo test --workspace --offline` with the file moved aside -> **2230 passed**, the count at `e8bf7b0`; with it present and `--no-fail-fast` -> 2234 passed, 8 failed, which is 2230 + the twelve new rows and nothing else disturbed.
 `cargo clippy --offline --test daemon_shutdown` reports nothing in the new file.
 `pgrep -af '[m]p daemon'` after every run: one line, the pid that was there before.
+
+## P6-U4: graceful shutdown
+
+`tests/daemon_shutdown.rs` is green, twelve of twelve, three runs.
+The shutdown is `src/daemon/shutdown.rs`, 474 lines of which 61 are its own tests and 178 of the rest are comment or blank; the eight steps the contract fixes are one function each and the order is the module's subject.
+
+### The sequence, and where each step runs
+
+Steps 1 to 4 run **inside the connection task that answered**, synchronously, so the answer cannot describe a daemon that has already moved past them: mark, cancel the holds, publish `daemon.shutting_down`, then build `{stopping, grace_secs, pending}` from what the registry has left.
+Steps 5 and 6 run in a driver task `shutdown::request` spawns, because the grace may be ten seconds and the stop's answer may not wait for it.
+Step 7 is split: the driver publishes the report and the asking connection writes it, which is the only arrangement in which `daemon.stopped` is both the daemon's own word and the last frame on that socket.
+Step 8 is `lifecycle::run`'s, unchanged: `serve` returns, `cleanup` unlinks.
+
+### Four decisions the contract did not settle
+
+- **The asking connection keeps serving while it waits.**
+  The first design closed the read loop the moment the stop was answered, which reads well and cannot pass `a_shutting_down_daemon_refuses_every_command_but_the_two_lifecycle_ones`: that row sends a *second* `daemon.stop` on the same connection during the grace, and a connection that stopped reading could never answer it.
+  So the stop sets a flag rather than a terminal state, the connection goes on answering `daemon.status` and a repeated `daemon.stop`, and a fourth `select!` arm on the settled signal is what turns it into the report writer.
+  A connection that stops twice is one reporter and not two, or the driver would sit out its ceiling waiting for a frame nobody is going to write.
+- **Step 7 closes the connections rather than letting the process exit under them.**
+  The contract says "close every connection", and the cheap reading of that is "the kernel does it when we exit".
+  It is cheap in the wrong place: a client whose `daemon.shutting_down` was still in its outbound queue would learn about an orderly stop as an EOF mid-stream, which is exactly what a crash looks like, and the SIGTERM row is the one that would flake on it, having no reporter to wait for.
+  Every connection therefore wakes on the same settled signal, writes out what it was queued (`AfterFlush::Drain`), and closes; the driver waits, bounded at two seconds, for `subscriber_count()` to reach zero.
+  The subscription is released when a connection task ends, so the count the state already keeps is what says they are gone.
+- **The `-32009` refusal reads one flag and the two lifecycle names.**
+  It sits ahead of `Session::gate` as P6-U3 required, and it asks `session::is_lifecycle_method` rather than matching two strings of its own: `LIFECYCLE_METHODS` is the single list of what answers before a handshake, and a second copy of it in the dispatcher would be the thing that drifts.
+- **The grace is validated, not coerced.**
+  `grace_secs` that is not a whole number of seconds is `-32602` naming what it got.
+  A stop that silently ignored a malformed grace would wait for a length nobody asked for, and the parameter exists precisely because the caller has an opinion about that length.
+
+### Two watch channels and a counter, and why `send_replace`
+
+`Shutdown` holds a `settled` channel (step 6 is done, the report exists), a `watchers` channel (step 6 has begun, the draft watcher stops), and a reporter counter with a `Notify`.
+Both channels are written with `send_replace` and never with `send`: `watch::Sender::send` fails and **leaves the value unchanged** when no receiver is live, and a daemon nobody has connected to is exactly that case.
+The first version used `send`, and the symptom was a unit test that hung forever on a shutdown that had already finished.
+
+### The two follow-ups P6-U3 left
+
+`src/tui/events.rs` gained an arm for `daemon.shutting_down`: one status line, `Daemon stopping`, at `Warning`, and then the existing reconnect path in `src/tui/session.rs` takes over on the EOF with the sentence it already shows.
+It answers `Applied::Ignored` rather than a sixth variant, because the five that enum has are P5-U7's contract and a new one would be a contract change for a line the drain does not branch on; nothing is reloaded and nothing is refetched, which is what `Ignored` promises a caller.
+No golden frame moved: the frames are rendered from constructed `App` states and none of them is built from an event.
+
+`lifecycle::cleanup` now guards the socket with the same instance check `daemon.pid` and `daemon.json` already had.
+It was the one path by which a slow shutdown could unlink a *successor's* socket: a daemon that started after us wrote its own `daemon.json` over ours, so the file that named us names it, and the check that already protected its metadata now protects its socket too.
+
+### `snapshot.holds`
+
+`CanonicalState::attach_holds` is `attach_operations`' twin, and `bootstrap` fills the array from `HoldScheduler::listing(None)`.
+The projection is taken in `bootstrap` rather than reduced into `Inner` for the reason the operations one is: the hold table is the daemon's, not the mirrored state's.
+`mp_protocol::state::Snapshot::holds` stays `Vec<Value>`; the TUI reads a hold off the typed event and off `send.hold_status`, and typing it in the snapshot before a client reads it *there* would pin the shape from the wrong end.
+
+### Test edits made
+
+**None.** `git diff --stat -- tests/ src/tui/*_tests.rs` is empty, which is what P6-U3 asked for: no method spec moved, no `LIFECYCLE_METHODS` entry was added, and `daemon.stop` stayed lifecycle surface rather than becoming a dispatcher method.
+
+Outside `tests/`, the five pre-approved doc edits were made (`docs/daemon-protocol.md`, `docs/daemon-operations.md`, `server.rs::serve`, `snapshot.rs::to_json`, `lifecycle.rs`'s startup header) and three files this unit owns gained tests of their own: `src/daemon/shutdown.rs` (3), `src/daemon/server.rs` (3 new rows on the dispatcher's refusal and the stop's answer shape, and the existing rows retargeted at a `dispatch` helper because `dispatch_request` now takes the state by `Arc` and an exit channel).
+The optional tidy-up P6-U3 offered - replacing the `"daemon.shutting_down"` literal in the queue tests with the new constant - was **not** taken: those rows are about the queue, they stay true, and the edit would have touched `tests/daemon_events.rs` for nothing.
+
+### Five new protocol fixtures
+
+`daemon.stop.request.json`, `daemon.stop.response.json`, `notification.daemon_shutting_down.json`, `notification.daemon_stopped.json` and `error.shutting_down.json`, discovered by `tests/daemon_protocol_fixtures.rs` through its own directory walk, so the file it lives in did not move either.
+
+### The CLI help walk
+
+`MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` is **empty**, not the diff hunk this unit was told to expect.
+The `daemon` subcommand is hidden (`hide = true`, plan section 3.0), the walk recurses only into the names clap lists under `Commands:`, and the baseline has never carried a `daemon` line at all: `rg -c daemon docs/baselines/pre-daemon/cli-help.txt` is 0.
+`--grace-secs` is therefore invisible to the snapshot by the same construction that has kept `mp daemon` out of it since P2-U7, and `mp daemon stop --help` shows it:
+
+```
+Options:
+      --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to go away, counted after the grace [default: 10]
+      --grace-secs <GRACE_SECS>      Seconds the daemon may spend settling work in flight (0 waits none)
+```
+
+### Size
+
+865 production lines added, 157 of test: over the ~700 the unit was budgeted, and the overrun is `src/daemon/shutdown.rs`, whose 413 non-test lines are 178 of comment.
+The eight steps are a sequence whose *order* is the contract, and the file is where that order is written down.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_shutdown` -> **12 passed**, three runs, 1.1 s each.
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2248 passed, 0 failed**, 5 ignored, which is 2242 at `7c96613` plus the six unit tests this unit added.
+`--test daemon_send_hold` 7; `--test phase5_undo_send_hold` 2; `--test tui_daemon_recovery` 3; `--test daemon_lifecycle` 10; `--test daemon_runtime_paths` 17; `--test daemon_bootstrap` 28; `--test daemon_events` 29; `--test daemon_protocol_fixtures` 17; `--lib events_tests` 20; `--lib hold_tests` 16; the two golden-frame suites 20 and 22 with no snapshot re-approved.
+`git diff --stat -- tests/ src/tui/*_tests.rs` empty.
+`cargo clippy --workspace --offline --all-targets` -> 38 warnings, the count at `7c96613`, none in a file this unit touched.
+`diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` empty.
+
+The smoke run, over an `examples/mkfixture` root in a sandbox `HOME`: `mp daemon start`, `mp daemon status` (running), `mp daemon stop` -> `✓ daemon stopped`, exit 0, and `<data_dir>/runtime` left holding only `daemon.start.lock`, which is never unlinked; then a second start and `kill -TERM <pid>` -> the same three files gone and the process with them.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.

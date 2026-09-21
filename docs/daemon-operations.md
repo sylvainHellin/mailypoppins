@@ -27,8 +27,23 @@ It prints the instance id, the application version, the protocol range, the pid,
 `--json` prints the same fields as one object with a leading `"running"`, and the key set never changes with the answer, so a client branches on `running` alone rather than on which fields exist.
 The round trip carries no `initialize`, which is what lets `status` describe a daemon whose protocol range this build cannot negotiate.
 
-`mp daemon stop` asks the running daemon to shut down and waits until it is really gone, up to `--timeout-secs` (default 10).
-When the socket answered a moment ago but the `daemon.stop` call does not, the daemon is wedged rather than absent, so the command falls back to `SIGTERM` on the pid in `daemon.json`.
+`mp daemon stop` asks the running daemon to shut down, waits for its report, and then waits until it is really gone, up to `--timeout-secs` (default 10).
+`--grace-secs <N>` is how long the daemon may spend settling work that is already running; absent, the daemon applies its own default of 10 seconds, and `0` waits for nothing.
+The two are counted one after the other: `--timeout-secs` starts when the daemon says it has finished, so a long grace cannot make the command give up on a daemon doing exactly what it was asked.
+
+A clean stop prints `✓ daemon stopped` and nothing else.
+A stop the grace did not cover names what it cut short, one line each:
+
+```
+✗ daemon stopped, 2 operations did not settle within 5s
+  sync.full (3b91c07d5e8f42a6b1c4d09e7f2a5638)
+  message.move (a17f4e02c9b84d31856c0fa2b7e91d44)
+```
+
+Either way the exit code is **0**: the daemon stopped, which is what was asked.
+A nonzero code would make `mp daemon restart` refuse to start the replacement, and would turn "a sync was still running" into a failure of the command that succeeded.
+
+When the socket answered a moment ago but the `daemon.stop` call does not, the daemon is wedged rather than absent, so the command falls back to `SIGTERM` on the pid in `daemon.json`; that path prints the clean line, because nothing told it otherwise.
 With nothing running it exits 0, and it sweeps a stale socket on the way out, because a stop is exactly when a user expects that tidying.
 
 `mp daemon restart` stops whatever runs, waits for the old pid to disappear (up to 10 s), and then starts this executable's daemon.
@@ -237,8 +252,24 @@ Every other classification is an error, `Absent` included: deleting nothing is c
 
 ### Shutdown
 
-A clean shutdown unlinks the socket, and unlinks `daemon.json` and `daemon.pid` only while they still name this instance, so a daemon that started after us does not have its metadata deleted by our exit.
-`SIGTERM` and `SIGINT` both run the same path, so a foreground daemon killed with Ctrl-C leaves no socket behind.
+A stop runs eight steps, in `src/daemon/shutdown.rs`, and the order is the contract:
+
+1. **mark shutting down** - from here every method but `daemon.status` and a repeated `daemon.stop` is `-32009`, `initialize` included;
+2. **cancel every armed undo-send hold**, publishing `send.hold_cancelled`, leaving the drafts `approved`;
+3. **announce**: one `daemon.shutting_down` event to every bootstrapped connection, carrying `{grace_secs, pending}`;
+4. **answer** the `daemon.stop` with the effective grace and what is still live;
+5. **the grace**: wait up to it for those operations to settle, then cancel whatever is left;
+6. **stop the watchers and the account runtimes**, which is what releases the engine locks;
+7. **report**: `daemon.stopped` on the connection that asked, as its last frame, and close every connection;
+8. **unlink** its own socket, `daemon.pid` and `daemon.json`, and exit 0.
+
+A hold is cancelled at step 2 and therefore never appears in `pending` or in `unsettled`: waiting out a window whose whole point is that the user may still close it would send mail nobody could stop any more, the client that would have pressed `u` losing its socket in the same second.
+
+The grace is a ceiling and never a sleep.
+With nothing live at step 4 the daemon does not enter it at all, which is what keeps stopping an idle daemon as cheap as it has always been: every fixture in the test tree stops one.
+
+All three runtime files are unlinked only while `daemon.json` still names this instance, so a daemon that started after us has neither its metadata nor its socket deleted by our exit.
+`SIGTERM` and `SIGINT` run the same eight steps with the default grace, so a unit stopped by systemd or launchd and a foreground daemon killed with Ctrl-C are as graceful as a typed `mp daemon stop`; the only step a signal skips is the report, which has no connection to travel on.
 
 ## Configuration ownership
 
@@ -366,7 +397,10 @@ Cancelling settles the operation the send answered with as `cancelled`, so `oper
 **When the last client disconnects, the daemon cancels every hold.**
 This is the plan's own rule and it is what killing the TUI did before the hold moved; it runs in the connection loop, after the unsubscribe, when `CanonicalState::subscriber_count()` reaches zero, and it logs how many sends it cancelled.
 It is deliberately not a cancel scope: `send.*` is durable, so a hold whose *own* client closed its window while another client watches still fires, and losing a confirmed send to a closing socket is the failure the durable outbox exists to prevent.
-P6-U3 and P6-U4 refine what a graceful shutdown does around it.
+
+A shutdown reaches the same holds at its step 2 and for the same reason, so the two rules never disagree: whichever comes first, the window ends with a `send.hold_cancelled` and a draft that is still `approved`, and the daemon that is leaving finds nothing left to cancel when the last connection drops.
+
+A client that connects while a window is running finds the hold in its own `state.bootstrap`, in the snapshot's `holds` array, as the very object `send.hold_status` answers: a GUI launched mid-countdown renders the remainder and can press `u` on it without a second query.
 
 ## Logs
 
@@ -393,8 +427,9 @@ An unsafe socket is the case that needs a human.
 The fix is to look at what is at `<data_dir>/runtime/daemon.sock`, move it aside, and start again; the message says so and reports the mode or the owning uid it found.
 A socket at the wrong mode is the interesting instance, because it means another user may be able to reach the daemon.
 
-A daemon that answers `daemon.status` but not `daemon.stop` is wedged, and `stop` already falls back to `SIGTERM`.
+A daemon that answers `daemon.status` but not `daemon.stop` is wedged, and `stop` already falls back to `SIGTERM`, which runs the same eight steps from inside the daemon.
 When that also fails, the command exits nonzero naming the daemon log rather than escalating to `SIGKILL` on its own.
+A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the grace is the daemon's own ceiling on step 5, and the command's timeout is the ceiling on everything after it.
 
 ## Test-only environment hooks
 

@@ -1944,3 +1944,15 @@ Three rows of `tests/daemon_send_hold.rs` assert `transport_events(&log).len() =
 ## A daemon started by `mp daemon start` does not inherit the test-only env hooks
 
 `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` exported in the shell that runs `mp daemon start` does not reach the daemon: the detached child is given an explicit environment (`MAILYPOPPINS_CONFIG_DIR`, `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_DAEMON_START_LOCK_HELD`) and nothing else, which is the right default and is why `tests/support/parity.rs` passes hooks to `DaemonFixture::start_with` explicitly. A hand-driven pty smoke that wants the fake transport has to run `mp daemon run` in the foreground with the variable set, not `mp daemon start`; with `start`, the send reaches a real SMTP attempt against an unroutable host and the TUI shows `Failed to send to all N recipient(s)`, which looks like a hold bug and is not one.
+
+## `watch::Sender::send` with no live receiver leaves the value unchanged
+
+The shutdown coordinator broadcasts "the report exists" on a `tokio::sync::watch` channel built as `watch::channel(false).0`, the receiver dropped on the spot because every reader subscribes for itself. `send(true)` on it does nothing at all: tokio checks the receiver count first and returns `SendError` *before* it replaces the value, so a later `subscribe()` sees `false` and a connection waiting for the signal waits forever. The symptom was a unit test that hung on a shutdown which had already finished, and it would have been a daemon that hung on a stop nobody had connected to watch.
+
+`send_replace` (and `send_modify`) always write, and they are what a state channel wants: the value is the state, not a message to a listener, and whether anyone is listening yet is not the sender's business. Use `send` only where "nobody is listening" is genuinely an error worth hearing about.
+
+## A shutdown that lets the process exit under its connections looks exactly like a crash
+
+The graceful shutdown publishes `daemon.shutting_down` to every bootstrapped connection and then, three steps later, exits. Between the two, each connection task has to wake, drain that event out of its queue, encode it and write it: reading "close every connection" as "the kernel closes them when we exit" loses the event whenever the daemon is idle enough to finish the remaining steps in one scheduling round, and a client that never saw the announcement cannot tell an orderly stop from a crash. SIGTERM is the sharp case, because it has no `daemon.stopped` reporter whose round trip would otherwise have bought the time.
+
+The fix is to make the close a step rather than a side effect: every connection wakes on the same settled signal, writes out what it was queued, and returns; the driver waits, bounded, for the subscriber count to reach zero before it signals the accept loop. The general rule is that any last message a server owes its clients needs an observable that says it was taken, and process exit is not one.

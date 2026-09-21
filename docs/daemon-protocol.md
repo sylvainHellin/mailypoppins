@@ -149,9 +149,27 @@ The fields are the daemon's own `daemon.json` metadata plus the live account lis
 The shape does not change with the opt-in, only which states appear in it.
 `mp daemon status --json` prints this object with a leading `"running": true`, or the same keys with null values and `"running": false` when nothing answers.
 
-`daemon.stop` takes `{}` and returns `{"stopping": true}`.
-The response is written and flushed before the shutdown starts, so the caller always learns the daemon accepted the request.
-Open connections are not drained: the daemon unlinks its runtime files and exits, and a client that loses the socket mid-call reconnects.
+`daemon.stop` takes `{grace_secs?}` and returns `{stopping: true, grace_secs, pending}`.
+`grace_secs` is how long the daemon may spend settling work that is already running: absent means the default of **10 seconds**, and an explicit `0` means no waiting at all.
+`pending` is what is still live once the holds are cancelled, each entry the `operation.status` object the bootstrap snapshot's `operations` array carries, in start order, so a client that lists what a shutdown is about to cut short renders it with the code it already has.
+The response is written and flushed before the grace begins, so the caller always learns the daemon accepted the request and what it is going to do.
+
+The sequence behind it is fixed, because every clause of it is observable:
+
+1. mark shutting down: from here every other method is `-32009`;
+2. cancel every armed undo-send hold, publishing `send.hold_cancelled`, leaving the drafts `approved`;
+3. publish `daemon.shutting_down` to every bootstrapped connection;
+4. answer the `daemon.stop` with the effective grace and what is still live;
+5. wait up to the grace for those operations to settle, cancelling whatever is left;
+6. stop the watchers and the account runtimes, releasing the engine locks;
+7. send `daemon.stopped` on the connection that asked, and close every connection;
+8. unlink its own socket, `daemon.pid` and `daemon.json`, and exit 0.
+
+A hold is therefore never in `pending` or in `unsettled`: step 2 is ahead of step 4, because a daemon that sat out the remaining seconds and then sent would send mail nobody could stop any more, the client that would have cancelled it losing its socket in the same second.
+With nothing live at step 4 the daemon does not enter the grace at all: the grace is a ceiling and never a sleep, so stopping an idle daemon costs what it always did.
+
+A second `daemon.stop` during the sequence is answered rather than refused, with the grace and the pending list the first one settled: a service manager and a user may both ask, and neither asked for an error.
+SIGTERM and SIGINT run the same eight steps with the default grace, so a unit stopped by its manager is stopped as gracefully as one stopped by hand; the only step a signal skips is the report, which has no connection to travel on.
 
 ### Bootstrap
 
@@ -179,8 +197,10 @@ Open connections are not drained: the daemon unlinks its runtime files and exits
 
 `mailboxes`, `drafts` and `outbox` carry one key per listed account, always, so a client indexes them by account name without a null check.
 A daemon with no configured account answers an empty `accounts` array and three empty objects.
-`holds` and `diagnostics` are arrays that nothing in this build fills.
+`diagnostics` is an array that nothing in this build fills.
 `operations` lists every long-running operation the daemon has not settled, in start order, each entry being an `operation.status` result, so a client that bootstraps while work is in flight learns about it without having been there when it started.
+`holds` is the same for the undo-send windows: every hold the daemon is counting down, in arm order, each entry the `HoldStatus` the `send.hold_*` events and `send.hold_status` carry, so a client launched mid-window renders the countdown and can press `u` on it.
+Both are empty on a daemon with nothing running, which is what a client that bootstraps during a shutdown sees: by the time it is told anything, the holds have been cancelled.
 
 A draft row carries `{id, path, to, subject, status, valid, ready}`, the same fields the `draft.changed` event carries, so the reducer a client writes is "replace the row with the payload" rather than a projection it has to keep in step.
 `id` is the `id:` frontmatter field, or the file stem when the file has none; `path` is absolute, because a GUI opens a draft by path; `to` is `null` for a draft with no recipient yet.
@@ -781,6 +801,10 @@ A removal is a fact about a moment and is never merged with anything, in either 
 
 `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` are the four kinds of the undo-send hold, described below.
 
+`daemon.shutting_down` says that this daemon has accepted a stop and is going away, with a payload of `{grace_secs, pending}`, the same two members `daemon.stop` answered with.
+It is a lifecycle event, it reaches every bootstrapped connection once, and it is the last thing a client is told before its socket closes; the shutdown sequence above says where in that sequence it is published.
+A client renders it and waits for the EOF: reconnecting is what it already does when a daemon goes away, and this is the second of warning that distinguishes an orderly stop from a crash.
+
 `operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
 `sync.completed` is the third lifecycle kind, described below.
 `config.changed` and `config.invalid` are the fourth and fifth: `config.changed` carries `{added, updated, removed, config_revision}` and closes every successful swap, `config.invalid` carries `{path, line, message}` and is the diagnostic a rejected candidate publishes.
@@ -872,6 +896,18 @@ They do not survive the re-bootstrap itself: a second `state.bootstrap` empties 
 If the control notification itself cannot be written, the daemon closes that connection and keeps serving every other one.
 
 A client that receives `state.resync_required` discards its state and calls `state.bootstrap`.
+
+### Notification methods
+
+Three methods travel as notifications, and a client that reads frames off the socket has to recognise all three.
+
+`state.event` carries one event envelope, `{instance_id, revision, kind, payload}`, and is what every kind above arrives as.
+`state.resync_required` carries `{instance_id, reason}` and is the control notification an overflow sends.
+`daemon.stopped` carries `{instance_id, clean, unsettled}` and is sent **only** on the connection that asked the daemon to stop, as the last frame before that connection closes.
+
+`daemon.stopped` is a method of its own rather than an event because the asking connection is pre-handshake and therefore not subscribed to anything: the report has to reach `mp daemon stop`, and the stop's own answer was flushed long before the daemon knew how the shutdown went.
+`clean` is whether everything settled inside the grace, and `unsettled` names what did not, as `operation.status` objects in the order `pending` carried them.
+A daemon stopped by a signal sends no report, having no connection to send it on.
 
 ## Fixtures
 
@@ -981,4 +1017,12 @@ P6-U2 moved the undo-send hold into the daemon (`SND-04`) and added two methods,
 `send.hold_status` `{account?}` -> `{holds: [HoldStatus, …]}` is a query, and `send.cancel_hold` `{operation_id}` -> `{cancelled: true, operation_id, revision}` is a command any connection may call, which is what makes cancelling from a window that did not send possible; both are durable and served from protocol 1.
 An `operation_id` naming no live hold is `-32602`, and so is one whose hold has already fired: a cancel is not a recall.
 The four kinds `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` each carry one `mp_protocol::send::HoldStatus`, and `mp_protocol::send::HoldListing` is `send.hold_status`'s result; the fixtures are `crates/mp-protocol/fixtures/notification.send_hold_tick.json`, `send.cancel_hold.request.json` and `send.hold_status.response.json`.
-A cancel settles the operation the send answered with as `cancelled`, so `operation.status` agrees with the event, and the bootstrap snapshot's `holds` array is still empty in this build: a client that joins mid-hold reads `send.hold_status`.
+A cancel settles the operation the send answered with as `cancelled`, so `operation.status` agrees with the event.
+
+P6-U4 made the shutdown graceful: one parameter, two members of an existing result, one event kind, one notification method and one filled snapshot array, all additive.
+`daemon.stop` gained an optional `grace_secs` and now answers `{stopping: true, grace_secs, pending}` where it answered `{stopping: true}`; a client that ignores the two new members is byte-identical to one written against the old shape.
+Absent means the default of 10 seconds and an explicit `0` means no waiting: a parameter is explicit where an environment hook is ambient, so zero is honoured rather than read as unset.
+`pending` and `unsettled` both carry the `operation.status` object, in start order, so nothing new has to be parsed to render either.
+The kind `daemon.shutting_down` carries `{grace_secs, pending}` to every bootstrapped connection, and the notification method `daemon.stopped` carries `{instance_id, clean, unsettled}` to the connection that asked, as its last frame; the fixtures are `crates/mp-protocol/fixtures/daemon.stop.request.json`, `daemon.stop.response.json`, `notification.daemon_shutting_down.json`, `notification.daemon_stopped.json` and `error.shutting_down.json`.
+`-32009 shutting_down`, reserved since the error table was written and unreachable until now, is the answer to every method but those two from the instant a stop is accepted, `initialize` included: the handshake gate exempts `initialize` by construction, so a client arriving during the grace is refused at the handshake rather than admitted to a daemon that is leaving.
+The bootstrap snapshot's `holds` array stopped being empty: it carries every window the daemon is counting down, each one the same `HoldStatus` the events and `send.hold_status` carry, so a client that joins mid-hold renders the countdown from its own bootstrap.
