@@ -1,4 +1,7 @@
-//! `mp daemon run | start | status | stop | restart` (P2-U7).
+//! `mp daemon run | start | status | stop | restart` (P2-U7), and
+//! `install-service | uninstall-service` (P6-U6), which [`super::service`]
+//! owns: they write a login-start unit and call a service manager, and touch
+//! neither the socket nor a daemon.
 //!
 //! ## The startup sequence, in order
 //!
@@ -177,6 +180,17 @@ pub enum DaemonAction {
     },
     /// Stop the running daemon and start this executable's daemon
     Restart,
+    /// Install the login-start service for this user and enable it
+    InstallService {
+        /// Replace a service file whose content differs from this version's
+        #[arg(long)]
+        force: bool,
+        /// Report whether a service is installed, and write nothing
+        #[arg(long)]
+        check: bool,
+    },
+    /// Disable the login-start service and remove its file
+    UninstallService,
 }
 
 /// Run one lifecycle command and return the process exit code.
@@ -190,6 +204,8 @@ pub async fn dispatch(action: DaemonAction) -> i32 {
             grace_secs,
         } => stop(Duration::from_secs(timeout_secs), grace_secs).await,
         DaemonAction::Restart => restart().await,
+        DaemonAction::InstallService { force, check } => super::service::install(force, check),
+        DaemonAction::UninstallService => super::service::uninstall(),
     };
     match outcome {
         Ok(code) => code,
