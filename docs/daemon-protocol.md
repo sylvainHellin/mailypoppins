@@ -708,6 +708,10 @@ The worker observes its token whenever it next looks, and its later result is th
 The answer is therefore a fact and not a promise.
 
 Cancelling an operation that has already finished is `-32602` with `data` of `{operation_id, state}`, naming the state that made the cancel impossible, and both `operation.cancel` and `operation.status` refuse an id the daemon never issued with `-32602` and `data` of `{operation_id}`.
+
+**A settled operation is remembered for the next 256 operations and then forgotten**, and an id past that window answers exactly as one this daemon never issued.
+The window exists because the table used to hold every operation the process had ever run, which the P6-U9 soak measured at about 0.8 KiB each and a daemon that syncs every five minutes turns into tens of megabytes a year ([baselines/phase6-soak.md](baselines/phase6-soak.md)).
+No client is affected by it in practice: `operation.status` is polled while an operation runs and for a moment after it finishes, never about one that finished a thousand operations ago, and a client that outlived a daemon restart already has to handle an id the daemon does not know.
 `-32008` `operation_cancelled` is not used for either: it is the operation's own answer to its caller, and one code may not mean two things on one connection.
 
 Progress travels as the lifecycle event kind `operation.progress`, with a payload of `{operation_id, phase, done, total, message}`, where `total` and `message` are `null` rather than absent when there is nothing to say: a client reads `total` to draw a bar and has to tell "unknown" from "missing field".

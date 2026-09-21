@@ -39,6 +39,20 @@
 //! [`OperationRegistry::drain_events`] and publishes each one at the next
 //! canonical revision. With no fan-out installed the events simply accumulate
 //! for the next drain, which is what makes the machine testable in process.
+//!
+//! # The history is bounded
+//!
+//! A settled operation stays in the table so `operation.status` can still
+//! answer for it, and until P6-U9 it stayed there for the life of the process.
+//! That is a leak in a daemon that is meant to run for weeks: the soak row in
+//! `tests/daemon_soak.rs` measured about 0.8 KiB per operation retained, which
+//! a quick sync every few minutes turns into tens of megabytes a year, and a
+//! TUI that starts an operation per keystroke turns into that in an afternoon.
+//! [`HISTORY`] is the cap: a `start` that finds more settled entries than that
+//! forgets the oldest of them first, so the trim is paid by a caller already
+//! allocating an operation and by nothing else. Live operations are never
+//! forgotten, whatever the cap says, because the table is also what a
+//! disconnect and a shutdown cancel through.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -335,6 +349,15 @@ fn finished_event(status: &OperationStatus) -> Event {
     }
 }
 
+/// How many settled operations the registry remembers.
+///
+/// The number a client can plausibly ask about: `operation.status` is polled
+/// while an operation runs and for a moment after it finishes, never about one
+/// that finished a thousand operations ago. An id past the cap answers exactly
+/// as an id this daemon never issued, which is the answer a client that
+/// outlived a daemon restart already has to handle.
+pub const HISTORY: usize = 256;
+
 /// The table of live operations, shared by the registry and every handle it
 /// has issued.
 #[derive(Default)]
@@ -386,6 +409,53 @@ impl Shared {
     }
 }
 
+/// Drop the oldest settled entries until at most [`HISTORY`] of them are left.
+///
+/// Called from [`OperationRegistry::start`], so the table is trimmed exactly
+/// when it grows and never on a timer: a daemon that starts no operation has
+/// nothing to forget. Start order is retention order, which is also the order
+/// `order` already holds, so "oldest" needs no timestamp.
+fn forget_oldest_settled(inner: &mut Inner) {
+    let settled = inner
+        .order
+        .iter()
+        .filter(|id| {
+            inner
+                .entries
+                .get(*id)
+                .is_some_and(|entry| entry.status.state.is_terminal())
+        })
+        .count();
+    let Some(excess) = settled.checked_sub(HISTORY).filter(|excess| *excess > 0) else {
+        return;
+    };
+
+    let mut left = excess;
+    let doomed: Vec<OperationId> = inner
+        .order
+        .iter()
+        .filter(|id| {
+            if left == 0 {
+                return false;
+            }
+            let terminal = inner
+                .entries
+                .get(*id)
+                .is_some_and(|entry| entry.status.state.is_terminal());
+            if terminal {
+                left -= 1;
+            }
+            terminal
+        })
+        .cloned()
+        .collect();
+
+    for id in &doomed {
+        inner.entries.remove(id);
+    }
+    inner.order.retain(|id| inner.entries.contains_key(id));
+}
+
 impl std::fmt::Debug for Shared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Shared")
@@ -394,7 +464,8 @@ impl std::fmt::Debug for Shared {
     }
 }
 
-/// Every operation this daemon process has started, live or finished.
+/// Every live operation this daemon has started, plus the last [`HISTORY`]
+/// settled ones.
 #[derive(Debug, Default)]
 pub struct OperationRegistry {
     shared: Arc<Shared>,
@@ -441,6 +512,7 @@ impl OperationRegistry {
         };
         {
             let mut inner = lock(&self.shared.inner);
+            forget_oldest_settled(&mut inner);
             inner.order.push(id.clone());
             inner.entries.insert(
                 id.clone(),
@@ -461,7 +533,7 @@ impl OperationRegistry {
     }
 
     /// What the registry knows about one operation, or `None` for an id it
-    /// never issued.
+    /// never issued or has since forgotten ([`HISTORY`]).
     pub fn status(&self, id: &OperationId) -> Option<OperationStatus> {
         lock(&self.shared.inner)
             .entries
@@ -782,6 +854,65 @@ mod tests {
             "a settled operation leaves the snapshot's array"
         );
         assert!(registry.status(&first).is_some(), "and keeps its status");
+    }
+
+    /// The history is bounded: settling operations past the cap forgets the
+    /// oldest of them, and only the settled ones.
+    ///
+    /// The leak this closes was measured by the P6-U9 soak, not reasoned
+    /// about: `tests/daemon_soak.rs` row (c) grew the daemon's resident set by
+    /// about 0.8 KiB per `sync.quick` and never gave any of it back, because
+    /// the table kept every operation the process had ever run.
+    #[test]
+    fn the_registry_forgets_the_oldest_settled_operations_past_the_cap() {
+        let registry = OperationRegistry::new();
+
+        // One operation that never settles, started first, so "oldest" and
+        // "settled" cannot be confused for one another.
+        let (live, _live_handle) =
+            registry.start(ConnectionId(1), CancelScope::Durable, TEST_OPERATION);
+
+        let mut settled = Vec::new();
+        for _ in 0..HISTORY {
+            let (id, handle) =
+                registry.start(ConnectionId(1), CancelScope::Durable, TEST_OPERATION);
+            handle.succeed(json!({}));
+            settled.push(id);
+        }
+        assert!(
+            settled.iter().all(|id| registry.status(id).is_some()),
+            "nothing is forgotten while the history is within its cap"
+        );
+
+        let (fresh, fresh_handle) =
+            registry.start(ConnectionId(1), CancelScope::Durable, TEST_OPERATION);
+        fresh_handle.succeed(json!({}));
+        assert!(
+            settled.iter().all(|id| registry.status(id).is_some()),
+            "the trim runs on the next start, so settling one more forgets nothing yet"
+        );
+
+        let (_next, next_handle) =
+            registry.start(ConnectionId(1), CancelScope::Durable, TEST_OPERATION);
+        next_handle.succeed(json!({}));
+        assert!(
+            registry.status(&settled[0]).is_none(),
+            "the oldest settled operation is forgotten once one more settles"
+        );
+        assert!(
+            registry.status(&settled[1]).is_some(),
+            "and only the oldest: the cap is a window, not a flush"
+        );
+        assert!(registry.status(&fresh).is_some());
+        assert_eq!(
+            registry
+                .live()
+                .iter()
+                .map(|status| status.id.clone())
+                .collect::<Vec<_>>(),
+            vec![live],
+            "a live operation is never forgotten, however old it is"
+        );
     }
 
     /// The fan-out runs on the emitting thread, right after the event is
