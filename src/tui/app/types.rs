@@ -8,7 +8,6 @@ use mp_protocol::draft::{DraftEntry, DraftSkip};
 use mp_protocol::listing::MessageListRow;
 
 use crate::parse::FetchedEmail;
-use crate::store::{drafts, Store};
 use crate::types::MailboxRole;
 
 // ---------------------------------------------------------------------------
@@ -248,7 +247,7 @@ pub use super::store_rows::{count_all_emails, load_emails};
 /// *partial* send, or one with no durable record, keeps it, marked `sent` and
 /// addressable.
 pub(super) fn load_drafts(account: &str) -> Vec<EmailEntry> {
-    let (rows, skipped) = indexed_drafts(account);
+    let (rows, skipped) = crate::draft::indexed_drafts(account);
     // The unparseable files lead the list: they are the ones the user is
     // hunting for ("my draft disappeared"), and they have no date to sort by,
     // so pinning them to the top is both honest and useful (#0080).
@@ -257,80 +256,6 @@ pub(super) fn load_drafts(account: &str) -> Vec<EmailEntry> {
         .map(entry_from_skip)
         .chain(rows.into_iter().map(entry_from_draft))
         .collect()
-}
-
-/// The indexed drafts of one account: the single answer the Drafts list and
-/// the sidebar count both read.
-///
-/// [`Store::open`] rather than [`open_store`], and the refresh is paid here
-/// rather than assumed: drafts are local-only files, so an account that has
-/// never synced has no store *file* and still has drafts, and a count that
-/// opened differently or skipped the refresh would contradict the list it
-/// labels.
-fn indexed_drafts(account: &str) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
-    let store = match Store::open(crate::config::store_path(account)) {
-        Ok(store) => store,
-        Err(e) => {
-            log::warn!("[drafts] could not open the store for {account}: {e:#}");
-            return (Vec::new(), Vec::new());
-        }
-    };
-    let dir = crate::config::drafts_dir(account);
-    // The reporting refresh hands back the files it skipped for a parse
-    // failure, so the Drafts list can show them as error rows instead of
-    // silently dropping them (#0080).
-    let skipped: Vec<DraftSkip> = match drafts::refresh_reporting(&store, account, &dir) {
-        Ok((_, _, skipped)) => skipped.iter().map(skip_to_wire).collect(),
-        Err(e) => {
-            log::warn!("[drafts] refreshing the index of {account} failed: {e:#}");
-            Vec::new()
-        }
-    };
-    match drafts::list(&store, account, None) {
-        Ok(rows) => (
-            rows.iter().map(|row| draft_to_wire(account, row)).collect(),
-            skipped,
-        ),
-        Err(e) => {
-            log::warn!("[drafts] listing the index of {account} failed: {e:#}");
-            (Vec::new(), skipped)
-        }
-    }
-}
-
-/// One indexed draft row as `draft.list` would have sent it.
-///
-/// The oracle's half of the equality `src/tui/app/queries_tests.rs` asserts:
-/// the daemon's `entry` (`src/daemon/methods/draft.rs`) builds the same value
-/// out of the same row, re-parse included, so the sessionless path and the
-/// routed one cannot answer differently about the same file.
-fn draft_to_wire(account: &str, row: &drafts::DraftRow) -> DraftEntry {
-    let draft = crate::draft::parse_email_draft(&row.path);
-    DraftEntry {
-        id: row.id.clone(),
-        selector: crate::selector::Selector::for_draft(account, &row.id).to_string(),
-        path: row.path.display().to_string(),
-        status: row.status.clone(),
-        to: row.to.clone(),
-        cc: row.cc.clone(),
-        subject: draft
-            .as_ref()
-            .ok()
-            .map(|draft| draft.frontmatter.subject.clone()),
-        date: row.date.clone(),
-        valid: draft.is_ok(),
-        ready: draft
-            .as_ref()
-            .is_ok_and(|draft| crate::draft::validate_draft(draft).is_ok()),
-    }
-}
-
-/// One skipped file as `draft.list` would have sent it.
-fn skip_to_wire(skip: &drafts::SkippedDraft) -> DraftSkip {
-    DraftSkip {
-        path: skip.path.display().to_string(),
-        error: skip.error.clone(),
-    }
 }
 
 /// One stored row as `message.list` would have sent it.
@@ -364,18 +289,6 @@ pub(crate) fn row_to_wire(account: &str, row: &crate::store::read::MessageRow) -
         is_invite: row.is_invite,
         selector: crate::selector::Selector::for_message(account, row).to_string(),
     }
-}
-
-/// How many rows the Drafts mailbox holds, for whoever labels it.
-///
-/// The count is the length of the list, from the same [`indexed_drafts`] call
-/// the mailbox load makes, so the sidebar cannot disagree with the mailbox it
-/// labels. It includes the parse-skipped error rows, so the badge matches the
-/// list even when some files would not parse (#0080). Public because the
-/// daemon's `mailbox.list` labels the same mailbox from the same index.
-pub fn draft_count(account: &str) -> usize {
-    let (rows, skipped) = indexed_drafts(account);
-    rows.len() + skipped.len()
 }
 
 /// The `messages.mailbox` value for a sidebar mailbox.
@@ -2775,7 +2688,7 @@ mod tests {
 
     use crate::ingest::{ingest_message, IngestInput};
     use crate::parse::FetchedEmail;
-    use crate::store::BlobStore;
+    use crate::store::{BlobStore, Store};
 
     fn mb(label: &str, id: &str, kind: MailboxKind) -> MailboxInfo {
         MailboxInfo {

@@ -252,6 +252,112 @@ pub fn delete_indexed_draft(
     remove_draft_files(&row.path)
 }
 
+
+// ---------------------------------------------------------------------------
+// The drafts index, as the wire spells it (#0126, P5-U10e)
+// ---------------------------------------------------------------------------
+//
+// The Drafts mailbox is listed from the index rather than from `messages`, and
+// two readers need that listing: `draft.list` / `mailbox.list` in the daemon,
+// and the sessionless oracle the TUI's query tests compare a served answer
+// against. Both want the same rows in the same wire shape, so the read lives
+// here, in the crate that owns the store, and answers in
+// `mp_protocol::draft::{DraftEntry, DraftSkip}`.
+
+use mp_protocol::draft::{DraftEntry, DraftSkip};
+
+/// The indexed drafts of one account: the single answer the Drafts list and
+/// the sidebar count both read.
+///
+/// [`Store::open`] rather than [`open_store`](crate::store::open_store), and
+/// the refresh is paid here
+/// rather than assumed: drafts are local-only files, so an account that has
+/// never synced has no store *file* and still has drafts, and a count that
+/// opened differently or skipped the refresh would contradict the list it
+/// labels.
+pub fn indexed_drafts(account: &str) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
+    let store = match crate::store::Store::open(crate::config::store_path(account)) {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[drafts] could not open the store for {account}: {e:#}");
+            return (Vec::new(), Vec::new());
+        }
+    };
+    let dir = crate::config::drafts_dir(account);
+    // The reporting refresh hands back the files it skipped for a parse
+    // failure, so the Drafts list can show them as error rows instead of
+    // silently dropping them (#0080).
+    let skipped: Vec<DraftSkip> = match crate::store::drafts::refresh_reporting(&store, account, &dir) {
+        Ok((_, _, skipped)) => skipped.iter().map(skip_to_wire).collect(),
+        Err(e) => {
+            log::warn!("[drafts] refreshing the index of {account} failed: {e:#}");
+            Vec::new()
+        }
+    };
+    match crate::store::drafts::list(&store, account, None) {
+        Ok(rows) => (
+            rows.iter().map(|row| draft_to_wire(account, row)).collect(),
+            skipped,
+        ),
+        Err(e) => {
+            log::warn!("[drafts] listing the index of {account} failed: {e:#}");
+            (Vec::new(), skipped)
+        }
+    }
+}
+
+/// One indexed draft row as `draft.list` would have sent it.
+///
+/// The oracle's half of the equality `src/tui/app/queries_tests.rs` asserts:
+/// the daemon's `entry` (`src/daemon/methods/draft.rs`) builds the same value
+/// out of the same row, re-parse included, so the sessionless path and the
+/// routed one cannot answer differently about the same file.
+fn draft_to_wire(account: &str, row: &crate::store::drafts::DraftRow) -> DraftEntry {
+    let draft = parse_email_draft(&row.path);
+    DraftEntry {
+        id: row.id.clone(),
+        selector: crate::selector::Selector::for_draft(account, &row.id).to_string(),
+        path: row.path.display().to_string(),
+        status: row.status.clone(),
+        to: row.to.clone(),
+        cc: row.cc.clone(),
+        subject: draft
+            .as_ref()
+            .ok()
+            .map(|draft| draft.frontmatter.subject.clone()),
+        date: row.date.clone(),
+        valid: draft.is_ok(),
+        ready: draft
+            .as_ref()
+            .is_ok_and(|draft| validate_draft(draft).is_ok()),
+    }
+}
+
+/// One skipped file as `draft.list` would have sent it.
+fn skip_to_wire(skip: &crate::store::drafts::SkippedDraft) -> DraftSkip {
+    DraftSkip {
+        path: skip.path.display().to_string(),
+        error: skip.error.clone(),
+    }
+}
+
+/// How many rows the Drafts mailbox holds, for whoever labels it.
+///
+/// The count is the length of the list, from the same [`indexed_drafts`] call
+/// the mailbox load makes, so the sidebar cannot disagree with the mailbox it
+/// labels. It includes the parse-skipped error rows, so the badge matches the
+/// list even when some files would not parse (#0080).
+///
+/// It lives here, beside the four other draft operations that need a store,
+/// because the daemon's `mailbox.list` labels the Drafts mailbox with it
+/// (#0126, P5-U10e): a daemon method reading its answer out of `src/tui/` was
+/// the shape P5-U10c-I2 fixed for the agenda, and the TUI is about to become a
+/// crate the daemon may not reach into.
+pub fn draft_count(account: &str) -> usize {
+    let (rows, skipped) = indexed_drafts(account);
+    rows.len() + skipped.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

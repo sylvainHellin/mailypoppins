@@ -36,7 +36,7 @@ use crate::config::AccountConfig;
 use crate::daemon::state::seeds_from_config;
 use crate::store::read;
 use crate::store::Store;
-use crate::tui::app::draft_count;
+use crate::draft::draft_count;
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,

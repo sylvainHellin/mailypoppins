@@ -28,8 +28,8 @@ use crate::store::open_store;
 use crate::store::read;
 
 use super::types::{
-    draft_count, entry_from_row, load_drafts, mailbox_key, row_to_wire, status_for_mailbox,
-    EmailEntry, MailboxInfo, MessageRef,
+    entry_from_row, load_drafts, mailbox_key, row_to_wire, status_for_mailbox, EmailEntry,
+    MailboxInfo, MessageRef,
 };
 
 /// Load one mailbox of one account from the store, newest first.
@@ -100,7 +100,7 @@ pub fn count_all_emails(account: &str, mailboxes: &[MailboxInfo]) -> Vec<usize> 
         .map(|mb| {
             let key = mailbox_key(mb);
             if key == crate::selector::DRAFTS_MAILBOX {
-                draft_count(account)
+                crate::draft::draft_count(account)
             } else {
                 counts.get(&key).copied().unwrap_or(0)
             }
