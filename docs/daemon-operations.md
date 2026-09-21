@@ -48,6 +48,8 @@ With nothing running it exits 0, and it sweeps a stale socket on the way out, be
 
 `mp daemon restart` stops whatever runs, waits for the old pid to disappear (up to 10 s), and then starts this executable's daemon.
 The wait is not decoration: a new daemon binding before the old one's cleanup runs would have its own socket unlinked by its predecessor.
+It prints the stop's line and nothing of its own about the start, so a successful restart reads as a stop and `mp daemon status` is what confirms the replacement; it also takes no `--grace-secs`, so a restart always stops under the daemon's default grace.
+Both are `BACKLOG.md` items.
 
 ## On-demand start, and the no-daemon list
 
@@ -146,7 +148,8 @@ The listing is transferred whole, once per mailbox open, as `docs/baselines/deci
 An `App` with no session at all falls back to the store-backed readers of `src/tui/app/store_rows.rs`, which is the shape every TUI unit test runs in and, in a real run, only a `Session::connect` that wedged.
 
 Since P5-U6 the actions go the same way, through `crate::tui::commands` and the same session.
-Eight call sites are left on the direct path and `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) is the record of them: three surfaces are not built (`RD-06`'s Markdown rendition, `LST-09`'s `message.fetch`, `RD-07`'s selector) and one is held back by the plan (`SND-04`'s undo-send hold, Phase 6).
+Seven call sites are left on the direct path and `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) is the record of them, all waiting on a surface that is not built: `RD-06`'s Markdown rendition, `LST-09`'s `message.fetch` and `RD-07`'s selector.
+The eighth was `SND-04`'s undo-send hold, and it went in P6-U2 when the hold became the daemon's.
 
 **An operation is awaited on the event stream, not polled.**
 `sync.quick`, `sync.full`, `send.approved` and `calendar.rsvp` answer `{operation_id}` at once and finish later.
@@ -352,7 +355,7 @@ A ready runtime watches its account's server, which is what the TUI used to do p
 An IMAP account holds a 300-second IDLE round on INBOX and renews it; a Graph account enumerates the inbox every 60 seconds and compares the *set* of ids, because one arrival plus one archive inside a minute leaves the count unchanged.
 A round that sees the mailbox move runs one quick tick, which publishes `sync.completed` with the arrivals it ingested and one count change per mailbox whose totals moved; a round that fails backs off from 30 seconds to 5 minutes and says so in the log.
 A blocked runtime does not watch: the engine holding the lock is watching the same mailbox.
-This is a watch and not a scheduler - it reacts to a server saying something changed - and a periodic tick with no client anywhere is still Phase 6's.
+This is a watch and not a scheduler - it reacts to a server saying something changed - and a periodic tick that keeps a store fresh with no client anywhere is **not built**: the plan put it in Phase 5/6 and neither phase built one, so it is a `BACKLOG.md` item rather than a phase's.
 
 ### The engine lock
 
@@ -379,8 +382,8 @@ The body's error is carried on the outcome rather than propagated, because the t
 A second tick arriving while one runs joins it and reports the running tick's outcome rather than starting a second engine pass.
 Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailbox body budget, with `0` meaning unbounded; `mp sync`, the explicit recovery path, stays unbounded whatever the config says.
 
-Nothing schedules a tick yet.
-The periodic scheduler is Phase 5/6 of the plan, so in this build a runtime holds its lock, serves reads, and ticks only when something in the process asks it to.
+Nothing schedules a tick.
+A runtime holds its lock, serves reads, and ticks when its watcher sees the mailbox move or when something in the process asks it to; a periodic pass on a timer is the `BACKLOG.md` item above and no phase of the migration has built it.
 
 ## The undo-send hold
 
@@ -585,7 +588,8 @@ The run that landed the file, its ceilings and the leak it found are in [baselin
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
 `DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the twelve environment hooks its own `HOOKS` list carries so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
-The two service hooks are not among them: no fixture installs a login service, and `tests/daemon_service.rs` sets both explicitly on every child it runs.
+Three of the fifteen are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, and `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way.
+The asymmetry is deliberate per hook rather than by design, and it is in `BACKLOG.md` as a thing to decide once rather than three times.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.
 
