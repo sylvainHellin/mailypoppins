@@ -268,9 +268,11 @@ const HOLD_SECS: u64 = 20;
 
 /// The six methods of the family, in the order their spec array declares them,
 /// which is method-name order like every other family.
-const SEND_METHODS: [&str; 6] = [
+const SEND_METHODS: [&str; 8] = [
     "send.approved",
+    "send.cancel_hold",
     "send.draft",
+    "send.hold_status",
     "send.invite",
     "send.outbox_discard",
     "send.outbox_list",
@@ -665,7 +667,7 @@ fn all_delivered() -> SendOutcome {
 #[test]
 fn the_send_family_declares_six_methods() {
     let names: Vec<&str> = SEND_METHOD_SPECS.iter().map(|spec| spec.name).collect();
-    assert_eq!(names, SEND_METHODS, "the family serves exactly these six");
+    assert_eq!(names, SEND_METHODS, "the family serves exactly these eight");
 
     let mut sorted = names.clone();
     sorted.sort_unstable();
@@ -769,19 +771,27 @@ async fn the_daemon_advertises_the_send_slice_methods() {
     }
 }
 
-/// No send path this slice serves takes a hold, a countdown or a delay.
+/// No send path this slice serves takes a countdown or a delay of its own.
 ///
-/// `SND-04`'s undo-send lives in the TUI today and Phase 6 moves it into the
-/// daemon *without* putting it on the CLI's path (`ANO-7`). Pinning the
-/// absence here means Phase 6 cannot quietly add the parameter to the method
-/// the CLI calls; it has to add a method of its own.
+/// `SND-04`'s undo-send moved into the daemon in P6-U2 *without* reaching the
+/// CLI's path (`ANO-7`): `send.draft` and `send.approved` gained one optional
+/// `hold: bool`, which the CLI never passes and which therefore defaults to
+/// off, and the window itself stayed the daemon's. So `hold_secs` and
+/// `countdown` are still refused everywhere - a caller may not name the window
+/// - and `hold` is still refused on `send.invite`, which has no undo key
+/// behind it.
 #[tokio::test]
 async fn the_cli_send_paths_take_no_hold() {
     let slice = Slice::start();
     let mut conn = slice.connect().await;
 
     for method in ["send.draft", "send.approved", "send.invite"] {
-        for extra in ["hold", "hold_secs", "countdown"] {
+        let refusable: &[&str] = if method == "send.invite" {
+            &["hold", "hold_secs", "countdown"]
+        } else {
+            &["hold_secs", "countdown"]
+        };
+        for extra in refusable.iter().copied() {
             let refused = call_err(
                 &mut conn,
                 method,

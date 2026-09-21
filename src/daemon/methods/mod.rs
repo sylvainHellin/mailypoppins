@@ -53,6 +53,29 @@ const INVALID_PARAMS: i32 = -32602;
 /// JSON-RPC's own "internal error".
 const INTERNAL_ERROR: i32 = -32603;
 
+/// Everything the registered methods share with the state that owns them.
+///
+/// One argument rather than seven, because [`register`]'s list is the daemon's
+/// whole set of long-lived tables and it grows by one every time a family
+/// needs another: [`DaemonState`](super::server::DaemonState) builds them,
+/// hands them over, and keeps its own `Arc` on each.
+pub struct Shared {
+    /// The live configuration every method resolves accounts against.
+    pub config: Arc<ConfigStore>,
+    /// The account runtimes.
+    pub runtimes: Arc<RuntimeTable>,
+    /// The one canonical state, whose revisions stamp every event.
+    pub canonical: Arc<CanonicalState>,
+    /// Every long-running operation this daemon has started.
+    pub operations: Arc<OperationRegistry>,
+    /// The draft and signature watcher.
+    pub watch: Arc<DraftWatch>,
+    /// Every live materialised handle.
+    pub handles: Arc<HandleTable>,
+    /// Every undo-send hold this daemon is carrying.
+    pub holds: Arc<super::hold::HoldScheduler>,
+}
+
 /// Register every domain method this build serves.
 ///
 /// The single place that says which methods exist: the handshake derives its
@@ -60,15 +83,16 @@ const INTERNAL_ERROR: i32 = -32603;
 /// being advertised. `test.operation` is the one exception a build can add, and
 /// only behind
 /// [`FAKE_OPERATIONS_ENV`](super::operations::FAKE_OPERATIONS_ENV).
-pub fn register(
-    dispatcher: &mut Dispatcher,
-    config: Arc<ConfigStore>,
-    runtimes: Arc<RuntimeTable>,
-    canonical: Arc<CanonicalState>,
-    operations: Arc<OperationRegistry>,
-    watch: Arc<DraftWatch>,
-    handles: Arc<HandleTable>,
-) {
+pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
+    let Shared {
+        config,
+        runtimes,
+        canonical,
+        operations,
+        watch,
+        handles,
+        holds,
+    } = shared;
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
     }));
@@ -103,6 +127,7 @@ pub fn register(
         Arc::clone(&config),
         Arc::clone(&canonical),
         Arc::clone(&operations),
+        holds,
     );
     self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));

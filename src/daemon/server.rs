@@ -218,6 +218,10 @@ pub struct DaemonState {
     /// three `message.*` handle methods hold the same table rather than a
     /// reference back to the state that owns them.
     pub handles: Arc<super::handles::HandleTable>,
+    /// Every undo-send hold this daemon is carrying (P6-U2). Held here for the
+    /// reason the operation registry is: the connection loop reaches it from
+    /// outside the dispatcher, to apply the last-client rule.
+    pub holds: Arc<super::hold::HoldScheduler>,
 }
 
 impl DaemonState {
@@ -262,15 +266,19 @@ impl DaemonState {
         // a handle minted under one lifetime and released under another would be
         // a promise this daemon changed its mind about.
         let handles = Arc::new(super::handles::HandleTable::from_env());
+        let holds = Arc::new(super::hold::HoldScheduler::new());
         let mut dispatcher = Dispatcher::new();
         super::methods::register(
             &mut dispatcher,
-            Arc::clone(&config),
-            Arc::clone(&runtimes),
-            Arc::clone(&canonical),
-            Arc::clone(&operations),
-            Arc::clone(&watch),
-            Arc::clone(&handles),
+            super::methods::Shared {
+                config: Arc::clone(&config),
+                runtimes: Arc::clone(&runtimes),
+                canonical: Arc::clone(&canonical),
+                operations: Arc::clone(&operations),
+                watch: Arc::clone(&watch),
+                handles: Arc::clone(&handles),
+                holds: Arc::clone(&holds),
+            },
         );
         DaemonState {
             meta,
@@ -281,6 +289,7 @@ impl DaemonState {
             runtimes,
             watch,
             handles,
+            holds,
         }
     }
 
@@ -446,6 +455,19 @@ async fn handle_connection(
     let result = serve_connection(stream, connection_id, &state, shutdown, queue.clone()).await;
     state.operations.on_disconnect(conn);
     drop(queue);
+    // The last client leaving cancels every hold and leaves the drafts
+    // approved, which is the plan's own rule and what killing the TUI does
+    // today. After the unsubscribe, so the count is what it will be: a hold
+    // that fired into an empty daemon would be a send nobody could still undo.
+    if state.canonical.subscriber_count() == 0 {
+        let cancelled = state.holds.cancel_all(&state.canonical, &state.operations);
+        if cancelled > 0 {
+            info!(
+                "[daemon] the last client left mid-hold: cancelled {cancelled} held send(s), \
+                 their drafts are still approved"
+            );
+        }
+    }
     result
 }
 

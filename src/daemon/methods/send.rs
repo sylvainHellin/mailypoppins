@@ -1,11 +1,14 @@
-//! The `send.*` family: the three sends and the operator's outbox (P4-U12).
+//! The `send.*` family: the three sends, the undo-send hold and the operator's
+//! outbox (P4-U12, P6-U2).
 //!
 //! Everything that puts a message on the wire, and everything that answers for
-//! one that is still on its way. Six methods:
+//! one that is still on its way. Eight methods:
 //!
 //! ```text
-//! send.approved        {account}                 -> {operation_id}
-//! send.draft           {account, selector}       -> {operation_id}
+//! send.approved        {account, hold?}          -> {operation_id, held?}
+//! send.cancel_hold     {operation_id}            -> {cancelled, operation_id, revision}
+//! send.draft           {account, selector, hold?} -> {operation_id, held?}
+//! send.hold_status     {account?}                -> HoldListing
 //! send.invite          {account, subject, start, …} -> {operation_id}
 //! send.outbox_discard  {account, row_id}         -> {discarded, row_id, message_id, revision}
 //! send.outbox_list     {account}                 -> OutboxListing
@@ -39,10 +42,20 @@
 //! `account` is a required parameter here and a caller that sends
 //! `all_accounts` is told rather than quietly served one account.
 //!
-//! The undo-send hold (`SND-04`) is in neither: `ANO-7` records that the CLI
-//! send paths bypass it, Phase 6 moves it into the daemon and must keep that
-//! true, so none of these methods takes a `hold`, a `hold_secs` or a
-//! `countdown` and a caller that sends one is refused.
+//! ## The undo-send hold is here, and it is a boolean
+//!
+//! `SND-04` moved into the daemon in P6-U2, as [`super::super::hold`]. What
+//! reaches this file is one optional `hold: bool` on `send.draft` and
+//! `send.approved`, defaulting to `false`: the daemon resolves
+//! `email.send_hold_secs` from the configuration it already owns, so a client
+//! that read the file itself and passed a number would leave the policy where
+//! #0090 put it.
+//!
+//! `ANO-7` therefore stays true without a line of client code. `mp send` and
+//! `mp send-approved` pass no `hold` at all, so they bypass the window by
+//! construction, and `send.invite` takes no `hold` in any form: an invitation
+//! has no undo key behind it. `hold_secs` and `countdown` are refused on all
+//! three, because the window is not the caller's to name.
 //!
 //! ## `send.invite` takes three parameters the CLI adds
 //!
@@ -82,6 +95,7 @@ use mp_protocol::send::{
 use mp_protocol::RpcError;
 
 use crate::config::{AccountConfig, AuthMethod, EmailSettings, SmtpConfig};
+use crate::daemon::hold::{HoldPlan, HoldScheduler};
 use crate::daemon::runtime::account::off_thread;
 use crate::outbox::{self, OutboxState};
 use crate::store::drafts::DraftRow;
@@ -92,16 +106,18 @@ use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
     ResourceId,
 };
-use super::super::operations::{OperationHandle, OperationRegistry, Progress};
+use super::super::operations::{OperationHandle, OperationId, OperationRegistry, Progress};
 use super::super::state::{CanonicalState, ConnectionId};
 use super::{internal, invalid_params, server_error, string_param};
 
 pub use crate::daemon::fake_transport::FAKE_TRANSPORT_ENV;
 
-/// The six methods of the family, in method-name order.
-pub const SEND_METHOD_SPECS: [MethodSpec; 6] = [
+/// The eight methods of the family, in method-name order.
+pub const SEND_METHOD_SPECS: [MethodSpec; 8] = [
     MethodSpec::new("send.approved", MethodKind::Operation, 1),
+    MethodSpec::new("send.cancel_hold", MethodKind::Command, 1),
     MethodSpec::new("send.draft", MethodKind::Operation, 1),
+    MethodSpec::new("send.hold_status", MethodKind::Query, 1),
     MethodSpec::new("send.invite", MethodKind::Operation, 1),
     MethodSpec::new("send.outbox_discard", MethodKind::Command, 1),
     MethodSpec::new("send.outbox_list", MethodKind::Query, 1),
@@ -114,6 +130,7 @@ pub fn register(
     config: Arc<ConfigStore>,
     canonical: Arc<CanonicalState>,
     operations: Arc<OperationRegistry>,
+    holds: Arc<HoldScheduler>,
 ) {
     for spec in SEND_METHOD_SPECS {
         dispatcher.register(Arc::new(SendMethod {
@@ -121,11 +138,12 @@ pub fn register(
             config: Arc::clone(&config),
             canonical: Arc::clone(&canonical),
             operations: Arc::clone(&operations),
+            holds: Arc::clone(&holds),
         }));
     }
 }
 
-/// One of the six, selected by its own [`MethodSpec`].
+/// One of the eight, selected by its own [`MethodSpec`].
 pub struct SendMethod {
     /// Which of [`SEND_METHOD_SPECS`] this instance serves.
     pub spec: MethodSpec,
@@ -135,6 +153,8 @@ pub struct SendMethod {
     pub canonical: Arc<CanonicalState>,
     /// The registry an operation is started in.
     pub operations: Arc<OperationRegistry>,
+    /// Every hold this daemon is carrying.
+    pub holds: Arc<HoldScheduler>,
 }
 
 impl Method for SendMethod {
@@ -149,6 +169,13 @@ impl Method for SendMethod {
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
         Box::pin(async move {
+            // The two hold methods before anything else: neither resolves an
+            // account, and `send.cancel_hold` does not take one at all.
+            match self.spec.name {
+                "send.hold_status" => return self.hold_status(&params),
+                "send.cancel_hold" => return self.cancel_hold(&params),
+                _ => {}
+            }
             let snapshot = self.config.snapshot();
             let request = plan(self.spec.name, &params, &snapshot)?;
             match request {
@@ -168,17 +195,66 @@ impl Method for SendMethod {
                         vec![ResourceId::new(format!("outbox:{account}"))],
                     ))
                 }
-                Request::Operation(work) => {
+                Request::Operation { work, hold } => {
                     let (id, handle) = self.operations.start(
                         ConnectionId(ctx.connection_id),
                         self.spec.cancel_scope,
                         self.spec.name,
                     );
-                    tokio::spawn(run(*work, handle));
-                    Ok(Outcome::query(json!({"operation_id": id.as_str()})))
+                    let account = work.account().to_string();
+                    let Some(plan) = hold else {
+                        tokio::spawn(run(*work, handle));
+                        return Ok(Outcome::query(json!({"operation_id": id.as_str()})));
+                    };
+                    // Armed before the timer is spawned, so a `send.hold_status`
+                    // called the instant after this answer already sees it.
+                    self.holds
+                        .arm(&self.canonical, &id, &account, ctx.kind.as_str(), &plan);
+                    tokio::spawn(super::super::hold::run_held(
+                        Arc::clone(&self.holds),
+                        Arc::clone(&self.canonical),
+                        id.clone(),
+                        plan.hold_secs,
+                        run(*work, handle),
+                    ));
+                    Ok(Outcome::query(
+                        json!({"operation_id": id.as_str(), "held": true}),
+                    ))
                 }
             }
         })
+    }
+}
+
+impl SendMethod {
+    /// `send.hold_status`: what the scheduler is carrying, for one account or
+    /// for all of them.
+    fn hold_status(&self, params: &Value) -> Result<Outcome, DomainError> {
+        only("send.hold_status", params, &["account"])?;
+        let account = optional(params, "account");
+        let listing = self.holds.listing(account.as_deref());
+        Ok(Outcome::query(to_value("send.hold_status", &listing)?))
+    }
+
+    /// `send.cancel_hold`: drop one hold and leave the draft approved.
+    ///
+    /// From any connection, because the hold is addressed by the operation the
+    /// send answered with and not by the window that made it: a countdown
+    /// every client renders is a countdown every client may stop.
+    fn cancel_hold(&self, params: &Value) -> Result<Outcome, DomainError> {
+        only("send.cancel_hold", params, &["operation_id"])?;
+        let id = OperationId::new(string_param(params, "operation_id")?);
+        if !self.holds.cancel(&self.canonical, &self.operations, &id) {
+            // An id that never named a hold and one whose hold has already
+            // fired are the same refusal: a cancel is not a recall.
+            return Err(invalid_params(format!("no hold is running for {id}")).into());
+        }
+        let revision = self.canonical.revision().get();
+        Ok(Outcome::command(
+            json!({"cancelled": true, "operation_id": id.as_str(), "revision": revision}),
+            revision,
+            vec![ResourceId::new(format!("operation:{id}"))],
+        ))
     }
 }
 
@@ -196,7 +272,14 @@ enum Request {
         account: String,
         row_id: i64,
     },
-    Operation(Box<Work>),
+    Operation {
+        /// What the operation performs, now or when the window elapses.
+        work: Box<Work>,
+        /// The window to wait out first, `None` when the caller asked for no
+        /// hold, when this method takes none, or when `email.send_hold_secs`
+        /// is zero.
+        hold: Option<HoldPlan>,
+    },
 }
 
 /// The work one operation performs.
@@ -226,11 +309,23 @@ enum Work {
     },
 }
 
+impl Work {
+    /// The account this work sends from, which is what a hold is listed under.
+    fn account(&self) -> &str {
+        match self {
+            Work::Draft { account, .. }
+            | Work::Approved { account, .. }
+            | Work::Invite { account, .. }
+            | Work::Retry { account, .. } => &account.name,
+        }
+    }
+}
+
 /// The parameters each method takes, and nothing else.
 fn allowed(method: &str) -> &'static [&'static str] {
     match method {
-        "send.approved" => &["account"],
-        "send.draft" => &["account", "id", "selector"],
+        "send.approved" => &["account", "hold"],
+        "send.draft" => &["account", "hold", "id", "selector"],
         "send.invite" => &[
             "account",
             "cc",
@@ -255,15 +350,7 @@ fn plan(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<Request, RpcError> {
-    let allowed = allowed(method);
-    if let Some(object) = params.as_object() {
-        if let Some(unexpected) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-            return Err(invalid_params(format!(
-                "{method} has no {unexpected} parameter; it takes {}",
-                allowed.join(", ")
-            )));
-        }
-    }
+    only(method, params, allowed(method))?;
     let name = string_param(params, "account")?;
     let account = super::account::configured_account(&snapshot.accounts, &name)?.clone();
     let secrets = snapshot.config.secrets_backend;
@@ -283,17 +370,32 @@ fn plan(
                     row.id, row.state
                 )));
             }
-            Ok(Request::Operation(Box::new(Work::Retry {
-                account,
-                row_id: row.id,
-                secrets,
-            })))
+            Ok(Request::Operation {
+                work: Box::new(Work::Retry {
+                    account,
+                    row_id: row.id,
+                    secrets,
+                }),
+                hold: None,
+            })
         }
-        "send.approved" => Ok(Request::Operation(Box::new(Work::Approved {
-            account,
-            email,
-            secrets,
-        }))),
+        "send.approved" => {
+            // The batch's hold names the first draft it would send, because
+            // that is the one a countdown is about; a batch with nothing in it
+            // arms no window, so "no approved emails found" is not a sentence
+            // a user waits twenty seconds for.
+            let hold = hold_plan(params, &email, || {
+                first_approved(&account.name).map(|row| (row.id, row.subject.unwrap_or_default()))
+            })?;
+            Ok(Request::Operation {
+                work: Box::new(Work::Approved {
+                    account,
+                    email,
+                    secrets,
+                }),
+                hold,
+            })
+        }
         "send.invite" => {
             let request = crate::invite::InviteRequest {
                 to: optional(params, "to"),
@@ -316,13 +418,16 @@ fn plan(
                 data: Some(json!({"account": account.name})),
             })?;
             let signature = super::draft::signature_of(&account, params, &email);
-            Ok(Request::Operation(Box::new(Work::Invite {
-                account,
-                plan,
-                signature,
-                email,
-                secrets,
-            })))
+            Ok(Request::Operation {
+                work: Box::new(Work::Invite {
+                    account,
+                    plan,
+                    signature,
+                    email,
+                    secrets,
+                }),
+                hold: None,
+            })
         }
         _ => {
             let selector = optional(params, "selector");
@@ -337,14 +442,69 @@ fn plan(
             }
             let key = super::draft::addressed_one(params, &account.name)?;
             let row = super::draft::resolve(&account.name, &key)?;
-            Ok(Request::Operation(Box::new(Work::Draft {
-                account,
-                row,
-                email,
-                secrets,
-            })))
+            let hold = hold_plan(params, &email, || {
+                Some((row.id.clone(), row.subject.clone().unwrap_or_default()))
+            })?;
+            Ok(Request::Operation {
+                work: Box::new(Work::Draft {
+                    account,
+                    row,
+                    email,
+                    secrets,
+                }),
+                hold,
+            })
         }
     }
+}
+
+/// Refuse a parameter this method does not take, naming the ones it does.
+fn only(method: &str, params: &Value, allowed: &[&str]) -> Result<(), RpcError> {
+    if let Some(object) = params.as_object() {
+        if let Some(unexpected) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+            return Err(invalid_params(format!(
+                "{method} has no {unexpected} parameter; it takes {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The window this call asks for, or `None` when it asks for none.
+///
+/// Three ways to get `None`, and all three are the same answer to the client:
+/// no `hold` (which is what every CLI path does), `hold: false`, and
+/// `send_hold_secs = 0`, the opt-out #0090 shipped. `what` is only consulted
+/// when a window is really going to be armed, so a plain send pays no scan.
+fn hold_plan(
+    params: &Value,
+    email: &EmailSettings,
+    what: impl FnOnce() -> Option<(String, String)>,
+) -> Result<Option<HoldPlan>, RpcError> {
+    let asked = match params.get("hold") {
+        None | Some(Value::Null) => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| invalid_params("hold is a boolean; the window is the daemon's"))?,
+    };
+    if !asked || email.send_hold_secs == 0 {
+        return Ok(None);
+    }
+    Ok(what().map(|(draft_id, subject)| HoldPlan {
+        hold_secs: email.send_hold_secs,
+        draft_id,
+        subject,
+    }))
+}
+
+/// The first approved draft of `account` in listing order, which is the one a
+/// batch's countdown names.
+fn first_approved(account: &str) -> Option<DraftRow> {
+    crate::store::drafts::index_dir(&crate::config::drafts_dir(account))
+        .0
+        .into_iter()
+        .find(|row| row.status == "approved")
 }
 
 /// An optional string parameter, absent when null.
@@ -875,9 +1035,10 @@ mod tests {
     use super::*;
 
     /// The array is the family, in method-name order, and every one of it is
-    /// durable: a send outlives the client that asked for it.
+    /// durable: a send outlives the client that asked for it, and a hold is
+    /// ended by a decision rather than by a disconnect.
     #[test]
-    fn the_family_declares_six_durable_methods_in_name_order() {
+    fn the_family_declares_eight_durable_methods_in_name_order() {
         let names: Vec<&str> = SEND_METHOD_SPECS.iter().map(|spec| spec.name).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
