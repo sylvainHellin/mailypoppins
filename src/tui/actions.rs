@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use super::app::{
-    mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus, HeldSend,
+    mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus,
     MailboxKind, MessageRef, Overlay, SearchOverlayFocus, StatusLevel,
 };
 use super::helpers::{
@@ -21,7 +21,6 @@ use crate::draft::{
     SourceMessage,
 };
 use crate::selector::Selector;
-use crate::send::SendReport;
 use crate::store::BlobStore;
 
 // ---------------------------------------------------------------------------
@@ -674,82 +673,6 @@ fn indexed_draft_path(app: &mut App, id: &str) -> Option<PathBuf> {
 // Send (#0052 scope item 3)
 // ---------------------------------------------------------------------------
 
-/// Send one draft the way `mp send <selector>` does, and leave the same trail.
-///
-/// The orchestration itself is [`crate::send::send_draft`] (#0058): the outbox
-/// commit, the transport choice, the sent copy and the draft file's fate are
-/// all shared with the CLI. What is added here is the TUI's own half: the
-/// blocking bridge into the async path, and the drafts-index refresh so the
-/// retirement (or the `sent` status a partial send leaves) is the answer the
-/// next selector resolution gives, without waiting for the one-second poll
-/// (#0050's post-write refresh discipline).
-fn send_one_draft(
-    rt: &tokio::runtime::Runtime,
-    draft: &crate::types::EmailDraft,
-    ctx: &crate::send::SendContext,
-) -> Result<SendReport> {
-    let sent = rt.block_on(crate::send::send_draft(draft, ctx))?;
-    if sent.report.send_result.any_succeeded() {
-        if let Some(e) = sent.settle_error.as_ref() {
-            log::warn!("[drafts] the send left the draft file behind: {e:#}");
-        }
-        if let Err(e) = crate::store::drafts::refresh_account(&ctx.account.name) {
-            log::warn!("[drafts] refreshing after the send failed: {e:#}");
-        }
-    }
-    Ok(sent.report)
-}
-
-/// Hand a parked send to the background send thread (#0090).
-///
-/// The tail of the send key: whatever the undo window was, this is where the
-/// draft finally leaves for SMTP. Shared by the zero-window opt-out (fired
-/// straight from `Action::Send`) and the event-loop tick that fires a held
-/// send once its window elapses, so both take the identical path the send key
-/// always took.
-pub(super) fn fire_held_send(
-    app: &mut App,
-    held: HeldSend,
-    bg_tx: &mpsc::Sender<BgResult>,
-) {
-    let HeldSend { draft, ctx, account_index, .. } = held;
-    app.bg_count += 1;
-    app.set_status_level("Sending...".to_string(), StatusLevel::Progress);
-    let tx = bg_tx.clone();
-    std::thread::spawn(move || {
-        let rt = super::runtime::shared();
-        let result = send_one_draft(rt, &draft, &ctx).and_then(|r| send_status_line(&r));
-        let _ = tx.send(BgResult::Send {
-            account_index,
-            result: result.map_err(|e| format!("{e:#}")),
-        });
-    });
-}
-
-/// The status line one finished send shows, which is the CLI's own report:
-/// how many recipients took it, and where the message actually is (#0037).
-fn send_status_line(report: &SendReport) -> Result<String> {
-    let result = &report.send_result;
-    if result.all_succeeded() {
-        Ok(format!(
-            "Sent to {} recipient(s) [{}]",
-            result.results.len(),
-            report.status_line()
-        ))
-    } else if result.any_succeeded() {
-        let failed: Vec<String> = result.failed().iter().map(|r| r.address.clone()).collect();
-        Ok(format!(
-            "Partial: {}/{} succeeded -- failed: {} [{}]",
-            result.succeeded().len(),
-            result.results.len(),
-            failed.join(", "),
-            report.status_line()
-        ))
-    } else {
-        anyhow::bail!("Failed to send to all {} recipient(s)", result.results.len())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Mutation plumbing (#0038 scope item 7)
 // ---------------------------------------------------------------------------
@@ -898,87 +821,39 @@ pub(super) fn handle_action(
             )?;
         }
         Action::Send => {
-            // `mp send <selector>` in-process (#0052 scope item 3). The draft
-            // is resolved through the index, validated the way the CLI
-            // validates it, and submitted through the durable outbox; the
-            // approved-status requirement is not checked here because it is
-            // not the CLI's either -- `build_draft_message` enforces it, and
-            // its refusal is the error the user sees.
-            let Some((_id, path)) = cursor_draft(
+            // `send.draft` with the hold the daemon owns (P6-U2). The draft is
+            // resolved through the index and approved the way `x` has always
+            // approved it -- a write to a file this client is looking at --
+            // and everything after that is one method call: the build, the
+            // outbox row, the transport and the draft file's fate are the
+            // daemon's, and so is the undo window.
+            let Some((id, path)) = cursor_draft(
                 app,
                 "Send needs a draft; received mail has nothing to send",
             ) else {
                 return Ok(());
             };
-
-            let draft = match validate_then_approve(&path) {
-                Ok(draft) => draft,
-                Err(e) => {
-                    app.set_status_level(format!("Send failed: {e:#}"), StatusLevel::Error);
-                    return Ok(());
-                }
-            };
-
+            if let Err(e) = validate_then_approve(&path) {
+                app.set_status_level(format!("Send failed: {e:#}"), StatusLevel::Error);
+                return Ok(());
+            }
             // Which account sends it is the draft's own `from:`, not the open
-            // mailbox: a draft written for another configured account is sent
-            // from that account's SMTP or Graph credentials.
-            //
-            // The IMAP config that resolver also hands back is not used here:
-            // the sent copy is an APPEND the outbox owns and drives (#0037),
-            // not something this path does after the fact.
-            // The signature now lives in the draft body (#0099), appended at
-            // creation, so the send-time injection is off here: passing it
-            // again would double it.
-            let (acct_idx, smtp, _imap, graph, account_config, _signature) =
+            // mailbox: a draft written for another configured account leaves
+            // through that account's credentials, and `send.draft` resolves
+            // the draft under the account it is told.
+            let (account_index, smtp, _imap, graph, account_config, _signature) =
                 super::helpers::resolve_send_account(app, &path);
             // The account's `auth_method` decides the transport, not which
-            // config happened to load: a Graph account sends over Graph or not
-            // at all (see `resolve_send_transport`).
-            let (graph, smtp) =
-                match super::helpers::resolve_send_transport(&account_config, graph, smtp) {
-                    Ok(pair) => pair,
-                    Err(missing) => {
-                        app.set_status_level(missing.to_string(), StatusLevel::Error);
-                        return Ok(());
-                    }
-                };
-            let ctx = crate::send::SendContext {
-                graph,
-                smtp,
-                account: account_config,
-                email_settings: app.global_config.email.clone(),
-                signature: None,
-            };
-
-            // Undo-send hold (#0090): park the send behind the configured
-            // window instead of handing it to SMTP at once. A zero window is
-            // the opt-out and fires immediately; a non-zero one waits, so `u`
-            // can cancel it (see `dispatch_normal_mode` and the event loop).
-            let hold = std::time::Duration::from_secs(app.global_config.email.send_hold_secs);
-            let held = HeldSend {
-                draft,
-                ctx,
-                account_index: acct_idx,
-                fire_at: std::time::Instant::now() + hold,
-            };
-            if hold.is_zero() {
-                fire_held_send(app, held, bg_tx);
-            } else {
-                // Only one send waits at a time: a second arm flushes the first
-                // rather than dropping it, so pressing send twice never loses a
-                // message.
-                if let Some(prev) = app.held_send.take() {
-                    fire_held_send(app, prev, bg_tx);
-                }
-                app.set_status_level(
-                    format!(
-                        "Sending in {}s (press u to undo)",
-                        app.global_config.email.send_hold_secs
-                    ),
-                    StatusLevel::Progress,
-                );
-                app.held_send = Some(held);
+            // config happened to load. The check stays here because its
+            // refusal is this key's sentence, named before an operation is
+            // started for work that cannot happen.
+            if let Err(missing) =
+                super::helpers::resolve_send_transport(&account_config, graph, smtp)
+            {
+                app.set_status_level(missing.to_string(), StatusLevel::Error);
+                return Ok(());
             }
+            commands::start_draft_send(app, &door, &account_config.name, account_index, &id);
         }
         Action::NewDraft => {
             let name = chrono::Local::now()
@@ -1363,14 +1238,16 @@ pub(super) fn handle_action(
             edit_signature_file(app, terminal, &name)?;
         }
 
-        // The twenty the command layer owns (P5-U6's fifteen and P5-U8's five
-        // operations). Listed rather than wildcarded so a new action still has
-        // to be classified here, and unreachable because `dispatch` answered
-        // `true` for every one of them before this match was entered.
+        // The twenty-one the command layer owns (P5-U6's fifteen, P5-U8's five
+        // operations and P6-U2's cancel). Listed rather than wildcarded so a
+        // new action still has to be classified here, and unreachable because
+        // `dispatch` answered `true` for every one of them before this match
+        // was entered.
         Action::Fetch
         | Action::Sync
         | Action::FetchAccount(_)
         | Action::SendApproved
+        | Action::CancelHeldSend
         | Action::Rsvp { .. }
         | Action::Approve
         | Action::BatchApprove(_)
@@ -3298,12 +3175,12 @@ mod store_backed_mutations {
         ));
         assert_eq!(outbox_counts(&fx).failed, 1);
 
-        // The status line is the CLI's refusal, and the draft is untouched:
-        // nothing was marked sent.
-        let err = send_status_line(&report).unwrap_err();
+        // Nobody took it, which is what the status line the daemon's outcome
+        // is rendered into says (`commands::sent_line`); and the draft is
+        // untouched, so nothing was marked sent.
         assert!(
-            err.to_string().starts_with("Failed to send to all"),
-            "{err}"
+            report.send_result.failed().len() == report.send_result.results.len(),
+            "every recipient was refused"
         );
         assert!(std::fs::read_to_string(&path)
             .unwrap()

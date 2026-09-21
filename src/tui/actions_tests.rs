@@ -209,6 +209,11 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         ActionRoute::Daemon(&["send.approved"]),
         false,
     ),
+    (
+        "CancelHeldSend",
+        ActionRoute::Daemon(&["send.cancel_hold"]),
+        false,
+    ),
     ("NewDraft", ActionRoute::Daemon(&["draft.create"]), true),
     ("Approve", ActionRoute::Daemon(&["draft.approve"]), false),
     (
@@ -424,6 +429,7 @@ fn one_of_each_action() -> Vec<Action> {
         Action::Reply(false),
         Action::Send,
         Action::SendApproved,
+        Action::CancelHeldSend,
         Action::NewDraft,
         Action::Approve,
         Action::BatchApprove(Vec::new()),
@@ -518,6 +524,7 @@ fn variant_name(action: &Action) -> &'static str {
         Action::Reply(_) => "Reply",
         Action::Send => "Send",
         Action::SendApproved => "SendApproved",
+        Action::CancelHeldSend => "CancelHeldSend",
         Action::NewDraft => "NewDraft",
         Action::Approve => "Approve",
         Action::BatchApprove(_) => "BatchApprove",
@@ -1241,13 +1248,6 @@ const TUI_ACTION_ENGINE_RESIDUE: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "src/tui/actions.rs",
-        "send_one_draft",
-        "send_draft(",
-        "the undo-send hold's fire path (#0090, SND-04): the plan holds the hold in the TUI \
-         until P6-U1/U2 moves it and the send to send.draft together",
-    ),
-    (
-        "src/tui/actions.rs",
         "store_for_mutation",
         "open_store(",
         "the helper the three renditions above share; it dies with the last of them",
@@ -1285,7 +1285,7 @@ const ENGINE_NEEDLES: [&str; 11] = [
 ];
 
 /// P5-U5's gate: every action that a registered method can carry goes through
-/// one, and what is left is the eight entries of
+/// one, and what is left is the seven entries of
 /// [`TUI_ACTION_ENGINE_RESIDUE`].
 ///
 /// Fails on the tree as committed (thirty-three call sites against eight),

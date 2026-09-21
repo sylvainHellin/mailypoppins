@@ -53,6 +53,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use mp_protocol::events::SyncCompleted;
+use mp_protocol::send::SendOutcome;
 
 use super::app::{
     mailbox_key, Action, App, BgResult, MailboxKind, MessageRef, RsvpChoice, StatusLevel,
@@ -96,6 +97,7 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::Reply(_) => ActionRoute::Daemon(&["draft.reply"]),
         Action::Send => ActionRoute::Daemon(&["send.draft"]),
         Action::SendApproved => ActionRoute::Daemon(&["send.approved"]),
+        Action::CancelHeldSend => ActionRoute::Daemon(&["send.cancel_hold"]),
         Action::NewDraft => ActionRoute::Daemon(&["draft.create"]),
         Action::Approve | Action::BatchApprove(_) => ActionRoute::Daemon(&["draft.approve"]),
         Action::MarkDraft | Action::BatchMarkDraft(_) => ActionRoute::Daemon(&["draft.demote"]),
@@ -309,6 +311,10 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             send_approved(app, commands);
             true
         }
+        Action::CancelHeldSend => {
+            cancel_hold(app, commands);
+            true
+        }
         Action::Rsvp { msg, choice } => {
             rsvp(app, commands, *msg, *choice);
             true
@@ -409,6 +415,10 @@ pub(super) fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
             account_index: *account_index,
             result: result.map(|settled| sync_status_line(account, &settled)),
         },
+        Awaited::Send { account_index } => BgResult::Send {
+            account_index: *account_index,
+            result: result.and_then(|settled| sent_line(&settled)),
+        },
         Awaited::SendApproved { account_index } => BgResult::SendApproved {
             account_index: *account_index,
             result: result.map(|settled| approved_line(&settled)),
@@ -503,6 +513,46 @@ fn start_account_pass(app: &mut App, commands: &dyn Queries, index: usize) {
     );
 }
 
+/// `send.draft` for one draft of the open account, behind the daemon's hold.
+///
+/// The approve and the two refusals ahead of it are the send key's (see
+/// `actions::handle_action`); what is here is the call and the operation it
+/// starts. `hold: true` and not a number of seconds: the window is
+/// `email.send_hold_secs`, the daemon reads it, and a client that computed it
+/// would be the hold living in the client again under a longer name.
+pub(super) fn start_draft_send(
+    app: &mut App,
+    commands: &dyn Queries,
+    account: &str,
+    account_index: usize,
+    id: &str,
+) {
+    start_operation(
+        app,
+        commands,
+        "send.draft",
+        json!({"account": account, "id": id, "hold": true}),
+        Awaited::Send { account_index },
+    );
+}
+
+/// `send.cancel_hold` for the countdown this client is showing.
+///
+/// The operation id and nothing else: a hold is addressed by the operation the
+/// send answered with, which is what makes cancelling one from a window that
+/// did not send it possible at all. A client with no countdown has no id to
+/// name, so it makes no call.
+fn cancel_hold(app: &mut App, commands: &dyn Queries) {
+    let Some(operation) = app.hold.as_ref().map(|hold| hold.operation_id.clone()) else {
+        return;
+    };
+    if let Err(e) = commands.call("send.cancel_hold", json!({"operation_id": operation})) {
+        // The countdown stays up: the daemon refused to stop it, so the send
+        // is still coming and saying otherwise would be a lie.
+        app.set_status_level(format!("send.cancel_hold: {e:#}"), StatusLevel::Error);
+    }
+}
+
 /// `send.approved` over the open Drafts directory.
 ///
 /// The two client-side refusals are the key's own sentences: a view with no
@@ -534,7 +584,7 @@ fn send_approved(app: &mut App, commands: &dyn Queries) {
         app,
         commands,
         "send.approved",
-        json!({"account": account}),
+        json!({"account": account, "hold": true}),
         Awaited::SendApproved { account_index },
     );
 }
@@ -619,6 +669,42 @@ fn new_inbox_mail(settled: &Value) -> Vec<NewMailMeta> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `send.draft`, as the line the send key has always posted: how many
+/// recipients took it, and where the message actually is (#0037).
+///
+/// The three sentences are `actions::send_status_line`'s, built from the
+/// `SendOutcome` the daemon settled with rather than from an engine report the
+/// client no longer has. A send that reached nobody is an error and not a
+/// green line: the message is parked in the outbox for a human.
+fn sent_line(settled: &Value) -> Result<String, String> {
+    let outcome: SendOutcome = match serde_json::from_value(settled.clone()) {
+        Ok(outcome) => outcome,
+        Err(e) => return Err(format!("the send outcome did not decode: {e}")),
+    };
+    let total = outcome.recipients.len();
+    let failed: Vec<String> = outcome
+        .recipients
+        .iter()
+        .filter(|recipient| !recipient.delivered)
+        .map(|recipient| recipient.address.clone())
+        .collect();
+    if failed.is_empty() {
+        Ok(format!(
+            "Sent to {total} recipient(s) [{}]",
+            outcome.status_line
+        ))
+    } else if failed.len() < total {
+        Ok(format!(
+            "Partial: {}/{total} succeeded -- failed: {} [{}]",
+            total - failed.len(),
+            failed.join(", "),
+            outcome.status_line
+        ))
+    } else {
+        Err(format!("Failed to send to all {total} recipient(s)"))
+    }
 }
 
 /// `send.approved`, as the line the arm has always posted: how many drafts went
@@ -1793,6 +1879,54 @@ mod tests {
         // leg is what answers next either way.
         let miss = crate::search::parse("nothingmatchesthis").unwrap();
         assert!(local_search(&daemon, ACCOUNT, &miss, None, 50).is_empty());
+    }
+
+    /// The three sentences a finished `send.draft` shows, which are the ones
+    /// the send key has posted since #0037.
+    ///
+    /// They were built from the engine's own `SendReport` until P6-U2 moved
+    /// the send behind `send.draft`; they are built from the `SendOutcome` the
+    /// daemon settles with now, and they may not have been reworded on the
+    /// way. A send nobody took is an `Err`, because the message is parked in
+    /// the outbox for a human rather than gone.
+    #[test]
+    fn the_send_lines_are_the_ones_the_send_key_has_always_shown() {
+        let outcome = |delivered: &[bool]| {
+            json!({
+                "account": ACCOUNT,
+                "selector": null,
+                "message_id": "<x@example.com>",
+                "status_line": "queued for delivery",
+                "recipients": delivered
+                    .iter()
+                    .enumerate()
+                    .map(|(at, ok)| json!({
+                        "address": format!("r{at}@example.com"),
+                        "role": "To",
+                        "delivered": ok,
+                        "error": null,
+                    }))
+                    .collect::<Vec<_>>(),
+                "sent_copy": "pending",
+                "settle_error": null,
+            })
+        };
+
+        assert_eq!(
+            sent_line(&outcome(&[true, true])),
+            Ok("Sent to 2 recipient(s) [queued for delivery]".to_string())
+        );
+        assert_eq!(
+            sent_line(&outcome(&[true, false])),
+            Ok(
+                "Partial: 1/2 succeeded -- failed: r1@example.com [queued for delivery]"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            sent_line(&outcome(&[false, false])),
+            Err("Failed to send to all 2 recipient(s)".to_string())
+        );
     }
 
     /// True when the draft file `id` names contains `needle`.

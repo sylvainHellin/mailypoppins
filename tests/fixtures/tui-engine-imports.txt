@@ -1,4 +1,3 @@
-actions.rs send
 actions.rs store
 app/calendar_view.rs store
 app/mod.rs store

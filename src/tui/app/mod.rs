@@ -171,10 +171,14 @@ pub struct App {
     /// hijacks a later unrelated mailbox switch.
     pub pending_select: Option<MessageRef>,
     pub queued_action: Option<Action>,
-    /// A send parked behind the undo window (#0090): validated and approved,
-    /// waiting out `email.send_hold_secs` before the event loop hands it to
-    /// the background send thread. `u` clears it before it reaches SMTP.
-    pub held_send: Option<HeldSend>,
+    /// The undo-send hold the daemon is counting down, as its last
+    /// `send.hold_*` event described it (`SND-04`, P6-U2).
+    ///
+    /// What this client renders and nothing more: the timer, the parked send
+    /// and the decision to fire are the daemon's, so a hold another window
+    /// armed shows here too and `u` cancels it from either. `None` between
+    /// holds, and the moment one fires or is cancelled.
+    pub hold: Option<mp_protocol::send::HoldStatus>,
     pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
@@ -355,7 +359,7 @@ impl App {
             mailbox_load_generation: 0,
             pending_select: None,
             queued_action: None,
-            held_send: None,
+            hold: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
@@ -435,7 +439,7 @@ impl App {
             mailbox_load_generation: 0,
             pending_select: None,
             queued_action: None,
-            held_send: None,
+            hold: None,
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
@@ -1074,19 +1078,13 @@ impl App {
                 None
             }
             Message::Quit => {
-                // A held send (#0090) lives only in this process: quitting
-                // inside the window would silently drop a send the user
-                // explicitly confirmed. Refuse and say why; `u` cancels the
-                // send, or the window elapses and it fires, and either way the
-                // next quit goes through.
-                if self.held_send.is_some() {
-                    self.set_status_level(
-                        "A send is holding: press u to undo it or let it fire, then quit"
-                            .to_string(),
-                        StatusLevel::Error,
-                    );
-                    return None;
-                }
+                // Quitting mid-hold was refused until P6-U2, because the hold
+                // lived in this process and closing the window would have
+                // dropped a send the user confirmed. The daemon owns the timer
+                // now and has its own rule for a window that goes away -- the
+                // send survives while another client watches, and the *last*
+                // client leaving cancels it and leaves the draft approved -- so
+                // a refusal here would only make that rule unreachable.
                 self.running = false;
                 None
             }

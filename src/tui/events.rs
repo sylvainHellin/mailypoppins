@@ -45,7 +45,11 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use mp_protocol::events::{Arrival, SyncCompleted, KIND_SYNC_COMPLETED};
+use mp_protocol::events::{
+    Arrival, SyncCompleted, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED,
+    KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+};
+use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
@@ -105,6 +109,9 @@ pub enum Applied {
     NewMail(Vec<Arrival>),
     /// The operation this client started, by id, finished.
     Operation(String),
+    /// An undo-send hold moved, by the operation id it concerned: armed,
+    /// ticked, fired or cancelled (`SND-04`, P6-U2).
+    Hold(String),
     /// At or below the watermark, so the snapshot already carries it.
     Duplicate,
     /// From an instance this client never bootstrapped against.
@@ -151,6 +158,12 @@ pub(super) enum Awaited {
         account_index: usize,
         /// Its name.
         account: String,
+    },
+    /// `send.draft`, which is the send key's own operation: it settles once
+    /// the hold has fired and the message has left.
+    Send {
+        /// The account the message went out from.
+        account_index: usize,
     },
     /// `send.approved`.
     SendApproved {
@@ -252,6 +265,10 @@ impl App {
         match event.kind.as_str() {
             KIND_SYNC_COMPLETED => self.apply_tick(event),
             KIND_OPERATION_FINISHED => self.apply_finished(event),
+            KIND_SEND_HOLD_STARTED
+            | KIND_SEND_HOLD_TICK
+            | KIND_SEND_HOLD_FIRED
+            | KIND_SEND_HOLD_CANCELLED => self.apply_hold(event),
             // The counts scope is the sidebar's and not the list's: a hundred
             // count changes for one mailbox may not each refetch the open list,
             // which is why `MessageRowDelta::decode` returns `None` for it.
@@ -322,6 +339,60 @@ impl App {
         // health mark and every refresh is the one that path produced.
         super::bg::handle_bg_result(self, super::commands::settled(&awaited, &event.payload));
         Applied::Operation(id)
+    }
+
+    /// An undo-send hold moved: the countdown, and the two sentences that end
+    /// it (`SND-04`, P6-U2).
+    ///
+    /// The three lines are the ones the TUI has shown since #0090, and the
+    /// only thing that changed is the number: today's line was written once at
+    /// arm time and stood still, because nothing in the client counted down.
+    /// The client still counts nothing -- it renders the daemon's own
+    /// remainder, because a countdown computed from a local clock drifts
+    /// against the timer that owns the hold and two windows would then
+    /// disagree about one send.
+    ///
+    /// A hold another client armed is applied here too: either window may
+    /// cancel it, so a client that ignored one would show an empty status line
+    /// beside a `u` that stops something invisible.
+    fn apply_hold(&mut self, event: &EventEnvelope) -> Applied {
+        let status: HoldStatus = match serde_json::from_value(event.payload.clone()) {
+            Ok(status) => status,
+            Err(e) => {
+                log::warn!("[events] a {} did not decode: {e}", event.kind);
+                return Applied::Ignored;
+            }
+        };
+        let operation = status.operation_id.clone();
+        match event.kind.as_str() {
+            KIND_SEND_HOLD_STARTED | KIND_SEND_HOLD_TICK => {
+                self.set_status_level(
+                    format!("Sending in {}s (press u to undo)", status.remaining_secs),
+                    StatusLevel::Progress,
+                );
+                self.hold = Some(status);
+            }
+            KIND_SEND_HOLD_FIRED => {
+                self.hold = None;
+                self.set_status_level("Sending...".to_string(), StatusLevel::Progress);
+            }
+            _ => {
+                self.hold = None;
+                // The operation the send answered with is settled as cancelled
+                // and its `operation.finished` is on its way. This client is
+                // done with it here: landing that finish too would follow the
+                // sentence the user asked for with an error about an operation
+                // they cancelled on purpose.
+                if self.events.started.remove(&operation).is_some() {
+                    self.bg_count = self.bg_count.saturating_sub(1);
+                }
+                self.set_status_level(
+                    "Send cancelled; the draft is untouched".to_string(),
+                    StatusLevel::Info,
+                );
+            }
+        }
+        Applied::Hold(operation)
     }
 
     /// A mailbox's counts moved, so the sidebar is read again from the daemon.

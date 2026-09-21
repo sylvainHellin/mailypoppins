@@ -756,29 +756,6 @@ impl AccountState {
     }
 }
 
-/// A send parked behind the undo window before it reaches SMTP (#0090).
-///
-/// `x` validates and approves the draft (see `validate_then_approve`), then
-/// instead of handing it straight to the background send thread the prepared
-/// send is parked here for `email.send_hold_secs`. The event loop fires it
-/// through `actions::fire_held_send` once `fire_at` passes; the `u` key clears
-/// it first, which transmits nothing and leaves the approved draft in place,
-/// recoverable. A zero window never parks a send here at all (it fires at
-/// once), which is the ticket's send-immediately opt-out.
-pub struct HeldSend {
-    pub draft: crate::types::EmailDraft,
-    pub ctx: crate::send::SendContext,
-    pub account_index: usize,
-    pub fire_at: std::time::Instant,
-}
-
-impl HeldSend {
-    /// True once the hold window has elapsed and the send is owed to SMTP.
-    pub fn is_ready(&self) -> bool {
-        std::time::Instant::now() >= self.fire_at
-    }
-}
-
 /// Result from a background CLI operation.
 #[derive(Debug)]
 pub enum BgResult {
@@ -1511,6 +1488,15 @@ pub enum Action {
     Reply(bool),
     Send,
     SendApproved,
+    /// Stop the undo-send hold the daemon is counting down (`SND-04`,
+    /// P6-U2), whichever client armed it: `send.cancel_hold` over the
+    /// operation id [`App::hold`](super::App) carries.
+    ///
+    /// An action rather than a cleared slot, because cancelling is a round
+    /// trip now and the countdown stays on screen until the daemon says it
+    /// stopped: a client that cleared it optimistically would hide a hold
+    /// whose cancel was refused.
+    CancelHeldSend,
     NewDraft,
     Approve,
     /// Batch variant for `Action::Approve`: the indexed `id:` of every draft
@@ -1714,6 +1700,7 @@ impl Action {
             // which detaches a GUI process and does not take our stdin.
             Action::Send
             | Action::SendApproved
+            | Action::CancelHeldSend
             | Action::Approve
             | Action::BatchApprove(_)
             | Action::MarkDraft
@@ -2372,74 +2359,6 @@ mod tests {
         assert_eq!(at_subject.next_field(), ComposeField::Signature);
         at_subject.focus = ComposeField::To;
         assert_eq!(at_subject.prev_field(), ComposeField::Signature);
-    }
-
-    // -----------------------------------------------------------------------
-    // Undo-send hold window (#0090)
-    // -----------------------------------------------------------------------
-
-    /// The event loop fires a parked send exactly when its window has elapsed:
-    /// a `fire_at` already in the past is ready, one still ahead is not. This
-    /// is the gate the loop reads before handing the send to SMTP (#0090).
-    #[test]
-    fn a_held_send_is_ready_only_once_its_window_has_elapsed() {
-        use std::time::{Duration, Instant};
-        let frontmatter: crate::types::EmailFrontmatter =
-            serde_yaml::from_str("subject: hi\nstatus: approved\n").unwrap();
-        let make = |fire_at| HeldSend {
-            draft: crate::types::EmailDraft {
-                path: std::path::PathBuf::from("/drafts/x.md"),
-                frontmatter: frontmatter.clone(),
-                body_markdown: String::new(),
-            },
-            ctx: crate::send::SendContext {
-                graph: None,
-                smtp: None,
-                account: crate::config::AccountConfig::default(),
-                email_settings: crate::config::EmailSettings::default(),
-                signature: None,
-            },
-            account_index: 0,
-            fire_at,
-        };
-        assert!(make(Instant::now() - Duration::from_secs(1)).is_ready());
-        assert!(!make(Instant::now() + Duration::from_secs(30)).is_ready());
-    }
-
-    /// Quit refuses while a send is holding (#0090 review finding): the held
-    /// send lives only in this process, so quitting inside the window would
-    /// silently drop a send the user explicitly confirmed. `u` (undo) or the
-    /// window elapsing both clear the slot, and then quit goes through.
-    #[test]
-    fn quit_refuses_while_a_send_is_holding() {
-        use crate::tui::App;
-        use std::time::{Duration, Instant};
-        let mut app = App::default_for_tests();
-        let frontmatter: crate::types::EmailFrontmatter =
-            serde_yaml::from_str("subject: hi\nstatus: approved\n").unwrap();
-        app.held_send = Some(HeldSend {
-            draft: crate::types::EmailDraft {
-                path: std::path::PathBuf::from("/drafts/x.md"),
-                frontmatter,
-                body_markdown: String::new(),
-            },
-            ctx: crate::send::SendContext {
-                graph: None,
-                smtp: None,
-                account: crate::config::AccountConfig::default(),
-                email_settings: crate::config::EmailSettings::default(),
-                signature: None,
-            },
-            account_index: 0,
-            fire_at: Instant::now() + Duration::from_secs(30),
-        });
-
-        app.update(Message::Quit);
-        assert!(app.running, "quit must not drop a holding send");
-
-        app.held_send = None;
-        app.update(Message::Quit);
-        assert!(!app.running, "with nothing holding, quit goes through");
     }
 
     // -----------------------------------------------------------------------
