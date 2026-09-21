@@ -118,6 +118,50 @@ with checksum assets):
 scripts/update-homebrew-formula.sh 0.9.0
 ```
 
+## Installing the daemon at login
+
+A release installs a binary; it does not arrange for a daemon to be running when
+the user logs in. That is one command per machine, and the same one on both
+supported platforms:
+
+```sh
+mp daemon install-service        # writes the unit and enables it
+mp daemon install-service --check
+mp daemon uninstall-service
+```
+
+On Linux it writes `$XDG_CONFIG_HOME/systemd/user/mailypoppins.service` and runs
+`systemctl --user daemon-reload` then `systemctl --user enable --now
+mailypoppins.service`. On macOS it writes
+`~/Library/LaunchAgents/dev.mailypoppins.daemon.plist` and runs `launchctl
+bootstrap gui/<uid> <plist>`. Both files run `mp daemon run` in the foreground
+by absolute path, and both carry the data and config directories the installing
+`mp` resolved. A host with no service manager on `PATH` still gets the file
+written and the commands printed to run by hand, and exits 0. The whole surface,
+its stdout and its refusals are in
+[daemon-operations.md](daemon-operations.md#login-mode).
+
+The macOS half has never been run against a real `launchctl` (see below), so a
+first install on a Mac is worth watching rather than scripting.
+
+## After a `cargo install`, restart the daemon
+
+`cargo install --path .` replaces the binary on disk and leaves the **running**
+daemon exactly where it was, still executing the code it was started with. Every
+client then talks to the old engine while `mp --version` reports the new one,
+which is the most confusing state this architecture can be in.
+
+```sh
+cargo install --path . && mp daemon restart
+```
+
+`mp daemon restart` prints the stop's line and nothing about the start, so
+`mp daemon status` is what confirms the replacement is up; its instance id is a
+new one. A login-installed service is restarted through the manager that owns the
+process instead: `systemctl --user restart mailypoppins.service` on Linux, and
+on macOS the launchd equivalent, which is untested here with the rest of the
+launchd half.
+
 ## Upgrades and the login-start service
 
 `mp daemon install-service` bakes the absolute path of the installing binary

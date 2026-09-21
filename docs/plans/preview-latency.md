@@ -209,6 +209,27 @@ Parking a `Store` per account to avoid the per-call `open_store`, blocked on `Co
 
 Storing a canonical unwrapped rich render at ingest and re-wrapping locally: it would make a rich render a one-time artifact, but requires reimplementing html2text's table and list layout, and D3 removes the rich render anyway.
 
+## What the daemon did to this path (Phase 6, #0125)
+
+The four removals above left a cursor move costing one store open, one indexed SELECT, one blob read and one Markdown wrap, in the client's own process.
+Since P5-U4 the read is a `message.get` over the socket instead, and the daemon holds the store the keypress used to open, so the question this plan settled once is a question the migration had to answer again.
+
+The offline lower bound is green at the Phase 6 HEAD: `the_preview_query_stays_inside_the_p95_delta_ceiling` (`src/tui/app/queries_tests.rs`, `#[ignore]`d for its wall clock) walks a 200-row fixture down and back up through both the daemon-backed and the store-backed read and asserts the daemon-backed p95 is inside the store-backed one plus `PREVIEW_P95_DELTA_CEILING_MS`, the 5 ms the plan fixed for the transport in P1a-U2.
+
+```sh
+TMPDIR=/var/tmp cargo test --offline --lib queries_tests -- --ignored
+```
+
+1 passed at `1ee6bcb`.
+It prints no number: what it pins is the verdict, and it prices the dispatcher in one process rather than the socket, the framing or the session thread's hop, so it is a lower bound on W1 and not W1.
+
+**W1 itself is still NOT TAKEN**, unchanged since Phase 0 and still owner action.
+It needs a release build in a named terminal with a real account, the recorded key-repeat delay and rate, and the twenty named rows of [#0108](../tickets/0108-coalesce-key-events.md) walked twice; the metric is the p50 and p95 of `[TIMING] tui_preview_query` and the p95 of the `tui_draw` pair behind each of them, and the acceptance rule is [workloads.md](../baselines/pre-daemon/workloads.md)'s: the daemon-era p95 may exceed the pre-daemon p95 by at most 5 ms.
+Nothing has been substituted for it.
+
+What Phase 6 did measure beside it, in [phase6-gate-evidence.md](../baselines/phase6-gate-evidence.md): cold first paint re-taken at 7 ms warm and 35 ms with no daemon running, unchanged from P5-U11, and the ten CLI workloads, where every small routed query is three to four times faster than the pre-daemon binary's.
+The contingency below stays closed.
+
 ## Acceptance criteria
 
 Ticket A: the baseline is recorded in the ticket under the pinned run conditions; a held `j` across twenty rows paints once per drained batch rather than once per key; a key typed while an action suspends the terminal into `$EDITOR` still reaches the editor, not the app.
