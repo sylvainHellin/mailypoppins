@@ -767,14 +767,15 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SND-04 Undo-send hold with a visible countdown and a cancel key
 
 - Classification: GUI parity
-- Source anchor: `email.send_hold_secs` with a 20 second default, consumed at `src/tui/actions.rs:1231`
+- Source anchor: `email.send_hold_secs` with a 20 second default, resolved daemon-side in `src/daemon/hold.rs`
 - Daemon surface: `send.hold_status`, `send.cancel_hold`, `hold: true` on `send.draft` / `send.approved`, and the countdown on `state.event` as `send.hold_started` / `send.hold_tick` / `send.hold_fired` / `send.hold_cancelled`
 - GUI location: TBD (Phase 9)
 - Validation: `src/tui/hold_tests.rs`, `tests/daemon_send_hold.rs`, `tests/phase5_undo_send_hold.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U1)
-- Status: contract landed (P6-U1); the move is P6-U2 and the last-client rule is P6-U3
-- Note: the hold lives inside the TUI process today and `mp send` and `mp send-approved` bypass it (`ANO-7`); the migration moves it into the daemon in Phase 6, after the parity gate, keeps the CLI commands sending immediately, and lets the TUI and GUI observe and cancel the same countdown.
+- Status: routed (P6-U2); GUI not started
+- Note: the hold is the daemon's, and the TUI keeps only what it renders: the status line, the `u` key and the `App::hold` the events fill.
+  `mp send` and `mp send-approved` bypass it by construction (`ANO-7`), because they pass no `hold` and the parameter defaults to off.
   The daemon owns the window: `hold` is a boolean and `email.send_hold_secs` is resolved daemon-side, so a caller that passes nothing bypasses the hold and `send_hold_secs = 0` fires at once with no countdown published.
-  When the last client exits mid-hold the daemon cancels the hold and leaves the draft approved, which is what killing the TUI does today; a client that merely closed *its* window while another is connected cancels nothing, because a send is durable.
+  When the last client exits mid-hold the daemon cancels the hold and leaves the draft approved, which is what killing the TUI did before the move; a client that merely closed *its* window while another is connected cancels nothing, because a send is durable.
 
 ### SND-05 Send a calendar invitation
 

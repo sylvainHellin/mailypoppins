@@ -185,6 +185,7 @@ The synchronous settle deliberately does *not* converge a not-found, because a C
 
 `send::send_draft(&EmailDraft, &SendContext) -> SentDraft` is the one orchestration behind `mp send`, `mp send-approved` and both TUI send keys: it builds the bytes, commits the outbox row, submits over SMTP or Graph depending on which the context names, and retires the draft file.
 Callers keep only what differs between them, the confirmation prompt, the wording of the result and the exit code.
+Every caller reaches it through the daemon since P6-U2: the TUI's two send keys are `send.draft` and `send.approved` like the CLI's two commands, and the undo-send window in front of them is the daemon's scheduler rather than a timer in whichever client was open.
 
 A reply or forward draft names its source in `in_reply_to:` / `forwarded_from:`, and `send::mark_source_after_send` is the one reader: after a successful submission it flags every local copy of that source `\Answered` or `$Forwarded` and enqueues the server half on the durable queue as a single `ServerOp::SetAnswered` naming every server folder the source is filed in (#TKT-0051, #0076).
 The send path opens no IMAP session for this: it costs one `COMMIT`, and the drain writes the flag in every named folder over one session (`imap_client::add_flag_in_mailboxes`) at the next resume point.
@@ -420,18 +421,19 @@ They are the equality oracle `queries_tests.rs` and `invites_tests.rs` compare e
 That fallback is **not** the direct fallback the plan forbids: nothing recovers a *failed* daemon call by reading the store.
 A failed call degrades exactly as it did before, as an empty list, a zeroed count, an empty preview and a line in the log, and `tests/tui_daemon_recovery.rs` asserts it as a lock, by taking the account's engine lock during the outage from a second open file description.
 
-### The residue, at eleven rows
+### The residue, at ten rows
 
-`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 11 pairs over 8 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
+`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 10 pairs over 8 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
 The plan drives it to zero in P5-U10, which is deferred; each remaining row waits on a surface that does not exist yet.
 
 - `app/mod.rs store`, `app/calendar_view.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
 - `app/types.rs store`, `app/types.rs ingest`, `queries.rs store` want `MessageRow`, `DraftRow` and `SkippedDraft` as protocol types, which would also delete `src/main.rs`'s duplicate wire-row decoder.
 - `actions.rs store` is `RD-06`'s Markdown rendition, `RD-07`'s `mp://` selector on a listing and `LST-09`'s `message.fetch`, none of which is built.
-- `actions.rs send` is the undo-send hold's fire path, which the plan holds in the TUI until P6-U1/U2.
 - `helpers.rs store`, `helpers.rs imap_client`, `mod.rs store` are `LST-08`'s server search leg, which becomes `message.list_server`.
 
-`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: eight `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store.
+`actions.rs send` went in P6-U2: the undo-send hold and the send behind it are `send.draft` now, so the action layer's last `crate::send` import left with them.
+
+`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: seven `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store.
 
 ### The crate move, deferred
 

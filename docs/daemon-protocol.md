@@ -95,7 +95,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `mailbox.*` for listings, counts, and mailbox metadata.
 - `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation. This build serves five mutations: `message.archive`, `message.delete`, `message.move`, `message.set_flag` and `message.set_read`, and two invitation reads, `message.ics` and `message.invite`.
 - `draft.*` for creation, parsing status, validation, recipient editing, reply, reply-all, forward, approval, discard, and attachment changes. This build serves the ten methods of the draft slice and the mutation slice.
-- `send.*` for immediate send, approved batches, invitations, outbox recovery, and, from Phase 6, hold countdowns and their cancellation. This build serves the six methods of the send slice: `send.approved`, `send.draft`, `send.invite`, `send.outbox_discard`, `send.outbox_list` and `send.outbox_retry`, whose result types are `mp_protocol::send`.
+- `send.*` for immediate send, approved batches, invitations, outbox recovery, and the undo-send hold's countdown and cancellation. This build serves the eight methods of the send slice: `send.approved`, `send.cancel_hold`, `send.draft`, `send.hold_status`, `send.invite`, `send.outbox_discard`, `send.outbox_list` and `send.outbox_retry`, whose result types are `mp_protocol::send`.
 - `sync.*` for quick sync, full sync, progress, and errors.
 - `contact.*` for listing, ranking, rebuilding, and statistics. This build serves `contact.rebuild`, `contact.search` and `contact.stats`, whose rows are `{address, display_name, sent_to, sent_cc, received, score}`.
 - `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.events`, `calendar.rebuild` and `calendar.rsvp`.
@@ -112,8 +112,8 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `contact.search`, `contact.stats`, `config.get` and `config.validate` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get` and `config.validate` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -779,6 +779,8 @@ Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbo
 `state.remove` says that a resource is gone, with a payload of `{resource}`.
 A removal is a fact about a moment and is never merged with anything, in either direction, including another removal of the same resource.
 
+`send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` are the four kinds of the undo-send hold, described below.
+
 `operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
 `sync.completed` is the third lifecycle kind, described below.
 `config.changed` and `config.invalid` are the fourth and fifth: `config.changed` carries `{added, updated, removed, config_revision}` and closes every successful swap, `config.invalid` carries `{path, line, message}` and is the diagnostic a rejected candidate publishes.
@@ -822,6 +824,31 @@ The same module holds the drain report lines a pass's `operation.progress` repor
 `sync.completed` is a lifecycle event and coalesces with nothing.
 Two ticks are two facts about two moments: merging an earlier warning into a later clean tick would present that tick as clean, which is exactly what the severity exists to prevent.
 A queued outcome therefore also survives a queue overflow's discard, because no re-bootstrap would bring it back.
+
+### The undo-send hold
+
+The four `send.hold_*` kinds all carry one `mp_protocol::send::HoldStatus`, which is also one row of `send.hold_status`'s answer: a client decodes one shape whether it watched the countdown start or joined halfway through it.
+
+| field | type | meaning |
+|---|---|---|
+| `operation_id` | string | the id the send answered with, which is what `send.cancel_hold` names |
+| `account` | string | the account the message would go out from |
+| `draft_id` | string | the `id:` of the draft that is waiting; the first of them for a batch |
+| `subject` | string | its subject, empty when it has none |
+| `hold_secs` | u64 | the window it was armed with, which is `email.send_hold_secs` |
+| `remaining_secs` | u64 | what is left of that window, `0` once it fired or was cancelled |
+| `fires_at` | string | when it fires, RFC3339 in UTC, so a late client renders a deadline |
+| `origin` | string | the kind word of the client that asked: `tui`, `cli` or `gui` |
+
+`send.hold_started` arms one, `send.hold_tick` reports one second of it, `send.hold_fired` says the send is on its way, and `send.hold_cancelled` says it is not and the draft is untouched.
+All four are lifecycle events: a countdown is a run of facts about moments, and two ticks merging into one would present the later remainder as the earlier one's.
+The remainder travels rather than being derived, because a countdown computed from a local clock drifts against the daemon that owns the timer and two windows would then disagree about one send.
+
+The window is the daemon's: `hold` is a boolean, and `email.send_hold_secs` is read daemon-side from the configuration `config.get` already serves.
+A caller that passes no `hold` bypasses the hold entirely, which is how `mp send` and `mp send-approved` keep `ANO-7` true without a line of client code, and `send_hold_secs = 0` fires at once, publishes no `send.hold_*` event and leaves `send.hold_status` empty.
+
+When the last client disconnects the daemon cancels every live hold and leaves the drafts approved, which is what killing the TUI did before the hold moved.
+A client that merely closed *its* window while another is connected cancels nothing: `send.*` is durable, and a send the user confirmed is not undone by a socket closing.
 
 ### Delivery, coalescing and caps
 
@@ -897,7 +924,8 @@ The snapshot's draft row, `{id, path, to, subject, status, valid, ready}`, which
 The coalescing rules above, the 512-event and 4 MiB per-connection caps, `event_queue_overflow` as the reason an exceeded cap resyncs a client, and the survival of lifecycle events across a discard and a poison.
 The `sync.*` family, which is `sync.quick` and `sync.full` as durable operations over `{account, limit?, mailbox?, dry_run?}` (`limit` on the quick pass alone) and `sync.watch` as a client-scoped one over `{account, mailbox?}`, joined in P4-U10 by `mailbox.list_server` `{account}` and `message.list_server` `{account, mailbox, limit, criteria?}`; with them the five phase names `head_outbox`, `head_mutations`, `body`, `tail_outbox` and `tail_mutations` that an `operation.progress` of a pass carries, the `{blocked, outcome}` result, the `local_only` account state on `-32006`, and the INBOX-only refusal of `sync.watch` with `{account, mailbox}`.
 The `send.*` family, which is `send.approved` `{account}`, `send.draft` `{account, selector|id}` and `send.invite` `{account, subject, start, to?, cc?, end?, duration?, location?, description?, uid?, signature?, no_signature?}` as durable operations answering with `{operation_id}`, `send.outbox_retry` `{account, row_id}` as a fourth, `send.outbox_list` `{account}` as a query and `send.outbox_discard` `{account, row_id}` as a command; their result types are `mp_protocol::send` (`SendOutcome`, `ApprovedOutcome`, `OutboxListing`, `OutboxRow`, `OutboxCounts`, `OutboxRetryOutcome`, `RecipientOutcome`, `SentCopy`) and every one of them is path-free.
-None of the three sends takes a `hold`, a `hold_secs` or a `countdown`, and a caller that sends one is `-32602`: the CLI send paths bypass the undo-send hold (`ANO-7`) and Phase 6 must add a method of its own rather than a parameter here.
+None of the three sends takes a `hold_secs` or a `countdown`, and a caller that names a window of its own is `-32602`; `send.invite` takes no `hold` in any form, since an invitation has no undo key behind it.
+P6-U2 added the `hold` boolean to the other two and the two hold methods, below.
 `send.invite` refuses a Graph account with the `ANO-4` sentence before it looks at anything else about the invitation, carrying `{account}`; `uid` is the client's, so the UID a user read in the preview is the UID that goes out, and `signature`/`no_signature` are the two global CLI flags, since an invitation has no draft body to carry a signature in.
 `send.outbox_list` answers `ever_used: false` for an account with no store rather than refusing, because "nothing has been queued yet" is a fact a client renders and not an error.
 `send.outbox_retry` accepts a `failed` row, which it re-arms, and a `sent_pending_append` row whose APPEND has already been attempted, which it re-drives behind the Message-ID dedup search; anything else is `-32602`, except while another retry for the same account is running, when the row's state is that retry's to decide and the second call is admitted and settles on what it finds.
@@ -947,3 +975,10 @@ The capability list a handshake advertises grew by those three names, which is t
 
 Account runtimes are on by default from the same unit, which is not a wire change but is a change to what a client sees: `daemon.status` and the bootstrap snapshot report `ready` for an account whose runtime holds the engine lock, `blocked` for one whose lock is held elsewhere **and** for one that has no local store yet, and `opening` only while a start is in flight.
 An account with no store is deliberately not given one: materialising an empty database would turn the `-32006` refusals of the read and mutation families into empty answers for an account the user has not set up, so it is reported blocked with the sentence that says to run `mp sync`.
+
+P6-U2 moved the undo-send hold into the daemon (`SND-04`) and added two methods, one optional parameter and four event kinds, all additive.
+`send.draft` and `send.approved` gained `hold: bool`, defaulting to `false`, and answer `{operation_id, held: true}` when one was armed and `{operation_id}` when none was; the window itself is not a parameter, because the daemon resolves `email.send_hold_secs` from the configuration it already serves through `config.get`, and a client that passed a number would leave the policy in the client under a longer name.
+`send.hold_status` `{account?}` -> `{holds: [HoldStatus, …]}` is a query, and `send.cancel_hold` `{operation_id}` -> `{cancelled: true, operation_id, revision}` is a command any connection may call, which is what makes cancelling from a window that did not send possible; both are durable and served from protocol 1.
+An `operation_id` naming no live hold is `-32602`, and so is one whose hold has already fired: a cancel is not a recall.
+The four kinds `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` each carry one `mp_protocol::send::HoldStatus`, and `mp_protocol::send::HoldListing` is `send.hold_status`'s result; the fixtures are `crates/mp-protocol/fixtures/notification.send_hold_tick.json`, `send.cancel_hold.request.json` and `send.hold_status.response.json`.
+A cancel settles the operation the send answered with as `cancelled`, so `operation.status` agrees with the event, and the bootstrap snapshot's `holds` array is still empty in this build: a client that joins mid-hold reads `send.hold_status`.

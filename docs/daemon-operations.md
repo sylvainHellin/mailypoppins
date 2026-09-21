@@ -351,6 +351,23 @@ Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailb
 Nothing schedules a tick yet.
 The periodic scheduler is Phase 5/6 of the plan, so in this build a runtime holds its lock, serves reads, and ticks only when something in the process asks it to.
 
+## The undo-send hold
+
+The hold (`SND-04`) is the daemon's since P6-U2, in `src/daemon/hold.rs`.
+A held send is an operation with a deadline: `send.draft` and `send.approved` answer their `{operation_id, held: true}` at once, a tokio task publishes one `send.hold_tick` a second, and the work the operation would have started immediately runs when the window elapses.
+
+The window is `email.send_hold_secs` (default 20), read by the daemon rather than passed by a client: `hold` is a boolean on the wire, so a caller that passes nothing bypasses the hold and `mp send` / `mp send-approved` keep sending immediately with no client code (`ANO-7`).
+A zero window arms nothing, publishes nothing and sends at once, which is #0090's own opt-out.
+
+One hold ends exactly once, whichever way it ends: the scheduler's table is the authority and both the fire and the cancel *remove* the row under one mutex, so a cancel that arrives while the timer is waking wins or loses cleanly and the loser does nothing.
+That is also why the timer task needs no cancellation token.
+Cancelling settles the operation the send answered with as `cancelled`, so `operation.status` agrees with the `send.hold_cancelled` event, and the draft is left `approved` with its file on disk.
+
+**When the last client disconnects, the daemon cancels every hold.**
+This is the plan's own rule and it is what killing the TUI did before the hold moved; it runs in the connection loop, after the unsubscribe, when `CanonicalState::subscriber_count()` reaches zero, and it logs how many sends it cancelled.
+It is deliberately not a cancel scope: `send.*` is durable, so a hold whose *own* client closed its window while another client watches still fires, and losing a confirmed send to a closing socket is the failure the durable outbox exists to prevent.
+P6-U3 and P6-U4 refine what a graceful shutdown does around it.
+
 ## Logs
 
 `mp daemon start` points the detached child's stdout and stderr at `<data_dir>/logs/daemon.log`, opened in append mode, and that is the path the exit-4 diagnostic prints.

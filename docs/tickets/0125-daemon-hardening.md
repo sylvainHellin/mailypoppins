@@ -7,7 +7,7 @@ status: open
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 has landed its contract tests; nothing else of the phase has started.
+Status: open. P6-U1 and P6-U2 have landed the daemon-owned hold; the rest of the phase has not started.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -19,7 +19,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | unit | kind | commit | subject | status |
 |---|---|---|---|---|
 | P6-U1 | T | this commit | daemon-owned undo-send hold, the contract | done (tests) |
-| P6-U2 | I | - | daemon-owned undo-send hold (SND-04) | not started |
+| P6-U2 | I | this commit | daemon-owned undo-send hold (SND-04) | done |
 | P6-U3 | T | - | graceful shutdown, the contract | not started |
 | P6-U4 | I | - | graceful shutdown | not started |
 | P6-U5 | T | - | login-start service units (LIF-06), the contract | not started |
@@ -182,3 +182,82 @@ The stub proof, in a throwaway `git worktree` at `~/.cache/mp-stub-p6u1` with `C
 It then runs 16 tests: **6 passed, 10 failed**, the six being the ones a declaration can satisfy (the wire vocabulary, the route table, and the three rows that assert nothing happens when there is no hold) and the ten being every row that needs behaviour. A stub that passed more than six would mean a vacuous row.
 
 The rest of the tree, with `mod hold_tests;` commented out and `tests/daemon_send_hold.rs` moved aside: `TMPDIR=/var/tmp cargo test --workspace --offline` -> **2204 passed**, the count at `55305f6`, both lines restored before the commit.
+
+## P6-U2: the daemon-owned undo-send hold
+
+The hold left `src/tui/actions.rs` and became `src/daemon/hold.rs`, 330 lines including four unit tests.
+`src/tui/hold_tests.rs` is green, sixteen of sixteen; `tests/phase5_undo_send_hold.rs` is green for the reason P6-U1 predicted, and the reading it took is the one implemented.
+
+### The scheduler
+
+A held send is an operation with a deadline.
+`send.draft` and `send.approved` answer `{operation_id, held: true}` at once, `HoldScheduler::arm` publishes `send.hold_started`, a tokio task publishes one `send.hold_tick` a second, and at the deadline it publishes `send.hold_fired` and awaits the very future the unheld path would have spawned.
+So there is one send path and not two: `run(work, handle)` is the same value either way, passed to `hold::run_held` instead of to `tokio::spawn`.
+
+Three decisions the contract did not settle.
+
+- **The countdown is driven off the deadline, not off a repeating one-second sleep.**
+  Each wake computes what is left and sleeps until the instant the remainder drops, so a loaded machine cannot accumulate drift between the last tick and the fire.
+  The remainder is rounded *up*, so the last fraction of a window reads as `1s` rather than `0s`.
+- **One hold ends exactly once, and the table is what decides it.**
+  `fire` and `cancel` both *remove* the row under one mutex, so the cancel that arrives while the timer is waking either wins (and the timer finds nothing and returns) or loses (and refuses with `-32602`).
+  That is why the timer task carries no cancellation token: there is nothing a token would say that the table does not.
+- **A cancel settles the operation as `cancelled`.**
+  `operation.status` then agrees with the `send.hold_cancelled` event, and a GUI watching the operation is not left waiting for work that will never run.
+  The TUI drops its own `Awaited` entry when the cancel event lands, so the `operation.finished` behind it is ignored rather than posting an error line over "Send cancelled; the draft is untouched".
+
+### The last-client rule, landed here rather than in P6-U3
+
+`handle_connection` calls `HoldScheduler::cancel_all` once the unsubscribe has brought `CanonicalState::subscriber_count()` to zero.
+P6-U3 and P6-U4 refine what a graceful shutdown does around it; this is the rule that keeps `tests/phase5_undo_send_hold.rs` meaning the same thing after the move, so it lands now.
+It is not a cancel scope, and `the_sender_may_close_its_window_while_another_client_watches` is the row that keeps it from becoming one.
+
+### The TUI, which now only renders
+
+`App::hold` replaces `App::held_send`; `HeldSend`, `fire_held_send`, `send_one_draft` and `send_status_line` are gone, and with them the last `use crate::send::…` in the action layer, so `tests/fixtures/tui-engine-imports.txt` lost its `actions.rs send` row (10 pairs over 8 files now) and `TUI_ACTION_ENGINE_RESIDUE` lost its `send_one_draft -> send_draft(` row (seven entries now).
+`u` pushes `Action::CancelHeldSend` and leaves the countdown on screen; `Message::Quit` stops refusing.
+
+Two consequences worth naming.
+
+- **`Action::Send` is `send.draft` now**, which is what its `ACTION_ROUTING` row always claimed.
+  The approve and the transport refusal stay in the key (they are its sentences), and the account is still the draft's own `from:` through `helpers::resolve_send_account`.
+  A draft whose `from:` names an account *other* than the one whose drafts directory holds the file is therefore refused by `send.draft` (`-32602`, "no draft …") where the in-process path used to send it through the other account's SMTP.
+  That cross-account case was already inconsistent - the file stayed here and the outbox row went there - and `mp send <selector>` has never supported it; it is now a visible refusal rather than a silent split.
+- **The status line of a finished send moved to `commands::sent_line`**, rendered from the `SendOutcome` the daemon settles with.
+  The three sentences are unchanged to the byte and are pinned by `the_send_lines_are_the_ones_the_send_key_has_always_shown`.
+- **`bg_count` rises when the hold is armed**, not when it fires, so the spinner runs for the length of the window. No golden frame covers the countdown, so nothing moved.
+
+### `send.approved` and the batch
+
+The batch's hold names the first approved draft in listing order, because that is the one a countdown is about, and an account with *no* approved draft arms no window at all: "No approved emails found" is not a sentence worth waiting twenty seconds for.
+
+### Test edits made
+
+The five P6-U1 pre-approved them, and all five were made and nothing else in another unit's file:
+`src/tui/actions_tests.rs` (the `variant_name` arm, the `ACTION_ROUTING` row, the struck residue row) and `tests/daemon_send_slice.rs` (`SEND_METHODS` six to eight, `the_cli_send_paths_take_no_hold` keeping `hold` refused on `send.invite` alone).
+
+Four edits outside that list, each forced and each in a file this unit owns:
+
+- `src/daemon/session.rs`'s capability-list test gains the two method names, which is the derivation working.
+- `src/daemon/methods/send.rs`'s own module test is renamed from `six` to `eight`.
+- `src/tui/app/types.rs` loses two tests about `HeldSend`: `a_held_send_is_ready_only_once_its_window_has_elapsed` (the type is gone) and `quit_refuses_while_a_send_is_holding` (the refusal is gone, and `hold_tests.rs` asserts its replacement).
+- `src/tui/actions.rs`'s all-refused send test asserted through `send_status_line`; it asserts the same fact on the report directly, and the wording moved to the new `commands.rs` test.
+
+### Open: three assertions in `tests/daemon_send_hold.rs` cannot pass
+
+`a_hold_nobody_cancels_fires_and_retires_the_draft`, `the_sender_may_close_its_window_while_another_client_watches` and `a_zero_window_sends_at_once_and_publishes_no_hold_event` each assert `transport_events(&log).len() == 1` after a successful send of `send_fixture::APPROVED`.
+That count is a property of the fixture and not of the hold: `send_fixture::widen_approved_draft` puts `carol@example.com` on the draft's `cc:`, the fake transport writes one `Submit` line **per recipient**, the send files its own Sent copy, and the send's outbox drain finishes the seeded `APPENDING_ROW`'s APPEND on its way out.
+One send is therefore four ledger lines, which is exactly what `tests/daemon_send_slice.rs` says in prose where it counts by Message-ID instead:
+
+> SND-09 is about *this* message's copy, counted by its Message-ID rather than by the ledger's length: the send drains the account's outbox on its way out, so the seeded row that was waiting on its APPEND (`APPENDING_ROW`) files its copy in the same run and a total of two is the drain doing its job.
+
+The zero-window row is the control: it takes the ordinary unheld path and produces the same four lines.
+No sound hold design changes any of the four, so the contract file needs the reviewed edit the unit rules require, one line in each of the three rows: count the draft's own submissions (`fixture::submits_of(&log, mid)` or the `Submit`-only filter the other slices use) rather than the ledger's length.
+The implementer did not make it: a T unit's file is not the implementer's to correct without written approval.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline --no-fail-fast` -> **2227 passed, 3 failed** (the three rows above), 2 ignored.
+`--lib hold_tests` 16, three runs; `--test daemon_send_hold` 4 of 7, three runs, the same three failing each time; `--test phase5_undo_send_hold` 2; `--lib actions_tests` 22; `--lib events_tests` 20; `--test phase5_parity_gate` 11; `--test daemon_send_slice` green; the two golden-frame suites 20 and 22 with no snapshot re-approved; `--test architecture_boundaries` and `--test test_selection_guard` green.
+`cargo clippy --workspace --offline --all-targets` -> 34 warnings, none new.
+The CLI help walk and `dump-keys --json` both diff empty against `docs/baselines/pre-daemon/`.
