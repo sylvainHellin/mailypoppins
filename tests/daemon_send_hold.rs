@@ -15,8 +15,8 @@
 //! - Cancellation from a window that did not send: **B** calls
 //!   `send.cancel_hold` on A's operation id, nothing reaches the transport,
 //!   and the draft stays `approved` with its file on disk.
-//! - A hold nobody cancels fires: the ledger gets exactly one submission and
-//!   the draft is retired, file and all.
+//! - A hold nobody cancels fires: the ledger gets one submission per
+//!   recipient of the draft and the draft is retired, file and all.
 //! - A send outlives the client that asked for it: **A** disconnects mid-hold
 //!   while **B** watches, and the hold still fires. A durable operation is not
 //!   cancelled by a closing window, which is what `send.*`'s
@@ -88,6 +88,45 @@ const EVENT_DEADLINE: Duration = Duration::from_secs(10);
 /// did: the whole window again, so a hold that fired late is still caught.
 fn past_the_window() -> Duration {
     Duration::from_secs(HOLD_SECS * 2 + 1)
+}
+
+/// The recipients one send of `fixture::APPROVED` submits to, sorted.
+///
+/// The `to:` the draft fixture writes (`ivana@example.com`) and the `cc:`
+/// `send_fixture`'s `widen_approved_draft` adds (`fixture::REJECTED`).
+const APPROVED_RECIPIENTS: [&str; 2] = [fixture::REJECTED, "ivana@example.com"];
+
+/// The addresses the transport was handed under the draft's own Message-ID,
+/// sorted.
+///
+/// Counted by Message-ID rather than by the ledger's length, the way
+/// `tests/daemon_send_slice.rs` counts a send's Sent copy: one send of this
+/// draft is four ledger lines and never one. The fake transport writes one
+/// `Submit` per recipient and the widened draft has two; the send files its
+/// own Sent copy; and it drains the account's outbox on its way out, so the
+/// seeded row parked on its APPEND (`fixture::APPENDING_ROW`) files its copy
+/// in the same run. "Sent exactly once" is therefore
+/// [`APPROVED_RECIPIENTS`] with nothing repeated.
+fn draft_submissions(events: &[fixture::TransportEvent]) -> Vec<String> {
+    let Some(mid) = events.iter().find_map(|event| match event {
+        fixture::TransportEvent::Submit { message_id, .. } => Some(message_id.clone()),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let mut addresses: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            fixture::TransportEvent::Submit {
+                message_id,
+                address,
+                ..
+            } if *message_id == mid => Some(address.clone()),
+            _ => None,
+        })
+        .collect();
+    addresses.sort();
+    addresses
 }
 
 // ---------------------------------------------------------------------------
@@ -432,9 +471,9 @@ fn a_hold_nobody_cancels_fires_and_retires_the_draft() {
 
     let events = fixture::transport_events(&log);
     assert_eq!(
-        events.len(),
-        1,
-        "exactly one submission reached the transport for {operation}: {events:?}"
+        draft_submissions(&events),
+        APPROVED_RECIPIENTS,
+        "exactly one submission per recipient reached the transport for {operation}: {events:?}"
     );
     assert_eq!(
         status, None,
@@ -497,9 +536,9 @@ fn the_sender_may_close_its_window_while_another_client_watches() {
 
     let events = fixture::transport_events(&log);
     assert_eq!(
-        events.len(),
-        1,
-        "the send the user confirmed went out: {events:?}"
+        draft_submissions(&events),
+        APPROVED_RECIPIENTS,
+        "the send the user confirmed went out, once per recipient: {events:?}"
     );
 
     daemon.stop();
@@ -559,9 +598,9 @@ fn a_zero_window_sends_at_once_and_publishes_no_hold_event() {
     std::thread::sleep(past_the_window());
     let events = fixture::transport_events(&log);
     assert_eq!(
-        events.len(),
-        1,
-        "and the message went, which is what the opt-out is for: {events:?}"
+        draft_submissions(&events),
+        APPROVED_RECIPIENTS,
+        "and the message went once per recipient, which is what the opt-out is for: {events:?}"
     );
 
     daemon.stop();

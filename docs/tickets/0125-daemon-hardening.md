@@ -243,21 +243,22 @@ Four edits outside that list, each forced and each in a file this unit owns:
 - `src/tui/app/types.rs` loses two tests about `HeldSend`: `a_held_send_is_ready_only_once_its_window_has_elapsed` (the type is gone) and `quit_refuses_while_a_send_is_holding` (the refusal is gone, and `hold_tests.rs` asserts its replacement).
 - `src/tui/actions.rs`'s all-refused send test asserted through `send_status_line`; it asserts the same fact on the report directly, and the wording moved to the new `commands.rs` test.
 
-### Open: three assertions in `tests/daemon_send_hold.rs` cannot pass
+### The reviewed edit in the T unit's own file
 
-`a_hold_nobody_cancels_fires_and_retires_the_draft`, `the_sender_may_close_its_window_while_another_client_watches` and `a_zero_window_sends_at_once_and_publishes_no_hold_event` each assert `transport_events(&log).len() == 1` after a successful send of `send_fixture::APPROVED`.
-That count is a property of the fixture and not of the hold: `send_fixture::widen_approved_draft` puts `carol@example.com` on the draft's `cc:`, the fake transport writes one `Submit` line **per recipient**, the send files its own Sent copy, and the send's outbox drain finishes the seeded `APPENDING_ROW`'s APPEND on its way out.
+Three rows of `tests/daemon_send_hold.rs` asserted `transport_events(&log).len() == 1` after a successful send of `send_fixture::APPROVED`, and no hold design can satisfy that: `a_hold_nobody_cancels_fires_and_retires_the_draft`, `the_sender_may_close_its_window_while_another_client_watches` and `a_zero_window_sends_at_once_and_publishes_no_hold_event`.
+The count is a property of the fixture and not of the hold: `send_fixture::widen_approved_draft` puts `carol@example.com` on the draft's `cc:`, the fake transport writes one `Submit` line **per recipient**, the send files its own Sent copy, and the send's outbox drain finishes the seeded `APPENDING_ROW`'s APPEND on its way out.
 One send is therefore four ledger lines, which is exactly what `tests/daemon_send_slice.rs` says in prose where it counts by Message-ID instead:
 
 > SND-09 is about *this* message's copy, counted by its Message-ID rather than by the ledger's length: the send drains the account's outbox on its way out, so the seeded row that was waiting on its APPEND (`APPENDING_ROW`) files its copy in the same run and a total of two is the drain doing its job.
 
 The zero-window row is the control: it takes the ordinary unheld path and produces the same four lines.
-No sound hold design changes any of the four, so the contract file needs the reviewed edit the unit rules require, one line in each of the three rows: count the draft's own submissions (`fixture::submits_of(&log, mid)` or the `Submit`-only filter the other slices use) rather than the ledger's length.
-The implementer did not make it: a T unit's file is not the implementer's to correct without written approval.
+So the edit, reviewed and approved for exactly these three rows, counts the draft's own submissions the same way: the new `draft_submissions` helper takes the Message-ID of the first `Submit` line and returns the addresses submitted under it, sorted, and each row asserts that they are `APPROVED_RECIPIENTS` (the draft's `to:` and the widened `cc:`).
+"Sent exactly once" is one submission per recipient with nothing repeated, which is the meaning the length assertion was reaching for.
+The file's header bullet said "exactly one submission" and now says one per recipient; nothing else in the file moved.
 
 ### Validation
 
-`TMPDIR=/var/tmp cargo test --workspace --offline --no-fail-fast` -> **2227 passed, 3 failed** (the three rows above), 2 ignored.
-`--lib hold_tests` 16, three runs; `--test daemon_send_hold` 4 of 7, three runs, the same three failing each time; `--test phase5_undo_send_hold` 2; `--lib actions_tests` 22; `--lib events_tests` 20; `--test phase5_parity_gate` 11; `--test daemon_send_slice` green; the two golden-frame suites 20 and 22 with no snapshot re-approved; `--test architecture_boundaries` and `--test test_selection_guard` green.
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2230 passed, 0 failed**, 2 ignored.
+`--lib hold_tests` 16, three runs; `--test daemon_send_hold` 7 of 7, three runs; `--test phase5_undo_send_hold` 2; `--lib actions_tests` 22; `--lib events_tests` 20; `--test phase5_parity_gate` 11; `--test daemon_send_slice` green; the two golden-frame suites 20 and 22 with no snapshot re-approved; `--test architecture_boundaries` and `--test test_selection_guard` green.
 `cargo clippy --workspace --offline --all-targets` -> 34 warnings, none new.
 The CLI help walk and `dump-keys --json` both diff empty against `docs/baselines/pre-daemon/`.
