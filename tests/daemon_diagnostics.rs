@@ -346,6 +346,27 @@ fn log_file(root: &Path) -> PathBuf {
         .unwrap_or_else(|| panic!("the daemon writes a log file under {}/logs", root.display()))
 }
 
+/// Put one of the configuration's secrets into the daemon's own log file.
+///
+/// Every marker lives in `config.toml` and in no other file of a bundle, so a
+/// redaction pass that ran over that one file and skipped the other four
+/// would satisfy every assertion about the markers. This is what makes the
+/// redaction row a statement about `log.txt` as well: the same string arrives
+/// there the way a real one would, logged by something that did not know it
+/// was a secret.
+///
+/// The line is written in the format the daemon's own writer produces, at a
+/// level that carries no target, so the log reader parses it and renders it
+/// back into `log.txt` with the marker intact.
+fn log_a_secret(root: &Path, marker: &str) -> String {
+    let path = log_file(root);
+    let message = format!("a careless library logged {marker}");
+    let mut text = fs::read_to_string(&path).expect("read the daemon log");
+    text.push_str(&format!("2026-09-21 19:25:59.921 [WARN] {message}\n"));
+    fs::write(&path, text).expect("append a line carrying a secret");
+    message
+}
+
 /// Wait until every account's runtime has reported.
 ///
 /// A runtime is started asynchronously, so a row that asserts `ready` or
@@ -1383,6 +1404,9 @@ fn a_bundle_holds_five_files_and_nothing_else() {
 #[test]
 fn a_redacted_bundle_carries_no_secret() {
     let diag = Diag::start();
+    // One marker into the log as well, so the row is about all five files and
+    // not only about the one every marker is seeded into.
+    let logged = log_a_secret(diag.root(), MARKERS[0]);
     let result = block_on(async {
         let mut conn = client(diag.root()).await;
         run_operation(&mut conn, "diagnostic.support_bundle", json!({})).await
@@ -1401,10 +1425,17 @@ fn a_redacted_bundle_carries_no_secret() {
         text_of_bundle.contains(REDACTED),
         "and it says where the values went: {REDACTED}"
     );
+
+    let log = fs::read_to_string(dir.join("log.txt")).expect("read log.txt");
+    assert!(
+        log.contains(&logged.replace(MARKERS[0], REDACTED)),
+        "the logged line reached log.txt with its secret struck and the rest of \
+         the sentence intact; log.txt:\n{log}"
+    );
     assert_eq!(
         number(&result, "redactions"),
-        MARKERS.len() as u64,
-        "one replacement per secret the configuration carried: {result}"
+        MARKERS.len() as u64 + 1,
+        "one replacement per secret the configuration carried, plus the one in the log: {result}"
     );
 
     let config = fs::read_to_string(dir.join("config.toml")).expect("read config.toml");
@@ -1428,6 +1459,7 @@ fn a_redacted_bundle_carries_no_secret() {
 #[test]
 fn an_unredacted_bundle_is_the_control() {
     let diag = Diag::start();
+    let logged = log_a_secret(diag.root(), MARKERS[0]);
     let result = block_on(async {
         let mut conn = client(diag.root()).await;
         run_operation(
@@ -1438,13 +1470,20 @@ fn an_unredacted_bundle_is_the_control() {
         .await
     });
 
-    let text_of_bundle = bundle_text(&bundle_dir(&result));
+    let dir = bundle_dir(&result);
+    let text_of_bundle = bundle_text(&dir);
     for marker in MARKERS {
         assert!(
             text_of_bundle.contains(marker),
             "{marker} is in the configuration this bundle copied verbatim"
         );
     }
+    let log = fs::read_to_string(dir.join("log.txt")).expect("read log.txt");
+    assert!(
+        log.contains(&logged),
+        "and the logged line reached log.txt whole, which is what the row above \
+         strikes: log.txt:\n{log}"
+    );
     assert_eq!(
         number(&result, "redactions"),
         0,
