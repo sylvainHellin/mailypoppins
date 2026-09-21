@@ -1,0 +1,11 @@
+{
+  "id": 21,
+  "jsonrpc": "2.0",
+  "result": {
+    "bytes": 412,
+    "expires_at": "2026-07-02T12:07:30Z",
+    "handle": "mdM3Fq7Zk1",
+    "name": "re-obermeyer-center-steering-meeting.md",
+    "path": "/home/alice/.local/share/mailypoppins/runtime/handles/mdM3Fq7Zk1/re-obermeyer-center-steering-meeting.md"
+  }
+}

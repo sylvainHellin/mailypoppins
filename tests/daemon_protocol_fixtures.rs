@@ -55,6 +55,15 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "notification.resync_required.json",
 ];
 
+/// The fixtures P5-U10c adds, a pair per surface plus the streamed hit (#0126).
+///
+/// Separate from [`REQUIRED_FIXTURES`] so the P2 list stays the record of what
+/// P2 required; the assertion over both is the same.
+const P5_U10C_FIXTURES: &[&str] = &[
+    "message.materialise_markdown.request.json",
+    "message.materialise_markdown.response.json",
+];
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -107,6 +116,7 @@ fn every_required_fixture_is_committed() {
     let present: BTreeSet<String> = fixtures().into_iter().map(|(name, _)| name).collect();
     let missing: Vec<&&str> = REQUIRED_FIXTURES
         .iter()
+        .chain(P5_U10C_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
     assert!(
@@ -653,6 +663,53 @@ fn assert_keys(value: &Value, expected: &[&str], label: &str) {
     assert_eq!(
         found, want,
         "{label} carries exactly the documented fields, got {value}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P5-U10c: the four surfaces that let `src/tui/` compile without the engine
+// ---------------------------------------------------------------------------
+
+/// `message.materialise_markdown` answers with the handle shape its two
+/// siblings answer with, key for key (`RD-06`).
+///
+/// Written out here rather than derived from the daemon, for the reason the
+/// read-only lists above give: a rendition that grew a key would regenerate a
+/// fixture that agrees with the new code and with nothing else. The shape is
+/// the `materialise_*` family's, not a fourth one, which is the whole argument
+/// for the name: a client that already releases an html rendition releases
+/// this one with the same code.
+#[test]
+fn the_markdown_rendition_answers_with_the_handle_shape() {
+    const HANDLE: &[&str] = &["bytes", "expires_at", "handle", "name", "path"];
+
+    let request = load("message.materialise_markdown.request.json");
+    assert_eq!(request["method"], json!("message.materialise_markdown"));
+    assert_keys(
+        &request["params"],
+        &["account", "row_id"],
+        "message.materialise_markdown params",
+    );
+
+    let response = load("message.materialise_markdown.response.json");
+    assert_keys(&response["result"], HANDLE, "the rendition handle");
+    let name = response["result"]["name"]
+        .as_str()
+        .expect("name is a string");
+    assert!(
+        name.ends_with(".md"),
+        "the store's own rendition of a message is Markdown (#0075), got {name:?}"
+    );
+    let path = response["result"]["path"]
+        .as_str()
+        .expect("path is a string");
+    assert!(
+        path.ends_with(&format!("/{name}")),
+        "the file keeps the sender's own name inside the handle directory: {path:?}"
+    );
+    assert!(
+        path.contains("/runtime/handles/"),
+        "a rendition lands under the daemon's own runtime directory: {path:?}"
     );
 }
 

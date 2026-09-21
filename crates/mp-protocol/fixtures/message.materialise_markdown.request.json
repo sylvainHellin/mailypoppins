@@ -1,0 +1,9 @@
+{
+  "id": 21,
+  "jsonrpc": "2.0",
+  "method": "message.materialise_markdown",
+  "params": {
+    "account": "work",
+    "row_id": 3141
+  }
+}

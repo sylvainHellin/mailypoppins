@@ -448,9 +448,10 @@ A client cannot read an account's blob store, so the daemon writes the bytes it 
 |---|---|---|---|
 | `message.materialise_attachment` | client_integration | `{account, id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_html` | client_integration | `{account, id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_markdown` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.release_handle` | query | `{handle}` | `{}` |
 
-Like the read-only methods, all three open the store by path and take no engine lock: materialising is a read plus a write into the daemon's own directory, and neither makes the daemon an account's engine.
+Like the read-only methods, all four open the store by path and take no engine lock: materialising is a read plus a write into the daemon's own directory, and neither makes the daemon an account's engine.
 The two materialisers are *client_integration* because the daemon prepares the file and only the client's own process can open it; the release is a *query* because it moves no revision and invalidates no resource, handles being per-client scratch that appears in no snapshot and in no event.
 
 **A message is addressed as `"<mailbox>/<uid>"`**, the last two thirds of the `message:work/inbox/41` resource, which a client composes from the mailbox it listed and the `uid` of the row it is holding.
@@ -469,6 +470,19 @@ It is the index of the row a client is looking at; addressing by the store's raw
 
 **`message.materialise_html` writes the browser rendition, not the raw markup**: the charset and the `Content-Security-Policy` meta tag the TUI's `b` binding injects before it hands a `file://` URL to a browser (#0037), with `cid:` references inlined as `data:` URIs.
 A sender who wrote no markup is `-32602`, not a daemon failure.
+
+**`message.materialise_markdown` writes the store's own view of a message**, which is `store::read::render_markdown`: YAML frontmatter built from the `messages` row, then the stored plain text, which is either the sender's `text/plain` or the `html_to_plain` of their markup (#0075, `RD-06`).
+It is the third member of this family rather than a method of its own, because the store keeps no Markdown file per message: the file era's `.md` files died with #0037, and what replaced them is a rendition built on every open, which is exactly what a handle is for.
+It is not `message.materialise_html`, which renders the sender's markup for a browser where this renders the store's own view for an editor.
+
+The file is written **mode 0444**, so `$EDITOR` opens the buffer read-only and says so instead of letting someone believe an edit reaches the message.
+That is #0075's rule, and it moves to the daemon with the bytes.
+`name` is the message's subject slugified, or `message-<row_id>.md` for a message with no subject, so a user reading three open buffers can tell them apart.
+The rendition pins the row's body blob for the life of the handle, exactly as the html rendition pins the `html` blob (`ANO-6`).
+
+It is the one method of this family that takes `row_id`, addressed as `message.get` addresses a message: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
+The TUI holds a `MessageRef`, which is the synthetic row key and nothing else (#0050), and making it spell `"<mailbox>/<uid>"` would make it carry a second identity for every listed row.
+A message with no stored body renders with an empty body rather than refusing, because `render_markdown` degrades the way `mp show` does.
 
 **The file lands at `<data_dir>/runtime/handles/<handle>/<name>`**, one directory per handle at mode 0700, where `<name>` is the sanitised attachment filename or `message.html`.
 One directory per handle is what lets the file keep the sender's own name (`vertrag.pdf`, not a hash) without two handles colliding, and what makes a release a directory removal derivable from the id alone.
