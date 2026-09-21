@@ -46,8 +46,9 @@ use std::time::Instant;
 use serde_json::json;
 
 use mp_protocol::events::{
-    Arrival, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+    Arrival, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
+    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
+    KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -270,6 +271,10 @@ impl App {
             | KIND_SEND_HOLD_FIRED
             | KIND_SEND_HOLD_CANCELLED => self.apply_hold(event),
             KIND_DAEMON_SHUTTING_DOWN => self.apply_shutting_down(),
+            KIND_DIAGNOSTIC_CHECK_CHANGED => {
+                land_check(self, &event.payload);
+                Applied::Ignored
+            }
             // The counts scope is the sidebar's and not the list's: a hundred
             // count changes for one mailbox may not each refetch the open list,
             // which is why `MessageRowDelta::decode` returns `None` for it.
@@ -438,6 +443,39 @@ impl App {
             .iter()
             .position(|state| state.account_config.name == account)
     }
+}
+
+/// One `diagnostic.check_changed` payload, landed in the activity ring (P6-U8).
+///
+/// One entry, `"{name}: {detail}"`, at the level the status maps to, and
+/// nothing else. `status_message` is deliberately **not** set: a check the user
+/// did not ask about may not overwrite the sentence his own last action put on
+/// the status line, which is why `apply_event` answers [`Applied::Ignored`] for
+/// it - the drain does not branch on this, nothing is reloaded and nothing is
+/// refetched, which is exactly what `Ignored` promises a caller.
+///
+/// A payload that is not a check is skipped rather than rendered as a line of
+/// JSON: `snapshot.diagnostics` is an array of `Value` and a future daemon may
+/// put something else in it. Free rather than a method on [`App`] because
+/// [`App::apply_bootstrap`] lands the snapshot's array through the same
+/// reading, and two copies of it would eventually be two readings.
+pub(super) fn land_check(app: &mut App, payload: &serde_json::Value) {
+    let (Some(name), Some(status), Some(detail)) = (
+        payload["name"].as_str(),
+        payload["status"].as_str(),
+        payload["detail"].as_str(),
+    ) else {
+        return;
+    };
+    let level = match status {
+        "warn" => StatusLevel::Warning,
+        "fail" => StatusLevel::Error,
+        // A check that recovered says so, because a warning nobody saw clear is
+        // a warning the user keeps believing.
+        "ok" => StatusLevel::Success,
+        _ => return,
+    };
+    app.push_status(format!("{name}: {detail}"), level);
 }
 
 /// The notifier's shape for the arrivals a tick reported.

@@ -151,6 +151,15 @@ impl App {
             log::warn!("[events] {orphaned} operation(s) died with the previous daemon");
             self.bg_count = self.bg_count.saturating_sub(orphaned);
         }
+        // The daemon's current complaints, in its own report order, landed the
+        // same way a `diagnostic.check_changed` is (P6-U8): a window that opens
+        // the activity overlay a second after starting finds them in it rather
+        // than waiting for the next flip, which may never come. A healthy
+        // daemon sends an empty array and writes nothing, which is what keeps
+        // every golden frame on its `No activity yet` line.
+        for diagnostic in &bootstrap.snapshot.diagnostics {
+            crate::tui::events::land_check(self, diagnostic);
+        }
         for account in &bootstrap.snapshot.accounts {
             let Some(index) = self
                 .accounts
