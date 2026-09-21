@@ -1,7 +1,7 @@
 //! The unified search grammar (#0086a): one parser, one AST, four renderers.
 //!
 //! Before this module `mp` shipped two query grammars that had drifted apart
-//! (the #0043 debt): [`crate::imap_client::search`]'s prefix scanner for the
+//! (the #0043 debt): `imap_client::search`'s prefix scanner for the
 //! server path, and `store::search`'s own term splitter for `--local` FTS.
 //! Neither could express an `OR` group or an attachment predicate. This module
 //! replaces both parsers with one, so a single input string means the same
@@ -36,7 +36,7 @@
 
 use std::fmt;
 
-use crate::imap_client::search::parse_date_to_imap;
+use crate::imap_query::parse_date_to_imap;
 
 // ---------------------------------------------------------------------------
 // AST
@@ -659,7 +659,7 @@ pub fn to_imap(q: &Query) -> Result<ImapRender, RenderError> {
     if let Some(ref mid) = q.message_id {
         parts.push(format!(
             "HEADER \"Message-ID\" \"{}\"",
-            imap_quote(&crate::imap_client::bracketed_message_id(mid))
+            imap_quote(&crate::imap_query::bracketed_message_id(mid))
         ));
     }
 
@@ -727,7 +727,7 @@ pub fn to_gmail(q: &Query) -> String {
     if let Some(ref mid) = q.message_id {
         parts.push(format!(
             "rfc822msgid:{}",
-            crate::imap_client::normalize_message_id(mid)
+            crate::imap_query::normalize_message_id(mid)
         ));
     }
     for clause in &q.clauses {
@@ -793,7 +793,7 @@ pub fn to_graph(q: &Query) -> Result<(Option<String>, Option<String>), RenderErr
     if let Some(ref mid) = q.message_id {
         filter_parts.push(format!(
             "internetMessageId eq '{}'",
-            crate::imap_client::bracketed_message_id(mid).replace('\'', "''")
+            crate::imap_query::bracketed_message_id(mid).replace('\'', "''")
         ));
     }
 

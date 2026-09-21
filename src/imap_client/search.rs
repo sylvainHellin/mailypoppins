@@ -1,3 +1,9 @@
+// The three pure string helpers moved to `mp_core::imap_query` with the search
+// grammar that shares them (#0126, P5-U10a). Re-exported here so that
+// `imap_client::search::normalize_message_id`, the `imap_client` re-export and
+// every `use super::*` inside this module keep naming the same functions.
+pub use mp_core::imap_query::{bracketed_message_id, normalize_message_id, parse_date_to_imap};
+
 /// Structured search criteria for IMAP queries.
 #[derive(Default)]
 pub struct FetchCriteria {
@@ -14,22 +20,6 @@ pub struct FetchCriteria {
     pub message_id: Option<String>,
     /// Routing directive: which mailbox to search. Not an IMAP search criterion.
     pub in_mailbox: Option<String>,
-}
-
-/// Normalize a Message-ID for comparison: trim whitespace and strip one layer of
-/// angle brackets, so `<a@b>` and `a@b` compare equal. Idempotent.
-pub fn normalize_message_id(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    trimmed
-        .strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .unwrap_or(trimmed)
-}
-
-/// Canonical wire form of a Message-ID, always angle-bracketed: `<a@b>`.
-/// Servers store the header with the brackets, so queries must carry them.
-pub fn bracketed_message_id(raw: &str) -> String {
-    format!("<{}>", normalize_message_id(raw))
 }
 
 /// The `HEADER Message-ID` search term for one Message-ID, with the value
@@ -120,86 +110,14 @@ pub(crate) fn build_imap_search_query(criteria: &FetchCriteria) -> String {
     }
 }
 
-/// Parse a `YYYY-MM-DD` date into the IMAP `D-Mon-YYYY` form.
-///
-/// The user-facing search grammar lives in [`crate::search`] now (#0086a); this
-/// stays here because it is the shared date lowering the IMAP renderer and the
-/// structured [`FetchCriteria`] path both use.
-pub(crate) fn parse_date_to_imap(date_str: &str) -> Option<String> {
-    let parts: Vec<&str> = date_str.split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let year = parts[0];
-    let month = match parts[1] {
-        "01" => "Jan",
-        "02" => "Feb",
-        "03" => "Mar",
-        "04" => "Apr",
-        "05" => "May",
-        "06" => "Jun",
-        "07" => "Jul",
-        "08" => "Aug",
-        "09" => "Sep",
-        "10" => "Oct",
-        "11" => "Nov",
-        "12" => "Dec",
-        _ => return None,
-    };
-    let day: u32 = parts[2].parse().ok()?;
-    Some(format!("{}-{}-{}", day, month, year))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_date_to_imap_valid() {
-        assert_eq!(
-            parse_date_to_imap("2024-12-25"),
-            Some("25-Dec-2024".to_string())
-        );
-        assert_eq!(
-            parse_date_to_imap("2026-01-01"),
-            Some("1-Jan-2026".to_string())
-        );
-        assert_eq!(
-            parse_date_to_imap("2023-06-15"),
-            Some("15-Jun-2023".to_string())
-        );
-    }
 
-    #[test]
-    fn test_parse_date_to_imap_invalid_format() {
-        assert_eq!(parse_date_to_imap("2024/12/25"), None);
-        assert_eq!(parse_date_to_imap("Dec 25 2024"), None);
-        assert_eq!(parse_date_to_imap("25-Dec-2024"), None);
-        assert_eq!(parse_date_to_imap("2024-1-5"), None);
-    }
 
-    #[test]
-    fn test_parse_date_to_imap_invalid_month() {
-        assert_eq!(parse_date_to_imap("2024-13-01"), None);
-        assert_eq!(parse_date_to_imap("2024-00-01"), None);
-        assert_eq!(parse_date_to_imap("2024-99-01"), None);
-    }
 
-    #[test]
-    fn test_parse_date_to_imap_invalid_day() {
-        // parse_date_to_imap only validates that day is a valid u32, not range.
-        // Invalid days will be rejected by the IMAP server at query time.
-        assert_eq!(parse_date_to_imap("2024-12-00"), Some("0-Dec-2024".to_string()));
-        assert_eq!(parse_date_to_imap("2024-12-32"), Some("32-Dec-2024".to_string()));
-        assert_eq!(parse_date_to_imap("2024-12-ab"), None);
-    }
 
-    #[test]
-    fn test_parse_date_to_imap_empty() {
-        assert_eq!(parse_date_to_imap(""), None);
-        assert_eq!(parse_date_to_imap("2024"), None);
-        assert_eq!(parse_date_to_imap("2024-12"), None);
-    }
 
     #[test]
     fn test_build_imap_search_query_empty() {
@@ -266,14 +184,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_normalize_message_id_strips_one_bracket_layer() {
-        assert_eq!(normalize_message_id("<abc@example.com>"), "abc@example.com");
-        assert_eq!(normalize_message_id("abc@example.com"), "abc@example.com");
-        assert_eq!(normalize_message_id("  <abc@example.com> "), "abc@example.com");
-        // Half-bracketed input is left alone rather than silently mangled.
-        assert_eq!(normalize_message_id("<abc@example.com"), "<abc@example.com");
-    }
 
     #[test]
     fn a_search_term_escapes_the_two_characters_a_quoted_string_has() {
@@ -297,14 +207,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_bracketed_message_id_is_idempotent() {
-        assert_eq!(bracketed_message_id("abc@example.com"), "<abc@example.com>");
-        assert_eq!(
-            bracketed_message_id("<abc@example.com>"),
-            "<abc@example.com>"
-        );
-    }
 
     #[test]
     fn test_build_imap_search_query_message_id_always_bracketed() {

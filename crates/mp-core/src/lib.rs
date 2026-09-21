@@ -8,15 +8,19 @@
 //! under every old path, so no call site outside these files changed.
 //!
 //! What lives here reaches no store, no IMAP session, no outbox and no sending
-//! transport. [`selector`] arrived split: the grammar is here, the two
-//! store-backed resolvers stayed in the root crate.
+//! transport. Two modules arrived split: [`selector`] kept the grammar and
+//! left its two store-backed resolvers in the root crate, and [`search`]
+//! moved whole, taking with it the three pure IMAP string helpers it read out
+//! of `imap_client` ([`imap_query`]).
 
 pub mod app_state;
 pub mod calendar;
 pub mod config;
+pub mod imap_query;
 pub mod notify;
 pub mod oauth2;
 pub mod parse;
+pub mod search;
 pub mod secrets;
 pub mod selector;
 pub mod signatures;
