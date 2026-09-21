@@ -641,7 +641,7 @@ The live check - `mp daemon install-service` on macOS, log out and back in, `mp 
 ## P6-U6: login-start service units
 
 `tests/daemon_service.rs` is green, twenty-three of twenty-three, three runs.
-The commands are `src/daemon/service.rs`, 469 production lines of which 56 are the module header, plus 150 of unit test, and two template files that are byte-for-byte copies of the committed fixtures.
+The commands are `src/daemon/service.rs`, 621 lines: 468 of production of which 57 are the module header, and 153 of unit test, beside two template files that are byte-for-byte copies of the committed fixtures.
 
 ### The templates live in `src/`, not in `tests/`
 
