@@ -151,7 +151,11 @@ mod tests {
     #[test]
     fn an_empty_rebuild_does_not_overwrite_a_populated_cache() {
         let dir = tempfile::tempdir().unwrap();
-        save_cache(dir.path(), &index(&["alice@example.com", "bob@example.com"])).unwrap();
+        save_cache(
+            dir.path(),
+            &index(&["alice@example.com", "bob@example.com"]),
+        )
+        .unwrap();
 
         let outcome = save_rebuilt_cache(dir.path(), &index(&[])).unwrap();
 

@@ -184,7 +184,10 @@ mod tests {
         let tmp = crate::config::test_env::TestDataDir::new();
         let account_root = account_dir(account_name);
         std::fs::create_dir_all(&account_root).unwrap();
-        DataDirFixture { account_root, _tmp: tmp }
+        DataDirFixture {
+            account_root,
+            _tmp: tmp,
+        }
     }
 
     fn mk_account() -> AccountConfig {
@@ -246,7 +249,11 @@ mod tests {
     }
 
     fn mk_draft(to: &str, cc: Option<&str>) -> EmailDraft {
-        let to_opt = if to.is_empty() { None } else { Some(to.to_string()) };
+        let to_opt = if to.is_empty() {
+            None
+        } else {
+            Some(to.to_string())
+        };
         EmailDraft {
             path: PathBuf::from("/tmp/fake.md"),
             frontmatter: EmailFrontmatter {

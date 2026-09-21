@@ -34,7 +34,8 @@ pub(crate) struct Observation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ObservationField {
+#[doc(hidden)]
+pub enum ObservationField {
     From,
     To,
     Cc,

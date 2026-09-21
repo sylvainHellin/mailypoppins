@@ -2143,6 +2143,7 @@ dependencies = [
  "machine-uid",
  "mailparse",
  "mp-protocol",
+ "nucleo-matcher",
  "rand 0.8.5",
  "regex",
  "reqwest",

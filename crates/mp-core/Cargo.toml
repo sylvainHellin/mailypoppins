@@ -56,6 +56,9 @@ zeroize = { version = "1.7", features = ["derive"] }
 # `types` re-exports the calendar frontmatter structs the daemon protocol owns
 # (P5-U10, #0124), so the YAML sidecar and the wire agree by construction.
 mp-protocol = { path = "../mp-protocol" }
+# `contacts::matcher`, the fuzzy address completion the TUI and `mp contacts`
+# both drive.
+nucleo-matcher = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

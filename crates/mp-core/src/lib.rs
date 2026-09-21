@@ -21,6 +21,7 @@ pub mod imap_query;
 pub mod invite;
 pub mod notify;
 pub mod oauth2;
+pub mod contacts;
 pub mod parse;
 pub mod reconcile;
 pub mod search;

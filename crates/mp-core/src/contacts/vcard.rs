@@ -182,7 +182,10 @@ mod tests {
 
     #[test]
     fn file_stem_slugifies() {
-        assert_eq!(vcard_file_stem(&mk("a@b.com", "Alice Smith")), "alice-smith");
+        assert_eq!(
+            vcard_file_stem(&mk("a@b.com", "Alice Smith")),
+            "alice-smith"
+        );
         assert_eq!(vcard_file_stem(&mk("bob.jones@x.com", "")), "bob-jones");
         assert_eq!(vcard_file_stem(&mk("@@@@@@", "")), "contact");
     }

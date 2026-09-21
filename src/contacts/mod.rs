@@ -3,18 +3,21 @@
 //! Reads each account's message rows, aggregates from/to/cc addresses, filters
 //! noise, ranks with a tiered comparator (sent > cc > received) with frecency
 //! tiebreaker, and caches results to JSON.
+//!
+//! Only the two halves that touch the engine are here: `extractor`'s store
+//! rebuild and [`hooks`], which observes what a sync or a send just saw.
+//! Everything else - the cache, the filter, the ranker, the matcher, the vCard
+//! writer and the observation merge - is [`mp_core::contacts`], re-exported
+//! whole below (#0126, P5-U10b), so `crate::contacts::load_cache` and every
+//! other old path resolves unchanged.
 
-mod cache;
+pub use mp_core::contacts::{
+    cache, cache_path, contact_to_vcard, filter, load_cache, matcher, observe, rank, save_cache,
+    save_rebuilt_cache, search, types, vcard, vcard_file_stem, CacheSave, Contact, ContactIndex,
+    ContactSource, ContactTier, MatchResult, ObservedIn,
+};
+
 mod extractor;
-mod filter;
 pub mod hooks;
-mod matcher;
-mod rank;
-mod types;
-mod vcard;
 
-pub use cache::{cache_path, load_cache, save_cache, save_rebuilt_cache, CacheSave};
-pub use extractor::{build_index_for_account, observe, ObservedIn};
-pub use matcher::{search, MatchResult};
-pub use types::{Contact, ContactIndex, ContactSource, ContactTier};
-pub use vcard::{contact_to_vcard, vcard_file_stem};
+pub use extractor::build_index_for_account;
