@@ -76,6 +76,8 @@ const P5_U10C_FIXTURES: &[&str] = &[
 /// each other: each list is the record of what one unit required, and the
 /// assertion over all of them is the same.
 const P5_U10D_FIXTURES: &[&str] = &[
+    "draft.create_from_message.request.json",
+    "draft.create_from_message.response.json",
     "message.thread.request.json",
     "message.thread.response.json",
 ];

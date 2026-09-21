@@ -1,0 +1,19 @@
+{
+  "id": 32,
+  "jsonrpc": "2.0",
+  "method": "draft.create_from_message",
+  "params": {
+    "account": "work",
+    "kind": "reply_all",
+    "message": {
+      "body_text": "hier ist das Angebot\n",
+      "cc": "team@example.com",
+      "date_display": "Mon, 29 Jun 2026 08:15:00 +0200",
+      "from": "Ivana <ivana@example.com>",
+      "html_body": null,
+      "message_id": "<Angebot@example.com>",
+      "subject": "Angebot",
+      "to": "alice@example.com"
+    }
+  }
+}

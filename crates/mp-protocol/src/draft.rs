@@ -210,3 +210,154 @@ pub struct DraftPreview {
     /// signature (#0099).
     pub signature: Option<String>,
 }
+
+/// Which draft `draft.create_from_message` builds (P5-U10d, #0126).
+///
+/// The wire spelling of `mailypoppins::draft::DraftFromSource`, which is
+/// `Reply { all }` and `Forward`: a closed set of three words rather than a
+/// verb plus a boolean, because `{"kind": "forward", "all": true}` would be a
+/// parameter combination with no meaning and a client that sent it would have
+/// to be told so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftKind {
+    /// A reply to the sender.
+    Reply,
+    /// A reply to the sender and every other recipient.
+    ReplyAll,
+    /// A forward, which quotes the message and carries no attachments here.
+    Forward,
+}
+
+/// The message a draft is built from when the store holds no row for it
+/// (P5-U10d, `DFT-08`, `DFT-09`).
+///
+/// The subset of [`crate::listing::ServerSearchHit`] that
+/// `mp_core::draft::source_from_fetched` reads, under the hit's own field
+/// names, so a client that holds a hit fills this in without renaming
+/// anything. The fields a `SourceMessage` has no use for - `row_id`,
+/// `selector`, `mailbox`, `reply_to`, `bcc`, the flags, `has_attachments`,
+/// `is_invite` - are absent: a draft is built from the headers it quotes back
+/// and the body it quotes.
+///
+/// **It carries no attachments.** A forward built from a stored row
+/// materialises the original parts into the account's stable attachment
+/// mirror; a server-only hit has no parts on the client's side to send, so a
+/// forward built this way quotes the message and attaches nothing. That is
+/// what the client does with such a hit today.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftMessage {
+    /// The `From:` header, which the reply addresses.
+    #[serde(default)]
+    pub from: String,
+    /// The `To:` header, which a reply-all keeps.
+    #[serde(default)]
+    pub to: String,
+    /// The `Cc:` header, `null` when the message carried none.
+    #[serde(default)]
+    pub cc: Option<String>,
+    /// The `Subject:` header, which the builder prefixes with `Re:` or `Fwd:`.
+    #[serde(default)]
+    pub subject: String,
+    /// The `Message-ID:` header, `null` for a server that returned none.
+    ///
+    /// Nullable and not required: the draft records it as `in_reply_to` when
+    /// it is there and quotes fine without it, which is what makes this the
+    /// one reply flow a message with no `Message-ID` can still have.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// The `Date:` header verbatim, which the quote header prints.
+    #[serde(default)]
+    pub date_display: String,
+    /// The flattened text the quote is built from, `""` when the server sent
+    /// none.
+    #[serde(default)]
+    pub body_text: String,
+    /// The sender's markup, `null` when there is none, which is what the
+    /// draft's HTML companion quotes.
+    #[serde(default)]
+    pub html_body: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The committed request fixture decodes into the typed payload, and the
+    /// kind is one of the three words.
+    #[test]
+    fn the_committed_create_from_message_fixture_decodes_whole() {
+        let raw = include_str!("../fixtures/draft.create_from_message.request.json");
+        let request: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let params = &request["params"];
+
+        let kind: DraftKind =
+            serde_json::from_value(params["kind"].clone()).expect("the kind decodes");
+        assert_eq!(kind, DraftKind::ReplyAll);
+
+        let message: DraftMessage =
+            serde_json::from_value(params["message"].clone()).expect("the message decodes");
+        assert_eq!(message.from, "Ivana <ivana@example.com>");
+        assert_eq!(message.cc.as_deref(), Some("team@example.com"));
+        assert_eq!(
+            message.message_id.as_deref(),
+            Some("<Angebot@example.com>"),
+            "the hit's own Message-ID, which the draft records as in_reply_to"
+        );
+        assert_eq!(message.body_text, "hier ist das Angebot\n");
+        assert_eq!(message.html_body, None);
+    }
+
+    /// The committed response fixture is a `DraftCreated` whose `source` is
+    /// `null`: the draft answers a message the store holds no row for, so
+    /// there is nothing to name it by.
+    #[test]
+    fn a_draft_built_from_a_message_names_no_stored_source() {
+        let raw = include_str!("../fixtures/draft.create_from_message.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let created: DraftCreated =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+
+        assert_eq!(created.account, "work");
+        assert_eq!(created.id, "0123456789abcdef");
+        assert!(created.selector.starts_with("mp://work/drafts/"));
+        assert!(created.path.ends_with(".md"));
+        assert_eq!(
+            created.source, None,
+            "a message the store does not hold has no id and no selector to answer with"
+        );
+    }
+
+    /// A message with no `Message-ID` and no Cc decodes, which is the hit a
+    /// server returned neither for: the one reply flow that still works.
+    #[test]
+    fn a_message_without_an_id_still_decodes() {
+        let message: DraftMessage = serde_json::from_value(json!({
+            "from": "someone@example.com",
+            "subject": "Kein Message-ID",
+            "body_text": "text",
+        }))
+        .expect("every field defaults");
+        assert_eq!(message.message_id, None);
+        assert_eq!(message.cc, None);
+        assert_eq!(message.to, "");
+        assert_eq!(message.date_display, "");
+    }
+
+    /// The three kinds are three words on the wire, and a fourth is a decode
+    /// error rather than a silent reply.
+    #[test]
+    fn the_draft_kinds_are_a_closed_set_of_three_words() {
+        assert_eq!(
+            serde_json::to_value(DraftKind::Forward).expect("it serialises"),
+            json!("forward")
+        );
+        assert_eq!(
+            serde_json::to_value(DraftKind::ReplyAll).expect("it serialises"),
+            json!("reply_all")
+        );
+        let refused: Result<DraftKind, _> = serde_json::from_value(json!("bounce"));
+        assert!(refused.is_err(), "the kind set is closed");
+    }
+}

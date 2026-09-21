@@ -643,21 +643,24 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp reply <selector> [--all] [--mailbox]` (`src/main.rs`), TUI `r`, `cr` (`src/tui/app/keymap.rs:626`), `ca`, search overlay `r` and `R`
-- Daemon surface: `draft.reply`
+- Daemon surface: `draft.reply`, and `draft.create_from_message` for a hit with no local row
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P5-U6); GUI not started
-- Note: the TUI's four reply keys went through it in P5-U6, addressed by the `row_id` the method gained for them; a search hit that resolved to no local row is the one reply the daemon cannot build, and is still built client-side from the fetch the overlay is rendering.
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`
+- Status: routed (P5-U6); the hit with no row contracted (P5-U10d-T), not served; GUI not started
+- Note: the TUI's four reply keys went through it in P5-U6, addressed by the `row_id` the method gained for them.
+  A search hit that resolved to no local row is the one reply neither `draft.reply` nor `draft.forward` can build, because every form of their `source` is an address into the store; it is still built client-side from the fetch the overlay is rendering.
+  `draft.create_from_message` `{account, kind, message}` is the contract for it: the message travels instead of an address, nothing is ingested, no unread count moves, and a hit with no `Message-ID` or in a mailbox the sidebar does not list still quotes.
 
 ### DFT-09 Forward a message to new recipients
 
 - Classification: GUI parity
 - Source anchor: `mp forward <selector> [--mailbox]` (`src/main.rs`), TUI `cf`, search overlay `w`
-- Daemon surface: `draft.forward`
+- Daemon surface: `draft.forward`, and `draft.create_from_message` for a hit with no local row
 - GUI location: TBD (Phase 9)
-- Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P5-U6); GUI not started
+- Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`
+- Status: routed (P5-U6); the hit with no row contracted (P5-U10d-T), not served; GUI not started
 - Note: the forward carries the original attachments, which the GUI must reproduce rather than dropping.
+  A forward of a server-only hit is the exception and carries none: `message.search_server` streams the envelope and the two body renditions, so since P5-U10c-I1 the client has no parts to forward, and `draft.create_from_message` takes none.
   P5-U6 routed the TUI's two forward keys through it and gave the method `headers`, the compose wizard's override of the recipients and the subject it collected before the draft existed.
 
 ### DFT-10 Compose wizard for new and forwarded mail

@@ -94,7 +94,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `account.*` for listing, selection metadata, sync health, and account operations.
 - `mailbox.*` for listings, counts, and mailbox metadata.
 - `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation. This build serves five mutations: `message.archive`, `message.delete`, `message.move`, `message.set_flag` and `message.set_read`, and two invitation reads, `message.ics` and `message.invite`.
-- `draft.*` for creation, parsing status, validation, recipient editing, reply, reply-all, forward, approval, discard, and attachment changes. This build serves the ten methods of the draft slice and the mutation slice.
+- `draft.*` for creation, parsing status, validation, recipient editing, reply, reply-all, forward, approval, discard, and attachment changes. This build serves the eleven methods of the draft slice and the mutation slice.
 - `send.*` for immediate send, approved batches, invitations, outbox recovery, and the undo-send hold's countdown and cancellation. This build serves the eight methods of the send slice: `send.approved`, `send.cancel_hold`, `send.draft`, `send.hold_status`, `send.invite`, `send.outbox_discard`, `send.outbox_list` and `send.outbox_retry`, whose result types are `mp_protocol::send`.
 - `sync.*` for quick sync, full sync, progress, and errors.
 - `contact.*` for listing, ranking, rebuilding, and statistics. This build serves `contact.rebuild`, `contact.search` and `contact.stats`, whose rows are `{address, display_name, sent_to, sent_cc, received, score}`.
@@ -113,7 +113,7 @@ Every method registered on the dispatcher declares a kind, and the kind fixes wh
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
-- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
+- **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the seven `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
@@ -622,12 +622,13 @@ The backend is opened on first use rather than at startup, because a first run h
 The daemon watches every account's drafts directory and the signatures directory, so a draft written by `$EDITOR`, by an agent or by the daemon itself reaches every client as an event without anybody asking.
 The watcher is described in [daemon-operations.md](daemon-operations.md); what it produces on the wire is the three kinds below and the snapshot rows above.
 
-The family is the ten methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
+The family is the eleven methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
 
 | method | kind | params | result |
 |---|---|---|---|
 | `draft.approve` | command | `{account, id}` | `{account, id, status: "approved", path}` |
 | `draft.create` | command | `{account, name, no_signature?, signature?}` | `DraftCreated` |
+| `draft.create_from_message` | command | `{account, kind, message, no_signature?, signature?}` | `DraftCreated` |
 | `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
 | `draft.discard` | command | `{account, id\|selector, force?}` or `{account, sent: true}` | `{account, id, selector, status}` or `{account, cleared, kept}` |
 | `draft.forward` | command | `{account, source, headers?, no_signature?, signature?}` | `DraftCreated` |
@@ -648,6 +649,23 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 **A reply or a forward addresses its source three ways and may override its headers.**
 `source` is `{id}`, `{row_id}` or `{selector, mailbox?}`, exactly one of the three: `id` is the store's `"<mailbox>/<uid>"` key, `row_id` is the `messages.id` a `message.list` row carries, and `selector` is the grammar `mp reply` takes from a user.
 `row_id` joined them in P5-U6 for the reason P5-U4 added it to `message.get`: a client holding a listed row has that id and nothing else, and re-deriving a `"<mailbox>/<uid>"` for it would make it carry a second identity per row.
+
+**`draft.create_from_message` is the one draft built from a message rather than from a row.**
+A server-search hit that resolved to no local row has no `messages.id`, no uid and no selector, and its content is the fetch the client is already rendering; `draft.reply` and `draft.forward` cannot build that draft, because every form of their `source` is an address into the store.
+So this method takes the message itself: `kind` is `"reply"`, `"reply_all"` or `"forward"`, and `message` is `mp_protocol::draft::DraftMessage` `{from, to, cc, subject, message_id, date_display, body_text, html_body}`, the subset of a `ServerSearchHit` the builder reads, under the hit's own field names.
+The result is `DraftCreated` with `source: null`: there is no stored message to name.
+
+It is a method of its own rather than a fourth form of `source` because the two are different questions.
+A `source` is an address, so every form of it needs the account's message store and takes the family's `-32006`; this one needs none, which is what lets it build a reply for an account whose store holds nothing and for a mailbox the sidebar does not list.
+It also **ingests nothing**: the message stays unknown to the store, no row appears in a mailbox, and no unread count moves, which is the difference between quoting a message and downloading it.
+The overlay has a separate key for downloading it, and that key is `message.fetch`.
+
+`message_id` is nullable, so a hit a server returned no `Message-ID` for still gets a reply; the draft records `in_reply_to` only when there is one.
+`message` carries no attachments and a forward built this way quotes the message and attaches nothing, where a forward from a stored row materialises the original parts into the account's stable attachment mirror (#0006).
+That is not a choice this method makes: a client holding a server-only hit has no parts to send, because `message.search_server` streams the envelope and the two body renditions and not the blobs.
+
+`no_signature` and `signature` are `draft.reply`'s, unchanged, and the `from` is the account's `default_from` exactly as it is there.
+There is no `headers` override: the compose wizard writes its recipients over a draft built from a *row*, and no flow collects them for a server-only hit.
 
 `headers` is `{to, cc, bcc, subject}`, all four required once it is present and an empty string clearing the field, and it rewrites the built draft's frontmatter in place.
 It exists for a compose wizard that collects the recipients and the subject *before* the draft is written and keeps them over the ones the builder derived; without it such a client would have to build the draft through the daemon and then rewrite the file behind its back.
@@ -677,7 +695,8 @@ They publish no event of their own: the watcher notices the daemon's write like 
 
 Every `path`, `kept` and `shadowed` field is absolute and under `<data_dir>/accounts/<account>/drafts/`, and nothing in the family names the store, the blobs or the runtime directory.
 
-An unknown account is `-32005` with `{account}`; an account with no store is `-32006` for the two methods that read one (`draft.reply`, `draft.forward`) and never for the seven that read the directory, because a drafts directory is local truth and an account that has never synced still has one.
+An unknown account is `-32005` with `{account}`; an account with no store is `-32006` for the two methods that read one (`draft.reply`, `draft.forward`) and never for the eight that read the directory, because a drafts directory is local truth and an account that has never synced still has one.
+A `kind` outside the three words, and a `message` that is absent or is not an object, are `-32602`.
 An id nothing resolves to is `-32602` with `{account, id}`; a name `draft.create` would overwrite is `-32602` with `{account, name, path}`; a draft already `sent` is `-32602` with `{account, id, status}` for both mutators; a draft that will not parse is `-32010` `draft_invalid` carrying the `draft.invalid` payload.
 An invalid draft is not a refusal: `draft.validate` reports it and the exit code stays the client's.
 
