@@ -14,6 +14,7 @@
 //! `imap_client` ([`imap_query`]), and [`invite`] kept the ICS and RSVP
 //! building and left `plan_invite`, which reads an account, behind.
 
+pub mod addresses;
 pub mod app_state;
 pub mod calendar;
 pub mod config;
