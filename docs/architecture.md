@@ -23,7 +23,7 @@ No native-Windows code paths (registry, Credential Manager).
 ## Crate shape
 
 A Cargo workspace: the root package is the library plus the binary, and `crates/mp-protocol` and `crates/mp-client` are the two daemon crates beside it (see "Daemon and crate boundaries" below).
-All product logic lives in `src/lib.rs` modules so the TUI can call them directly without subprocess spawning.
+All product logic lives in `src/lib.rs` modules, and the daemon in `src/daemon/` drives them; the CLI and the TUI are clients of it over a Unix socket and spawn no subprocess of their own.
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).
@@ -65,14 +65,14 @@ What did not change is the help surface: `mp daemon`, `mp account` and the globa
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
 It counts `#[test]` attributes by scanning `src/tui/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
-The three floors are 368 TUI tests, 20 golden-frame tests and 18 snapshot files.
+The three floors are 464 TUI tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
 
 ### The engine-import allow-list, and the CLI's engine-touch residue
 
 `tests/architecture_boundaries.rs` holds both halves of the client/engine boundary.
 
 The first walks `src/tui/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
-The file holds 12 pairs over 7 files today, and that 12 is the number Phase 5 has to drive to zero as the TUI stops calling the engine and starts calling the daemon.
+The file holds 11 pairs over 8 files today, and that 11 is the number the deferred P5-U10 has to drive to zero as the last of the TUI's engine calls become daemon calls (see "TUI layering" below).
 
 It is a record, not a ceiling: a removed import fails the test as loudly as a new one, because the count is the migration's progress bar.
 Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.
@@ -169,13 +169,13 @@ A message with no `Message-ID` header gets a deterministic `sha256-<hex16>@local
 
 Everything the TUI, `mp dump-mailbox` and the contact index show comes from `src/store/read.rs` and `src/store/drafts.rs`.
 There is no directory-walk fallback: nothing writes `.md` for received mail, so a missing row is a bug in ingest and a walk that quietly produced the message anyway would hide it.
-Attachments are blobs, so anything that needs a file materialises them: `mp open` and the TUI's `o` into a private temp directory keyed by the row, a forward draft into `<account_dir>/attachments/<message-id>/` so the draft keeps resolving them after the source row is archived or evicted.
+Attachments are blobs, so anything that needs a file materialises them: `mp open` and the TUI's `o` into a handle directory under `<data_dir>/runtime/handles/`, one per handle, minted by the daemon and pinning the blob against the retention sweep for its lifetime (P5-U6, #0122), a forward draft into `<account_dir>/attachments/<message-id>/` so the draft keeps resolving them after the source row is archived or evicted.
 
 ### Mutate
 
 A flag, move, archive or delete is one local write plus one server op, and both frontends now route it through the durable queue `src/pending_ops.rs` (#0039).
 `apply_move` / `apply_delete` / `apply_set_read` / `apply_set_flagged` commit the local write and the owed `ServerOp` (defined in `src/ops.rs`, the library home of the remote op) in one transaction, so a crash between the halves can never lose the op nor leave the store optimistically changed with nothing owed.
-The TUI's `src/tui/mutations.rs` `queue_*` functions call those `apply_*` and return the rows they touched for the list update; the TUI keeps no server thread and no rollback of its own, because the queue owns both.
+`src/mutations.rs`'s `queue_*` functions call those `apply_*` and return the rows they touched for the list update; they moved out of `src/tui/` in P5-U6, so the daemon's five message mutations and the TUI that asks for them run one pairing rather than two copies of one, and neither keeps a server thread or a rollback of its own, because the queue owns both.
 The background `drain` retires confirmed ops and rolls failed ones back under the engine lock, and it runs at the sync/fetch resume points beside `resume_outbox` (`pending_ops::resume_account`), draining nothing and building no backend when no row is owed.
 Replay is exactly-once for the local half because the drain runs only the server op and never re-applies the local change, and it converges a crash-replayed not-found rather than failing it.
 The CLI (`mp archive`, `mp delete`) enqueues through the same `apply_*` and then runs the op synchronously with `pending_ops::run_and_settle`, keeping its blocking UX: a success retires the row, a refusal rolls the local half back and returns the error verbatim, so a not-found stays byte-identical to the pre-queue message.
@@ -258,9 +258,10 @@ Deletions are the one thing the delta does not resolve: a `@removed` entry names
 
 ### Watchers
 
-One IMAP IDLE thread per password or OAuth2 account, and one polling thread per Graph account that compares the *set* of inbox ids rather than its cardinality.
-Both emit `WatchEvent::{Changed, Reconnected, Error}` on a shared channel tagged with `account_index`, and both widen their retry interval after consecutive failures instead of hammering a server that is down.
-Changes on a non-active account set `has_unseen`, which is the badge in the status bar.
+One IMAP IDLE round per password or OAuth2 account, and one polling round per Graph account that compares the *set* of inbox ids rather than its cardinality.
+Both live in the daemon's account runtime since P5-U8 (`src/daemon/runtime/watcher.rs`), one per account beside its tick and its read pool, and both widen their retry interval after consecutive failures instead of hammering a server that is down.
+A round that sees the mailbox move runs one quick tick and publishes what changed as events, so every connected client converges without a tick-specific rule; a runtime whose engine lock is held by another process does not watch, because the engine holding it is watching the same mailbox.
+Changes on a non-active account set `has_unseen` in the TUI, which is the badge in the status bar.
 
 ## Module map
 
@@ -317,15 +318,21 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 | `batch.rs` | `batch_move_on_server`, `batch_delete_on_server` |
 | `sent.rs` | `ImapSentMailbox`: the APPEND seam the outbox drives, faked in tests |
 | **`src/tui/`** | |
-| `mod.rs` | Event loop (`run_loop`), watcher spawn, background result drain. One iteration drains the queued terminal events into the model and then paints once (#0108), bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
-| `actions.rs` | `handle_action()`, the side-effect dispatch for all `Action` variants. Branches on `is_graph()`. |
-| `mutations.rs` | The TUI's `queue_*` entry into the durable mutation queue (#0039): local write plus enqueue, testable without a terminal |
-| `bg.rs` | `handle_bg_result()`, processing background task completions |
-| `helpers.rs` | Terminal suspend and resume, editor, clipboard, the two watcher loops, `lib_do_sync`, `lib_do_sync_graph`, `resolve_send_account` |
+| `mod.rs` | Event loop (`run_loop`), the session and event-stream drain, background result drain. One iteration drains the queued terminal events and the queued daemon events into the model and then paints once (#0108), both bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
+| `session.rs` | The one daemon connection: a thread with a current-thread runtime on it, `call` / `dispatch` / `events`, and `handle()`, the weak-sender door a worker thread owns |
+| `queries.rs` | Every read, as typed functions over the object-safe `Queries` trait, plus the uid index and the row-delta decoder |
+| `commands.rs` | `route()`, the exhaustive `Action` classification table, and `dispatch()`, which turns a daemon-routed action into its calls |
+| `events.rs` | `Incoming`, the subscription drain, `App::apply_event` and the watermark, and the rebootstrap a resync or a reconnect costs |
+| `actions.rs` | `handle_action()`, the side-effect dispatch for the `Action` variants `commands::dispatch` hands back: the client-only ones and the overlays |
+| `bg.rs` | `handle_bg_result()`, processing background task completions, and `land_sync`, shared by a tick this client asked for and one it heard about |
+| `helpers.rs` | Terminal suspend and resume, editor, clipboard, `resolve_send_account`, and the server search leg (`LST-08`) that is still client-side |
+| `test_daemon.rs` | `TestDaemon`, the in-process daemon every TUI test module builds its fixture on |
 | `event.rs` | Crossterm event polling: `poll_event` waits up to the 250 ms tick, `poll_pending_event` takes an already-queued event without waiting (the drain step, #0108). Both return `None` for an event we do not model. |
 | `theme.rs` | Named themes, semantic colour slots |
 | **`src/tui/app/`** | |
 | `mod.rs` | `App` struct, `new()`, `update()`, account sync, core state helpers |
+| `bootstrap.rs` | `App::shell`, `App::from_bootstrap` and the two `apply_bootstrap` entries (startup, which skips an account that already opened, and resync, which does not) |
+| `store_rows.rs` | The store-backed readers the query layer replaced, kept as the equality oracle and as what an `App` with no session reads |
 | `types.rs` | `EmailEntry`, `AccountState`, `BgResult`, `Action`, `Focus`, `MailboxKind`, `open_store`, mailbox builders |
 | `keys.rs` | `handle_key()` dispatch and all `handle_*_key()` methods |
 | `keymap.rs` | The single `KEYMAP` table behind the help overlay, the hint bar and `mp dump-keys` |
@@ -341,20 +348,97 @@ Changes on a non-active account set `has_unseen`, which is the badge in the stat
 
 ## TUI layering
 
+Since Phase 5 of the daemon migration (#0124) the TUI is a client of the daemon rather than a caller of the engine.
+It still lives in the root package, under `src/tui/`, because the crate move is deferred; what changed is where its reads, its writes and its watchers happen.
+
+### The shape
+
 - The TUI follows The Elm Architecture.
 `App::update()` is a state machine (`Message -> State`).
-Side effects are dispatched as `Action` variants and executed in `tui/actions.rs::handle_action()`.
-Background operations run on threads and report back over an `mpsc` channel as `BgResult` variants, each tagged with `account_index`.
+Side effects are dispatched as `Action` variants and executed either by `tui/commands.rs::dispatch()`, which turns the action into daemon calls, or by `tui/actions.rs::handle_action()`, which owns the ones no daemon can perform.
 - `ui/` renders from `App` state only.
 It opens no store, runs no SQL and performs no I/O.
-- `app/` is not pure in that sense.
-It opens the account store synchronously to load listings, counts, drafts and the preview body, through the handful of `open_store` call sites across `app/types.rs` and `app/mod.rs` (six in production code, one fewer since #0111 deleted `load_message_html`).
-Those reads are local, indexed and memoised, so they cost little today, but a new one is a synchronous disk hit inside the update pass and belongs behind an `Action` if it can be slow.
-What stays absolute is the protocol boundary: no SMTP, IMAP, MIME or Graph code in `app/` or `ui/`.
+- `app/` is not pure in that sense, but what it does now is call the daemon rather than open a database.
+The protocol boundary stays absolute: no SMTP, IMAP, MIME or Graph code in `app/` or `ui/`.
 - Account state proxy pattern.
 `App` holds a `Vec<AccountState>` plus top-level proxy fields (mailboxes, list index) that mirror the active account, with `save_to_account()` and `load_from_account()` syncing on switch.
 This avoids routing every key handler through indirect access.
-- Mutations are optimistic: local state and store update immediately, the server op is retired by the durable-queue drain at the next sync/fetch resume point, and a refusal rolls the row back there (#0039).
+- Mutations are optimistic and stay so: the daemon commits the row change and the owed server op in one transaction and lets the next sync tick drain it, which is what `settle: false` on the five message mutations means and why a thousand-row selection costs no network (#0039, P5-U6).
+
+### The session thread
+
+`src/tui/session.rs` owns the one connection.
+It is a thread of its own with a current-thread tokio runtime on it, because `mp`'s `main` is already inside a runtime that `run_loop` cannot block on, and a `Connection` holds a `UnixStream` registered with the runtime that created it.
+The UI thread talks to it over channels: `dispatch` posts and forgets, `call` blocks for the answer, and `Session::handle()` hands a worker thread a `QueryHandle` holding a weak sender, so quitting closes the channel under every worker instead of joining on one.
+
+The session comes up **before** the terminal does.
+`client_session` may start a daemon and may end the run with the exit-4 diagnostic, and neither reads well through a terminal already in raw mode on the alternate screen.
+A first paint therefore costs a connect and a handshake, and on a cold start the daemon's own start as well; `docs/baselines/phase5-gate-evidence.md` measures both.
+
+The thread `select!`s over the call channel and the notification stream, so an event does not wait for the next keystroke.
+A closed socket refuses every in-flight call at once rather than waiting out the 30 s ceiling, posts `Disconnected`, and retries `client::reopen_session` on a widening gap from 250 ms to 2 s.
+
+### Queries
+
+`src/tui/queries.rs` is every read.
+`Queries` is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
+Over it sit the typed readers the call sites need: `list_emails` (`message.list`), `mailbox_counts` (`mailbox.list`), `message_body` (`message.get`), and the three invitation reads P5-U10 added (`calendar.events`, `message.ics`, `message.invite`).
+
+A wire row becomes a `MessageRow` and goes through `entry_from_row`, the same function the store-backed path uses, so the two are equal by construction rather than by inspection.
+A held list is keyed by `messages.id` and the daemon removes a row by `(mailbox, uid)`, so the query layer keeps a process-wide `(account, mailbox) -> (uid -> id)` table; a uid it does not know owes a refetch rather than a guess.
+
+### Commands
+
+`src/tui/commands.rs` is every write.
+`route()` classifies all fifty `Action` variants exhaustively, with no wildcard arm, into `Daemon` (the methods it issues, in issue order), `ClientOnly` (editor, browser, clipboard, file picker, terminal suspend) and `Local` (pure UI state).
+`dispatch()` returns `true` when it handled the action and `false` when `handle_action` still owns it; a refusal from the daemon is not a `false`, it lands on the status line exactly as a refused store mutation did.
+
+An operation-kind method (`sync.quick`, `sync.full`, `send.approved`, `calendar.rsvp`) answers `{operation_id}` at once and finishes later.
+The arm records the id against what it is awaiting and returns; there is no worker thread and no poll.
+
+### Events
+
+`src/tui/events.rs` replaced the two watcher threads.
+`Incoming` carries the decoded events *and* the connection's own state (`Resync`, `Disconnected`, `Reconnected`) on one channel, which is what keeps a reconnect from overtaking the last event of the dead instance.
+`drain()` runs in the same pre-draw pass as the terminal drain and is held to the same two bounds, `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, so a first sync of a large mailbox publishing a row per message cannot starve the paint.
+
+`App::apply_event` consults the watermark before it looks at a kind: an event above it is applied and moves it, one at or below it is a duplicate the snapshot already carries, and one from an instance this client never bootstrapped against is refused, stickily.
+`App::apply_bootstrap` is the only thing that sets the watermark, which is why a resync and a reconnect are both spelled "bootstrap again"; `App::apply_resync_bootstrap` is the recovery entry and, unlike the startup one, it replaces the mailboxes, the counts and the listing caches of an account that had already opened.
+
+### The watchers are the daemon's
+
+`imap_watch`, the Graph poller, `watcher_loop` and `WatchEvent` are gone from `src/tui/`; `src/daemon/runtime/watcher.rs` is where they went.
+One IDLE round of 300 s per IMAP account and one 60 s enumeration per Graph account, the same numbers and the same backoff curve the TUI's threads used, and a round that sees the mailbox move runs one quick tick and publishes the counts that moved with it.
+`AccountState::watcher_active` keeps its name and means the daemon session's health now.
+
+### The sessionless store fallback
+
+`src/tui/app/store_rows.rs` holds the store-backed readers the query layer replaced: `load_emails`, `count_all_emails` and `App::load_message_body`.
+They have two callers and no third.
+They are the equality oracle `queries_tests.rs` and `invites_tests.rs` compare every daemon-backed answer against, and they are what an `App` with no session reads, which is every one of the ~370 sessionless-`App` unit tests and, in a real run, only a `Session::connect` that wedged for 30 s.
+
+That fallback is **not** the direct fallback the plan forbids: nothing recovers a *failed* daemon call by reading the store.
+A failed call degrades exactly as it did before, as an empty list, a zeroed count, an empty preview and a line in the log, and `tests/tui_daemon_recovery.rs` asserts it as a lock, by taking the account's engine lock during the outage from a second open file description.
+
+### The residue, at eleven rows
+
+`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 11 pairs over 8 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
+The plan drives it to zero in P5-U10, which is deferred; each remaining row waits on a surface that does not exist yet.
+
+- `app/mod.rs store`, `app/calendar_view.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
+- `app/types.rs store`, `app/types.rs ingest`, `queries.rs store` want `MessageRow`, `DraftRow` and `SkippedDraft` as protocol types, which would also delete `src/main.rs`'s duplicate wire-row decoder.
+- `actions.rs store` is `RD-06`'s Markdown rendition, `RD-07`'s `mp://` selector on a listing and `LST-09`'s `message.fetch`, none of which is built.
+- `actions.rs send` is the undo-send hold's fire path, which the plan holds in the TUI until P6-U1/U2.
+- `helpers.rs store`, `helpers.rs imap_client`, `mod.rs store` are `LST-08`'s server search leg, which becomes `message.list_server`.
+
+`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: eight `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store.
+
+### The crate move, deferred
+
+The plan's shape is `crates/mp-tui` depending on `mp-client` and `mp-protocol` and on nothing else.
+The obstacle is not the engine residue above; it is the shared modules the allow-list deliberately does not scan.
+`src/tui/` reaches twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure is about 15 000 lines across sixteen modules, six of which need a genuine split before one line of `src/tui/` can move.
+The three-unit sequencing that does it (P5-U10a the shared crate, P5-U10b the last surfaces, P5-U10c the move) is in `docs/tickets/0124-tui-cutover.md`, and it runs after Phase 6.
 
 ## Multi-account
 
