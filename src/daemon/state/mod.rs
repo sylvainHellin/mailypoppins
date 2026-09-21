@@ -237,6 +237,10 @@ pub struct CanonicalState {
     hook: Mutex<Option<RaceHook>>,
     operations: Mutex<Option<Arc<crate::daemon::operations::OperationRegistry>>>,
     holds: Mutex<Option<Arc<crate::daemon::hold::HoldScheduler>>>,
+    diagnostics: Mutex<Option<Arc<crate::daemon::diagnostics::Diagnostics>>>,
+    /// When each account's last tick finished and how it went. Not part of the
+    /// snapshot, for the reason [`CanonicalState::last_sync`] gives.
+    last_sync: Mutex<BTreeMap<String, (chrono::DateTime<chrono::Local>, &'static str)>>,
 }
 
 #[derive(Debug)]
@@ -293,6 +297,8 @@ impl CanonicalState {
             hook: Mutex::new(None),
             operations: Mutex::new(None),
             holds: Mutex::new(None),
+            diagnostics: Mutex::new(None),
+            last_sync: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -315,6 +321,33 @@ impl CanonicalState {
     /// no reason to make.
     pub fn attach_holds(&self, scheduler: Arc<crate::daemon::hold::HoldScheduler>) {
         *lock(&self.holds) = Some(scheduler);
+    }
+
+    /// Point the snapshot's `diagnostics` array at the daemon's health checks
+    /// (P6-U8).
+    ///
+    /// The third projection of something that is not canonical state, and the
+    /// reason is the same as the first two: a window that opens its activity
+    /// overlay a second after starting has to find the daemon's current
+    /// complaints in it, and the events that announce a flip only ever carry
+    /// the flips that happened after this client connected.
+    pub fn attach_diagnostics(&self, diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>) {
+        *lock(&self.diagnostics) = Some(diagnostics);
+    }
+
+    /// When `account`'s last tick finished and how it went, `None` until one
+    /// has (P6-U8).
+    ///
+    /// Beside the state rather than in it: a `sync.completed` is a command
+    /// outcome, no snapshot carries one, and a client that bootstraps between
+    /// two ticks learns about neither. A health report is not a client mirror
+    /// though - it is a statement about this process - so the daemon keeps the
+    /// one fact it needs here, where the change already passes through.
+    pub fn last_sync(
+        &self,
+        account: &str,
+    ) -> Option<(chrono::DateTime<chrono::Local>, &'static str)> {
+        lock(&self.last_sync).get(account).copied()
     }
 
     /// The daemon process this state belongs to.
@@ -342,6 +375,19 @@ impl CanonicalState {
     /// snapshot never shows half of a change.
     pub fn apply(&self, change: Change) -> Revision {
         let _gate = self.gate.enter();
+        if let Change::SyncCompleted(outcome) = &change {
+            lock(&self.last_sync).insert(
+                outcome.account.clone(),
+                (
+                    chrono::Local::now(),
+                    if outcome.error.is_some() {
+                        "failed"
+                    } else {
+                        "ok"
+                    },
+                ),
+            );
+        }
         let mut inner = lock(&self.inner);
         inner.revision += 1;
         let revision = Revision(inner.revision);
@@ -516,6 +562,13 @@ impl CanonicalState {
                     .collect()
             })
             .unwrap_or_default();
+        // Evaluated rather than published: a bootstrap is a read, and a read
+        // that announced a flip would tell this connection about a check it is
+        // being handed in the same frame.
+        snapshot.diagnostics = lock(&self.diagnostics)
+            .as_ref()
+            .map(|diagnostics| diagnostics.not_ok())
+            .unwrap_or_default();
         self.fire(Boundary::AfterCapture);
         self.fire(Boundary::AfterQueueStart);
 
@@ -617,7 +670,10 @@ impl Inner {
             // A command outcome reduces to nothing: no snapshot carries a last
             // sync, so a client that bootstraps between two ticks learns about
             // neither, which is what a command outcome is. It still takes a
-            // revision and still fans out.
+            // revision and still fans out, and
+            // [`CanonicalState::apply`] notes it in the ledger a health report
+            // reads `last_sync` out of, which is beside the state rather than
+            // in it for exactly this reason.
             Change::SyncCompleted(_) => {}
         }
     }
@@ -649,6 +705,7 @@ impl Inner {
             outbox: self.outbox.clone(),
             operations: Vec::new(),
             holds: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 }

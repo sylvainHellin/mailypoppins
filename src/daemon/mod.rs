@@ -12,6 +12,7 @@
 
 pub mod client;
 pub mod config;
+pub mod diagnostics;
 pub mod dispatch;
 pub mod fake_transport;
 pub mod handles;

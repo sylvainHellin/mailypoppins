@@ -332,8 +332,15 @@ const CONTACT_METHODS: [&str; 3] = ["contact.rebuild", "contact.search", "contac
 /// The two methods of the calendar family.
 const CALENDAR_METHODS: [&str; 2] = ["calendar.rebuild", "calendar.rsvp"];
 
-/// The diagnostic family, as far as this slice needs it: one method.
-const DIAGNOSTIC_METHODS: [&str; 1] = ["diagnostic.store_gc"];
+/// The diagnostic family. This slice owns `diagnostic.store_gc`; the other
+/// four are P6-U8's and `tests/daemon_diagnostics.rs` pins them.
+const DIAGNOSTIC_METHODS: [&str; 5] = [
+    "diagnostic.health",
+    "diagnostic.log_path",
+    "diagnostic.logs",
+    "diagnostic.store_gc",
+    "diagnostic.support_bundle",
+];
 
 /// The config family after this slice: the six shipped methods plus the three
 /// this one adds, still in method-name order.

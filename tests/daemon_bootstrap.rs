@@ -672,6 +672,14 @@ fn assert_snapshot_shape(snapshot: &Value, label: &str) {
 /// empty, which is the frame `App::new` paints first - is unchanged, and which
 /// of the two non-ready states an account is in is `daemon_account_runtime`'s
 /// business.
+///
+/// P6-U8 edit: `diagnostics` is no longer asserted empty here. It was empty
+/// because nothing in the build filled it; the daemon now reports the health
+/// checks that are not `ok`, and this fixture's accounts have no store, which
+/// is exactly the `store_open` and `account:<name>` failure
+/// `tests/daemon_diagnostics.rs` pins. What the row is about - a snapshot whose
+/// counts are all zero and whose drafts are empty - is unchanged, and the
+/// shape of a diagnostic is asserted instead of its absence.
 fn assert_opening_and_zeroed(snapshot: &Value, label: &str) {
     for account in snapshot["accounts"]
         .as_array()
@@ -707,11 +715,27 @@ fn assert_opening_and_zeroed(snapshot: &Value, label: &str) {
             "{label}: {name} has a zeroed outbox while opening"
         );
     }
-    for family in ["holds", "operations", "diagnostics"] {
+    for family in ["holds", "operations"] {
         assert_eq!(
             snapshot[family],
             json!([]),
             "{label}: {family} is empty before anything has happened"
+        );
+    }
+    for diagnostic in snapshot["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: diagnostics is an array"))
+    {
+        for key in ["name", "status", "detail"] {
+            assert!(
+                diagnostic[key].is_string(),
+                "{label}: a diagnostic carries a {key}, got {diagnostic}"
+            );
+        }
+        assert_ne!(
+            diagnostic["status"],
+            json!("ok"),
+            "{label}: only the checks that are not ok are reported, got {diagnostic}"
         );
     }
 }

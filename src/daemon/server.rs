@@ -104,6 +104,36 @@ pub struct RuntimeTable {
     entries: Mutex<BTreeMap<String, RuntimeEntry>>,
 }
 
+/// How an account's runtime is doing, as the diagnostics read it.
+///
+/// [`RuntimeTable::state_of`] answers `daemon.status`'s three words and cannot
+/// tell a runtime that came up blocked from one that never came up at all: both
+/// are `blocked` to a client that only paints a loading marker. A health report
+/// has to tell them apart, because a second `mp` holding the engine lock is a
+/// normal state of this machine and an account with no store is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeHealth {
+    /// No start has come back yet.
+    Opening,
+    /// The runtime holds the lock and is serving.
+    Ready,
+    /// The runtime came up, and another engine holds the lock.
+    Blocked(String),
+    /// The runtime never came up at all.
+    Failed(String),
+}
+
+impl RuntimeHealth {
+    /// The word `daemon.status` and a health report's `accounts` both use.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeHealth::Opening => "opening",
+            RuntimeHealth::Ready => "ready",
+            RuntimeHealth::Blocked(_) | RuntimeHealth::Failed(_) => "blocked",
+        }
+    }
+}
+
 /// What a start attempt left behind.
 #[derive(Debug)]
 enum RuntimeEntry {
@@ -146,6 +176,20 @@ impl RuntimeTable {
             },
             RuntimeEntry::Failed(_) => "blocked",
         })
+    }
+
+    /// How `account` is doing, with a blocked runtime told apart from one that
+    /// never came up (P6-U8).
+    pub fn health_of(&self, account: &str) -> RuntimeHealth {
+        match lock(&self.entries).get(account) {
+            None => RuntimeHealth::Opening,
+            Some(RuntimeEntry::Live(runtime)) => match runtime.readiness() {
+                Readiness::Opening => RuntimeHealth::Opening,
+                Readiness::Ready => RuntimeHealth::Ready,
+                Readiness::Blocked { reason } => RuntimeHealth::Blocked(reason),
+            },
+            Some(RuntimeEntry::Failed(reason)) => RuntimeHealth::Failed(reason.clone()),
+        }
     }
 
     /// Why `account` is not serving, whether its runtime came up blocked or
@@ -252,6 +296,11 @@ pub struct DaemonState {
     /// `daemon.stop` or by a signal, read by every dispatch afterwards, and
     /// carrying the report the asking connection writes as its last frame.
     pub shutdown: Arc<super::shutdown::Shutdown>,
+    /// This daemon's health checks, its log reader and its bundle writer
+    /// (P6-U8). Held here because three things reach it: the `diagnostic.*`
+    /// family, the canonical state, which projects the non-`ok` checks into
+    /// every bootstrap snapshot, and the periodic sweep that re-evaluates them.
+    pub diagnostics: Arc<super::diagnostics::Diagnostics>,
 }
 
 impl DaemonState {
@@ -297,6 +346,19 @@ impl DaemonState {
         // a promise this daemon changed its mind about.
         let handles = Arc::new(super::handles::HandleTable::from_env());
         let holds = Arc::new(super::hold::HoldScheduler::new());
+        // Built here because it needs the instance metadata, the configuration
+        // and the runtime table, and held by the canonical state so a bootstrap
+        // can project the checks that are not `ok`. The state holds it back
+        // weakly, so the two do not keep each other alive.
+        let diagnostics = Arc::new(super::diagnostics::Diagnostics::new(
+            meta.clone(),
+            Arc::clone(&config),
+            Arc::clone(&runtimes),
+            Arc::clone(&operations),
+            Arc::clone(&holds),
+            &canonical,
+        ));
+        canonical.attach_diagnostics(Arc::clone(&diagnostics));
         // The snapshot's `holds` array is the scheduler's own listing: a client
         // that joins mid-window has no other way to learn about a countdown it
         // may cancel.
@@ -312,6 +374,7 @@ impl DaemonState {
                 watch: Arc::clone(&watch),
                 handles: Arc::clone(&handles),
                 holds: Arc::clone(&holds),
+                diagnostics: Arc::clone(&diagnostics),
             },
         );
         DaemonState {
@@ -325,6 +388,7 @@ impl DaemonState {
             handles,
             holds,
             shutdown: Arc::new(super::shutdown::Shutdown::new()),
+            diagnostics,
         }
     }
 
@@ -355,29 +419,13 @@ impl DaemonState {
     ///
     /// The CLI adds `"running": true` and prints the rest verbatim, so this
     /// object is the contract in `tests/daemon_lifecycle.rs` minus that key.
+    ///
+    /// Assembled by [`super::diagnostics::Diagnostics`], which holds the same
+    /// three things it is built from and writes the same object into a support
+    /// bundle's `daemon-status.json`: two renderers would eventually be two
+    /// answers.
     pub fn status_result(&self) -> Value {
-        json!({
-            "instance_id": self.meta.instance_id,
-            "app_version": self.meta.app_version,
-            "protocol": {"min": self.meta.protocol_min, "max": self.meta.protocol_max},
-            "pid": self.meta.pid,
-            "started_at": self.meta.started_at,
-            "data_dir": self.meta.data_dir.display().to_string(),
-            "config_dir": self.meta.config_dir.display().to_string(),
-            // The live configuration says which accounts there are; the
-            // runtime table says how each one is doing. An account with no
-            // entry yet is `opening`, which is what an account whose start is
-            // still in flight is.
-            "accounts": self
-                .config
-                .status_accounts()
-                .iter()
-                .map(|name| {
-                    let state = self.runtimes.state_of(name).unwrap_or("opening");
-                    json!({"name": name, "state": state})
-                })
-                .collect::<Vec<_>>(),
-        })
+        self.diagnostics.status_result()
     }
 }
 

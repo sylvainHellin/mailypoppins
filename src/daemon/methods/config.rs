@@ -207,6 +207,8 @@ pub struct ConfigFamily {
     pub watch: Arc<crate::daemon::watch::DraftWatch>,
     /// The registry the family's two operations are started in.
     pub operations: Arc<crate::daemon::operations::OperationRegistry>,
+    /// The health checks a swap re-evaluates (P6-U8).
+    pub diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>,
 }
 
 /// One served method of the family, dispatched by the name its spec declares.
@@ -242,7 +244,13 @@ impl Method for ConfigMethod {
                 "config.get" => Ok(Outcome::query(family.store.get_json())),
                 "config.validate" => Ok(Outcome::query(validate(&family, &params)?)),
                 "config.reload" => {
-                    let (plan, _) = swap(&family, Source::Disk).await?;
+                    let swapped = swap(&family, Source::Disk).await;
+                    // Before the refusal is returned and whether or not there
+                    // was one: a reload of a file that no longer loads is
+                    // exactly the case `config_loaded` exists to report, and
+                    // the daemon keeps serving the configuration it has.
+                    family.diagnostics.refresh();
+                    let (plan, _) = swapped?;
                     Ok(command(&family, plan.to_json(), plan.affected()))
                 }
                 "config.set_password" => set_password(&family, &params).await,

@@ -74,6 +74,8 @@ pub struct Shared {
     pub handles: Arc<HandleTable>,
     /// Every undo-send hold this daemon is carrying.
     pub holds: Arc<super::hold::HoldScheduler>,
+    /// The health checks, the log reader and the bundle writer (P6-U8).
+    pub diagnostics: Arc<super::diagnostics::Diagnostics>,
 }
 
 /// Register every domain method this build serves.
@@ -92,6 +94,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         watch,
         handles,
         holds,
+        diagnostics,
     } = shared;
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
@@ -131,7 +134,12 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     );
     self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
-    self::diagnostic::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
+    self::diagnostic::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&operations),
+        Arc::clone(&diagnostics),
+    );
     self::config::register(
         dispatcher,
         Arc::new(self::config::ConfigFamily {
@@ -140,6 +148,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
             canonical: Arc::clone(&canonical),
             watch,
             operations: Arc::clone(&operations),
+            diagnostics,
         }),
     );
     dispatcher.register(Arc::new(self::state::StateBootstrap::new(

@@ -158,6 +158,15 @@ pub const KIND_DRAFT_INVALID: &str = "draft.invalid";
 /// The `kind` a watched signature file travels as.
 pub const KIND_SIGNATURE_CHANGED: &str = "signature.changed";
 
+/// The `kind` a health check whose status moved travels as (P6-U8).
+///
+/// The payload is one check, `{name, status, detail}`, the same three keys
+/// `diagnostic.health` and `snapshot.diagnostics` carry. Published on a change
+/// of `status` only, never for a detail that moved under an unchanged status: a
+/// daemon that republished its whole check set on every evaluation would fill a
+/// client's activity log with news that nothing happened.
+pub const KIND_DIAGNOSTIC_CHECK_CHANGED: &str = "diagnostic.check_changed";
+
 /// One thing wrong with a file, positioned when the parser gave a position.
 ///
 /// `line` is 1-based and relative to the file rather than to the block the

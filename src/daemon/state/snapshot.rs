@@ -304,14 +304,20 @@ pub struct Snapshot {
     /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from the
     /// hold scheduler, which is not part of the state a client mirrors either.
     pub(super) holds: Vec<Value>,
+    /// The health checks that are not `ok`, in report order, each the `checks`
+    /// item of a `diagnostic.health` answer verbatim (P6-U8). Filled by
+    /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from
+    /// [`Diagnostics`](crate::daemon::diagnostics::Diagnostics), which is not
+    /// part of the state a client mirrors either.
+    pub(super) diagnostics: Vec<Value>,
 }
 
 impl Snapshot {
     /// The `snapshot` member of a `state.bootstrap` result.
     ///
-    /// `diagnostics` is an empty array rather than an absent key: nothing in
-    /// this build produces one, and a client that iterates it must not have to
-    /// check first. `operations` lists whatever the registry has not settled
+    /// `diagnostics` is an empty array rather than an absent key: a healthy
+    /// daemon complains about nothing, and a client that iterates it must not
+    /// have to check first. `operations` lists whatever the registry has not settled
     /// and `holds` whatever the scheduler is still counting down, so a client
     /// that bootstraps mid-operation or mid-window learns about it instead of
     /// having to ask.
@@ -373,7 +379,7 @@ impl Snapshot {
             "outbox": outbox,
             "holds": self.holds,
             "operations": self.operations,
-            "diagnostics": [],
+            "diagnostics": self.diagnostics,
         })
     }
 }
