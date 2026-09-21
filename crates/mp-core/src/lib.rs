@@ -8,7 +8,8 @@
 //! under every old path, so no call site outside these files changed.
 //!
 //! What lives here reaches no store, no IMAP session, no outbox and no sending
-//! transport.
+//! transport. [`selector`] arrived split: the grammar is here, the two
+//! store-backed resolvers stayed in the root crate.
 
 pub mod app_state;
 pub mod calendar;
@@ -17,6 +18,7 @@ pub mod notify;
 pub mod oauth2;
 pub mod parse;
 pub mod secrets;
+pub mod selector;
 pub mod signatures;
 pub mod sync_health;
 pub mod timing;

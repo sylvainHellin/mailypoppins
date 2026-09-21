@@ -1,0 +1,596 @@
+//! The `mp://` selector contract: one grammar, one parser, one formatter.
+//!
+//! Paths are gone from every CLI input position (#0050). A message is named by
+//!
+//! ```text
+//! selector := [ "mp://" account "/" ] [ mailbox "/" ] key
+//! ```
+//!
+//! and the canonical form every command *prints* is the fully qualified
+//! `mp://<account>/<mailbox>/<key>`. Elision is positional and deterministic,
+//! never sniffed: without the scheme the account comes from `-A/--account` or
+//! the default account, and the mailbox comes from `--mailbox` or the
+//! command's declared default scope. Segment counts alone decide what was
+//! elided, which works because the key is percent-encoded and therefore
+//! contains no raw `/`.
+//!
+//! The parser never inspects the string to decide *what kind of thing* it is.
+//! The [`Namespace`] is fixed by the command that called it: `mp archive` is
+//! always received mail, `mp send` is always a draft. That is the whole reason
+//! the two namespaces can share one grammar without a sniffing rule that would
+//! silently reinterpret a key the day a Message-ID happens to look like a
+//! draft id.
+//!
+//! Resolution (`selector::resolve_received`, `selector::resolve_draft`, which
+//! stayed in the root crate because they read the store) is a single indexed
+//! lookup. Zero matches names the namespace searched; more than one match (the
+//! cross-mailbox copy) lists every fully qualified candidate and asks for
+//! `--mailbox`, and never picks one.
+//!
+//! # The effective account is the selector's, resolved before any store opens
+//!
+//! A selector's own `mp://<account>/…` segment overrides `-A/--account` and the
+//! default, the same way its mailbox segment overrides `--mailbox`: naming a
+//! thing inside the selector is the more specific statement. The consequence a
+//! caller must honour is an ordering one. The account is resolved from the
+//! selector *before* any store is opened or any server credential is loaded, so
+//! a cross-account selector addresses its own account's index and transport.
+//! Opening the default account's store first and resolving against it turns a
+//! valid cross-account selector into a wrong-store miss whose error even prints
+//! the selector's account as the scope it searched, which is actively
+//! misleading (the #0073 follow-up bug: `mp delete mp://tum/drafts/<id>` under a
+//! `perso` default). A command whose transport is bound before the selector is
+//! parsed (`mp send`, `mp invite`) cannot honour a cross-account selector
+//! cheaply; it fails loudly with "selector names account X but this command is
+//! bound to Y" rather than operate on the wrong account. No command silently
+//! resolves a selector against an account the selector did not name.
+
+use std::fmt;
+
+use anyhow::{anyhow, bail, Result};
+
+/// What [`Selector::for_message`] reads off a received-mail row.
+///
+/// The row itself is a store type and stayed in the root crate (#0126,
+/// P5-U10a), while the canonical selector of a row is a formatting decision
+/// and belongs to the grammar. One trait with two accessors is what lets
+/// `Selector::for_message` stay the inherent constructor it has always been,
+/// called exactly as before, without this crate knowing what a `MessageRow`
+/// is.
+pub trait MessageRowRef {
+    /// The mailbox the row was listed from.
+    fn mailbox(&self) -> &str;
+    /// The row's Message-ID, with or without its RFC 5322 angle brackets.
+    fn message_id(&self) -> &str;
+}
+
+impl<T: MessageRowRef + ?Sized> MessageRowRef for &T {
+    fn mailbox(&self) -> &str {
+        (**self).mailbox()
+    }
+    fn message_id(&self) -> &str {
+        (**self).message_id()
+    }
+}
+
+/// The reserved mailbox segment of every draft selector. Drafts are local-only
+/// files, so this is not a server folder name and can never collide with one:
+/// a real IMAP `Drafts` folder syncs into the store as a `messages` row like
+/// any other mailbox, in the received namespace.
+pub const DRAFTS_MAILBOX: &str = "drafts";
+
+/// The scheme prefix of a fully qualified selector.
+pub const SCHEME: &str = "mp://";
+
+/// Which key namespace a command addresses. Fixed by the command, never by the
+/// shape of the string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Namespace {
+    /// Received mail, resolved in `messages`. The key is the RFC 5322
+    /// Message-ID without angle brackets, made total by the
+    /// `sha256-<hex16>@local.invalid` synthesis rule ingest applies when the
+    /// header is missing.
+    Received,
+    /// Local drafts, resolved in the `drafts` index. The mailbox segment is
+    /// the reserved [`DRAFTS_MAILBOX`] and the key is the draft id.
+    Drafts,
+}
+
+impl Namespace {
+    /// The name used when reporting that nothing matched.
+    pub fn label(self) -> &'static str {
+        match self {
+            Namespace::Received => "received mail",
+            Namespace::Drafts => "drafts",
+        }
+    }
+}
+
+/// A canonical, fully qualified selector. This is what every command prints,
+/// and it round-trips through [`parse`] unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selector {
+    pub account: String,
+    pub mailbox: String,
+    pub key: String,
+}
+
+impl Selector {
+    pub fn new(account: impl Into<String>, mailbox: impl Into<String>, key: impl Into<String>) -> Self {
+        Self {
+            account: account.into(),
+            mailbox: mailbox.into(),
+            key: key.into(),
+        }
+    }
+
+    /// The canonical selector of a received message row.
+    ///
+    /// The key is the Message-ID *without* its angle brackets (scope item 2):
+    /// the brackets are RFC 5322 delimiters, not part of the identifier, and
+    /// carrying them would make every printed selector end in `%3E` and every
+    /// hand-typed one need shell quoting.
+    pub fn for_message<R: MessageRowRef>(account: &str, row: &R) -> Self {
+        Self::new(account, row.mailbox(), message_key(row.message_id()))
+    }
+
+    /// The canonical selector of a draft.
+    pub fn for_draft(account: &str, id: &str) -> Self {
+        Self::new(account, DRAFTS_MAILBOX, id)
+    }
+}
+
+impl fmt::Display for Selector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{SCHEME}{}/{}/{}",
+            encode(&self.account),
+            encode(&self.mailbox),
+            encode(&self.key)
+        )
+    }
+}
+
+/// What one selector string said, before any default was applied. `None` means
+/// the segment was elided, which is a different statement from naming it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorParts {
+    pub account: Option<String>,
+    pub mailbox: Option<String>,
+    pub key: String,
+}
+
+/// A parsed selector with its defaults applied: the question the resolver
+/// asks. `mailbox` stays optional for received mail, where an unqualified
+/// selector deliberately searches every mailbox and reports the ambiguity
+/// rather than picking one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorQuery {
+    pub namespace: Namespace,
+    pub account: String,
+    pub mailbox: Option<String>,
+    pub key: String,
+}
+
+/// Parse a selector into its segments, applying no defaults.
+///
+/// The grammar is positional. With the scheme, two segments are
+/// `account/key` and three are `account/mailbox/key`; without it, one segment
+/// is `key` and two are `mailbox/key`. Anything longer is rejected rather than
+/// re-split, because a key that needed a `/` should have been encoded.
+pub fn parse(input: &str) -> Result<SelectorParts> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("empty selector: expected {SCHEME}<account>/<mailbox>/<key>");
+    }
+    let (qualified, rest) = match trimmed.strip_prefix(SCHEME) {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
+    };
+    // The path heuristic is a guess, so it only runs where the input is
+    // ambiguous. A string carrying the scheme has already said what it is, and
+    // sniffing it would make the canonical form of any key ending in `.md`
+    // (a Message-ID on a `.md` ccTLD, a draft id ending `.md`) unparseable.
+    if !qualified && looks_like_path(trimmed) {
+        bail!(
+            "{trimmed} looks like a filesystem path; commands take a selector \
+             ({SCHEME}<account>/<mailbox>/<key>), and `mp path <selector>` is the only \
+             way back to a path"
+        );
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        bail!("selector {trimmed} has an empty segment");
+    }
+
+    let parts = match (qualified, segments.len()) {
+        (true, 2) => SelectorParts {
+            account: Some(decode(segments[0])?),
+            mailbox: None,
+            key: decode(segments[1])?,
+        },
+        (true, 3) => SelectorParts {
+            account: Some(decode(segments[0])?),
+            mailbox: Some(decode(segments[1])?),
+            key: decode(segments[2])?,
+        },
+        (false, 1) => SelectorParts {
+            account: None,
+            mailbox: None,
+            key: decode(segments[0])?,
+        },
+        (false, 2) => SelectorParts {
+            account: None,
+            mailbox: Some(decode(segments[0])?),
+            key: decode(segments[1])?,
+        },
+        _ => bail!(
+            "selector {trimmed} has {} segments: expected {SCHEME}<account>/<mailbox>/<key> \
+             or one of its elided forms (<mailbox>/<key>, <key>). A `/` inside a key must be \
+             percent-encoded as %2F",
+            segments.len()
+        ),
+    };
+    Ok(parts)
+}
+
+/// Parse `input` in a fixed namespace and apply the command's defaults.
+///
+/// `account_default` is `-A/--account` or the first configured account;
+/// `mailbox_flag` is the command's `--mailbox`, which the selector's own
+/// mailbox segment overrides (naming it in the selector is more specific than
+/// naming it beside it). In the drafts namespace the mailbox is always the
+/// reserved [`DRAFTS_MAILBOX`], and any other value is rejected instead of
+/// being quietly ignored.
+pub fn parse_in(
+    input: &str,
+    namespace: Namespace,
+    account_default: &str,
+    mailbox_flag: Option<&str>,
+) -> Result<SelectorQuery> {
+    let parts = parse(input)?;
+    let account = parts
+        .account
+        .or_else(|| non_empty(account_default))
+        .ok_or_else(|| {
+            anyhow!("no account for {input}: name one with -A/--account or configure a default")
+        })?;
+
+    let named_mailbox = parts.mailbox.or_else(|| mailbox_flag.map(str::to_string));
+    let mailbox = match namespace {
+        Namespace::Drafts => {
+            if let Some(mb) = named_mailbox.as_deref() {
+                if mb != DRAFTS_MAILBOX {
+                    bail!(
+                        "{input} names the mailbox {mb}, but a draft selector's mailbox segment \
+                         is the reserved name `{DRAFTS_MAILBOX}`"
+                    );
+                }
+            }
+            Some(DRAFTS_MAILBOX.to_string())
+        }
+        Namespace::Received => {
+            if named_mailbox.as_deref() == Some(DRAFTS_MAILBOX) {
+                bail!(
+                    "{input} names the reserved mailbox `{DRAFTS_MAILBOX}`, which holds local \
+                     drafts; this command addresses received mail"
+                );
+            }
+            named_mailbox
+        }
+    };
+
+    Ok(SelectorQuery {
+        namespace,
+        account,
+        mailbox,
+        key: parts.key,
+    })
+}
+
+/// The zero-match error of a draft lookup, for a resolver that answers from a
+/// directory scan rather than from the index.
+///
+/// The daemon's `draft.path` is that resolver (P4-U6), and the sentence a user
+/// sees may not depend on which process did the looking, so it is minted here
+/// rather than spelled again over there.
+pub fn draft_not_found(account: &str, key: &str) -> anyhow::Error {
+    not_found(&SelectorQuery {
+        namespace: Namespace::Drafts,
+        account: account.to_string(),
+        mailbox: Some(DRAFTS_MAILBOX.to_string()),
+        key: key.to_string(),
+    })
+}
+
+/// The zero-match error: it names the namespace searched, so the reader can
+/// tell "no such message" from "you asked the wrong index".
+///
+/// `pub` only because the two resolvers that raise it stayed in the root
+/// crate; it is not part of the grammar's surface.
+#[doc(hidden)]
+pub fn not_found(query: &SelectorQuery) -> anyhow::Error {
+    let scope = match query.mailbox.as_deref() {
+        Some(mailbox) => format!("{}/{mailbox}", query.account),
+        None => query.account.clone(),
+    };
+    anyhow!(
+        "no match for {} in the {} index of {scope}",
+        query.key,
+        query.namespace.label()
+    )
+}
+
+/// The multiple-match error: every candidate fully qualified, and the flag
+/// that picks one.
+///
+/// `pub` for the same reason as [`not_found`].
+#[doc(hidden)]
+pub fn ambiguous(query: &SelectorQuery, candidates: Vec<Selector>) -> anyhow::Error {
+    let list = candidates
+        .iter()
+        .map(|s| format!("\n  {s}"))
+        .collect::<String>();
+    anyhow!(
+        "{} matches {} messages in {}; name one with --mailbox:{list}",
+        query.key,
+        candidates.len(),
+        query.account
+    )
+}
+
+/// The selector key of a Message-ID: the identifier without the RFC 5322
+/// angle brackets, whichever form the caller happens to hold.
+#[doc(hidden)]
+pub fn message_key(message_id: &str) -> &str {
+    message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// True for strings that are obviously filesystem paths, so the decline names
+/// the real mistake instead of "no match for ./drafts/foo.md". Only ever
+/// applied to unqualified input: see [`parse`].
+fn looks_like_path(s: &str) -> bool {
+    s.starts_with('/')
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with('~')
+        || s.ends_with(".md")
+}
+
+// ---------------------------------------------------------------------------
+// Percent-encoding
+// ---------------------------------------------------------------------------
+
+/// Bytes that survive [`encode`] unescaped: RFC 3986 unreserved plus `@`,
+/// which every Message-ID contains and which is unambiguous inside a segment.
+/// Everything else, `/` and `%` and whitespace above all, is escaped, which is
+/// what makes splitting a selector on `/` total.
+fn is_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'@')
+}
+
+/// Percent-encode one selector segment.
+pub fn encode(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for &b in segment.as_bytes() {
+        if is_unreserved(b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Percent-decode one selector segment. A truncated or non-hex escape is an
+/// error rather than a literal `%`, so a mistyped selector cannot resolve to
+/// something the user did not write.
+pub fn decode(segment: &str) -> Result<String> {
+    let bytes = segment.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .ok_or_else(|| anyhow!("selector segment {segment} ends in a truncated % escape"))?;
+            let hi = (hex[0] as char)
+                .to_digit(16)
+                .ok_or_else(|| anyhow!("selector segment {segment} has a non-hex % escape"))?;
+            let lo = (hex[1] as char)
+                .to_digit(16)
+                .ok_or_else(|| anyhow!("selector segment {segment} has a non-hex % escape"))?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out)
+        .map_err(|_| anyhow!("selector segment {segment} decodes to invalid UTF-8"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keys chosen to break a naive split-on-slash or a naive encoder: the
+    /// characters the grammar promises never appear raw, plus unicode and the
+    /// scheme itself as a payload.
+    fn hostile_keys() -> Vec<String> {
+        vec![
+            "plain@example.com".to_string(),
+            "has/slash@example.com".to_string(),
+            "has%25percent@example.com".to_string(),
+            "has percent % and space".to_string(),
+            "has\ttab\nnewline".to_string(),
+            "üñíçø∂é@例え.jp".to_string(),
+            "mp://looks/like/a/selector".to_string(),
+            "../../etc/passwd".to_string(),
+            "sha256-0123456789abcdef@local.invalid".to_string(),
+            "<already-bracketed@example.com>".to_string(),
+            "trailing-dot.".to_string(),
+            // A key that ends in `.md` is not a path: Message-IDs live on
+            // `.md` ccTLD domains and draft ids can end that way too.
+            "2026-07-31-note.md".to_string(),
+            "newsletter@digital.md".to_string(),
+            "%%%".to_string(),
+            "a".repeat(300),
+            "emoji \u{1F4E7} key".to_string(),
+        ]
+    }
+
+    #[test]
+    fn encode_decode_round_trips_over_hostile_keys() {
+        for key in hostile_keys() {
+            let encoded = encode(&key);
+            assert!(!encoded.contains('/'), "{encoded} must not contain a raw /");
+            assert!(
+                !encoded.chars().any(char::is_whitespace),
+                "{encoded} must not contain raw whitespace"
+            );
+            assert_eq!(decode(&encoded).unwrap(), key, "round trip of {key:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_selectors_round_trip_through_the_parser() {
+        for key in hostile_keys() {
+            for mailbox in ["inbox", "archive", DRAFTS_MAILBOX, "Some Folder/Sub"] {
+                let selector = Selector::new("work account", mailbox, key.clone());
+                let printed = selector.to_string();
+                let parts = parse(&printed).expect("canonical form parses");
+                assert_eq!(parts.account.as_deref(), Some("work account"));
+                assert_eq!(parts.mailbox.as_deref(), Some(mailbox));
+                assert_eq!(parts.key, key);
+            }
+        }
+    }
+
+    #[test]
+    fn elided_forms_take_the_defaults_positionally() {
+        let q = parse_in("key@example.com", Namespace::Received, "work", None).unwrap();
+        assert_eq!(q.account, "work");
+        assert_eq!(q.mailbox, None);
+        assert_eq!(q.key, "key@example.com");
+
+        let q = parse_in("archive/key@example.com", Namespace::Received, "work", None).unwrap();
+        assert_eq!(q.account, "work");
+        assert_eq!(q.mailbox.as_deref(), Some("archive"));
+
+        // The selector's own mailbox wins over the flag beside it.
+        let q = parse_in(
+            "archive/key@example.com",
+            Namespace::Received,
+            "work",
+            Some("inbox"),
+        )
+        .unwrap();
+        assert_eq!(q.mailbox.as_deref(), Some("archive"));
+
+        let q = parse_in("key@example.com", Namespace::Received, "work", Some("inbox")).unwrap();
+        assert_eq!(q.mailbox.as_deref(), Some("inbox"));
+
+        // Two segments after the scheme is account + key, not mailbox + key.
+        let q = parse_in("mp://home/key@example.com", Namespace::Received, "work", None).unwrap();
+        assert_eq!(q.account, "home");
+        assert_eq!(q.mailbox, None);
+        assert_eq!(q.key, "key@example.com");
+    }
+
+    #[test]
+    fn the_namespace_is_fixed_by_the_caller_not_the_string() {
+        // The same string resolves in either namespace; nothing about it is
+        // sniffed. Only the mailbox segment is namespace-checked.
+        let received = parse_in("2026-07-31-note", Namespace::Received, "work", None).unwrap();
+        let draft = parse_in("2026-07-31-note", Namespace::Drafts, "work", None).unwrap();
+        assert_eq!(received.key, draft.key);
+        assert_eq!(received.namespace, Namespace::Received);
+        assert_eq!(draft.mailbox.as_deref(), Some(DRAFTS_MAILBOX));
+    }
+
+    #[test]
+    fn a_draft_selector_rejects_a_non_drafts_mailbox() {
+        let err = parse_in("inbox/some-id", Namespace::Drafts, "work", None).unwrap_err();
+        assert!(err.to_string().contains("reserved name"), "{err}");
+    }
+
+    #[test]
+    fn a_received_selector_rejects_the_reserved_drafts_mailbox() {
+        let err = parse_in("drafts/some-id", Namespace::Received, "work", None).unwrap_err();
+        assert!(err.to_string().contains("reserved mailbox"), "{err}");
+    }
+
+    #[test]
+    fn paths_are_refused_with_the_reason_rather_than_searched() {
+        for path in [
+            "./drafts/2026-07-31.md",
+            "/home/user/mail/inbox/message.md",
+            "../other.md",
+            "~/mail/x.md",
+        ] {
+            let err = parse(path).unwrap_err();
+            assert!(
+                err.to_string().contains("looks like a filesystem path"),
+                "{path}: {err}"
+            );
+        }
+    }
+
+    /// The heuristic is for unqualified input only. Once the scheme is there
+    /// the string has declared itself, and a key ending in `.md` (a `.md`
+    /// ccTLD Message-ID, a draft id) must survive its own canonical form.
+    #[test]
+    fn the_path_heuristic_does_not_run_on_qualified_selectors() {
+        let parts = parse("mp://work/inbox/newsletter@digital.md").expect("qualified .md key parses");
+        assert_eq!(parts.key, "newsletter@digital.md");
+
+        let parts = parse("mp://work/drafts/2026-07-31-note.md").expect("qualified .md draft id parses");
+        assert_eq!(parts.mailbox.as_deref(), Some(DRAFTS_MAILBOX));
+        assert_eq!(parts.key, "2026-07-31-note.md");
+    }
+
+    #[test]
+    fn over_long_and_empty_selectors_are_rejected() {
+        assert!(parse("").is_err());
+        assert!(parse("a//b").is_err());
+        assert!(parse("a/b/c").is_err(), "three unqualified segments are not a form");
+        assert!(parse("mp://a/b/c/d").is_err());
+        assert!(parse("mp://a").is_err(), "the scheme needs at least a key");
+    }
+
+    /// The key is the bare Message-ID, so a selector can be typed without
+    /// shell-quoting and printed without a trailing `%3E`. Both forms are
+    /// accepted on input, because a user pasting from a mail header holds the
+    /// bracketed one.
+    #[test]
+    fn angle_brackets_are_not_part_of_the_key() {
+        assert_eq!(message_key("<a@example.com>"), "a@example.com");
+        assert_eq!(message_key("a@example.com"), "a@example.com");
+        assert_eq!(
+            message_key("<sha256-0123456789abcdef@local.invalid>"),
+            "sha256-0123456789abcdef@local.invalid"
+        );
+    }
+
+    #[test]
+    fn a_truncated_escape_is_an_error_not_a_literal_percent() {
+        assert!(decode("%4").is_err());
+        assert!(decode("%zz").is_err());
+        assert!(decode("ok%20fine").is_ok());
+    }
+}
