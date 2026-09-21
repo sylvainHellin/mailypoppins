@@ -3,11 +3,14 @@ id: 0125
 title: Phase 6 of the daemon migration, hardening and service integration
 type: feature
 priority: now
-status: open
+status: done
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 to P6-U8 have landed the daemon-owned hold, the graceful shutdown, the login-start service units and the diagnostics, and P6-U9 has landed the soak tests and the one leak they found; the benchmarks and the phase documentation have not started.
+Status: done. All ten units have landed: the daemon-owned hold, the graceful shutdown, the login-start service units, the diagnostics, the soak tests and the one leak they found, and the benchmark rerun with the phase's documentation.
+Three of the four gate lines pass as written and the fourth, the platform smoke tests, passes on this host's systemd half with launchd escalated as the plan's own line anticipated.
+The gate evidence is [docs/baselines/phase6-gate-evidence.md](../baselines/phase6-gate-evidence.md) and the soak run [docs/baselines/phase6-soak.md](../baselines/phase6-soak.md).
+P5-U10a/b/c, the crate boundary deferred out of Phase 5 to run after this phase, is the next sequence.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -27,7 +30,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U7 | T | this commit | diagnostics, the contract | done (tests) |
 | P6-U8 | I | this commit | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | done |
 | P6-U9 | I | this commit | soak tests | done |
-| P6-U10 | I | - | benchmarks and docs | not started |
+| P6-U10 | I | `699d0d8`, `0d48b4e`, `480b730`, `3ab3666`, `73999d9`, `c91862e`, this commit | benchmarks and docs | done |
 
 The phase exit gate for the hold, verbatim from the plan: *"The daemon-owned hold reproduces the behaviour the parity gate recorded, and the last client exiting mid-hold cancels the hold and leaves the draft approved."*
 The second half of that sentence is P6-U3/P6-U4's and is already asserted from the outside by `tests/phase5_undo_send_hold.rs`; the first half is P6-U1/P6-U2's and is the two files below.
@@ -982,3 +985,92 @@ The unit test for the registry cap lives in `src/daemon/operations.rs`'s own `mo
 `cargo clippy --workspace --offline --all-targets` -> 38 warnings, the count at `6ffd0c2`, none in either file this unit touched; the copied generator carries `#[allow(clippy::manual_is_multiple_of)]` so that keeping it diffable against the example costs no warning.
 `rustfmt --edition 2021` was run on both files, each rustfmt-clean afterwards.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
+
+## P6-U10: benchmarks and docs
+
+The phase's last unit, whose product is a measurement nobody had taken against the complete dispatcher plus the documents the other nine left owing.
+Seven commits and not one line of production code: `699d0d8` the gate evidence and the benchmarks, `0d48b4e` `docs/architecture.md`, `480b730` `docs/daemon-operations.md`, `3ab3666` `docs/release-process.md` and `docs/plans/preview-latency.md`, `73999d9` the CHANGELOG entry, `c91862e` the BACKLOG block, and this commit the ticket.
+
+### The benchmark rerun
+
+The plan asks for the Phase 1a workloads against the complete dispatcher.
+What that means now that there is a dispatcher is the ten workloads of the Phase 4 table, run through the product binaries rather than through `spikes/ipc-bench`: the spike measured a transport that did not exist yet, and re-running it would price the same socket a second time instead of the daemon in front of it.
+
+Same harness as Phase 0 and Phase 4, unchanged: the three-line `bench` helper of `docs/baselines/pre-daemon/workloads.md`, one discarded warm-up, eleven runs, median with min and max.
+The fixture is `--rows 5000` on `/var/tmp`, which is **ext4** on this host where Phase 4's table was taken on tmpfs, so the comparison is a direction rather than a delta; the oracle column is re-taken from `~/.cache/mp-oracle/pre-daemon/mp` in the same session for exactly that reason.
+All three columns are one session, one fixture, one quiescent machine, and nine of the ten workloads were diffed byte for byte against the oracle before being timed.
+
+Milliseconds, `median min max`, with Phase 4's warm figure last:
+
+| workload | oracle | warm | cold | P4 warm |
+|---|---|---|---|---|
+| `mp --version` (floor) | 8 7 9 | 8 7 9 | 9 8 9 | 8 |
+| `mp list-messages --mailbox inbox -n 20` (W6) | 45 44 47 | **11** 10 12 | 76 75 78 | 10 |
+| `mp list-messages --mailbox Bulk -n 5000` (W2) | 55 54 57 | 94 92 97 | 177 177 181 | 56 |
+| `mp show <ordinary body>` (W4) | 46 44 50 | **11** 10 12 | 76 75 79 | 11 |
+| `mp show <10 MiB body>` (W4) | 80 77 85 | 68 65 82 | 151 149 156 | 73 |
+| `mp show --json <10 MiB body>` (W4) | 76 75 79 | 72 61 76 | 144 141 151 | 68 |
+| `mp dump-mailbox --json -A alpha` (W3) | 91 89 92 | 116 112 119 | 204 198 210 | 121 |
+| `mp search --local 'body:zolvertrix' -n 100` (W7) | 46 45 48 | **11** 10 12 | 76 75 79 | 10 |
+| `mp search --local 'body:concrete' -n 100` (W7) | 50 48 51 | **17** 15 18 | 81 80 83 | 15 |
+| `mp list` (drafts) | 45 42 48 | **9** 9 10 | 38 37 39 | 9 |
+
+Three things to carry out of it, and the evidence file argues all three at length.
+
+Every small answer is where Phase 4 left it: 9 to 17 ms warm against 45 to 50 in process, which is W6's 25 ms budget satisfied in the other direction, and a cold command costs one daemon start of about 65 ms against W6's 1 s allowance.
+
+`mp dump-mailbox --json` is still the one command that pays more than it saves, at 1.27x against W3's 1.2x rule, where Phase 4 measured 1.41x.
+
+**W2 is the one row that moved**, 56 ms warm at `db2d67d` and 94 ms here, and it is the row shape rather than the transport: `message.list`'s `list` projection carried nine keys per row in Phase 4 and carries fifteen since Phase 5 gave the TUI its wire rows, which measures as about 17 µs per row against about 9. W2's rule is 2x the pre-daemon figure and 1.71x passes it, so it is recorded in `BACKLOG.md` rather than escalated.
+
+Beside the table, the P5-U11 first-paint harness was rerun (7 ms warm, 35 ms cold, 7 ms for the pre-daemon binary, unchanged by the whole phase to the millisecond) and the W1 lower bound was run with its documented command: `TMPDIR=/var/tmp cargo test --offline --lib queries_tests -- --ignored` passes, the daemon-backed preview p95 inside the store-backed one plus the 5 ms transport budget.
+W1 itself, W2's TUI half, W6's cold-cache half and W8 all stay `NOT TAKEN` and owner action, and no synthetic number was put in their place.
+
+### The gate, in one table
+
+| gate line | verdict | evidence |
+|---|---|---|
+| The daemon can run unattended across client churn | **pass** | `tests/daemon_soak.rs` 7 rows, three runs at ~15 s, plus a 65.6 s run at `MAILYPOPPINS_SOAK_SECS=60`; numbers in `phase6-soak.md` |
+| Memory remains bounded under slow clients and repeated syncs | **pass**, with the leak it found fixed | soak rows (b), (c), (g); `operations::HISTORY = 256` and its unit test |
+| Lifecycle commands and service-manager modes pass platform smoke tests | **pass** on systemd, **escalated** for launchd | `tests/daemon_service.rs` 23, a by-hand dry-run install/re-install/check/uninstall on both halves, and the lifecycle smoke; `launchctl` and `plutil` absent from this host |
+| The daemon-owned hold reproduces the parity gate's behaviour, and the last client exiting mid-hold cancels the hold and leaves the draft approved | **pass** | `tests/daemon_send_hold.rs` 7, `src/tui/hold_tests.rs` 16, `tests/daemon_shutdown.rs` 12, and `tests/phase5_undo_send_hold.rs` 2 rerun with not a line of it moved |
+
+### The deviations
+
+**The gate table names a file that does not exist.** The plan's proof column for the fourth line is `tests/daemon_hold.rs`; the file is `tests/daemon_send_hold.rs`, the name the send family's other socket-level files already use. P6-U1 recorded the rename when it wrote the file and this is the second place it is written down, because a gate whose proof command does not run is a gate nobody can re-check.
+
+**Two units are over their line budget**, and both overruns are one file whose subject is a sequence.
+P6-U4 added 865 production lines and 157 of test against a budget of ~700, the overrun being `src/daemon/shutdown.rs`, of whose 413 non-test lines 178 are comment: the eight steps are a sequence whose *order* is the contract.
+P6-U8 added 1 725 production lines and 176 of test against a budget of ~900, the overrun being `src/daemon/diagnostics.rs`, of whose 969 non-test lines 311 are header or item comment, leaving about 620 for a health assembly, five checks, a log parser, a bundle writer and a redaction pass.
+The other units carried no stated budget: P6-U2 is 330 lines, P6-U6 621 (468 production, 153 test) and P6-U9 one test file plus a 20-line fix.
+
+**Test edits outside a pre-approval, all of them recorded in the section of the unit that made them.**
+P6-U2 made four beyond its list, each forced and each in a file it owns (`src/daemon/session.rs`'s capability test, `src/daemon/methods/send.rs`'s count test, two `src/tui/app/types.rs` tests about a type that no longer exists, and `src/tui/actions.rs`'s all-refused send test), plus **one edit inside a T unit's own file**: three rows of `tests/daemon_send_hold.rs` asserted a ledger length no hold design can satisfy, and the reviewed replacement counts the draft's own submissions by Message-ID instead. That is the one edit in this phase that needed approval in writing, and the P6-U2 section carries the reasoning.
+P6-U8 made two more, both in `tests/`: `tests/daemon_admin_slice.rs`'s `DIAGNOSTIC_METHODS` from one entry to five, which a compile-time assertion forces, and `tests/daemon_bootstrap.rs`'s `assert_opening_and_zeroed`, which asserted `diagnostics == []` over a fixture whose accounts have no store and now asserts the array's shape instead.
+P6-U4, P6-U6 and P6-U9 edited no test file at all; P6-U6 also declined a pre-approved edit (the two service hooks joining `DaemonFixture`'s clearing list) and said so in the document instead.
+
+**No CHANGELOG entry was written before this unit.** P6-U2, P6-U4, P6-U6 and P6-U8 each recorded that the phase's entry is P6-U10's, which is why the #0125 entry lands whole rather than as five appended paragraphs.
+
+**`spikes/ipc-bench` is still in the tree.** `BACKLOG.md` recorded its deletion as this unit's, on the reasoning that Phase 6 re-runs its workloads; this unit re-ran the workloads through the product binaries, which is what the plan's sentence means now, so the spike was neither used nor deleted. A `git rm` nobody asked for is not a documentation unit's to make, and the item stays open.
+
+### The documents
+
+`docs/architecture.md` gains a section for what Phase 6 put in the daemon (the hold scheduler, the eight-step shutdown, the diagnostics assembly, the two service templates and the registry's 256-entry settled window), and three numbers it carried were corrected in the same pass: the hidden-surface list gains the five Phase 6 subcommands, the engine-import allow-list is 10 rows since P6-U2 took the hold's import with it, and the test count is 2 343 where it said 2 071.
+
+`docs/daemon-operations.md` needed a consistency pass rather than new sections, since P6-U4, P6-U6 and P6-U8 each wrote their own: the action residue is seven rows rather than eight and no longer says the hold is held back by the plan, the periodic tick stops being "Phase 6's" in two places and becomes a backlog item, the parity fixture's hook list is twelve of fifteen with the third omission named, and `mp daemon restart` says what it prints and what it does not take.
+
+`docs/release-process.md` gains the login-service install step for both platforms and the reinstall footgun: a rebuilt binary leaves the running daemon on the old code, so a reinstall is followed by `mp daemon restart`.
+
+`docs/plans/preview-latency.md` gains the Phase 6 status of the measurement it was written around: the offline p95 lower bound is green at this HEAD, W1 is still `NOT TAKEN` with the exact conditions it needs, and the cache-and-prefetch contingency stays closed.
+
+One comment-only source edit, reported here because this unit is not supposed to touch `src/`: `crates/mp-protocol/src/state.rs`'s module header said nothing in this build fills `snapshot.diagnostics`, which stopped being true at P6-U8.
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2343 passed, 0 failed**, 5 ignored, the count at `1ee6bcb`.
+`--test phase5_undo_send_hold` 2; `--test phase5_parity_gate` 11 (the oracle is the cache at `~/.cache/mp-oracle/pre-daemon/mp`, so no `MP_ORACLE_BIN` is needed); `--test daemon_send_hold` 7; `--test daemon_shutdown` 12; `--test daemon_service` 23; `--test daemon_diagnostics` 36; `--test daemon_soak` 7; `--lib queries_tests -- --ignored` 1.
+`touch src/main.rs && timeout 600 cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` -> empty.
+`diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` -> empty.
+`timeout 600 cargo clippy --workspace --offline --all-targets` -> **38 distinct warnings**, the phase's baseline, none on a line this unit wrote.
+`TMPDIR=/var/tmp timeout 900 cargo install --path . --offline` -> installs the Phase 6 daemon-backed `mp`.
+`pgrep -af '[m]p daemon'` after every test run, every benchmark pass and both smoke runs: one line, pid 3667325, the owner's own daemon, which no sandbox in this work could reach.

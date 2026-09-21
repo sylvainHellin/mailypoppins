@@ -17,8 +17,9 @@
 //!   Defaulting is for the other direction: a decoder that refuses a snapshot
 //!   over an empty section it would have ignored anyway turns an additive
 //!   protocol change into a client that will not start.
-//! - **`holds`, `operations` and `diagnostics` stay [`Value`].** Nothing in
-//!   this build fills the third; a `holds` entry is a
+//! - **`holds`, `operations` and `diagnostics` stay [`Value`].** A
+//!   `diagnostics` entry is one `checks` item of a `diagnostic.health` answer,
+//!   filled since P6-U8 with the checks that are not `ok`; a `holds` entry is a
 //!   [`HoldStatus`](crate::send::HoldStatus) and an `operations` entry is an
 //!   `operation.status` result whose owner is the daemon's operation registry.
 //!   Typing either here before a client reads it out of the *snapshot* would
@@ -193,7 +194,8 @@ pub struct Snapshot {
     /// order, each entry an `operation.status` result.
     #[serde(default)]
     pub operations: Vec<Value>,
-    /// Diagnostics; nothing in this build fills it.
+    /// The health checks that are not `ok`, in report order, each one a
+    /// `checks` item of a `diagnostic.health` answer verbatim (P6-U8).
     #[serde(default)]
     pub diagnostics: Vec<Value>,
 }
