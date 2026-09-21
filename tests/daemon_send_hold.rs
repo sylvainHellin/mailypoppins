@@ -370,6 +370,32 @@ fn a_second_client_sees_the_countdown_and_cancels_the_send() {
             listed[0]
         );
 
+        // The countdown itself, on the wire and not only in the table: B
+        // renders `Sending in {n}s` off these, so a scheduler that armed the
+        // hold and published no tick would leave every client's countdown
+        // frozen at the window it started with. The wait is bounded by
+        // `await_kind`, because a fixed sleep would either race the tick or
+        // sit out the window it is trying to observe.
+        let tick = await_kind(&mut b, "send.hold_tick").await;
+        assert_eq!(
+            tick["operation_id"].as_str(),
+            Some(operation.as_str()),
+            "the tick is about the hold that started: {tick}"
+        );
+        assert_eq!(
+            tick["hold_secs"].as_u64(),
+            started["hold_secs"].as_u64(),
+            "and carries the same window it was armed with: {tick}"
+        );
+        let left = tick["remaining_secs"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a tick carries a remainder: {tick}"));
+        assert!(
+            left > 0 && left < HOLD_SECS,
+            "a tick is the window counting down, so its remainder is below the {HOLD_SECS}s it \
+             was armed with and above the zero an ended hold reports: {tick}"
+        );
+
         let cancelled = b
             .call("send.cancel_hold", json!({ "operation_id": operation }))
             .await
