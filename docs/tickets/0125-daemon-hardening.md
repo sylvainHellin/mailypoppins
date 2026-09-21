@@ -976,9 +976,9 @@ The unit test for the registry cap lives in `src/daemon/operations.rs`'s own `mo
 
 ### Validation
 
-`TMPDIR=/var/tmp timeout 900 cargo test --offline --test daemon_soak` -> **7 passed**, three runs at 14.1 s, 14.2 s and 13.8 s wall.
+`TMPDIR=/var/tmp timeout 900 cargo test --offline --test daemon_soak` -> **7 passed**, three runs at 15.5 s, 15.0 s and 15.0 s wall.
 `MAILYPOPPINS_SOAK_SECS=60` -> **7 passed**, 65.6 s wall, the numbers in the baseline file.
-`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2343 passed, 0 failed**, 5 ignored, 55.8 s wall, which is 2335 at `6ffd0c2` plus this file's 7 rows and the registry unit test.
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2343 passed, 0 failed**, 5 ignored, 72.6 s wall, which is 2335 at `6ffd0c2` plus this file's 7 rows and the registry unit test.
 `cargo clippy --workspace --offline --all-targets` -> 38 warnings, the count at `6ffd0c2`, none in either file this unit touched; the copied generator carries `#[allow(clippy::manual_is_multiple_of)]` so that keeping it diffable against the example costs no warning.
 `rustfmt --edition 2021` was run on both files, each rustfmt-clean afterwards.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.

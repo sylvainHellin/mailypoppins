@@ -64,7 +64,7 @@ The long run (`MAILYPOPPINS_SOAK_SECS=60`, **65.6 s wall**):
 | f | 300 holds, 0.6 s | - | +1.1 MiB | `holds` 0 |
 | g | 60 s mixed run | 47 -> 47 (+0) | +60.8 MiB | 14667 churn cycles, 10596 syncs, 3445 reads, 2840 draft pairs, 37018 holds, 132242 events, stop clean |
 
-Three consecutive short runs took 14.1 s, 14.2 s and 13.8 s wall.
+Three consecutive short runs of the committed file took 15.5 s, 15.0 s and 15.0 s wall.
 
 ## The ceilings, and why they are where they are
 
