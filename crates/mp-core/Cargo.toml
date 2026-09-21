@@ -59,6 +59,13 @@ mp-protocol = { path = "../mp-protocol" }
 # `contacts::matcher`, the fuzzy address completion the TUI and `mp contacts`
 # both drive.
 nucleo-matcher = "0.3"
+# `draft`: the YAML frontmatter parser and the drafts-directory walk.
+gray_matter = "0.2"
+walkdir = "2"
+# `draft::validate_draft` only parses an address with `message::Mailbox`, so
+# the transports and their TLS stacks are off: what it asserts is that the
+# string the send path will hand lettre is one lettre accepts.
+lettre = { version = "0.11", default-features = false, features = ["builder"] }
 
 [dev-dependencies]
 tempfile = "3"

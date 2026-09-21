@@ -2135,10 +2135,12 @@ dependencies = [
  "chrono-tz",
  "colored",
  "dirs 5.0.1",
+ "gray_matter",
  "hkdf",
  "html2text",
  "icalendar",
  "keyring",
+ "lettre",
  "log",
  "machine-uid",
  "mailparse",
@@ -2157,6 +2159,7 @@ dependencies = [
  "time",
  "tokio",
  "toml 0.8.23",
+ "walkdir",
  "zeroize",
 ]
 
