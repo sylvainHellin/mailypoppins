@@ -1077,6 +1077,9 @@ pub mod test_env {
     }
 
     impl TestDataDir {
+        // A `Default` would be a second way to arm a thread-local override, and
+        // the lint only fires at all because the boundary made this `pub`.
+        #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             Self {
@@ -1430,6 +1433,10 @@ pub fn init_logging() {
 // Signature loading
 // ---------------------------------------------------------------------------
 
+// The signature loaders below were already after this module before the crate
+// boundary moved the file (#0126); the lint started seeing them only because
+// `test_env` above stopped being a plain `#[cfg(test)] mod`.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
