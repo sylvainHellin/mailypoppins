@@ -688,11 +688,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: implicit workflow, no command; the drafts index refresh in `src/tui/`
-- Daemon surface: daemon-owned watcher emitting `state.event`
+- Daemon surface: daemon-owned watcher emitting `state.event`, plus `draft.list`'s fresh directory scan
 - GUI location: TBD (Phase 9)
-- Validation: manual
-- Status: not started
+- Validation: `tests/daemon_draft_watch.rs`, `tests/daemon_draft_index_slice.rs`
+- Status: served (P3b-U10); the TUI's own poll not yet dropped; GUI not started
 - Note: the mechanism that keeps the GUI correct while Neovim writes the file.
+  The daemon has watched every configured account's drafts directory since P3b-U10 and `draft.list` answers from a directory scan, so the client's one-second fingerprint poll and its three `store::drafts::refresh_account` calls need no method to replace them: dropping them is a client-side change (P5-U10d).
+  The store's `drafts` table survives as the daemon's own, refreshed on every `mailbox.list` for the sidebar count, which is the one thing that reads it.
 
 ## Attachments
 
