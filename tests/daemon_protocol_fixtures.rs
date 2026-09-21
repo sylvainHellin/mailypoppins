@@ -70,6 +70,16 @@ const P5_U10C_FIXTURES: &[&str] = &[
     "message.materialise_markdown.response.json",
 ];
 
+/// The fixtures P5-U10d adds: a pair per surface (#0126).
+///
+/// Separate from the two lists above for the reason they are separate from
+/// each other: each list is the record of what one unit required, and the
+/// assertion over all of them is the same.
+const P5_U10D_FIXTURES: &[&str] = &[
+    "message.thread.request.json",
+    "message.thread.response.json",
+];
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -123,6 +133,7 @@ fn every_required_fixture_is_committed() {
     let missing: Vec<&&str> = REQUIRED_FIXTURES
         .iter()
         .chain(P5_U10C_FIXTURES)
+        .chain(P5_U10D_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
     assert!(

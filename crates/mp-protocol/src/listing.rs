@@ -134,6 +134,81 @@ pub struct MessageListing {
     pub messages: Vec<MessageListRow>,
 }
 
+/// One message of a conversation, as `message.thread` answers it (P5-U10d,
+/// `LST-10`).
+///
+/// A row of its own rather than a [`MessageListRow`], because a conversation
+/// crosses mailboxes: a listing names its mailbox once and every row of it is
+/// in that mailbox, while a thread holds the Inbox copy and the archived
+/// original side by side and the overlay switches mailbox when it opens one.
+/// It carries what the overlay renders and nothing else, which is why there is
+/// no `date_sort` here: the daemon orders the conversation oldest first, and a
+/// client that re-sorted it would be inventing an order the overlay does not
+/// have.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadMessage {
+    /// `messages.id`, the same synthetic row key [`MessageListRow`] carries
+    /// under the same name, which is what the overlay opens the message with.
+    pub id: i64,
+    /// The mailbox this copy lives in, as the store holds it.
+    ///
+    /// The one field a listing row has no use for: the overlay prints it and
+    /// its `Enter` switches mailbox when the highlighted message is in another
+    /// one.
+    #[serde(default)]
+    pub mailbox: String,
+    /// The `Message-ID:` header verbatim, which is the identity the
+    /// conversation is deduped over: one logical message is one row even when
+    /// the store holds it twice.
+    #[serde(default)]
+    pub message_id: String,
+    /// The `From:` header, `""` when the message carried none. The display
+    /// name is extracted client-side, as it is for a listing row.
+    #[serde(default)]
+    pub from: String,
+    /// The `Date:` header as the store holds it, which is the column the
+    /// overlay prints.
+    #[serde(default)]
+    pub date_display: String,
+    /// The four flag axes, which draw the same markers a list row draws.
+    #[serde(default)]
+    pub flags: MessageFlags,
+    /// Whether this is the message the conversation was opened from.
+    ///
+    /// Decided daemon-side on the `Message-ID`, not on the row id: the store
+    /// may hold two copies of the addressed message and the dedup keeps the
+    /// first one ingest saw, so the row marked `current` can carry an `id`
+    /// other than the one the call addressed.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// The whole `message.thread` answer: one conversation, oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadListing {
+    /// The account the conversation was read from.
+    pub account: String,
+    /// The `thread_id` ingest assigned, which is the `Message-ID` of the root
+    /// the `In-Reply-To` / `References` chain resolved to, and the addressed
+    /// message's own `Message-ID` when ingest assigned it none.
+    #[serde(default)]
+    pub thread_id: String,
+    /// The `Subject:` of the message the conversation was opened from, `""`
+    /// when it carried none: the overlay's title renders its own placeholder,
+    /// and the wire does not invent one.
+    #[serde(default)]
+    pub subject: String,
+    /// The conversation, oldest first (`date_sort ASC, id ASC`), one row per
+    /// `Message-ID`, and always including the addressed message.
+    ///
+    /// A message with no relatives is therefore a one-row answer rather than
+    /// an empty one: "this message is its own conversation" is a fact the
+    /// client renders its own sentence for, and an empty list would make it
+    /// indistinguishable from a thread whose rows were all evicted.
+    #[serde(default)]
+    pub messages: Vec<ThreadMessage>,
+}
+
 /// One hit of the `message.search_server` operation, as the `message.server_hit`
 /// event carries it (P5-U10c, `LST-08`).
 ///
@@ -313,5 +388,85 @@ mod tests {
         assert_eq!(hit.selector, None);
         assert_eq!(hit.html_body, None);
         assert_eq!(hit.body_text, "hier ist das Angebot\n");
+    }
+
+    /// The committed conversation fixture decodes whole: the rows are oldest
+    /// first, exactly one of them is `current`, and each carries the mailbox
+    /// its copy lives in.
+    #[test]
+    fn the_committed_thread_fixture_decodes_whole() {
+        let raw = include_str!("../fixtures/message.thread.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let thread: ThreadListing =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+
+        assert_eq!(thread.account, "work");
+        assert_eq!(thread.thread_id, "<Bericht@example.com>");
+        assert_eq!(thread.subject, "Re: Bericht");
+        assert_eq!(thread.messages.len(), 3);
+        assert_eq!(
+            thread.messages[0].mailbox, "inbox",
+            "a conversation crosses mailboxes and each row says where it is"
+        );
+        assert_eq!(thread.messages[1].mailbox, "sent");
+        assert_eq!(
+            thread
+                .messages
+                .iter()
+                .filter(|message| message.current)
+                .count(),
+            1,
+            "exactly one row is the message the conversation was opened from"
+        );
+        assert!(thread.messages[2].current);
+        assert!(thread.messages[0].flags.seen && thread.messages[0].flags.answered);
+    }
+
+    /// A thread row from a daemon that predates a later field still decodes,
+    /// and a lone message is a one-row conversation rather than an empty one.
+    #[test]
+    fn a_lone_message_is_a_one_row_conversation() {
+        let thread: ThreadListing = serde_json::from_value(json!({
+            "account": "work",
+            "thread_id": "<lonely@example.com>",
+            "subject": "",
+            "messages": [{"id": 7, "current": true}],
+        }))
+        .expect("the account is the only required field");
+        assert_eq!(thread.messages.len(), 1);
+        assert_eq!(thread.messages[0].id, 7);
+        assert_eq!(thread.messages[0].mailbox, "");
+        assert_eq!(thread.messages[0].flags, MessageFlags::default());
+        assert!(thread.messages[0].current);
+    }
+
+    /// Round trip, which is what lets a test build a conversation by hand and
+    /// trust the wire.
+    #[test]
+    fn a_thread_round_trips() {
+        let thread = ThreadListing {
+            account: "work".to_string(),
+            thread_id: "<root@example.com>".to_string(),
+            subject: "Bericht".to_string(),
+            messages: vec![ThreadMessage {
+                id: 12,
+                mailbox: "Team/Reports".to_string(),
+                message_id: "<root@example.com>".to_string(),
+                from: "Ivana <ivana@example.com>".to_string(),
+                date_display: "Thu, 2 Jul 2026 13:57:30 +0200".to_string(),
+                flags: MessageFlags {
+                    seen: true,
+                    answered: false,
+                    forwarded: false,
+                    flagged: true,
+                },
+                current: false,
+            }],
+        };
+        let encoded = serde_json::to_value(&thread).expect("it serialises");
+        assert_eq!(encoded["messages"][0]["mailbox"], json!("Team/Reports"));
+        assert_eq!(encoded["messages"][0]["flags"]["flagged"], json!(true));
+        let decoded: ThreadListing = serde_json::from_value(encoded).expect("it decodes");
+        assert_eq!(decoded, thread);
     }
 }

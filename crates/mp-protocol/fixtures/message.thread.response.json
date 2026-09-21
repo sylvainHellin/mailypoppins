@@ -1,0 +1,53 @@
+{
+  "id": 31,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "work",
+    "messages": [
+      {
+        "current": false,
+        "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
+        "flags": {
+          "answered": true,
+          "flagged": false,
+          "forwarded": false,
+          "seen": true
+        },
+        "from": "Ivana <ivana@example.com>",
+        "id": 3141,
+        "mailbox": "inbox",
+        "message_id": "<Bericht@example.com>"
+      },
+      {
+        "current": false,
+        "date_display": "Thu, 2 Jul 2026 15:02:11 +0200",
+        "flags": {
+          "answered": false,
+          "flagged": false,
+          "forwarded": false,
+          "seen": true
+        },
+        "from": "alice@example.com",
+        "id": 3142,
+        "mailbox": "sent",
+        "message_id": "<Re-Bericht@example.com>"
+      },
+      {
+        "current": true,
+        "date_display": "Fri, 3 Jul 2026 09:14:00 +0200",
+        "flags": {
+          "answered": false,
+          "flagged": true,
+          "forwarded": false,
+          "seen": false
+        },
+        "from": "Ivana <ivana@example.com>",
+        "id": 3148,
+        "mailbox": "inbox",
+        "message_id": "<Re-Re-Bericht@example.com>"
+      }
+    ],
+    "subject": "Re: Bericht",
+    "thread_id": "<Bericht@example.com>"
+  }
+}

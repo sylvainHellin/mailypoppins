@@ -1,0 +1,9 @@
+{
+  "id": 31,
+  "jsonrpc": "2.0",
+  "method": "message.thread",
+  "params": {
+    "account": "work",
+    "row_id": 3141
+  }
+}

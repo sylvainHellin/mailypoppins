@@ -112,7 +112,7 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
@@ -230,7 +230,7 @@ The daemon still renders the object by hand in `src/daemon/state/snapshot.rs`, w
 
 ### Read-only methods
 
-`account.list`, `mailbox.list`, `message.get`, `message.list` and `message.search` are the read-only domain methods.
+`account.list`, `mailbox.list`, `message.get`, `message.list`, `message.search` and `message.thread` are the read-only domain methods.
 All of them take the store path the CLI takes (`store::read`) and none acquires the account's `EngineLock`: the daemon does not become an account's engine before Phase 5, so a running TUI or `mp sync` keeps the lock while the daemon answers reads beside it.
 No read result names a file: a client that cannot open the store must not be handed a path into it, which is the dump's own contract (`docs/dump-allow-list.md`) applied to every one of them.
 
@@ -411,6 +411,43 @@ Hits come back in the store's ranking order, which is what `mp search --local` p
 An absent `limit` means every hit.
 A query the search layer cannot use, a lone quote or bare punctuation, is `-32602` and not `-32603`: the parameter is wrong, not the store.
 A query nothing matches is an empty `hits` array, not an error.
+
+`message.thread` takes `{"account": str, "row_id": i64}`, `{"account": str, "id": str}` or `{"account": str, "selector": str, "mailbox": str|null}` and returns the conversation the addressed message belongs to (`LST-10`):
+
+```json
+{
+  "account": "work",
+  "thread_id": "<Bericht@example.com>",
+  "subject": "Re: Bericht",
+  "messages": [{
+    "id": 3141,
+    "mailbox": "inbox",
+    "message_id": "<Bericht@example.com>",
+    "from": "Ivana <ivana@example.com>",
+    "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
+    "flags": {"seen": true, "answered": true, "forwarded": false, "flagged": false},
+    "current": false
+  }]
+}
+```
+
+The rows are `mp_protocol::listing::ThreadMessage` and the answer is `ThreadListing`.
+The grouping is `store::read::thread_messages`: the set of rows ingest gave the same `thread_id`, which is the `Message-ID` of the root the `In-Reply-To` / `References` chain resolved to, decided once at ingest and read out of the indexed column rather than recomputed from headers.
+A message ingest assigned no thread to is its own thread, so `thread_id` is then its own `Message-ID`.
+
+The order is `date_sort ASC, id ASC`, the reverse of a listing: a conversation reads oldest to newest, the way a mail client threads one.
+One row per `Message-ID`, because the same message sits in the Inbox and in the Archive after a move and the conversation is a list of messages rather than of copies; the row that survives is the first one the order yields, which is the earliest copy ingest saw.
+
+**A thread row is not a listing row.** It carries `mailbox`, which a listing names once for every row it holds, because a conversation crosses mailboxes and a client opens a row in the one it is in; it carries no `date_sort`, no `uid`, no `selector` and no `to`/`cc`/`bcc`, because the daemon orders the conversation and the overlay renders a sender, a date, four flag markers and a mailbox.
+A client that wants the whole message asks `message.get` with the row's `id`, which is the same `messages.id` a listing row carries under the same name.
+
+`current` marks the message the conversation was opened from, and it is decided on the `Message-ID` rather than on the row id: the dedup above may have kept another copy of the addressed message, so the marked row can carry an `id` other than the one the call named.
+`subject` is the addressed message's `Subject:` verbatim, `""` when it carried none, and the client renders its own `(no subject)` placeholder.
+
+**A message with no relatives answers with itself alone.** A one-row conversation is the truthful answer to "what else is in this thread", and the client is what turns it into a sentence: the TUI says "No related emails for this message in the store" and opens no overlay for it.
+An empty `messages` array would be a different claim, that the store holds not even the message that was addressed, which is `-32602` instead.
+
+The address, the `mailbox` narrowing and their refusals are `message.get`'s, unchanged: naming none or more than one of the three is `-32602`, a `row_id` no message has is `-32602`, an unknown account is `-32005` and an account with no store is `-32006`.
 
 ### Message mutations
 
@@ -1120,6 +1157,13 @@ P5-U10c added three methods, one row field and one event kind, all additive; no 
 A `message.list` row and a `message.search` hit gained `selector`, the canonical `mp://` of the row, so a clipboard copy costs no store read (`RD-07`); it is the fifteenth key of a row, and the fixture and the two key lists that pin the shape moved with it (`crates/mp-protocol/fixtures/message.list.response.json`, `tests/daemon_read_only_methods.rs`, `tests/daemon_protocol_fixtures.rs`).
 `mp_protocol::listing` is the new module: `MessageListRow`, `MessageListing`, `MessageFlags` and `ServerSearchHit`, the typed decode of a listing for a client that must not link the store.
 The fixtures are `crates/mp-protocol/fixtures/message.materialise_markdown.{request,response}.json`, `message.fetch.{request,response}.json`, `message.search_server.{request,response}.json` and `event.server_search_hit.json`.
+
+P5-U10d added two methods, both additive, and no existing shape moved.
+`message.thread` `{account, row_id|id|selector, mailbox?}` -> `{account, thread_id, subject, messages}` answers one conversation, oldest first and one row per `Message-ID` (`LST-10`); the rows are `mp_protocol::listing::{ThreadMessage, ThreadListing}` and carry the mailbox each copy lives in, which is the field a listing row has no use for.
+`draft.create_from_message` `{account, kind, message, no_signature?, signature?}` -> `DraftCreated` builds a reply, a reply-all or a forward from a message the client holds rather than from a row the store holds, which is the one draft `draft.reply` and `draft.forward` cannot build (`DFT-08`, `DFT-09`): a server-search hit that resolved to no local row.
+It is a method of its own rather than a fourth form of their `source`, because `source` is an *address* into the store and every form of it takes the family's `-32006`, while this one opens no message store at all.
+The payload is `mp_protocol::draft::DraftMessage`, the subset of `ServerSearchHit` a draft is built from, and it carries no attachments: a forward built this way quotes the message and attaches nothing, which is what the client does with a server-only hit today.
+The fixtures are `crates/mp-protocol/fixtures/message.thread.{request,response}.json` and `draft.create_from_message.{request,response}.json`.
 
 P6-U8 added four methods to the `diagnostic.*` family, one event kind and one filled snapshot array, all additive.
 `diagnostic.health` `{}` answers `{instance_id, version, protocol_version, uptime_secs, pid, socket, log_path, clients, accounts, holds, operations: {active}, store: {path, size_bytes}, checks}`, a statement about the live process rather than about the state a client mirrors.

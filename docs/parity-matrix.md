@@ -351,8 +351,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `tt` (`src/tui/app/keymap.rs:630`), the thread overlay in `src/tui/ui/overlays.rs`
 - Daemon surface: `message.thread`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: TUI golden frames, `tests/daemon_thread_slice.rs`
+- Status: contracted (P5-U10d-T), not served
+- Note: `open_thread_overlay` opens the store, reads the row and folds `read::thread_messages` over it, which is the last read in `src/tui/app/` that no method answers.
+  The method takes `message.get`'s address and answers `{account, thread_id, subject, messages}`, the rows oldest first and one per `Message-ID`; a thread row carries the `mailbox` its copy lives in, which a listing row does not, because a conversation crosses mailboxes and the overlay's `Enter` switches to the one it opens.
+  A message with no relatives answers with itself alone, and the client keeps its "No related emails for this message in the store" line by branching on the length.
 
 ### LST-11 Legacy server fetch with inline filters
 
