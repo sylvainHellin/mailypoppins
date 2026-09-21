@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.mailypoppins.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{MP}}</string>
+		<string>daemon</string>
+		<string>run</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MAILYPOPPINS_CONFIG_DIR</key>
+		<string>{{CONFIG_DIR}}</string>
+		<key>MAILYPOPPINS_DATA_DIR</key>
+		<string>{{DATA_DIR}}</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>15</integer>
+	<key>StandardOutPath</key>
+	<string>{{DATA_DIR}}/logs/daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{DATA_DIR}}/logs/daemon.log</string>
+</dict>
+</plist>

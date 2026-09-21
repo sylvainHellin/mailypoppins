@@ -7,7 +7,7 @@ status: open
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 to P6-U4 have landed the daemon-owned hold and the graceful shutdown; P6-U5 and the rest of the phase have not started.
+Status: open. P6-U1 to P6-U4 have landed the daemon-owned hold and the graceful shutdown, and P6-U5 has landed the login-start contract; P6-U6 and the rest of the phase have not started.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -22,7 +22,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U2 | I | this commit | daemon-owned undo-send hold (SND-04) | done |
 | P6-U3 | T | this commit | graceful shutdown, the contract | done (tests) |
 | P6-U4 | I | this commit | graceful shutdown | done |
-| P6-U5 | T | - | login-start service units (LIF-06), the contract | not started |
+| P6-U5 | T | this commit | login-start service units (LIF-06), the contract | done (tests) |
 | P6-U6 | I | - | login-start service units | not started |
 | P6-U7 | T | - | diagnostics, the contract | not started |
 | P6-U8 | I | - | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | not started |
@@ -483,4 +483,157 @@ The eight steps are a sequence whose *order* is the contract, and the file is wh
 `diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` empty.
 
 The smoke run, over an `examples/mkfixture` root in a sandbox `HOME`: `mp daemon start`, `mp daemon status` (running), `mp daemon stop` -> `✓ daemon stopped`, exit 0, and `<data_dir>/runtime` left holding only `daemon.start.lock`, which is never unlinked; then a second start and `kill -TERM <pid>` -> the same three files gone and the process with them.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
+
+## P6-U5: login-start service units (LIF-06), the contract
+
+One test file and two fixtures, no production code.
+
+- `tests/daemon_service.rs`, 23 rows, every one of them socket-free: the two commands write a file and call a service manager, and neither needs a daemon to exist.
+- `tests/fixtures/service/mailypoppins.service` and `tests/fixtures/service/dev.mailypoppins.daemon.plist`, the byte-exact generated files with three placeholders (`{{MP}}`, `{{DATA_DIR}}`, `{{CONFIG_DIR}}`) the rows substitute.
+
+There is no stub proof: the file compiles against the tree as committed, importing only `mailypoppins::daemon::client::needs_daemon` and `mailypoppins::daemon::shutdown::DEFAULT_GRACE_SECS`, both of which exist.
+The 22 contract rows fail at runtime on clap's `unrecognized subcommand`, which is the arrangement `tests/daemon_shutdown.rs` used.
+
+### The surface
+
+```text
+mp daemon install-service   [--force] [--check]
+mp daemon uninstall-service
+```
+
+Both are local commands under the already-hidden `daemon` subtree, so `mp --help` and `docs/baselines/pre-daemon/cli-help.txt` do not move.
+
+**No wire method.** The parity matrix's `LIF-06` row named `daemon.install_service` and `daemon.remove_service`; a method would mean asking a running daemon to arrange for a daemon to run, and the file being installed is the thing that starts one. The row now names the two commands instead, and `LIFECYCLE_METHODS` and every `*_METHOD_SPECS` array stay as they are, with their `const _: () = assert!(…)` count tripwires untouched.
+
+`needs_daemon` already answers `false` for `(Some("daemon"), _)`, so neither command auto-starts anything; the last row asserts it, passes today, and is there because P6-U6 adds two names to that family.
+
+### The two environment hooks
+
+Both in the `MAILYPOPPINS_DAEMON_*` family the other ten hooks use, both without a flag.
+
+- `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1` renders, writes and removes the file exactly as usual and **runs no `systemctl` and no `launchctl`**, printing the lines it would have run plus one line saying nothing was run.
+  This is what keeps the suite off the developer's own user session.
+- `MAILYPOPPINS_DAEMON_SERVICE_OS=linux|darwin` selects the half. Unset means this build's target OS; an unrecognised value is an error naming the variable and the two values it takes.
+  It exists because the macOS half cannot be smoke-tested on this host - the plan says so and carries the live launchd check as an escalation - so without it the plist would be pinned nowhere at all.
+
+Three rows run with the dry run **off** and `PATH` pointing at a sandbox directory holding a fake `systemctl` that records its argv and exits with a chosen code.
+Containment there is by `PATH`, not by the hook: the real `systemctl` is unreachable from those children, and recording the argv is the only way to pin *which* commands run and in what order rather than only which are printed.
+
+### The files
+
+| OS | path |
+|---|---|
+| linux | `$XDG_CONFIG_HOME/systemd/user/mailypoppins.service`, falling back to `$HOME/.config` |
+| darwin | `$HOME/Library/LaunchAgents/dev.mailypoppins.daemon.plist` |
+
+Both are written 0644, with their parent directories created as needed, and neither holds a secret.
+`{{MP}}` is `std::env::current_exe()`; `{{DATA_DIR}}` and `{{CONFIG_DIR}}` are the two directories the installing `mp` resolved, canonicalised, i.e. the exact strings `mp daemon status --json` reports.
+The rows render `{{MP}}` canonicalised because the test binary is a real file under `target/` where both spellings are one string; they are not one string for a Homebrew `mp`, whose `bin/mp` is a symlink into a version-stamped Cellar directory, so the contract names `current_exe()` and leaves the resolution to it.
+
+```ini
+# Written by `mp daemon install-service`.
+# Hand edits are replaced by `mp daemon install-service --force`.
+
+[Unit]
+Description=mailypoppins daemon
+Documentation=https://mailypoppins.dev
+
+[Service]
+Type=simple
+ExecStart={{MP}} daemon run
+Environment=MAILYPOPPINS_DATA_DIR={{DATA_DIR}}
+Environment=MAILYPOPPINS_CONFIG_DIR={{CONFIG_DIR}}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+```
+
+The plist carries `Label`, `ProgramArguments` `[{{MP}}, daemon, run]`, `EnvironmentVariables` with the same two directories, `RunAtLoad`, `KeepAlive` `{SuccessfulExit: false}`, `ExitTimeOut 15`, and `StandardOutPath` / `StandardErrorPath` both at `{{DATA_DIR}}/logs/daemon.log`, which is `lifecycle::daemon_log_path()` and the file `mp daemon start` already points a detached daemon's stdio at.
+The keys are pinned in that order, tab-indented, Apple's doctype and XML declaration first.
+The darwin install also creates `<data_dir>/logs`, because launchd refuses a job whose `StandardOutPath` names a directory that does not exist.
+
+Four decisions inside those files, all asserted:
+
+- **`ExecStart` is `daemon run`, never `daemon start`.** A `Type=simple` unit whose `ExecStart` forked and returned would be restarted forever by `Restart=on-failure`, and the daemon left behind would be one systemd does not own. The rows also assert `--foreground-logs` is absent: the journal gets what the daemon logs anyway.
+- **`Environment=` is exactly the data and config directories, and nothing else.** A login-started daemon inherits the session manager's environment, not the shell's, so a user whose `MAILYPOPPINS_DATA_DIR` or `XDG_DATA_HOME` is exported from a shell rc file would otherwise get a daemon serving a different tree than the one his `mp` talks to. No `PATH`: the binary is invoked by absolute path and the daemon spawns nothing that needs one.
+- **`TimeoutStopSec` and `ExitTimeOut` are `DEFAULT_GRACE_SECS + 5`.** The tie is asserted against the constant rather than assumed, so a grace raised in `src/daemon/shutdown.rs` without the unit following it fails here instead of having the service manager `SIGKILL` a daemon in the middle of the eight steps.
+- **`KillSignal=SIGTERM`** is the signal those eight steps answer (P6-U4), and `KeepAlive {SuccessfulExit: false}` is its launchd equivalent: a crash is restarted, a `mp daemon stop` (exit 0) is not.
+
+The plist is checked structurally - declaration, doctype, balanced `dict` and `array`, the eight keys in order, the argv array verbatim - and linted by `plutil -lint` when it is on `PATH`, with an `eprintln` skip otherwise, which is what this Linux host takes. No `plist` crate: it is not in `Cargo.lock` and one file does not buy a dependency.
+
+### Stdout, pinned line for line
+
+In the style of `mp daemon stop`: a `✓`/`✗` first line, then indented detail lines.
+
+| case | stdout | exit |
+|---|---|---|
+| fresh install | `✓ wrote <path>`, then the command lines | 0 |
+| identical unit already there | `✓ <path> is already installed`, then the same command lines | 0 |
+| uninstall | `✓ removed <path>`, then the command lines | 0 |
+| uninstall with nothing installed | `✓ no service installed`, and nothing is run | 0 |
+| `--check`, installed | `✓ service installed at <path>` | 0 |
+| `--check`, absent | `✗ no service installed` / `  install one: mp daemon install-service` | 1 |
+
+The command lines, in order, are `  systemctl --user daemon-reload` then `  systemctl --user enable --now mailypoppins.service` on install, and `  systemctl --user disable --now mailypoppins.service` then `  systemctl --user daemon-reload` on uninstall - disable while the unit file is still readable, reload once it is gone.
+The darwin half prints one line each: `  launchctl bootstrap gui/<uid> <plist>` and `  launchctl bootout gui/<uid>/dev.mailypoppins.daemon`, the bootout targeting the label rather than the path.
+
+Two lines are appended to that block, never both:
+
+- `  dry run: MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN is set, nothing was run`
+- `  systemctl is not on PATH; run the lines above to enable the service`
+
+A missing service manager is **not** a failure of the write: that is a container, a minimal image, or a session that is not systemd's, and a command that refused to write the file there would be useless exactly where a user would copy the unit somewhere else himself. Exit 0.
+A `systemctl` that runs and *fails* is exit 1 with a `✗` on stderr naming it, and the unit stays on disk: the file is what the command owns, enabling is what it asked the session manager for, and removing the file because the enable failed would throw away the half that worked.
+
+An install over a unit whose content differs is refused: exit 1, a `✗` line on stderr naming the path, the word `differs` and `--force`, and the file left byte-identical.
+A user may have edited it, and an upgrade that silently overwrote that edit would lose it without saying so. `--force` replaces it and reports a write.
+An identical unit is not rewritten at all - the row asserts the mtime does not move - but the enable still runs, because a user who disabled the unit by hand expects `install-service` to put it back.
+
+### Which rows fail today
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_service` on the tree as committed: **1 passed, 22 failed**, three runs, identical every time.
+
+All 22 fail the same way and for the same reason, which is what a contract test with no implementation behind it looks like:
+
+```
+error: unrecognized subcommand 'install-service'
+error: unrecognized subcommand 'uninstall-service'
+
+Usage: mp daemon [OPTIONS] <COMMAND>
+```
+
+clap exits 2, so every row's first assertion - the exit code, or a `stdout_lines` comparison against an empty stdout - is what trips.
+The one that passes is `neither_service_command_is_on_the_daemon_list`, a regression row over `needs_daemon`, which is vacuously true until the two subcommands exist and load-bearing afterwards.
+
+### Pre-approved edits for P6-U6
+
+Nothing in `tests/` moves, and neither fixture moves.
+No method-spec array and no count tripwire is touched, because this unit adds no wire method.
+
+Outside `tests/`, these are forced and pre-approved:
+
+- **`src/daemon/lifecycle.rs`**: two `DaemonAction` variants and their `dispatch` arms, plus the module header, whose first line lists the five lifecycle commands.
+- **`docs/daemon-operations.md`**: the *Login mode* section, which today says "Not implemented" and names this unit, and the environment-hook list, which says "all ten environment hooks" in the `DaemonFixture` paragraph and becomes twelve. `DaemonFixture::start` clears the hooks it lists, and the two new ones belong in that clearing.
+- **`docs/parity-matrix.md`**: `LIF-06` - P6-U5 already points it at this ticket and corrects its daemon-surface line; P6-U6 moves its Status.
+- **`docs/release-process.md`**: a note that a binary reinstalled at a different path leaves a unit whose `ExecStart` points at the old one, which `mp daemon install-service --force` repairs. Installing from source keeps `~/.cargo/bin/mp` and does not move; a Homebrew upgrade does, if `ExecStart` ends up holding the resolved Cellar path rather than the `bin/mp` symlink, which is the one case P6-U6 has to check on macOS and no test on this host can see.
+- **`CHANGELOG.md`** and the unit table above.
+
+The website pages under `website/src/pages/` are hand-derived from `mp --help`, and the `daemon` subtree is hidden from it, so they stay as they are.
+
+### Escalation
+
+The launchd half is written and pinned as a fixture and cannot be smoke-tested here: `plutil` is absent, `launchctl` is absent, and `MAILYPOPPINS_DAEMON_SERVICE_OS=darwin` on Linux proves only that the right bytes are produced.
+The live check - `mp daemon install-service` on macOS, log out and back in, `mp daemon status` reporting a running daemon, `mp daemon uninstall-service` - is owner action on Sylvain's Mac, as plan risk 8 already anticipated.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_service` -> 1 passed, 22 failed, three runs, identical each time.
+`TMPDIR=/var/tmp cargo test --workspace --offline` with the file moved aside -> **2248 passed**, 0 failed, 5 ignored, the count at `29691c0`; with it present and `--no-fail-fast` -> 2249 passed, 22 failed, which is 2248 plus the one regression row and the twenty-two contract rows, nothing else disturbed.
+`cargo clippy --offline --test daemon_service` reports nothing in the new file.
+`rustfmt --edition 2021 tests/daemon_service.rs` leaves it unchanged.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.

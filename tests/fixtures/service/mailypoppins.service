@@ -1,0 +1,19 @@
+# Written by `mp daemon install-service`.
+# Hand edits are replaced by `mp daemon install-service --force`.
+
+[Unit]
+Description=mailypoppins daemon
+Documentation=https://mailypoppins.dev
+
+[Service]
+Type=simple
+ExecStart={{MP}} daemon run
+Environment=MAILYPOPPINS_DATA_DIR={{DATA_DIR}}
+Environment=MAILYPOPPINS_CONFIG_DIR={{CONFIG_DIR}}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

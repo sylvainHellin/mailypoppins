@@ -1330,11 +1330,12 @@ Every capability in this group is new in this plan and has no current source anc
 ### LIF-06 Install or remove the login-start service
 
 - Classification: daemon administration
-- Source anchor: none, new in this plan; launchd and systemd user units
-- Daemon surface: `daemon.install_service`, `daemon.remove_service`
+- Source anchor: none, new in this plan; entry points `mp daemon install-service` and `mp daemon uninstall-service`
+- Daemon surface: none, and deliberately so: the commands write a systemd user unit or a launchd user agent themselves, and the file they write is what starts a daemon, so there is nobody to ask
 - GUI location: TBD (Phase 9)
-- Validation: none today
-- Status: not started
+- Validation: `tests/daemon_service.rs` over `tests/fixtures/service/`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U5)
+- Status: contract pinned (P6-U5); implementation not started (P6-U6)
+- Note: the launchd half cannot be smoke-tested on the machine this project is developed on; the plist is pinned as a fixture and the live check is owner action on macOS.
 
 ### LIF-07 Health and support diagnostics
 
