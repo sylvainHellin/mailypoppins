@@ -304,8 +304,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.search` as an `operation.*` for the server leg
 - GUI location: TBD (Phase 9)
 - Validation: unit tests in `src/search.rs`, `tests/cli_help_snapshot.rs` for the grammar's help text
-- Status: not started, and deliberately not taken by Phase 4 (P4-U15)
-- Note: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, so the server leg still opens its own IMAP session or Graph client in `src/main.rs`, and the plain-IMAP `has:attachment` post-filter still reads the local index there. It is the one command surface Phase 4 leaves on the direct path and the largest of the four groups in `CLI_ENGINE_RESIDUE`. P5-U10c-T contracted the method it wants, `message.search_server`, the twin of `message.list_server`: `{account, query, mailboxes?, limit?, exclude_message_ids?}` as a durable operation streaming `message.server_hit` events (`docs/daemon-protocol.md`, `tests/daemon_server_leg_slice.rs`). Not implemented.
+- Status: the method exists (P5-U10c-I1), the CLI leg is not routed to it
+- Note: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, so the server leg still opens its own IMAP session or Graph client in `src/main.rs`, and the plain-IMAP `has:attachment` post-filter still reads the local index there. It is the largest of the four groups in `CLI_ENGINE_RESIDUE`. `message.search_server` `{account, query, mailboxes?, limit?, exclude_message_ids?}` is served since P5-U10c-I1 and the TUI's overlay runs on it; three user-visible behaviours stand between this leg and it, which is why routing it is a unit of its own. `mp search` prints `Search in <mailbox> failed` to stderr per mailbox as it goes, where the operation reports `unreachable` at the settle; `mp search --mailbox` names the server mailbox directly, so a name the account does not configure is searched rather than refused; and the plain-IMAP `has:attachment` warning is a sentence about a post-filter the daemon now applies itself.
 - Note: the grammar covers `from:`, `to:`, `cc:`, `subject:`, `body:`, `filename:`, `has:attachment`, `before:`, `after:` with `since:` as an alias, quoted phrases, `OR` groups, `in:`, and `message-id:`; `filename:` resolves only on Gmail, Exchange, or the local index.
 
 ### LST-07 Search the local ranked full-text index across every synced mailbox
@@ -325,11 +325,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.search` local first, then `message.search_server` as a durable `operation.*` streaming hits on `state.event`
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui/commands.rs`)
-- Status: routed (P5-U6) except the server leg; GUI not started
-- Note: the server leg is still unmigrated. P5-U10c-T (#0126) contracted it as `message.search_server`, and one method retires both it and `LST-06`'s `CLI_ENGINE_RESIDUE` group. It is deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s one-mailbox query.
-  Deduplication is by Message-ID, so a message found twice appears once.
-  The local pass is `message.search` with `body: true` since P5-U6; the server leg is still the TUI's own `lib_do_multi_search` behind a background thread. Deduplication moves to the daemon with it: the client sends the Message-IDs the local pass is showing as `exclude_message_ids` and the settle counts them in `deduplicated`.
+- Status: routed (P5-U6 local, P5-U10c-I1 server); GUI not started
+- Note: `message.search_server`, deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s one-mailbox query. The TUI's background thread is gone: the overlay appends each hit as its `message.server_hit` event arrives, matched by operation id because a fast retype leaves two searches in flight.
+  Deduplication is by Message-ID and it is the daemon's: the client sends the Message-IDs the local pass is showing as `exclude_message_ids` and the settle counts them in `deduplicated`, so a message found twice appears once and the count is a fact any client reproduces.
+  The local pass is `message.search` with `body: true` since P5-U6.
   The overlay holds a parsed query and the method takes what a user typed, so the query is rendered back into the grammar (`search::to_query_string`) rather than sent as an engine enum.
+  A mailbox the server refuses lands in `unreachable` and does not fail the search; `LST-06`'s CLI leg is not routed through it yet, for the reasons that row gives.
 
 ### LST-09 Act on a search result without leaving the overlay
 
@@ -338,9 +339,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.get`, `message.materialise_html`, `message.materialise_attachment`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: routed (P5-U6) except the fetch and the Markdown rendition, both contracted by P5-U10c-T (#0126) and neither implemented; GUI not started
-- Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6.
-  Two keys are not: `f` ingests a server-only hit, which is `message.fetch` `{account, mailbox, message_id}` as a durable operation, idempotent over a message the store already holds; and `Enter` / `e` / `y` render a stored message as Markdown, which is `RD-06`. Both are contracted in `docs/daemon-protocol.md` and neither is built.
+- Status: routed (P5-U6, completed by P5-U10c-I1); GUI not started
+- Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6; `f` and the three rendition keys joined them in P5-U10c-I1.
+  `f` is `message.fetch` `{account, mailbox, message_id}`, a durable operation that is idempotent over a message the store already holds: it answers with that row and `already_present: true` and opens no session, so the overlay keeps its "Already in the local store" line by branching on a boolean rather than matching a refusal.
+  `Enter` / `e` / `y` are `RD-06`'s `message.materialise_markdown`.
+  One key still reads the store inline, and it is not this row's: `Action::OpenEventSource` on the agenda hands `$EDITOR` a row's `invite.ics` blob, which no `message.*` method serves.
 
 ### LST-10 Show the conversation a message belongs to
 
@@ -439,8 +442,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.materialise_markdown` `{account, row_id|id|selector, mailbox?}`, the third member of the handle family
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: contracted by P5-U10c-T (#0126), not implemented
+- Status: routed (P5-U10c-I1); GUI not started
 - Note: the handle keeps its blob alive until release or expiry (`ANO-6`), and the file is written 0444 so `$EDITOR` opens it read-only (#0075).
+  The rendition is released when the editor exits, where the pre-daemon file was unlinked; a second open of the same row is a second handle in a directory of its own, so the mode the first one left cannot stop it.
   `message.materialise_html` is not it: that renders the sender's markup for a browser, where this renders the store's own Markdown view of a message.
   The store keeps no `.md` per message, so the rendition is `store::read::render_markdown` on every call, which is what makes a handle the right shape rather than a path.
   It is the one member of the family that takes `row_id`, because the TUI holds a `MessageRef` and nothing else (#0050).
@@ -452,8 +456,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `selector` on the `message.list` row and on the `message.search` hit, then a client-side clipboard write
 - GUI location: TBD (Phase 9)
 - Validation: `tests/cli_selector_contract.rs` for the selector shape
-- Status: contracted by P5-U10c-T (#0126), not implemented
+- Status: routed (P5-U10c-I1); GUI not started
 - Note: the row carries it rather than a `message.selector` query answering it, because the daemon already had the string in hand when it built the row.
+  The TUI's `EmailEntry` carries the daemon's string, so `y` costs neither a round trip nor a store read; a parse-skipped draft and a server-only hit carry `None`, which are the two rows with no name to copy.
   `message.get` would answer it too, at the price of a whole-message read per clipboard copy.
   The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fifteen keys, and this is the sixteenth.
   It is rendered daemon-side, so `tests/cli_selector_contract.rs`'s spelling stays the only one in the tree.
@@ -465,7 +470,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.materialise_markdown`, then a client-side clipboard write
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: not started
+- Status: routed (P5-U10c-I1); GUI not started
+- Note: the path a `y` copies now names a file inside a handle directory, which the family releases after ten minutes: nothing reads a yanked path back, so what changed is how long a pasted one resolves.
 
 ## Selection and message actions
 

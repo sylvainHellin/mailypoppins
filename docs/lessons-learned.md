@@ -2014,3 +2014,25 @@ Name the re-exports one by one instead, leaving the split file out of the list, 
 `clippy::items_after_test_module` fires on the file, not on the item, so moving the two functions that sat after `src/draft.rs`'s `mod tests` into a new file where they sit above its `mod tests` removed the warning.
 The clippy baseline went 38 -> 37 with nothing silenced.
 A warning that disappears from a move is worth identifying before reporting the count, because "the number went down" and "a lint stopped being checked" look identical in a summary line.
+
+## A 0444 file has to be chmodded after it is written, and the mode belongs to the caller
+
+`message.materialise_markdown` writes the rendition `$EDITOR` opens read-only (#0075, #0126).
+`write_handle` set the directory to 0700 and wrote the file, and the obvious place for the mode looked like the `fs::write` call: it is not, because `set_permissions` before the write makes the file unwritable and the write then fails with `Permission denied` on a file the same process just created.
+Write, stat for the length, then chmod.
+
+The mode is also not the family's. Two of the four materialisers hand out bytes a client may copy anywhere and the third is deliberately unwritable, so `write_handle` takes the mode as an argument rather than deriving it from `HandleKind`: a `match` inside the writer would put the reason (which is #0075's, about editors, not about handles) in the file that knows least about it.
+
+## A future that holds a `Store` across an `.await` cannot be `tokio::spawn`ed
+
+`rusqlite::Connection` is `Send` and not `Sync`, so a `Store` alive across a suspension point makes the whole future non-`Send` and `tokio::spawn` refuses it, with an error that names the future's type and not the line.
+The daemon's server search (#0126) reads the store once per mailbox to resolve hits by `Message-ID`, between two network calls that are both awaited.
+The fix is scoping rather than `spawn_blocking`: open the store, resolve and publish inside one synchronous function, and let the `Store` drop before returning to the loop that awaits.
+`Event::publish` is synchronous, which is what makes that possible; a streaming operation whose publish were async would have to hand the rows out of the scope instead.
+
+## An operation's streamed events need an id on the payload, not a client-side generation counter
+
+The TUI's search overlay tells a stale result from a live one with a generation counter it bumps on every submit, which works when the result arrives as one message the client itself posted.
+It does not survive the move to streamed events: a `state.event` carries the daemon's revision and whatever the kind's payload holds, and nothing on it knows about a counter the client invented.
+`message.server_hit` therefore carries `{operation_id, hit}` and the client remembers the id the call answered with (#0126).
+The general shape: when a per-call client-side sequence number becomes a daemon-side stream, the discriminator has to move onto the wire, and the operation id is already there for it.

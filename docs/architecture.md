@@ -478,20 +478,21 @@ They are the equality oracle `queries_tests.rs` and `invites_tests.rs` compare e
 That fallback is **not** the direct fallback the plan forbids: nothing recovers a *failed* daemon call by reading the store.
 A failed call degrades exactly as it did before, as an empty list, a zeroed count, an empty preview and a line in the log, and `tests/tui_daemon_recovery.rs` asserts it as a lock, by taking the account's engine lock during the outage from a second open file description.
 
-### The residue, at ten rows
+### The residue, at seven rows
 
-`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 10 pairs over 8 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
-The plan drives it to zero in P5-U10, which is deferred; each remaining row waits on a surface that does not exist yet.
+`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 7 pairs over 6 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
+The plan drives it to zero in P5-U10, which is in progress; what is left waits on the crate move rather than on a method.
 
 - `app/mod.rs store`, `app/calendar_view.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
   P5-U10b routed the last reader that had no daemon-backed twin: `App::draft_body` calls `draft.path` and parses the file the daemon names, and `load_draft_body` stays as its oracle. That one opened the store with `Store::open` rather than `open_store`, so `TUI_APP_STORE_RESIDUE` never listed it and still does not.
-- `app/types.rs store`, `app/types.rs ingest`, `queries.rs store` want `MessageRow`, `DraftRow` and `SkippedDraft` as protocol types, which would also delete `src/main.rs`'s duplicate wire-row decoder.
-- `actions.rs store` is `RD-06`'s Markdown rendition, `RD-07`'s `mp://` selector on a listing and `LST-09`'s `message.fetch`, none of which is built.
-- `helpers.rs store`, `helpers.rs imap_client`, `mod.rs store` are `LST-08`'s server search leg, which becomes `message.list_server`.
+- `app/types.rs store` is three `#[cfg(test)]` imports and `indexed_drafts`, the Drafts oracle; `app/types.rs ingest` is a test module. Both die with the move.
+- `actions.rs store` is `store_for_mutation`, which the `OpenEventSource` arm still calls for the row's `invite.ics` blob: no `message.*` method hands out an attachment blob inline.
+- `mod.rs store` is the drafts-directory poll loop's `drafts::fingerprint` / `drafts::refresh_account`, which is `draft.watch`'s business.
 
+`queries.rs store`, `helpers.rs store` and `helpers.rs imap_client` went in P5-U10c-I1, with the four surfaces: a listing row is `mp_protocol::listing::MessageListRow` and a draft row is `mp_protocol::draft::DraftEntry`, and the server search leg is two daemon operations.
 `actions.rs send` went in P6-U2: the undo-send hold and the send behind it are `send.draft` now, so the action layer's last `crate::send` import left with them.
 
-`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: seven `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store.
+`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: two `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store. Both are the invite blob above and the helper it calls.
 
 ### The crate move, in progress
 
@@ -500,11 +501,12 @@ The obstacle is not the engine residue above; it is the shared modules the allow
 `src/tui/` reaches twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure was about 15 000 lines across sixteen modules before any of it moved.
 The three-unit sequencing that does it is in `docs/tickets/0124-tui-cutover.md`.
 **P5-U10a and P5-U10b's splits landed** (#0126): eleven of those modules whole, and the engine-free halves of `selector`, `search`, `invite`, `reconcile`, `contacts` and `draft`, are `crates/mp-core` above.
-What P5-U10b did not land is the allow-list half of its brief: `RD-06`, `RD-07`, `LST-08`, `LST-09` and the wire-row types are still unbuilt, so the ten rows below are ten rows still, and they and the move are P5-U10c's.
+**P5-U10c-I1's four surfaces landed too**: `RD-06`'s `message.materialise_markdown`, `RD-07`'s `selector` on the listing row, and `LST-08`/`LST-09`'s `message.search_server` and `message.fetch`, which took the allow-list from ten rows to the seven above and the action residue from seven to two.
+What is left is the move itself, P5-U10c-I2, plus two production calls into store-half library functions the allow-list does not scan: `draft::create_draft_from_source` for a server hit with no local row, and `contacts::build_index_for_account` behind the contacts refresh key.
 
 One consequence to carry into those two units: `secrets` and `oauth2` are named in `ENGINE_MODULES` and now live in `mp-core`.
 No file under `src/tui/` imports either, so the allow-list did not move, but a `crates/mp-tui` depending on `mp-core` would be able to reach both without the textual scan (which looks for `use crate::` / `use mailypoppins::`) ever seeing it.
-P5-U10c has to decide whether they leave that list or whether the scan learns about `mp_core::`.
+P5-U10c-I2 has to decide whether they leave that list or whether the scan learns about `mp_core::`.
 
 ## Multi-account
 

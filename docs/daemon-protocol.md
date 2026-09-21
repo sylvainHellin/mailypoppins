@@ -454,8 +454,8 @@ A client cannot read an account's blob store, so the daemon writes the bytes it 
 
 | method | kind | params | result |
 |---|---|---|---|
-| `message.materialise_attachment` | client_integration | `{account, id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
-| `message.materialise_html` | client_integration | `{account, id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_attachment` | client_integration | `{account, row_id\|id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_html` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_markdown` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.release_handle` | query | `{handle}` | `{}` |
 
@@ -488,7 +488,8 @@ That is #0075's rule, and it moves to the daemon with the bytes.
 `name` is the message's subject slugified, or `message-<row_id>.md` for a message with no subject, so a user reading three open buffers can tell them apart.
 The rendition pins the row's body blob for the life of the handle, exactly as the html rendition pins the `html` blob (`ANO-6`).
 
-It is the one method of this family that takes `row_id`, addressed as `message.get` addresses a message: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
+All four address a message as `message.get` does: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
+`row_id` is documented here because this is the method whose call site holds one, and the other two accept it because the whole family resolves an address through one helper; widening them was additive and free (P5-U10c).
 The TUI holds a `MessageRef`, which is the synthetic row key and nothing else (#0050), and making it spell `"<mailbox>/<uid>"` would make it carry a second identity for every listed row.
 A message with no stored body renders with an empty body rather than refusing, because `render_markdown` degrades the way `mp show` does.
 
@@ -715,7 +716,9 @@ A hit is `mp_protocol::listing::ServerSearchHit`: the envelope the overlay rende
 A server-only hit carries no row and says so with `null` rather than with an empty string, because "not in the store" is the fact every row-dependent key of the overlay branches on.
 
 **`query` is the grammar a user types**, not an engine enum: the overlay holds a parsed `search::Query` and renders it back with `search::to_query_string`, so one parser serves every backend, which is `LST-06`'s whole point.
-`mailboxes` is the sidebar mailboxes the overlay asked for and defaults to every listable one; `limit` is the total hit budget across them, defaulting to 50, split per mailbox the way the in-process leg splits it.
+`mailboxes` is the sidebar mailboxes the overlay asked for and defaults to every one of the account's that has a server name.
+A mailbox is named by its sidebar label **or** by its server name, which is one spelling more than `message.list` accepts: the overlay holds a target of `(label, server_name)` and the search grammar's own `in:` directive is matched against both, so the wire takes whichever the caller has in hand rather than making it re-derive the other.
+`limit` is the total hit budget across the mailboxes, defaulting to 50 and split per mailbox with a floor of five, which is what the in-process leg spent: a per-mailbox limit would make a five-folder search cost five times what a one-folder search costs for the same number.
 A query the grammar cannot parse is `-32602`, and so is a mailbox the account does not have.
 
 **Deduplication is by `Message-ID` and it is the daemon's.**

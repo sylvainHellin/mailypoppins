@@ -26,7 +26,8 @@ That ticket's proposed sequencing is this one's unit table.
 | P5-U10a | I | `0d712c7`, `11370eb`, `9311bef`, `84385b1`, `e9a2773` | the shared crate: `crates/mp-core`, the eleven-module engine-free closure plus the `selector`, `search` and `invite` splits | done |
 | P5-U10b | I | `3a93341`, `3a2dc58`, `e88eb89`, `de575de`, `25a6ee6` | the three remaining splits (`reconcile`, `contacts`, `draft`), the `addresses` move out of `send`, and the draft body through `draft.path` | done, partially: the four surfaces did not land |
 | P5-U10c-T | T | see below | the contract for the four surfaces: `docs/daemon-protocol.md`, seven fixtures, `mp_protocol::listing`, three test files and both guards moved to their post-unit state | done |
-| P5-U10c | I | - | `RD-06`, `RD-07`, `LST-08`, `LST-09`, the wire-row types, and then the move itself: `git mv src/tui crates/mp-tui/src`, the test modules that link the engine, and the P2-U1a guard's scan roots | pending |
+| P5-U10c-I1 | I | `52a68cb`, `dd35b18`, `9e06bcf` | the four surfaces: `RD-06`, `RD-07`, `LST-08`, `LST-09`, the wire rows, and both guards at their post-unit counts | done |
+| P5-U10c-I2 | I | - | the move itself: `git mv src/tui crates/mp-tui/src`, the test modules that link the engine, and the P2-U1a guard's scan roots | pending |
 
 ## P5-U10a: the shared crate
 
@@ -381,3 +382,98 @@ What is left is `handle_action -> store_for_mutation(` (the invite blob) and `st
 - Whether `message.materialise_attachment` and `message.materialise_html` also gain `row_id`. This unit gives it to the third materialiser alone, because that is the only one with a `row_id`-holding call site today; widening the other two is additive and free.
 - Whether `message.search_server`'s `limit` is a total budget split per mailbox (which is what `lib_do_multi_search` does, and what the doc says) or a per-mailbox one. The rows assert neither.
 - Whether the streamed hit should carry the attachment list. The overlay does not render one for a server-only hit today, so `ServerSearchHit` does not carry it.
+
+## P5-U10c-I1: the four surfaces
+
+The implementer half of the contract above. Every row the T unit wrote is green and no test file of its own was edited.
+
+### What landed, per surface
+
+**`RD-07`, the selector on the row.** `src/daemon/methods/message.rs`'s `to_json` takes the account and renders `Selector::for_message` over the row it is serving, so a `message.list` row and a `message.search` hit are sixteen keys instead of fifteen.
+The TUI stops decoding a listing into the store row it came from: `entry_from_row` takes `mp_protocol::listing::MessageListRow`, `entry_from_draft` takes `DraftEntry`, `entry_from_skip` takes `DraftSkip`, `EmailEntry::skip` is a `DraftSkip`, and `EmailEntry` carries the daemon's own `selector`.
+`selected_selector` reads it off the row, where it opened the account's store on every `y`.
+The decode is `MessageListRow`'s serde derive rather than a key-by-key index, so a row a daemon older than this build produced still paints.
+
+**`RD-06`, the Markdown rendition.** `message.materialise_markdown` writes `store::read::render_markdown` at mode 0444 into the handle family's own directory and pins the row's `body_blob` for the handle's life.
+It declares itself in `MESSAGE_MARKDOWN_METHOD_SPECS`, an array of its own, because `tests/daemon_handles.rs` pins `MESSAGE_HANDLE_METHOD_SPECS` at the three names P3b-U12 shipped; `write_handle` took a `mode` argument, because 0444 is a property of this rendition and not of the family.
+The TUI's `Enter`/`e` and the overlay's `Enter`/`e`/`y` route through it, and the rendition is *released* when the editor exits where it used to be unlinked.
+
+**`LST-08` and `LST-09`, the server leg.** `message.search_server` and `message.fetch`, two durable operations in the new `src/daemon/methods/message_server.rs`.
+`lib_do_multi_search`, `lib_do_multi_search_graph`, `fetch_search_hit`'s IMAP round trip and `ingest_search_hit` moved into it unchanged in what they ask a server for, Graph/IMAP split included.
+The overlay appends each hit as its `message.server_hit` event arrives, matched by operation id, and the settle carries the footer's count and the mailboxes that refused.
+`src/tui/runtime.rs` is deleted: the TUI runs no network work of its own now, so the process-wide tokio runtime it handed out has no caller.
+
+### The three open decisions, decided
+
+**`message.materialise_attachment` and `message.materialise_html` take `row_id` too, and always did.** The family resolves an address through one `address` helper, which has accepted `row_id` since P5-U4 gave it to `message.get`; the doc's parameter column said `{account, id|selector, mailbox?}` for the two older materialisers and was wrong about the build it described. The column is corrected rather than the code widened, and the paragraph says which of the four has the call site that needs it.
+
+**`limit` is a total budget split per mailbox, with a floor of five.** That is what `lib_do_multi_search` spent and what the protocol document already said. A per-mailbox limit would make a five-folder search cost five times what a one-folder search costs for the same number, which is a different promise from the one `mp search --limit` makes.
+
+**The streamed hit carries no attachment list.** The overlay renders none for a server-only hit, so the field would travel unread; the hit does carry `has_attachments`, which is what draws the badge. Adding the list later is additive, and the day a client renders one is the day to measure what a search of fifty hits with their part tables costs on the wire.
+
+### Deviations
+
+**`message.search_server`'s `mailboxes` accepts a server name as well as a sidebar label.** `message.list` resolves a mailbox by role, slug or label; the overlay holds a `SearchTarget` of `(label, server_name)` and the grammar's own `in:` directive is matched against both (`App::search_target_by_name`), so a wire that took only the label would make every caller re-derive the other half. `docs/daemon-protocol.md` says so and a name that is neither is still `-32602` naming what the account has.
+
+**The read-only view's path now expires.** The overlay's `y` copies the path of a Markdown rendition, and a rendition is a handle with the family's ten-minute lifetime where the pre-daemon file sat in the per-row scratch directory until something overwrote it. Nothing reads a yanked path back, so what changed is how long a pasted path resolves.
+
+**A second open of the same row is a second handle.** The pre-daemon `write_readonly` removed the 0444 file first so the next open could write over it; each materialisation owns its own directory, so there is nothing to remove and the two renditions coexist until they are released or expire. `the_read_only_view_lands_beside_the_other_renditions` asserts the new fact rather than the old one.
+
+**`CLI_ENGINE_RESIDUE`'s `LST-06` reason is rewritten, and the five rows stay.** The reason said "no `message.search_server` exists", which stopped being true in this unit. What stands between `mp search`'s server leg and the method is three user-visible behaviours and not a call site: the CLI prints `Search in <mailbox> failed` to stderr per mailbox *as it goes*, where the operation reports `unreachable` only at the settle; `mp search --mailbox` names the server mailbox directly, so a name the account does not configure is searched rather than refused; and the plain-IMAP `has:attachment` warning is a sentence about a post-filter the daemon now applies itself. Routing it is a unit of its own.
+
+### Test edits
+
+None to the T unit's files: `git diff 943f433..HEAD --stat -- tests/daemon_markdown_slice.rs tests/daemon_server_leg_slice.rs tests/daemon_wire_rows.rs tests/daemon_read_only_methods.rs tests/daemon_protocol_fixtures.rs` is empty, and `tests/fixtures/tui-engine-imports.txt` and `TUI_ACTION_ENGINE_RESIDUE` are exactly as the T unit left them.
+
+Three tests the unit's own changes falsified were rewritten, each in the file that owns the code it tests:
+
+| test | what it asserted | what it asserts now |
+|---|---|---|
+| `actions::tests::the_read_only_view_lands_beside_the_other_renditions` | the rendition is at `materialisation_dir(<row>)/render/<slug>.md` and a second open rebuilds it in place | it is under the handle directory, and a second open is a second handle |
+| `actions::tests::the_read_only_view_is_discarded_however_the_editor_exits` | `finish_readonly_view` takes a path | it takes the rendition, and the release is what unlinks it |
+| `helpers::tests::a_search_hit_carries_a_ref_only_when_the_store_holds_it` | `fetched_to_email_entry` resolves a hit against the store | the daemon resolves it and the mapper is handed the answer |
+
+`src/daemon/session.rs`'s capability list gained the three method names, which is a source file's own expectation and not a contract test.
+
+### The guards, as they stand
+
+`tests/fixtures/tui-engine-imports.txt` is the seven survivors the T unit predicted, unchanged and for the reasons it gave.
+`TUI_ACTION_ENGINE_RESIDUE` is the two it predicted: `handle_action -> store_for_mutation(` for the `OpenEventSource` arm's `invite.ics` blob, and `store_for_mutation -> open_store(` for the helper that arm calls.
+`CLI_ENGINE_RESIDUE` is seventeen rows still, with one reason rewritten.
+
+### The P5-U10b hold, and what is left of it
+
+P5-U10b named four store-half functions `src/tui/` still calls. Two of them are already gone from the production tree:
+
+| call | where it is now | what it needs |
+|---|---|---|
+| `draft::source_from_row` | `src/tui/actions.rs`, `#[cfg(test)]` only | nothing: it dies with the test module in P5-U10c-I2 |
+| `draft::settle_sent_draft` | `src/tui/app/types.rs`, `#[cfg(test)]` only | the same |
+| `draft::create_draft_from_source` | `write_fetched_draft_and_edit`, production | a method: `draft.reply` and `draft.forward` address a `row_id`, and this is the one draft built from a server hit that has no local row |
+| `contacts::build_index_for_account` | `App::refresh_contacts`, production | not a call-site change: `contact.rebuild` is a durable operation and this is a synchronous key handler, so routing it needs an `Action` variant, an `Awaited` variant, a `BgResult` arm and a row in `ACTION_ROUTING` |
+
+The settle of `contact.rebuild` already carries everything `refresh_contacts` renders, which is worth writing down for whoever takes it: `saved == "written"` is the `Contacts refreshed ({contacts})` line after a `load_cache` of the file the daemon just wrote, `refused_empty` is `Contacts rebuild found none, kept {kept} cached`, and `refused_shrunk` is `Contacts rebuild found only {contacts}, kept {kept} cached`. The one line that has nowhere to go is `Contacts cache save failed`, which becomes the operation's failure and reads `Contacts refresh failed` with the save's own error behind it.
+
+### Follow-ups
+
+- The move itself, P5-U10c-I2.
+- `LST-06`'s CLI residue, above.
+- `create_draft_from_source` and `refresh_contacts`, above.
+- `ENGINE_MODULES` still names `secrets` and `oauth2`, which live in `mp-core`. P5-U10a raised it, P5-U10b repeated it, and this unit did not need it either: no file under `src/tui/` imports either, so the allow-list does not move. It is P5-U10c-I2's, because a `crates/mp-tui` that depends on `mp-core` can reach both and the scan would not see it.
+- Neither operation's happy path is testable offline, which is the gap every server-leg slice shares. The owner's manual check is the five-step list in `tests/daemon_server_leg_slice.rs`'s header and has not been run.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2 377 passed, 0 failed, 5 ignored**.
+That is P5-U10b's 2 347 plus thirty rows: the T unit's twenty-eight (four in `mp_protocol::listing`, five in `daemon_protocol_fixtures`, seven in `daemon_markdown_slice`, seven in `daemon_server_leg_slice`, five in `daemon_wire_rows`) and this unit's two, both in `message_server`.
+Per crate: `mailypoppins` lib 986, `mp-core` 416, `mp-protocol` 18, `mp-client` 7, `mp` bin 2, the integration binaries the rest.
+
+`--test daemon_markdown_slice` -> 7. `--test daemon_server_leg_slice` -> 7. `--test daemon_wire_rows` -> 5. `--test daemon_read_only_methods` -> 9. `--test daemon_protocol_fixtures` -> 20. `--test architecture_boundaries` -> 6, the allow-list at seven rows. `--test test_selection_guard` -> 6. `--test phase5_parity_gate` -> 11.
+`--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, with no snapshot re-approved and no `.snap.new`.
+
+`scripts/capture-cli-help.sh` and `mp dump-keys --json`, from a binary rebuilt in the same run, diff empty against `docs/baselines/pre-daemon/cli-help.txt` and `docs/baselines/pre-daemon/tui-keys.json`.
+
+`cargo clippy --workspace --offline --all-targets` -> **37 distinct warnings**, P5-U10b's count exactly, none of them on a line this unit wrote.
+
+`cargo install --path . --offline` -> replaced, release profile, 35 s.
+`pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
