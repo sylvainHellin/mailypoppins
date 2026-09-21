@@ -41,9 +41,15 @@ const SNAPSHOT_DIR: &str = "src/tui/ui/snapshots";
 
 /// `#[test]` / `#[tokio::test]` attributes under [`TUI_ROOT`].
 ///
-/// The plan's floor was 367 and the pre-workspace tree carried 368; the Phase
-/// 5 tree carries 464, which is the count CI defends.
-const MIN_TUI_TESTS: usize = 464;
+/// The plan's floor was 367 and the pre-workspace tree carried 368; the tree
+/// carries 467, which is the count CI defends.
+///
+/// It went through 492: the agenda loader and its 25 tests left `src/tui/` for
+/// `src/agenda.rs` in P5-U10c-I2 (#0126), because a `calendar.events` that
+/// reads its answer out of the TUI is a daemon method depending on a client.
+/// They did not leave the root package, so the `--lib` run is unmoved at 988
+/// and this floor is the only number that had to come down.
+const MIN_TUI_TESTS: usize = 467;
 /// `#[test]` functions in [`GOLDEN_FRAMES`]. Plan floor and actual both 20.
 const MIN_GOLDEN_FRAME_TESTS: usize = 20;
 /// `.snap` files in [`SNAPSHOT_DIR`]. Plan floor and pre-workspace actual both

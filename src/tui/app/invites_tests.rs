@@ -26,7 +26,7 @@ use crate::tui::app::App;
 use crate::tui::queries::{calendar_events, message_ics, message_invite, Queries};
 use crate::tui::test_daemon::TestDaemon;
 
-use super::MessageRef;
+use super::{CalendarEvent, MessageRef};
 
 /// The one account every fixture configures, and the one every call names.
 const ACCOUNT: &str = "alice";
@@ -87,7 +87,14 @@ fn a_daemon_backed_agenda_matches_the_store_backed_one() {
     seed_invited_and_answered(&fx);
     fx.ingest("inbox", 3, "Just mail", None);
 
-    let expected = fx.agenda(&self_address());
+    // The oracle is the wire rows `crate::agenda` builds, decoded the way the
+    // client decodes the ones that come off the socket (#0126): one agenda,
+    // one dedup, and the comparison is over what the view holds.
+    let expected: Vec<CalendarEvent> = fx
+        .agenda(&self_address())
+        .into_iter()
+        .map(CalendarEvent::from_wire)
+        .collect();
     let daemon = daemon();
     let actual = calendar_events(&daemon as &dyn Queries, ACCOUNT).expect("the agenda");
 

@@ -7,6 +7,7 @@ pub use mp_core::{
     timing, types,
 };
 
+pub mod agenda;
 pub mod config_cmd;
 pub mod contacts;
 pub mod contacts_cmd;

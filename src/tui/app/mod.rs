@@ -1,5 +1,4 @@
 mod bootstrap;
-pub(crate) mod calendar_view;
 pub(crate) mod jump_date;
 mod keymap;
 mod keys;
@@ -10,7 +9,6 @@ mod queries_tests;
 mod store_rows;
 mod types;
 
-pub use calendar_view::load_events_for_account;
 pub use keymap::{
     dump_json, dump_markdown, help_sections, hint_bindings, leader_is_view_agnostic,
     palette_actions, prefix_continuations, resolve, Guard, KeyAction, KeyBinding, KeyCtx,
@@ -654,7 +652,13 @@ impl App {
             return Vec::new();
         };
         let blobs = crate::store::BlobStore::for_account(&account);
-        calendar_view::load_events_for_account(&store, &blobs, &account, &self.self_address())
+        // The same wire rows `calendar.events` would have answered, decoded
+        // the same way: the agenda moved out of the TUI with #0126 and the
+        // client reads one shape whichever side built it.
+        crate::agenda::load_events_for_account(&store, &blobs, &account, &self.self_address())
+            .into_iter()
+            .map(CalendarEvent::from_wire)
+            .collect()
     }
 
     /// Drop the loaded agenda (events are per-account, so the view reloads
@@ -695,7 +699,7 @@ impl App {
     /// are always listed — they cannot be placed on the timeline, so hiding
     /// them would silently lose data.
     pub fn recompute_calendar_visible(&mut self) {
-        let now = calendar_view::now_sort_key();
+        let now = crate::calendar::now_sort_key();
         let show_past = self.calendar_view.show_past;
         self.calendar_view.visible = self
             .calendar_view

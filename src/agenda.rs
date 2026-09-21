@@ -1,5 +1,13 @@
-//! Local calendar loader (#0034): build the Calendar view's agenda rows from
-//! the iMIP messages the store already holds.
+//! The local agenda (#0034): the rows `calendar.events` serves, built from the
+//! iMIP messages the store already holds.
+//!
+//! It was `tui::app::calendar_view` until #0126 (P5-U10c-I2), which is what a
+//! daemon method reaching into the TUI for its own answer looked like. It
+//! reads a store and a blob store, so it is the engine's; what it produces is
+//! [`mp_protocol::calendar::AgendaEvent`], the wire row, which is what both
+//! ends already spoke. The TUI decodes one into its own `CalendarEvent`
+//! whether it came off the socket or off this function, so there is one
+//! agenda and one dedup.
 //!
 //! This is deliberately local-first and **blind to Outlook-created events**:
 //! only invitations that arrived (or were sent) by email exist locally, so an
@@ -15,9 +23,9 @@
 //!
 //! Attendee statuses and our own RSVP are folded in from the REPLY rows by
 //! [`crate::reconcile`], which computes them rather than storing them. The
-//! whole agenda is therefore rebuilt from rows and blobs on demand, and is
-//! kept in `CalendarView` until the user refreshes it (`r`) or switches
-//! account, exactly as the walk-based build was.
+//! whole agenda is therefore rebuilt from rows and blobs on demand, and the
+//! client keeps it until the user refreshes it (`r`) or switches account,
+//! exactly as the walk-based build was.
 //!
 //! Cost: one indexed join over `messages` plus one blob read per invite row.
 //! Invites are a rare row, the blobs are a few kilobytes, and none of it runs
@@ -26,7 +34,8 @@
 
 use std::collections::HashMap;
 
-use super::types::{CalendarEvent, MessageRef};
+use mp_protocol::calendar::AgendaEvent;
+
 use crate::reconcile::{self, InviteMessage};
 use crate::store::{BlobStore, Store};
 
@@ -37,7 +46,7 @@ const SENT_MAILBOX: &str = "sent";
 
 /// A REQUEST candidate before dedup, with its identity and tiebreak keys.
 struct Candidate {
-    row: CalendarEvent,
+    row: AgendaEvent,
     /// `SEQUENCE` from the ics.
     sequence: u32,
     /// `DTSTAMP` from the ics, empty when unknown.
@@ -95,7 +104,7 @@ pub fn load_events_for_account(
     blobs: &BlobStore,
     account: &str,
     self_address: &str,
-) -> Vec<CalendarEvent> {
+) -> Vec<AgendaEvent> {
     let invites = reconcile::load_invites(store, blobs, account);
     let replies = reconcile::fold_replies(&invites);
     // Cancellations and the version chain, folded over the whole account so
@@ -128,14 +137,14 @@ pub fn load_events_for_account(
         }
     }
 
-    let mut events: Vec<CalendarEvent> =
+    let mut events: Vec<AgendaEvent> =
         candidates.into_values().map(|candidate| candidate.row).collect();
 
     // Chronological, undated last; the row reference as the final tiebreak so
     // the order is stable across runs.
     events.sort_by(|a, b| {
-        let a_key = (a.start_sort.is_empty(), &a.start_sort, a.msg);
-        let b_key = (b.start_sort.is_empty(), &b.start_sort, b.msg);
+        let a_key = (a.start_sort.is_empty(), &a.start_sort, a.row_id);
+        let b_key = (b.start_sort.is_empty(), &b.start_sort, b.row_id);
         a_key.cmp(&b_key)
     });
     events
@@ -164,8 +173,8 @@ fn candidate_from(
         _ => end.sort,
     };
     Candidate {
-        row: CalendarEvent {
-            msg: MessageRef::new(invite.row_id),
+        row: AgendaEvent {
+            row_id: invite.row_id,
             subject: invite
                 .subject
                 .clone()
@@ -279,11 +288,6 @@ fn plus_one_day(sort_key: &str) -> String {
     }
 }
 
-/// The current instant as a `start_sort`-comparable UTC key.
-pub fn now_sort_key() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,18 +333,18 @@ mod tests {
     }
 
     /// The agenda of the fixture account, with no own address to resolve.
-    fn agenda(fx: &Fixture) -> Vec<CalendarEvent> {
+    fn agenda(fx: &Fixture) -> Vec<AgendaEvent> {
         load_events_for_account(&fx.store, &fx.blobs, "alice", "")
     }
 
     /// Ingest one REQUEST and return the agenda it produces.
-    fn agenda_of(mailbox: &str, uid: i64, ics: &str) -> Vec<CalendarEvent> {
+    fn agenda_of(mailbox: &str, uid: i64, ics: &str) -> Vec<AgendaEvent> {
         let fx = fixture();
         fx.ingest_invite(mailbox, uid, "Subject", ics);
         agenda(&fx)
     }
 
-    fn subjects(events: &[CalendarEvent]) -> Vec<&str> {
+    fn subjects(events: &[AgendaEvent]) -> Vec<&str> {
         events.iter().map(|e| e.subject.as_str()).collect()
     }
 
@@ -476,7 +480,7 @@ mod tests {
         assert!(
             events[0].is_organizer,
             "our sent copy must win the tie, got {}",
-            events[0].msg
+            events[0].row_id
         );
     }
 
@@ -904,9 +908,18 @@ mod tests {
     }
 
     /// The subjects the Calendar view's default (upcoming-only) scope shows.
+    ///
+    /// The two rows above it are about a sort key this module mints and a
+    /// filter the client applies to it, so the oracle has to be the client's
+    /// own `recompute_calendar_visible` rather than a second copy of the rule.
+    /// It is the one place this module's tests reach into the TUI, and it goes
+    /// with the filter the day the TUI is a crate of its own.
     fn upcoming(fx: &Fixture) -> Vec<String> {
         let mut app = crate::tui::app::App::default_for_tests();
-        app.calendar_view.events = agenda(fx);
+        app.calendar_view.events = agenda(fx)
+            .into_iter()
+            .map(crate::tui::app::CalendarEvent::from_wire)
+            .collect();
         app.calendar_view.loaded = true;
         app.recompute_calendar_visible();
         app.calendar_view
@@ -970,7 +983,7 @@ mod tests {
         let me = "me@example.com";
         let before = load_events_for_account(&fx.store, &fx.blobs, "alice", me);
         assert_eq!(before[0].event.rsvp, "needs-action");
-        assert_eq!(before[0].msg, MessageRef::new(request));
+        assert_eq!(before[0].row_id, request);
 
         // What `outbox::ingest_sent_copy` does during the send itself.
         let reply = fx.ingest_invite(
@@ -996,7 +1009,7 @@ mod tests {
         // untouched: still one agenda row, still the REQUEST's.
         let after = load_events_for_account(&fx.store, &fx.blobs, "alice", me);
         assert_eq!(after.len(), 1, "the REPLY is not a second agenda row");
-        assert_eq!(after[0].msg, MessageRef::new(request));
+        assert_eq!(after[0].row_id, request);
         assert_eq!(after[0].event.rsvp, "declined");
         assert_eq!(after[0].event.attendees[0].status, "declined");
     }

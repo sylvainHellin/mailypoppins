@@ -127,11 +127,11 @@ impl Method for CalendarQueryMethod {
 
 /// The `result` of `calendar.events`.
 ///
-/// The agenda rows are built by [`crate::tui::app::calendar_view`], the one
-/// place that owns the dedup, the tiebreak and the sort; a second copy here
-/// would be a second answer to "which copy of this event is the row". That
-/// module is still under `src/tui/`, which is where P5-U10's crate move has to
-/// pick it up: see the ticket's follow-ups.
+/// The agenda rows are built by [`crate::agenda`], the one place that owns the
+/// dedup, the tiebreak and the sort; a second copy here would be a second
+/// answer to "which copy of this event is the row". It was
+/// `crate::tui::app::calendar_view` until #0126 (P5-U10c-I2), which is a
+/// daemon method reading its answer out of a client.
 pub fn events(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     only_params("calendar.events", params, &["account"])?;
     let name = string_param(params, "account")?;
@@ -141,14 +141,7 @@ pub fn events(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     let store =
         Store::open(crate::config::store_path(&name)).map_err(|e| server_error(&name, &e))?;
     let blobs = BlobStore::for_account(&name);
-    let rows = crate::tui::app::calendar_view::load_events_for_account(
-        &store,
-        &blobs,
-        &name,
-        &self_address,
-    );
-    let events: Vec<mp_protocol::calendar::AgendaEvent> =
-        rows.into_iter().map(|row| row.to_wire()).collect();
+    let events = crate::agenda::load_events_for_account(&store, &blobs, &name, &self_address);
     Ok(json!({"account": name, "events": events}))
 }
 

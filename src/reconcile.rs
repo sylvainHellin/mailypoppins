@@ -298,8 +298,11 @@ pub(crate) mod tests {
         }
 
         /// The store-backed agenda, the oracle `calendar.events` answers.
-        pub(crate) fn agenda(&self, self_address: &str) -> Vec<crate::tui::app::CalendarEvent> {
-            crate::tui::app::load_events_for_account(
+        pub(crate) fn agenda(
+            &self,
+            self_address: &str,
+        ) -> Vec<mp_protocol::calendar::AgendaEvent> {
+            crate::agenda::load_events_for_account(
                 &self.store,
                 &self.blobs,
                 &self.account,

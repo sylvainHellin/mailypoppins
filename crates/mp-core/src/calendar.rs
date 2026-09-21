@@ -330,6 +330,16 @@ fn humanize_days(days: &str) -> String {
         .join(", ")
 }
 
+/// The current instant as an agenda `start_sort`-comparable UTC key.
+///
+/// The one place that mints one, because the keys it is compared against are
+/// minted by `mailypoppins::agenda` and a second format would make "upcoming"
+/// mean two things. Here rather than beside them because the comparison is the
+/// client's: the TUI recomputes the visible agenda on every `t`.
+pub fn now_sort_key() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

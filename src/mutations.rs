@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::reconcile::tests::{fixture, invite_ics, Fixture};
     use crate::store::read;
-    use crate::tui::app::{calendar_view, MessageRef};
+    use crate::agenda;
 
     fn refs(ids: &[i64]) -> Vec<i64> {
         ids.to_vec()
@@ -320,12 +320,12 @@ mod tests {
     fn moving_an_invite_changes_what_a_rebuilt_agenda_reads() {
         let fx = fixture();
         let id = fx.ingest_invite("inbox", 1, "Standup", &invite_ics("uid-a", 0, &["a@x.com"]));
-        let stale = calendar_view::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
+        let stale = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
         assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0].msg, MessageRef::new(id));
+        assert_eq!(stale[0].row_id, id);
 
         queue_move(&fx.store, "alice", &refs(&[id]), "archive", "INBOX", "Archive");
-        let rebuilt = calendar_view::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
+        let rebuilt = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
 
         assert_eq!(rebuilt.len(), 1, "the invite is still on the agenda");
         assert_eq!(mailbox_of(&fx, id).as_deref(), Some("archive"));
@@ -338,11 +338,11 @@ mod tests {
     fn deleting_an_invite_drops_it_from_a_rebuilt_agenda() {
         let fx = fixture();
         let id = fx.ingest_invite("inbox", 1, "Standup", &invite_ics("uid-a", 0, &["a@x.com"]));
-        let stale = calendar_view::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
+        let stale = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
         assert_eq!(stale.len(), 1);
 
         queue_delete(&fx.store, &fx.blobs, "alice", &refs(&[id]), "INBOX");
-        let rebuilt = calendar_view::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
+        let rebuilt = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
 
         assert!(rebuilt.is_empty(), "a deleted invite stayed on the agenda");
         assert_eq!(stale.len(), 1, "the pre-mutation snapshot is the stale one");
