@@ -1185,9 +1185,20 @@ fn a_quit_clears_running_so_the_drain_stops() {
 /// why.
 ///
 /// `(file, function, needle, reason)`, sorted. Read it as the answer to "why is
-/// this gate not at zero": six functions read or write something no registered
-/// method answers, and one is the undo-send hold the plan holds back for Phase
-/// 6 (`SND-04`, `.agents/workflow/native-gui-daemon/plan.md` P6-U1/U2).
+/// this gate not at zero".
+///
+/// P5-U10c (#0126) took five of the seven rows P5-U6 left: `RD-06`'s
+/// `message.materialise_markdown` took `readonly_view_for_row` and
+/// `handle_search_result_action`, `RD-07`'s `selector` on the listing row took
+/// `selected_selector`, and `LST-09`'s `message.fetch` took `ingest_search_hit`
+/// and `fetch_search_hit`.
+///
+/// What is left is one call site and the helper it uses: the `OpenEventSource`
+/// arm reads an `invite.ics` blob out of the store inline, and no `message.*`
+/// method hands out an attachment blob that way. `store_for_mutation` was
+/// going to die with the last rendition and does not, because that arm still
+/// calls it. Both rows go when the invite blob is a method, which is not one
+/// of P5-U10c's four surfaces.
 ///
 /// The table is a record as much as a gate, and
 /// [`the_actions_that_could_be_routed_were`] fails in both directions: a call
@@ -1206,13 +1217,6 @@ fn a_quit_clears_running_so_the_drain_stops() {
 const TUI_ACTION_ENGINE_RESIDUE: &[(&str, &str, &str, &str)] = &[
     (
         "src/tui/actions.rs",
-        "fetch_search_hit",
-        "imap_client::",
-        "the raw fetch by Message-ID behind a server-only hit: message.list_server lists \
-         envelopes and no method fetches one message's bytes (LST-09)",
-    ),
-    (
-        "src/tui/actions.rs",
         "handle_action",
         "store_for_mutation(",
         "the OpenEventSource arm's invite.ics blob, the same read app/mod.rs keeps as \
@@ -1220,37 +1224,10 @@ const TUI_ACTION_ENGINE_RESIDUE: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "src/tui/actions.rs",
-        "handle_search_result_action",
-        "store_for_mutation(",
-        "the read-only Markdown rendition of a search hit, which is readonly_view_for_row's \
-         read under another caller",
-    ),
-    (
-        "src/tui/actions.rs",
-        "ingest_search_hit",
-        "open_store(",
-        "ingesting a server-only hit into the local store: LST-09's message.fetch is not built \
-         and mail enters the store through a sync (#0037)",
-    ),
-    (
-        "src/tui/actions.rs",
-        "readonly_view_for_row",
-        "store_for_mutation(",
-        "the read-only Markdown rendition (#0075, RD-06): nothing registered renders a stored \
-         message as Markdown, and the parity matrix's message.materialize is not built",
-    ),
-    (
-        "src/tui/actions.rs",
-        "selected_selector",
-        "open_store(",
-        "the mp:// selector of the cursor row (RD-07): no listing carries one, and message.get \
-         would be a whole-message read to answer a clipboard copy",
-    ),
-    (
-        "src/tui/actions.rs",
         "store_for_mutation",
         "open_store(",
-        "the helper the three renditions above share; it dies with the last of them",
+        "the helper the invite blob above still calls; it dies with that one read and not \
+         with the renditions, which P5-U10c moved onto message.materialise_markdown",
     ),
 ];
 
@@ -1285,7 +1262,7 @@ const ENGINE_NEEDLES: [&str; 11] = [
 ];
 
 /// P5-U5's gate: every action that a registered method can carry goes through
-/// one, and what is left is the seven entries of
+/// one, and what is left is the two entries of
 /// [`TUI_ACTION_ENGINE_RESIDUE`].
 ///
 /// Fails on the tree as committed (thirty-three call sites against eight),
