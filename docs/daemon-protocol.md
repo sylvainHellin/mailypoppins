@@ -292,10 +292,13 @@ An unknown account is `account_unknown` and a configured account with no readabl
     "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
     "flags": {"seen": true, "answered": true, "forwarded": true, "flagged": false},
     "has_attachments": true,
-    "is_invite": false
+    "is_invite": false,
+    "selector": "mp://work/inbox/Bericht@example.com"
   }]
 }
 ```
+
+The row is `mp_protocol::listing::MessageListRow`, so a client decodes a listing into a typed value instead of indexing a map with string literals; `message.search`'s hits are the same row plus the `mailbox` they were found in.
 
 `mailbox` accepts a role, a slug or a sidebar label, exactly as `mp list-messages --mailbox` does, and the answer echoes the resolved id rather than the spelling that was sent.
 The order is the store's, `date_sort DESC, id DESC`, the same rows `mp list-messages` and the TUI list show.
@@ -306,6 +309,11 @@ The two dates are both carried because neither can be derived from the other: `d
 `is_invite` says the row carries an iMIP payload, which is what draws the badge without reading a blob.
 `id` is `messages.id`, the synthetic row key: it is the identity a TUI holds for a listed row and the address `message.get` takes back as `row_id`.
 It is per store and per session, it survives no store rebuild, and a client that persisted one would be naming a row that may since have become another message.
+`selector` is the canonical `mp://<account>/<mailbox>/<key>` of the row, rendered daemon-side by `Selector::for_message`, so a client copies it to a clipboard without a store read (`RD-07`).
+It goes on the row rather than behind a `message.selector` query, because the daemon already had the string in hand when it built the row and a query per keypress would be a round trip to learn something the listing could have said.
+A client could compose it from `message_id`, the answer's `mailbox` and its own account name, since `mp_core::selector` is a shared module; it may not, because that is a second implementation of the percent-encoding and of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins only the CLI's spelling.
+The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fifteen keys, and this is the sixteenth, about forty bytes of ASCII, paid once per listing rather than once per copy.
+
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
 An empty mailbox of a ready account is an empty listing, not an error.
@@ -398,7 +406,7 @@ An unknown uid, a malformed id, a mailbox the account does not have and a select
 
 The params mirror `mp search --local`'s flags and the daemon builds the query with `search::from_cli`, so one parser serves every backend and the client sends what the user typed.
 `body_query` is the wire name of the `--body` flag, because `body` is already the "send me the bodies" switch (`--full`) and one key may not mean two things; `body` defaults to `false` here and to `true` in `message.get`, deliberately, since `mp show` always prints a body and `mp search` prints one only under `--full`.
-Hits come back in the store's ranking order, which is what `mp search --local` prints under "best match first", and each hit is a `message.list` row plus the `mailbox` it was found in, which is what `Selector::for_message` needs to render the line.
+Hits come back in the store's ranking order, which is what `mp search --local` prints under "best match first", and each hit is a `message.list` row, `selector` included, plus the `mailbox` it was found in.
 `mailbox` is resolved as `message.list` resolves it and falls back to the query's own `in:` directive; an unknown one is `-32602`.
 An absent `limit` means every hit.
 A query the search layer cannot use, a lone quote or bare punctuation, is `-32602` and not `-32603`: the parameter is wrong, not the store.

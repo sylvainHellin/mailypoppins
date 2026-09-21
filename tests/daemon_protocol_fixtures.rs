@@ -578,6 +578,9 @@ fn the_read_only_response_fixtures_carry_the_documented_fields() {
     // The six columns and the row id P5-U4 added for the TUI list are part of
     // this shape since then, and `flags` carries the store's fourth axis with
     // them; the protocol changelog carries the entry.
+    //
+    // `selector` joined them in P5-U10c: the fifteenth key is the canonical
+    // `mp://` of the row, so a client copies it without a store read (`RD-07`).
     const MESSAGE_ROW: &[&str] = &[
         "bcc",
         "cc",
@@ -590,6 +593,7 @@ fn the_read_only_response_fixtures_carry_the_documented_fields() {
         "is_invite",
         "message_id",
         "reply_to",
+        "selector",
         "subject",
         "to",
         "uid",

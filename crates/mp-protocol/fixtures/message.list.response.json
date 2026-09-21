@@ -22,6 +22,7 @@
         "is_invite": false,
         "message_id": "<Bericht@example.com>",
         "reply_to": null,
+        "selector": "mp://work/inbox/Bericht@example.com",
         "subject": "Re: Obermeyer Center steering meeting",
         "to": "alice@example.com",
         "uid": 1846
@@ -43,6 +44,7 @@
         "is_invite": false,
         "message_id": "<Invoice-2025-114@example.com>",
         "reply_to": "accounts@example.com",
+        "selector": "mp://work/inbox/Invoice-2025-114@example.com",
         "subject": "Invoice 2025-114",
         "to": "alice@example.com",
         "uid": 1845

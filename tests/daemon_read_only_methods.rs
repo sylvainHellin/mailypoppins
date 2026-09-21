@@ -114,6 +114,7 @@ use tokio::net::UnixStream;
 use mailypoppins::engine_lock::EngineLock;
 use mailypoppins::ingest::{ingest_message, IngestInput};
 use mailypoppins::parse::{AttachmentData, FetchedEmail};
+use mailypoppins::selector;
 use mailypoppins::store::{read, BlobStore, Store};
 use mailypoppins::tui::app::resolve_date;
 use mailypoppins::types::MessageFlags;
@@ -627,10 +628,16 @@ fn account_entry<'a>(result: &'a Value, name: &str) -> &'a Value {
 /// The row id, the six columns and the fourth flag axis joined the row in
 /// P5-U4 (#0124), which is what a TUI list holds beyond what a CLI listing
 /// prints; the protocol changelog carries the entry.
-fn expected_message(row: &read::MessageRow) -> Value {
+///
+/// `selector` joined it in P5-U10c (#0126, `RD-07`), which is why this takes
+/// an account: the canonical `mp://` of a row needs one, and the expectation
+/// is `Selector::for_message` over the very row the daemon read, so the wire
+/// and `tests/cli_selector_contract.rs` cannot spell one message two ways.
+fn expected_message(account: &str, row: &read::MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
     json!({
+        "selector": selector::Selector::for_message(account, row).to_string(),
         "id": row.id,
         "uid": row.uid,
         "message_id": row.message_id,
@@ -792,6 +799,7 @@ async fn message_list_reports_the_store_rows_newest_first() {
                 "flags",
                 "has_attachments",
                 "is_invite",
+                "selector",
             ],
             &format!("messages[{index}]"),
         );
@@ -802,7 +810,7 @@ async fn message_list_reports_the_store_rows_newest_first() {
         );
         assert_eq!(
             message,
-            &expected_message(row),
+            &expected_message("alpha", row),
             "messages[{index}] carries the stored row {} verbatim",
             row.message_id
         );
