@@ -61,7 +61,7 @@
 //!
 //! The seven actions whose route names an **operation**-kind method
 //! (`sync.quick`, `sync.full`, `send.draft`, `send.approved`, `calendar.rsvp`,
-//! `message.search`, `message.list_server`) keep the arm they have in
+//! `message.search_server`, `message.fetch`) keep the arm they have in
 //! `handle_action`: each already owns a `std::thread::spawn` and a
 //! `BgResult` reply channel, and an operation answers `{operation_id}` at once
 //! and finishes later, so its arm has to wait somewhere and post a result. That
@@ -323,7 +323,7 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     (
         "ServerSearch",
         // The local pass first, then the server leg (LST-08).
-        ActionRoute::Daemon(&["message.search", "message.list_server"]),
+        ActionRoute::Daemon(&["message.search", "message.search_server"]),
         false,
     ),
     (
@@ -339,12 +339,9 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ),
     (
         "SearchResultFetch",
-        // LST-09's `message.fetch` is not built and nothing else ingests a
-        // server-only hit; the two functions that do it are the last two rows
-        // of `TUI_ACTION_ENGINE_RESIDUE`.
-        ActionRoute::ClientOnly(
-            "no method ingests a server-only hit; see TUI_ACTION_ENGINE_RESIDUE",
-        ),
+        // LST-09, served since P5-U10c-I1: the ingest of a server-only hit is
+        // one durable operation on the daemon.
+        ActionRoute::Daemon(&["message.fetch"]),
         false,
     ),
     (
@@ -1323,49 +1320,37 @@ fn a_quit_clears_running_so_the_drain_stops() {
 /// `(file, function, needle, reason)`, sorted. Read it as the answer to "why is
 /// this gate not at zero".
 ///
-/// P5-U10c (#0126) took five of the seven rows P5-U6 left: `RD-06`'s
+/// **Empty since P5-U10c-I2 (#0126), which is the gate met.** The TUI's action
+/// layer reaches the store, the mail server and the send path through daemon
+/// methods and through nothing else.
+///
+/// P5-U10c-I1 took five of the seven rows P5-U6 left: `RD-06`'s
 /// `message.materialise_markdown` took `readonly_view_for_row` and
 /// `handle_search_result_action`, `RD-07`'s `selector` on the listing row took
 /// `selected_selector`, and `LST-09`'s `message.fetch` took `ingest_search_hit`
-/// and `fetch_search_hit`.
-///
-/// What is left is one call site and the helper it uses: the `OpenEventSource`
-/// arm reads an `invite.ics` blob out of the store inline, and no `message.*`
-/// method hands out an attachment blob that way. `store_for_mutation` was
-/// going to die with the last rendition and does not, because that arm still
-/// calls it. Both rows go when the invite blob is a method, which is not one
-/// of P5-U10c's four surfaces.
+/// and `fetch_search_hit`. P5-U10c-I2 took the last two: the
+/// `OpenEventSource` arm reads the `invite.ics` blob through
+/// `App::load_message_ics`, which is `message.ics` on the session, and
+/// `store_for_mutation` died with it, having been the helper that one read
+/// kept alive.
 ///
 /// The table is a record as much as a gate, and
 /// [`the_actions_that_could_be_routed_were`] fails in both directions: a call
 /// site still there belongs behind a method, a site gone belongs struck from
-/// the table in the same commit. It follows `tests/architecture_boundaries.rs`'s
-/// `CLI_ENGINE_RESIDUE` and `queries_tests::TUI_APP_STORE_RESIDUE` in shape and
-/// in intent, with a needle column those two do not have: `handle_action` is a
-/// thousand lines and a whole-function exemption there would exempt forty
-/// arms, so what is permitted is one *symbol* in one function.
+/// the table in the same commit. An empty table therefore fails on the first
+/// engine call anyone adds back, which is what it is for now. It follows
+/// `tests/architecture_boundaries.rs`'s `CLI_ENGINE_RESIDUE` and
+/// `queries_tests::TUI_APP_STORE_RESIDUE` in shape and in intent, with a needle
+/// column those two do not have: `handle_action` is a thousand lines and a
+/// whole-function exemption there would exempt forty arms, so what is permitted
+/// is one *symbol* in one function.
 ///
 /// It lives in this module rather than in `tests/architecture_boundaries.rs`
 /// for the reason P5-U3 gave: it only becomes true when P5-U6 lands, and the
 /// plan requires `cargo test --workspace` to be green on a T unit's commit.
 /// This module is the target that does not compile, so a failing gate inside it
 /// costs the rest of the tree nothing.
-const TUI_ACTION_ENGINE_RESIDUE: &[(&str, &str, &str, &str)] = &[
-    (
-        "src/tui/actions.rs",
-        "handle_action",
-        "store_for_mutation(",
-        "the OpenEventSource arm's invite.ics blob, the same read app/mod.rs keeps as \
-         load_message_ics: no message.* method hands out an attachment blob inline",
-    ),
-    (
-        "src/tui/actions.rs",
-        "store_for_mutation",
-        "open_store(",
-        "the helper the invite blob above still calls; it dies with that one read and not \
-         with the renditions, which P5-U10c moved onto message.materialise_markdown",
-    ),
-];
+const TUI_ACTION_ENGINE_RESIDUE: &[(&str, &str, &str, &str)] = &[];
 
 /// The two files this unit is accountable for.
 ///

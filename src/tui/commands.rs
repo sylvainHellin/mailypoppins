@@ -13,8 +13,8 @@
 //! `true` means the action was daemon-routed here and `handle_action` owes it
 //! nothing. `false` means "not mine": a client-only or local action, or one of
 //! the operation-kind actions (`sync.*`, `send.*`, `calendar.rsvp`,
-//! `message.search`, `message.list_server`) that still owns a background thread
-//! and a [`BgResult`](crate::tui::app::BgResult) channel in `handle_action`,
+//! `message.search_server`) that still owns a background thread and a
+//! [`BgResult`](crate::tui::app::BgResult) channel in `handle_action`,
 //! because an operation answers `{operation_id}` at once and finishes later.
 //!
 //! A refusal from the daemon is not a `false`. It lands on the status line
@@ -135,18 +135,14 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::Sync => ActionRoute::Daemon(&["sync.full"]),
         // The local pass first, then the server leg (LST-08).
         Action::ServerSearch { .. } => {
-            ActionRoute::Daemon(&["message.search", "message.list_server"])
+            ActionRoute::Daemon(&["message.search", "message.search_server"])
         }
         Action::SearchResultOpen => {
             ActionRoute::ClientOnly("$EDITOR, over a rendition this process opens")
         }
         Action::SearchResultJump => ActionRoute::Local,
         Action::SearchResultYankPath => ActionRoute::ClientOnly("the system clipboard"),
-        // LST-09's `message.fetch` is not built and nothing else ingests a
-        // server-only hit.
-        Action::SearchResultFetch => ActionRoute::ClientOnly(
-            "no method ingests a server-only hit; see TUI_ACTION_ENGINE_RESIDUE",
-        ),
+        Action::SearchResultFetch => ActionRoute::Daemon(&["message.fetch"]),
         Action::SearchResultReply(_) => ActionRoute::Daemon(&["draft.reply"]),
         Action::SearchResultForward => ActionRoute::Daemon(&["draft.forward"]),
         Action::SearchResultArchive => ActionRoute::Daemon(&["message.archive"]),

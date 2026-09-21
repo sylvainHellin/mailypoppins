@@ -15,14 +15,12 @@ use super::helpers::{
 };
 use super::commands;
 use super::session::QueryHandle;
-use crate::store::open_store;
 
 use crate::draft::{
     create_draft_from_source, new_draft_skeleton, DraftFromSource, DraftRecipientEdit,
     SourceMessage,
 };
 use crate::selector::Selector;
-use crate::store::BlobStore;
 
 // ---------------------------------------------------------------------------
 // Parking a sync behind the background work it cannot run alongside
@@ -635,29 +633,6 @@ fn daemon_door(app: &App) -> QueryHandle {
         .unwrap_or_else(QueryHandle::closed)
 }
 
-/// The account's store and blob store, or a status line saying why not.
-///
-/// A mutation without a store is not a silent no-op: the row it would have
-/// written is the whole local half of the operation.
-///
-/// Despite the name it is also the plain open helper, and read-only flows use
-/// it as such (attachments, the browser rendition, the read-only view #0075):
-/// it opens the two stores and nothing else, and `what` only names the
-/// operation in the failure status line.
-fn store_for_mutation(app: &mut App, what: &str) -> Option<(crate::store::Store, BlobStore)> {
-    let account = app.account_config.name.clone();
-    match open_store(&account) {
-        Some(store) => Some((store, BlobStore::for_account(&account))),
-        None => {
-            app.set_status_level(
-                format!("{what} failed: no store for {account} yet (sync first)"),
-                StatusLevel::Error,
-            );
-            None
-        }
-    }
-}
-
 /// The canonical `mp://` selector of the entry under the cursor (#0050 scope
 /// item 7), or `None` when the entry has no name to copy.
 ///
@@ -1094,16 +1069,10 @@ pub(super) fn handle_action(
             // doing the same thing: this flow is inspecting an artifact the
             // message carries, not composing, and the `.ics` is worth reading.
             let row_id = msg.row_id();
-            // The store connection is scoped to the read: `$EDITOR` owns the
-            // terminal for as long as the user wants it, and holding SQLite
-            // open across that is pointless.
-            let ics = {
-                let Some((store, blobs)) = store_for_mutation(app, "Open event source") else {
-                    return Ok(());
-                };
-                crate::store::read::load_invite_ics(&store, &blobs, row_id)
-            };
-            let Some(ics) = ics else {
+            // `message.ics` on the session the `App` holds (#0126): the bytes
+            // are the row's `invite.ics` blob either way, and the read that
+            // opened a store here was the action layer's last one.
+            let Some(ics) = app.load_message_ics(msg) else {
                 app.set_status_level(
                     "That event has no ics source in the store".to_string(),
                     StatusLevel::Warning,
@@ -2446,7 +2415,7 @@ mod store_backed_drafts {
     use crate::parse::{AttachmentData, FetchedEmail};
     use crate::selector::Namespace;
     use crate::store::read::MessageRow;
-    use crate::store::Store;
+    use crate::store::{BlobStore, Store};
 
     /// Point the data directory at a tempdir so every `config::` path resolves
     /// inside the fixture.
@@ -3118,6 +3087,7 @@ mod store_backed_files {
     use super::store_backed_drafts::{fixture_email, Fixture};
     use super::*;
     use crate::parse::{AttachmentData, FetchedEmail};
+    use crate::store::BlobStore;
     use crate::store::read::MessageRow;
     use crate::tui::app::EmailEntry;
 
