@@ -1407,7 +1407,7 @@ impl App {
                 ));
                 match entry {
                     EntryKey::Msg(msg) => self.message_body(*msg).unwrap_or_default(),
-                    EntryKey::Draft(id) => self.load_draft_body(id).unwrap_or_default(),
+                    EntryKey::Draft(id) => self.draft_body(id).unwrap_or_default(),
                 }
             }
             None => String::new(),
@@ -1521,7 +1521,29 @@ impl App {
         store_rows::load_message_body(&self.account_config.name, msg)
     }
 
+    /// Read one draft's body for the preview memo.
+    ///
+    /// One `draft.path` on the session the `App` holds, and the file it names
+    /// parsed here: see [`super::queries::draft_body`] for why the body does
+    /// not travel. The sessionless branch is [`Self::load_draft_body`], which
+    /// is the oracle the contract test compares against.
+    pub(crate) fn draft_body(&self, id: &str) -> Option<String> {
+        let account = self.account_config.name.clone();
+        match self.queries() {
+            Some(queries) => {
+                super::queries::draft_body(queries, &account, id).unwrap_or_else(|e| {
+                    log::warn!("[queries] previewing the draft {id} of {account}: {e:#}");
+                    None
+                })
+            }
+            None => self.load_draft_body(id),
+        }
+    }
+
     /// Read one draft's body from the file the drafts index points at.
+    ///
+    /// The pre-daemon path, which is [`Self::draft_body`]'s fallback and the
+    /// oracle its contract test compares against.
     ///
     /// [`crate::store::Store::open`] rather than `open_store`, for the reason
     /// every drafts path gives: drafts are local-only files, so an account that

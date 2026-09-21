@@ -341,6 +341,40 @@ pub fn message_body(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<O
     }
 }
 
+/// The body of one draft, through `draft.path` plus a client-side parse.
+///
+/// The daemon answers where the file is, not what is in it: a draft is a
+/// local Markdown file, its format is [`mp_core::draft`]'s and both ends of
+/// the socket read it with the same parser, so shipping the body through the
+/// wire would be a second answer to "what is the body of this file" and a
+/// second place for the signature sentinels to be stripped. What the client
+/// cannot do without the daemon is turn an `id:` into a path, which is an
+/// index read, and that is exactly what this call asks for.
+///
+/// `None` degrades to an empty pane, which is what a stale index has always
+/// looked like: the row names a file that has been moved, retired by a send,
+/// or rewritten into something that no longer parses.
+pub fn draft_body(q: &dyn Queries, account: &str, id: &str) -> Result<Option<String>> {
+    let params = json!({"account": account, "id": id});
+    let answer = match q.call("draft.path", params) {
+        Ok(answer) => answer,
+        Err(e) => {
+            log::warn!("[queries] {id} of {account} is no longer indexed: {e:#}");
+            return Ok(None);
+        }
+    };
+    let Some(path) = answer.get("path").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    match crate::draft::parse_email_draft(&PathBuf::from(path)) {
+        Ok(draft) => Ok(Some(draft.body_markdown)),
+        Err(e) => {
+            log::warn!("[queries] reading {path}: {e:#}");
+            Ok(None)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Invitations and the agenda (P5-U10)
 // ---------------------------------------------------------------------------

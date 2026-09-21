@@ -234,3 +234,58 @@ fn the_app_answers_the_same_three_things_with_and_without_a_session() {
     assert_eq!(daemon_app.load_message_ics(msg), store_ics);
     assert!(store_ics.is_some(), "the fixture really carries a payload");
 }
+
+// ---------------------------------------------------------------------------
+// The draft body (P5-U10b)
+// ---------------------------------------------------------------------------
+
+/// Write a draft `.md` into the account's drafts directory the way an agent or
+/// `$EDITOR` does: no index entry, nothing told to the application.
+fn write_draft(stem: &str, body: &str) {
+    let dir = crate::config::drafts_dir(ACCOUNT);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{stem}.md")), body).unwrap();
+}
+
+/// `draft.path` plus a client-side parse answers the body the store-backed
+/// reader answers, and both strip nothing the other keeps.
+///
+/// The `Store::open` in `load_draft_body` is the fourth residue site #0124's
+/// follow-ups named, and it is the one the scan never saw: it opens the store
+/// directly rather than through `open_store`, because a drafts-only account has
+/// no store file and still has drafts. The daemon-backed route does not carry
+/// the body over the wire, only the path, so this row is what says the two
+/// parsers are the same parser.
+#[test]
+fn the_app_reads_the_same_draft_body_with_and_without_a_session() {
+    let _fx = AmbientFixture::new(ACCOUNT);
+    write_draft(
+        "2026-07-01-note",
+        "---\nid: d1\nto: a@example.com\nsubject: Note\nstatus: draft\n---\n\nThe body.\n",
+    );
+    // The store-backed reader consumes the index rather than refreshing it,
+    // which is the render-pass discipline of #0050; one listing is what the
+    // one-second poll would have done before the preview ran.
+    let _ = super::store_rows::load_emails(ACCOUNT, crate::selector::DRAFTS_MAILBOX);
+
+    let store_app = app_without_session();
+    let store_body = store_app.load_draft_body("d1");
+
+    let mut daemon_app = app_without_session();
+    daemon_app.session = Some(daemon().session());
+
+    assert_eq!(daemon_app.draft_body("d1"), store_body);
+    assert_eq!(store_body.as_deref(), Some("The body."));
+}
+
+/// A draft id the index no longer holds is an empty pane on both paths, not a
+/// refusal that reaches the user: the row names a file a send has retired or a
+/// rename has moved.
+#[test]
+fn an_unindexed_draft_id_answers_nothing_on_both_paths() {
+    let _fx = AmbientFixture::new(ACCOUNT);
+    let mut daemon_app = app_without_session();
+    daemon_app.session = Some(daemon().session());
+    assert_eq!(daemon_app.draft_body("nosuch"), None);
+    assert_eq!(app_without_session().load_draft_body("nosuch"), None);
+}
