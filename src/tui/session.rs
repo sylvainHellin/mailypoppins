@@ -277,9 +277,11 @@ impl Session {
     /// **A weak sender**, and that is load-bearing (P5-U6): [`Session::close`]
     /// drops the strong one and then *joins* the session thread, whose loop
     /// ends when the last sender goes. A worker holding a strong clone would
-    /// therefore keep the thread alive and make quitting block on it, which a
-    /// sync arm polling `operation.status` to a terminal state can do for as
-    /// long as the mailbox takes. Weak, the channel closes on quit, the
+    /// therefore keep the thread alive and make quitting block on it, which the
+    /// two worker threads that are left can do for as long as their call takes:
+    /// the background mailbox load and the startup per-account count. Since
+    /// P5-U8 an operation is awaited on the event stream rather than polled, so
+    /// no worker outlives a call any more. Weak, the channel closes on quit, the
     /// worker's next call fails with the closed-session error every other
     /// refusal uses, and it ends.
     pub fn handle(&self) -> QueryHandle {
