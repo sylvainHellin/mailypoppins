@@ -1042,6 +1042,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: routed (P4-U14)
 - Note: the all-accounts default of the CLI form is automation, while the single-account refresh is the user-facing capability.
   The loop is the client's, over the configured accounts in configuration order; the method takes one required `account` and no `all_accounts`.
+  The TUI's `r` joined it in P5-U10c-I2 (#0126): an `Action::RefreshContacts` starting the same operation, where it walked the store on the UI thread and rendered its verdict in place.
 
 ### CON-04 Contact index statistics
 
@@ -1108,20 +1109,20 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### CAL-02 Agenda view with an upcoming and past toggle and a refresh
 
 - Classification: GUI parity
-- Source anchor: TUI `t` and `r` in the calendar view, `src/tui/app/calendar_view.rs`, `src/tui/ui/calendar.rs`
+- Source anchor: TUI `t` and `r` in the calendar view, `src/agenda.rs`, `src/tui/ui/calendar.rs`
 - Daemon surface: `calendar.events` (the name `calendar.agenda` this row carried until P5-U10; the served method is `calendar.events`)
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/tui/app/calendar_view.rs`, TUI golden frames, `src/tui/app/invites_tests.rs`
+- Validation: unit tests in `src/agenda.rs`, TUI golden frames, `src/tui/app/invites_tests.rs`
 - Status: routed (P5-U10) - the TUI's agenda is built by the daemon; the view itself is still GUI-parity work
 
 ### CAL-03 Open the source email of an agenda entry
 
 - Classification: GUI parity
 - Source anchor: TUI `Enter` and `e` in the calendar view
-- Daemon surface: `message.get`, then `message.materialise_markdown` for the editor session
+- Daemon surface: `message.ics`, whose bytes the client writes to a temp file for the editor session
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames
-- Status: not started
+- Validation: TUI golden frames, `src/tui/app/invites_tests.rs`
+- Status: routed (P5-U10c-I2) - what `$EDITOR` gets is the row's `invite.ics` blob and not the message (#0052 scope item 10), so the method is the invitation read rather than a rendition
 
 ### CAL-04 Report what stored attendee replies resolve on stored invitations
 

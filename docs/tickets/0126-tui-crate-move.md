@@ -7,7 +7,9 @@ status: in progress
 created: 2026-09-22
 ---
 
-Status: in progress. P5-U10a and P5-U10b have landed: `crates/mp-core` holds the engine-free closure the TUI reaches, eleven modules whole and the engine-free half of six more.
+Status: in progress. The move itself is still ahead: P5-U10c-I2 drove the action layer's engine residue to zero and measured what the `git mv` costs, which is three more units.
+
+P5-U10a and P5-U10b have landed: `crates/mp-core` holds the engine-free closure the TUI reaches, eleven modules whole and the engine-free half of six more.
 No call site outside the moved files changed, and no behaviour changed: the help surface, the key dump and the twenty golden frames are byte-identical, and the workspace test count did not drop.
 **P5-U10b landed its splits and not its surfaces**: `RD-06`, `RD-07`, `LST-08`, `LST-09` and the wire-row types are unbuilt, so the allow-list is ten rows still and P5-U10c carries them along with the move.
 P5-U10c-T has since written their contract: the protocol entries, the fixtures, the wire types and the failing tests are in the tree, and both guards are at their post-unit expectation, so they fail until the implementer serves the methods.
@@ -27,7 +29,8 @@ That ticket's proposed sequencing is this one's unit table.
 | P5-U10b | I | `3a93341`, `3a2dc58`, `e88eb89`, `de575de`, `25a6ee6` | the three remaining splits (`reconcile`, `contacts`, `draft`), the `addresses` move out of `send`, and the draft body through `draft.path` | done, partially: the four surfaces did not land |
 | P5-U10c-T | T | see below | the contract for the four surfaces: `docs/daemon-protocol.md`, seven fixtures, `mp_protocol::listing`, three test files and both guards moved to their post-unit state | done |
 | P5-U10c-I1 | I | `52a68cb`, `dd35b18`, `9e06bcf` | the four surfaces: `RD-06`, `RD-07`, `LST-08`, `LST-09`, the wire rows, and both guards at their post-unit counts | done |
-| P5-U10c-I2 | I | - | the move itself: `git mv src/tui crates/mp-tui/src`, the test modules that link the engine, and the P2-U1a guard's scan roots | pending |
+| P5-U10c-I2 | I | `ec364ff`, `9258140`, `1182dfe` | the last engine call sites in `src/tui/`: `contact.rebuild`, the agenda out of the TUI, the invite blob onto `message.ics` | done, partially: the move itself did not land |
+| P5-U10c-I3.. | I | - | the move: three units, named in P5-U10c-I2's inventory below | pending |
 
 ## P5-U10a: the shared crate
 
@@ -476,4 +479,105 @@ Per crate: `mailypoppins` lib 986, `mp-core` 416, `mp-protocol` 18, `mp-client` 
 `cargo clippy --workspace --offline --all-targets` -> **37 distinct warnings**, P5-U10b's count exactly, none of them on a line this unit wrote.
 
 `cargo install --path . --offline` -> replaced, release profile, 35 s.
+`pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
+
+## P5-U10c-I2: the last engine call sites, and what the move actually costs
+
+Briefed as the two remaining call sites and then the move.
+It landed the call sites, one more nobody had counted, and a measurement: the `git mv` is three units and not the tail of this one, for reasons the import allow-list is structurally unable to show.
+That is written down here rather than rediscovered, in the same spirit as P5-U10b's half.
+
+### `App::refresh_contacts` -> `contact.rebuild`
+
+The shape P5-U10c-I1's follow-up worked out, built as written: `Action::RefreshContacts`, `Awaited::ContactRebuild { account_index }`, `BgResult::ContactsRebuilt`, an `ACTION_ROUTING` row and `commands::rebuild_contacts`.
+The key handler pushes the action where it called the walk, and `App::refresh_contacts` is gone.
+
+The four lines are the four the synchronous rebuild painted, and the mapping is the ticket's:
+`written` is `Contacts refreshed ({contacts})` after a `load_cache` of the file the daemon just wrote, `refused_empty` and `refused_shrunk` are #0053's two warnings, and a failed operation is `Contacts refresh failed: {e}`, which is also where #0067's `Contacts cache save failed` went, since a save that fails fails the operation.
+Nothing is put on the status line while it runs: the pre-daemon rebuild showed no line either, and the spinner `start_operation` bumps is what says work is in flight.
+
+Two decisions the brief did not settle.
+**The settle carries the payload, not a rendered line.** `BgResult::ContactsRebuilt` holds the `Result<Value, String>` and `tui::bg` renders it, because the three outcomes have three status *levels* and one of them also replaces the loaded index; `Awaited::Quick`'s pre-rendering would have had to carry both.
+**A settle for an account the user has since left says what it did and does not touch the view.** The Contacts pane is the active account's and `reset_contacts_view` has already emptied it, so painting another account's correspondents into it would be the one thing the synchronous version could not do.
+
+Two tests, both in `src/tui/actions_tests.rs`: the row test the file's pattern requires (the method, the parameter, and the effect read at the settle, which is the cache file the daemon wrote), and the four lines against four synthetic settles.
+The fixture gained one field, `started`, because a row over an operation-kind method has to reach the settle and the operation id is in the *answer* the recorder was dropping.
+
+### `write_fetched_draft_and_edit` -> stopped, and why
+
+The brief's condition: compose the served `message.fetch` with `draft.reply` / `draft.forward` on the fetched row if that reproduces the observable behaviour, and stop if it does not.
+It does not, on four counts, and the first is the one that matters:
+
+- **It would ingest the message.** `r` and `f` on an unresolved hit build the draft from the bytes the overlay is already rendering and write nothing to the store. Composing puts a row in the mailbox, moves the unread count and turns the hit into a resolved one. The overlay has a separate key for that, `f`, and this would make the reply key do it silently.
+- **It needs a Message-ID and a sidebar mailbox.** `message.fetch` refuses a hit with neither; today both quote fine.
+- **It needs the server.** The draft is built from memory today and cannot fail for a network reason; through a fetch, an unreachable account refuses the reply.
+- **It is a round trip per reply**, where the payload is already in the client's hand.
+
+`draft.create` is not an alternative either: it takes `{account, name}` and mints a skeleton, so a client-side compose would have to write the file itself, which is the drafts-index mint (`store::drafts::new_id`) it is trying to avoid.
+What this wants is a method that takes the fetched message, which is a contract a T unit should write.
+The call site is untouched.
+
+### The third site nobody had counted, and the gate met
+
+`TUI_ACTION_ENGINE_RESIDUE`'s two rows were the `OpenEventSource` arm reading an `invite.ics` blob inline and `store_for_mutation`, the helper it kept alive.
+The reason on both rows said no `message.*` method hands out an attachment blob that way. **`message.ics` does**, and has since P4, and `App::load_message_ics` already routes it with the sessionless fallback every other reader has.
+The arm reads the bytes there, `store_for_mutation` is deleted, and the table is empty.
+
+It stays as a table rather than being removed: an empty allow-list fails on the first engine call anyone adds back, which is exactly what it is for now.
+
+Two `ACTION_ROUTING` rows were repaired in the same commit, both falsified by P5-U10c-I1 and neither caught because the test only asks whether a named method is *registered*: `ServerSearch` named `message.list_server` (`mp fetch`'s one-mailbox query, which it never calls) where it calls `message.search_server`, and `SearchResultFetch` was client-only "because no method ingests a server-only hit" when `message.fetch` does.
+
+### The agenda leaves the TUI
+
+`calendar.events` built its answer by calling `crate::tui::app::calendar_view::load_events_for_account`, which is a daemon method reading its answer out of a client.
+The loader is `src/agenda.rs` now, in the crate that owns the store it reads.
+
+What it returns is `mp_protocol::calendar::AgendaEvent` rather than the TUI's `CalendarEvent`, which is what makes the move a move rather than a swap: the wire row is what both ends already spoke, `CalendarEvent::from_wire` is what the TUI has decoded a daemon-built agenda with since P5-U10, and the sessionless branch now decodes the same shape from the same builder.
+One dedup, one tiebreak, one sort.
+`now_sort_key` went to `mp_core::calendar` with it: the filter that reads it is the client's (`recompute_calendar_visible`), the keys it compares are the agenda's, and a second format would make "upcoming" mean two things.
+
+All 25 tests came along. They stayed in the root package, so the `--lib` run is unmoved at 988 and `MIN_TUI_TESTS` is the only floor that had to come down, re-derived to 467 from the 492 the subtree carried.
+One test in the moved module builds an `App` to exercise `recompute_calendar_visible`, which is the client's filter over this module's keys; it is the one place `src/agenda.rs` reaches into the TUI, and it goes with the filter when the TUI is a crate.
+
+### What the move costs, measured
+
+The allow-list is six rows and the action residue is zero, and neither number is what stands between `src/tui/` and `crates/mp-tui`.
+`tests/architecture_boundaries.rs` scans **`use` statements**; most of the calls that block the move are fully-qualified paths it never sees (`crate::outbox::counts_for_account(…)`, `crate::store::read::thread_messages(…)`), so the progress bar reads six where the work is this:
+
+| group | production sites | what it needs |
+|---|---|---|
+| the outbox badge | `bg.rs:72`, `mod.rs:198`, `app/types.rs` (`AccountState::outbox`, `BgResult::AccountOpened`) | `outbox::counts_for_account` is a store read on every sync completion and every account open, and `OutboxCounts` is a field of the model. A badge on the wire, or the type in `mp-core` and the read behind a method. |
+| the drafts index | `mod.rs:37` (the poll loop's `drafts::fingerprint`), `actions.rs:560`, `actions.rs:1608`, `commands.rs:1598` | `store::drafts::{fingerprint, refresh_account}`. The poll loop is `draft.watch`'s business, which the daemon already runs; the three refreshes after an editor session are the client telling the index about a write it made. |
+| the conversation overlay | `app/keys.rs`'s `open_thread_overlay` | `open_store` + `read::{find_by_id, thread_messages}`. No `message.thread` method exists, and a thread is a real listing rather than a fold over one the client holds. |
+| the sessionless oracles | `app/store_rows.rs` whole, five readers in `app/mod.rs`, `row_to_wire` in `app/types.rs` | the test move, plus the decision to drop the fallbacks. The plan's P5-U8 sentence ("no direct fallback") already implies it; what it costs is the equality oracle `queries_tests.rs` and `invites_tests.rs` compare every daemon answer against, which has to move to the root crate with them. |
+| the draft from a server hit | `write_fetched_draft_and_edit` | the method above. |
+| the connect helper | `session.rs:159`, `session.rs:432` | `daemon::client::{client_session, reopen_session}`, the exit-4 diagnostic and the reconnect the CLI shares. Into `mp-client`, or a third home both can reach. |
+
+Three units, roughly: the two methods and the badge; the oracle relocation with the test modules; the move itself.
+Only the last is a `git mv`.
+
+Two smaller things the move will also want, neither worth a unit: `crate::draft::DraftFromSource` is a plain enum that stayed in the root half of `draft` because `create_draft_from_source` takes it, and `ENGINE_MODULES` still names `secrets` and `oauth2`, which live in `mp-core` where a `crates/mp-tui` could reach them without the scan seeing it.
+
+### Deviations
+
+**The move did not land**, which is the unit's headline and the reason for the inventory above.
+
+**`MIN_TUI_TESTS` came down**, 464 -> 467 as a number and 492 -> 467 as a fact: the constant was three below the tree it defended, so the 25 that left the subtree did not cross it. Re-deriving it is the guard doing what its own doc asks ("a floor left far below what the tree carries stops defending anything").
+
+**One test file the T units own was edited.** `src/tui/actions_tests.rs`: two tests added, the routing row, the `started` field on the fixture, the residue table emptied and two stale `ACTION_ROUTING` rows repaired. The brief asked for the routing row test and for the residue table to reach zero or the truth; the two repaired rows are the same table telling the truth.
+
+**No `rustfmt` run on the moved file.** `src/agenda.rs` carries `calendar_view.rs`'s formatting unchanged, which was rustfmt-dirty before the move; the reasoning is P5-U10a's.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2 379 passed, 0 failed, 5 ignored**, across 59 binaries. That is P5-U10c-I1's 2 377 plus this unit's two, both in `actions_tests`: no test was deleted and none was lost to the agenda's move.
+Per crate: `mailypoppins` lib 988, `mp-core` 416, `mp-protocol` 18, `mp-client` 7, `mp` bin 2, the integration binaries the rest.
+
+`--test architecture_boundaries` -> 6, the allow-list at six rows. `--test test_selection_guard` -> 6. `--test phase5_parity_gate` -> 11. `--test daemon_protocol_fixtures` -> 20, no fixture moved.
+`--lib 'ui::golden_frames::'` -> 20 and `--lib golden_frames_daemon` -> 22, with no snapshot re-approved and no `.snap.new`.
+
+`scripts/capture-cli-help.sh` and `mp dump-keys --json`, from a binary rebuilt in the same run, diff empty against `docs/baselines/pre-daemon/cli-help.txt` and `docs/baselines/pre-daemon/tui-keys.json`.
+
+`cargo clippy --workspace --offline --all-targets` -> **37 distinct warnings**, the same 37 as `facde0d` by `(lint, file, line)`, none of them on a line this unit wrote.
+
 `pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.

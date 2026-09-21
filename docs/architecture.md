@@ -88,7 +88,8 @@ What did not change is the help surface: `mp daemon`, `mp account` and the globa
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
 It counts `#[test]` attributes by scanning `src/tui/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
-The four floors are 464 TUI tests, 416 `mp-core` tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
+The four floors are 467 TUI tests, 416 `mp-core` tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
+The TUI floor came down once, from 492 to 467, when P5-U10c-I2 moved the agenda loader and its 25 tests out of `src/tui/`; they stayed in the root package, so the `--lib` run did not move.
 The `mp-core` floor is #0126's and its arithmetic is the move's proof: the root package's `--lib` run went from 1 398 to 982 across P5-U10a and P5-U10b while `mp-core` runs 416, and 982 + 416 is 1 398.
 
 ### What the daemon owns since Phase 6
@@ -337,6 +338,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/read_cmd.rs` | `mp show`, `mp list-messages` (#0062) and the `mp search --local` listing (#0043): the human read surface over `store::read` and `store::search`, offline, rendering to a `String` so the layout is testable. Not the dump: that is an oracle with a pinned record shape. |
 | `src/cutover.rs` | `mp cutover` (#0040): the end of the file-era transition. Mints an `id:` into any draft that has none (the one-time draft "import"; the drafts directory never moved) and reports the dead file-era mailbox directories. Deletes nothing, by design. |
 | `mp-core/reconcile.rs` + `src/reconcile.rs` | iMIP invite reconciliation, folded over the rows at display time and never persisted: attendee `PARTSTAT`s (#0030) and, since #0031, the `(UID, RECURRENCE-ID)` cancellation/version fold (`fold_status`) that marks an event cancelled, superseded, or missing individual occurrences. Split at the readers: the fold is in `mp-core`, the three functions that open a store and read blobs stay. |
+| `src/agenda.rs` | The local agenda (#0034): one row per `(UID, RECURRENCE-ID)` over the account's invite rows, deduped by `(sequence, dtstamp, is_organizer, mailbox, uid)`, sorted by start with undated last, answered as `mp_protocol::calendar::AgendaEvent`. It is what `calendar.events` serves and what the TUI decodes; it was `tui::app::calendar_view` until #0126 (P5-U10c-I2). |
 | `mp-core/parse.rs` | RFC822 parsing, attachment extraction and sanitisation, `inline_images` and `embed_inline_images` (the `cid:`-referenced image parts, inlined as `data:` URIs for the browser view and the `.html` companion; the in-pane rendering they were written for was retired by #0109), `open_file_with_system()`, `materialisation_dir()`, `stable_attachments_dir()`, `ensure_utf8_charset()` |
 | `mp-core/draft.rs` + `src/draft.rs` | Draft parsing and validation, reply and forward creation, status transitions. Split at what needs an index, a row or an outbox record: the file format is in `mp-core`, `new_draft_skeleton`, `source_from_row`, `create_draft_from_source`, `settle_sent_draft` and `delete_indexed_draft` stay. |
 | `mp-core/addresses.rs` | RFC 5322 address strings: `split_addresses`, `normalize_address_for_smtp`, `quote_display_name`, `format_recipient`. Out of `send` in P5-U10b, which re-exports them, because `draft`'s validation reads them and wants no transport. |
@@ -395,7 +397,6 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `keys.rs` | `handle_key()` dispatch and all `handle_*_key()` methods |
 | `keymap.rs` | The single `KEYMAP` table behind the help overlay, the hint bar and `mp dump-keys` |
 | `jump_date.rs` | The closed date grammar behind jump-to-date (`g t`, #0017): pure, clock-free, `parse_jump_date(input, today)` |
-| `calendar_view.rs` | Agenda rows built from the iMIP messages the store holds |
 | **`src/tui/ui/`** | |
 | `mod.rs` | `view()`, the top-level layout dispatch, including the #TKT-0044 pane zoom (one pane over the whole content area, hint and status bars kept) and the shared overlay dispatch |
 | `views.rs` | View switcher chrome |
@@ -478,21 +479,24 @@ They are the equality oracle `queries_tests.rs` and `invites_tests.rs` compare e
 That fallback is **not** the direct fallback the plan forbids: nothing recovers a *failed* daemon call by reading the store.
 A failed call degrades exactly as it did before, as an empty list, a zeroed count, an empty preview and a line in the log, and `tests/tui_daemon_recovery.rs` asserts it as a lock, by taking the account's engine lock during the outage from a second open file description.
 
-### The residue, at seven rows
+### The residue, at six rows
 
-`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 7 pairs over 6 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
+`tests/fixtures/tui-engine-imports.txt` is the engine-import allow-list, 6 pairs over 5 files, and it is the migration's progress bar: a removed import fails the test as loudly as a new one.
 The plan drives it to zero in P5-U10, which is in progress; what is left waits on the crate move rather than on a method.
 
-- `app/mod.rs store`, `app/calendar_view.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
+- `app/mod.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
   P5-U10b routed the last reader that had no daemon-backed twin: `App::draft_body` calls `draft.path` and parses the file the daemon names, and `load_draft_body` stays as its oracle. That one opened the store with `Store::open` rather than `open_store`, so `TUI_APP_STORE_RESIDUE` never listed it and still does not.
 - `app/types.rs store` is three `#[cfg(test)]` imports and `indexed_drafts`, the Drafts oracle; `app/types.rs ingest` is a test module. Both die with the move.
-- `actions.rs store` is `store_for_mutation`, which the `OpenEventSource` arm still calls for the row's `invite.ics` blob: no `message.*` method hands out an attachment blob inline.
+- `actions.rs store` is three `#[cfg(test)]` imports and nothing else: the arms themselves reach no store since P5-U10c-I2.
 - `mod.rs store` is the drafts-directory poll loop's `drafts::fingerprint` / `drafts::refresh_account`, which is `draft.watch`'s business.
 
 `queries.rs store`, `helpers.rs store` and `helpers.rs imap_client` went in P5-U10c-I1, with the four surfaces: a listing row is `mp_protocol::listing::MessageListRow` and a draft row is `mp_protocol::draft::DraftEntry`, and the server search leg is two daemon operations.
+`app/calendar_view.rs store` went in P5-U10c-I2, with the agenda loader itself: it is `src/agenda.rs`, in the crate that owns the store it reads, and it answers `mp_protocol::calendar::AgendaEvent` to `calendar.events` and to the TUI alike.
 `actions.rs send` went in P6-U2: the undo-send hold and the send behind it are `send.draft` now, so the action layer's last `crate::send` import left with them.
 
-`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: two `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store. Both are the invite blob above and the helper it calls.
+`src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`, where the import list says which file and this one says which function still opens a store.
+**It is empty since P5-U10c-I2**: the `OpenEventSource` arm reads the row's `invite.ics` through `message.ics` like every other reader, and `store_for_mutation` died with it.
+The table stays as the gate, because an empty one fails on the first engine call anyone adds back.
 
 ### The crate move, in progress
 
@@ -501,12 +505,24 @@ The obstacle is not the engine residue above; it is the shared modules the allow
 `src/tui/` reaches twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure was about 15 000 lines across sixteen modules before any of it moved.
 The three-unit sequencing that does it is in `docs/tickets/0124-tui-cutover.md`.
 **P5-U10a and P5-U10b's splits landed** (#0126): eleven of those modules whole, and the engine-free halves of `selector`, `search`, `invite`, `reconcile`, `contacts` and `draft`, are `crates/mp-core` above.
-**P5-U10c-I1's four surfaces landed too**: `RD-06`'s `message.materialise_markdown`, `RD-07`'s `selector` on the listing row, and `LST-08`/`LST-09`'s `message.search_server` and `message.fetch`, which took the allow-list from ten rows to the seven above and the action residue from seven to two.
-What is left is the move itself, P5-U10c-I2, plus two production calls into store-half library functions the allow-list does not scan: `draft::create_draft_from_source` for a server hit with no local row, and `contacts::build_index_for_account` behind the contacts refresh key.
+**P5-U10c-I1's four surfaces landed too**: `RD-06`'s `message.materialise_markdown`, `RD-07`'s `selector` on the listing row, and `LST-08`/`LST-09`'s `message.search_server` and `message.fetch`, which took the allow-list from ten rows to seven and the action residue from seven to two.
+**P5-U10c-I2 took the contacts refresh onto `contact.rebuild`, the agenda out of the TUI and the invite blob onto `message.ics`**, which is the allow-list at six and the action residue at zero.
 
-One consequence to carry into those two units: `secrets` and `oauth2` are named in `ENGINE_MODULES` and now live in `mp-core`.
+The move itself did not land, and the reason is worth recording rather than rediscovering: the allow-list is an *import* scan, and the calls that block the move are mostly fully-qualified paths it never sees.
+The production call sites in `src/tui/` that a `crates/mp-tui` could not compile, measured at #0126's P5-U10c-I2:
+
+| group | where | what it needs |
+|---|---|---|
+| the outbox badge | `bg.rs`, `mod.rs`, `AccountState::outbox` in `app/types.rs` | `outbox::counts_for_account` is a store read per sync and per account open, and `OutboxCounts` is a field of the model; a wire badge or the type in `mp-core` |
+| the drafts index | the poll loop in `mod.rs`, both editor returns in `actions.rs`, `commands.rs` | `store::drafts::{fingerprint, refresh_account}`, which is `draft.watch`'s business |
+| the conversation overlay | `app/keys.rs`'s `open_thread_overlay` | `read::thread_messages`; no `message.thread` method exists |
+| the sessionless oracles | `app/store_rows.rs`, five readers in `app/mod.rs`, `row_to_wire` in `app/types.rs` | the test move, and the decision to drop the fallbacks the plan's "no direct fallback" already implies |
+| the draft from a server hit | `write_fetched_draft_and_edit` in `actions.rs` | a method: `draft.reply`/`draft.forward` address a row, and this is the one draft built from a fetch that has no row |
+| the connect helper | `session.rs` | `daemon::client::{client_session, reopen_session}`, the exit-4 diagnostic the CLI shares |
+
+One consequence to carry into those units: `secrets` and `oauth2` are named in `ENGINE_MODULES` and now live in `mp-core`.
 No file under `src/tui/` imports either, so the allow-list did not move, but a `crates/mp-tui` depending on `mp-core` would be able to reach both without the textual scan (which looks for `use crate::` / `use mailypoppins::`) ever seeing it.
-P5-U10c-I2 has to decide whether they leave that list or whether the scan learns about `mp_core::`.
+The unit that moves the crate has to decide whether they leave that list or whether the scan learns about `mp_core::`.
 
 ## Multi-account
 

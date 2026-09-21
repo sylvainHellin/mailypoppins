@@ -1,6 +1,6 @@
 # mailypoppins
 
-Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Cargo workspace: the root crate (library + binary) plus `crates/mp-protocol` and `crates/mp-client`; the TUI calls the library directly, no subprocess spawning.
+Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Cargo workspace: the root crate (library + binary) plus `crates/mp-core` (the engine-free modules a client and the engine both read, re-exported from the root crate under their old paths), `crates/mp-protocol` and `crates/mp-client`. The CLI and the TUI are clients of the daemon over a Unix socket and spawn no subprocess; `crates/mp-tui` is the move #0126 is working towards and does not exist yet.
 
 ## Repo layout
 
