@@ -7,7 +7,7 @@ status: open
 created: 2026-09-21
 ---
 
-Status: open. P6-U1 to P6-U6 have landed the daemon-owned hold, the graceful shutdown and the login-start service units; the rest of the phase has not started.
+Status: open. P6-U1 to P6-U6 have landed the daemon-owned hold, the graceful shutdown and the login-start service units, and P6-U7 has landed the diagnostics contract; the implementation behind it, the soak tests and the benchmarks have not started.
 
 Eighth ticket of the daemon-first architecture plan (`.agents/workflow/native-gui-daemon/plan.md` section 3.8), after #0118, #0119, #0120, #0121, #0122, #0123 and #0124.
 
@@ -24,7 +24,7 @@ Phase 6 makes the daemon something that can be left running: the undo-send hold 
 | P6-U4 | I | this commit | graceful shutdown | done |
 | P6-U5 | T | this commit | login-start service units (LIF-06), the contract | done (tests) |
 | P6-U6 | I | this commit | login-start service units | done |
-| P6-U7 | T | - | diagnostics, the contract | not started |
+| P6-U7 | T | this commit | diagnostics, the contract | done (tests) |
 | P6-U8 | I | - | `diagnostic.health`, `diagnostic.logs`, `diagnostic.support_bundle` | not started |
 | P6-U9 | I | - | soak tests | not started |
 | P6-U10 | I | - | benchmarks and docs | not started |
@@ -702,4 +702,167 @@ Owner action on the Mac: install the service, log out and back in, `mp daemon st
 
 The smoke run, in a sandbox `HOME` with `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1`: install, install again, `--check`, uninstall, then the same four with `MAILYPOPPINS_DAEMON_SERVICE_OS=darwin`, each printing the block the table above fixes and each exiting 0 except the `--check` with nothing installed.
 No real `systemctl --user enable` was run on this host.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.
+
+## P6-U7: diagnostics, the contract
+
+Two test files, no production code.
+
+- `tests/daemon_diagnostics.rs`, 36 rows over a real `mp daemon run` and a real socket, because a health report is a statement about a live process: its uptime, its connections, its runtimes, the socket it owns and the log it is writing.
+- `src/tui/diagnostics_tests.rs`, 9 rows, a `#[cfg(test)] mod` of `src/tui/mod.rs`, because the activity ring, the status line it must not disturb and the golden frames it must not move are all in process.
+
+There is no stub proof, for the reason P6-U3 and P6-U5 had none: the contract names **one** Rust item, `DIAGNOSTIC_METHOD_SPECS`, which exists and grows from one entry to five. Everything else is on the wire, on stdout or behaviour over `App::apply_event`, `App::apply_bootstrap`, `App::status_log` and `Applied`, all of which exist. Both files compile against the tree as committed and fail at runtime naming what is missing.
+
+### The contract
+
+```text
+diagnostic.health {}    Query      -> {
+    instance_id, version, protocol_version, uptime_secs, pid,
+    socket, log_path, clients,
+    accounts: [{name, runtime, last_sync: {finished_at, outcome}, watcher}],
+    holds, operations: {active}, store: {path, size_bytes},
+    checks: [{name, status, detail}]
+}
+diagnostic.log_path {}  Query      -> {path}
+diagnostic.logs {lines?, level?, since?}  Query
+                        -> {path, lines: [{ts, level, target, message}], truncated}
+diagnostic.support_bundle {out?, redact?}  Operation, Durable
+                        -> {operation_id}, settling {path, files: [...], redactions}
+
+state.event {kind: "diagnostic.check_changed", payload: {name, status, detail}}
+state.bootstrap's snapshot.diagnostics: the checks that are not `ok`, in report order
+
+mp daemon health [--json]
+mp daemon logs [--lines N] [--level L] [--json]
+mp daemon support-bundle [OUT] [--no-redact]
+```
+
+`DIAGNOSTIC_METHOD_SPECS` grows to five in method-name order: `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `diagnostic.store_gc`, `diagnostic.support_bundle`. The three reads are queries; the bundle is an `Operation` with `CancelScope::Durable`, because a bundle is asked for by a client that is about to send it somewhere and may well close its window while the daemon is still copying, and a half-written bundle directory is worse than none.
+
+### The checks, which are the whole of `health`'s verdict
+
+Four fixed checks in this order, then one `account:<name>` per configured account in configuration order, and nothing else: `config_loaded`, `store_open`, `socket_owner`, `log_writable`. A `status` is `ok`, `warn` or `fail`, and a `detail` is never empty, including on a passing check - the sentence is what a support case is read with, and it is also what the TUI renders.
+
+The account check maps the runtime the daemon already tracks: `ready` is `ok`, `opening` and a runtime that came up **blocked because another engine holds the lock** are `warn`, and a runtime that never came up at all (`RuntimeTable::insert_failure`, an account with no local store) is `fail`. That distinction is the whole reason both words exist: a second `mp` holding a lock is a normal state of a developer's machine and a daemon that called it a failure would cry wolf, while an account the daemon cannot serve at all is a failure whatever caused it.
+
+`store_open` reports on the set: every account's store opened is `ok`, some is `warn`, none is `fail`. `socket_owner` and `log_writable` each name the path they looked at in their detail, so a failure is actionable without a second call.
+
+### Four keys that needed deciding
+
+- **`version` and `protocol_version`, not `app_version` and `protocol`.** `daemon.status` is the pre-handshake lifecycle probe and answers the daemon's *range* `{min, max}`; health is a support document, it is written into `health.json`, and what a support case needs is the single integer this connection negotiated. Two different facts, two different names.
+- **`store` is one entry, not one per account.** `path` is `<data_dir>/accounts`, the tree that holds every account's store and blobs, and `size_bytes` is the summed size of the `store.sqlite3` files under it. One stat per account, and it answers the only question a health report is asked about the store: is the cache large.
+- **`operations` is an object with one key.** `{active: n}` rather than a bare number, so a count of failures or of durable operations joins it without a version bump. `holds` and `clients` are bare numbers because neither has a second dimension to grow.
+- **`clients` counts the asking connection.** A report that said `0` while answering over a socket would be wrong on its face.
+
+### `diagnostic.logs`, and the format it parses
+
+The daemon's own log is `<data_dir>/logs/mailypoppins-<date>.log`, the simplelog `WriteLogger` `src/config.rs` installs, and a line is `2026-09-21 19:05:20.081 [INFO] [(thread) target: ]message`. It is **not** `<data_dir>/logs/daemon.log`, which is only where `mp daemon start` points a detached daemon's stdio and which is empty for a daemon started in the foreground. `src/timing.rs` is a producer of `[TIMING]` lines in that same file, not a second format.
+
+- `ts` is RFC3339 **with the daemon's local offset**, because the file's own stamps are local time with no offset and a bundle read on another machine would otherwise lie about when something happened. `since` is any RFC3339 instant and the comparison is on the instant, not on the string.
+- `level` is lowercase, the vocabulary the `level` parameter takes, and the parameter is a *minimum*.
+- `target` is the module path when the line carries one and `""` when it does not, which is what the writer's own level-dependent formatting produces.
+- A line the format does not explain - a panic message, a backtrace frame, a continuation - is kept whole as `{ts: null, level: null, target: "", message: <the line>}` and survives a `level` filter, because those lines are exactly what a crash looks like and dropping them precisely when someone filters for errors would be the wrong way round.
+- `lines` defaults to 200, and above 5000 is `-32602` naming the cap rather than a silent clamp: a caller asking for a million lines has misunderstood something and answering five thousand without a word hides it.
+- The answer is the **tail**, in file order, and `truncated` says whether older matching lines were dropped.
+
+### The bundle is a directory, and the redaction is by value
+
+`Cargo.lock` holds neither `tar` nor `flate2`, and section 2.4 of the plan says no to a new download a unit can do without. So a bundle is a directory of five files - `config.toml`, `daemon-status.json`, `health.json`, `log.txt`, `version.txt`, reported in that order - and a user who wants one attachment runs the `tar` his machine already has. Adding the archive later is a wrapper rather than a reshuffle.
+
+`out` is absolute or it is `-32602`: the daemon's working directory is not the caller's, which is P4-U2's rule for every path that crosses the socket. Absent, the bundle lands under the data directory.
+
+Redaction is two passes and both are needed. The keys decide what is a secret - `password`, `client_secret`, `access_token`, `refresh_token`, and any `*_secret` or `*_token` - and every value so identified is then struck from **every** text file in the bundle, `log.txt` included, because a library that logged a credential did not know it was one. The replacement is the literal `<redacted>` and the key stays, so a reader sees that a password was set. Email addresses and OAuth2 client ids stay verbatim: a bundle without them is useless and neither is a credential.
+
+The row that proves it seeds the sandbox configuration with five marker strings, one per key shape, and greps the finished bundle for each. `--no-redact` is the control that keeps it from passing vacuously over an empty bundle, and a third row asserts that neither `secrets.enc` nor the token cache is ever copied, redacted or not: ciphertext is still a credential and no support case needs it.
+
+### The event, and what the TUI does with it
+
+`diagnostic.check_changed` is published when a check's **status** changes, never for a detail that moved under an unchanged status: a daemon that republished its whole check set on every evaluation would fill the activity overlay with news that nothing happened. The trigger the rows use is a `config.reload` of a file that no longer loads, which is refused with `-32007` and leaves `config_loaded` failing while the daemon keeps serving the configuration it has.
+
+The TUI half is one reading and two refusals.
+
+The reading: the event pushes one entry into `App::status_log` - the ring the activity overlay and the sidebar pane both render - as `format!("{name}: {detail}")`, at `StatusLevel::Warning` for `warn`, `Error` for `fail` and `Success` for `ok`, and `apply_event` answers `Applied::Ignored`. `status_message` is **not** set: a check the user did not ask about may not overwrite the sentence his own last action put on the status line. `apply_bootstrap` lands `snapshot.diagnostics` the same way, so a window that opens the overlay finds the daemon's current complaints already in it.
+
+The refusals:
+
+- **Calling `diagnostic.logs` when the overlay opens** puts a socket round trip on the keypress path of the UI thread, and it would make the ring's content depend on when the overlay was opened, which no golden frame could pin. The daemon's log is reachable whole through `mp daemon logs` and through `sf` (`Action::OpenLogFile`, `INT-02`), both of which open a file rather than paginate one into a ring of 200 lines.
+- **A sixth `Applied` variant.** `apply_shutting_down` already records why there is none: the drain does not branch on this, nothing is reloaded and nothing is refetched, which is exactly what `Applied::Ignored` promises a caller.
+
+No golden frame moves, and that is an assertion rather than a hope: every frame is built from a bootstrap whose `snapshot.diagnostics` is empty and applies no `diagnostic.check_changed`, so every frame keeps the `No activity yet` line it has today, which is what `a_healthy_bootstrap_leaves_the_ring_empty` says.
+
+### Stdout, pinned line for line
+
+All three commands live under the already-hidden `daemon` subtree, so `mp --help` and `docs/baselines/pre-daemon/cli-help.txt` do not move.
+
+`mp daemon health`, in the style of `mp daemon status`: a verdict line, then the labelled block, then one line per account, then one line per check prefixed `✓`, `⚠` or `✗`.
+
+| case | first line | exit |
+|---|---|---|
+| every check ok | `✓ daemon healthy` | 0 |
+| warnings, no failure | `✓ daemon healthy, 1 check needs attention` | 0 |
+| any failure | `✗ daemon unhealthy, 1 check failing` | 1 |
+
+The block's labels, in order and column-aligned as `mp daemon status` aligns its own: `instance:`, `version:`, `protocol:`, `pid:`, `uptime:`, `socket:`, `log:`, `clients:`, `holds:`, `operations:`, `store:`, then `account:    alpha (ready, …)` per account. A warning is not a failure and does not cost an exit code: a lock held elsewhere is a normal state of this machine.
+
+`mp daemon logs` prints the lines and **nothing** around them - no `✓` banner - because a header would end up in every `mp daemon logs | grep`. `--json` prints the wire answer as one object, as `mp daemon status --json` does.
+
+`mp daemon support-bundle`:
+
+```text
+✓ wrote <path>
+  files:      5
+  redactions: 12
+```
+
+and with `--no-redact` the third line is `  redactions: none, --no-redact was given`, never a `0`: a bundle full of credentials must not look like any other bundle.
+
+All three refuse identically when nothing answers, with the two lines `mp daemon status` already prints in that case, and exit 1:
+
+```text
+✗ no daemon running
+  start one:  mp daemon start
+```
+
+None of them starts a daemon: `needs_daemon` answers `false` for the whole `daemon` subtree, and a command that reports on a daemon must not conjure the thing it reports on.
+
+### Which rows fail today
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_diagnostics` on the tree as committed: **1 passed, 35 failed**, three runs, identical every time. `--lib diagnostics_tests`: **4 passed, 5 failed**, three runs.
+
+The 35 fail in five kinds, each naming the contract and nothing else:
+
+```
+diagnostic.health was refused: Rpc(RpcError { code: -32601, message: "unknown method diagnostic.health" })
+assertion `left == right` failed: the family serves exactly these five
+  left: ["diagnostic.store_gc"]
+ right: ["diagnostic.health", "diagnostic.log_path", "diagnostic.logs", "diagnostic.store_gc", "diagnostic.support_bundle"]
+diagnostic.health is served, so it is advertised; the offer was [… 59 names, none of them these four]
+error: unrecognized subcommand 'health' / 'logs' / 'support-bundle'
+no diagnostic.check_changed arrived within 20s
+```
+
+The one row that passes is `a_healthy_daemon_bootstraps_with_no_diagnostics`, vacuously true while nothing fills `snapshot.diagnostics` and load-bearing afterwards. In the TUI file the four that pass are the four a no-op satisfies - a duplicate event, an event from another instance, an empty diagnostics array and an entry that is not a check - and the five that fail are every row that needs behaviour. A stub that passed more than five in total would mean a vacuous row.
+
+### Pre-approved edits for P6-U8
+
+Nothing in `tests/` moves and neither new file moves. These are forced by a name in the contract and pre-approved:
+
+- **`src/daemon/methods/diagnostic.rs`**: the module header, which today says the family goes as far as the admin slice needs it; `DIAGNOSTIC_METHOD_SPECS` from one entry to five; and its own unit test `the_sweep_is_a_durable_operation`, whose `assert_eq!(DIAGNOSTIC_METHOD_SPECS.len(), 1)` becomes 5 and which stops being able to index `[0]` for the sweep.
+- **`src/daemon/session.rs`**: the capability-list test gains `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs` and `diagnostic.support_bundle` in method-name order around the existing `diagnostic.store_gc`. That is the derivation working, not a second list.
+- **`src/daemon/state/snapshot.rs`**: `Snapshot::to_json`'s `"diagnostics": []` literal and the doc comment above it, which says nothing in this build fills it.
+- **`src/daemon/lifecycle.rs`**: three `DaemonAction` variants and their `dispatch` arms, plus the module header's list of the lifecycle commands.
+- **`crates/mp-protocol/src/events.rs`**: `KIND_DIAGNOSTIC_CHECK_CHANGED`, if the implementer wants the constant the other kinds have; the wire name is fixed here either way.
+- **`docs/daemon-protocol.md`**: the `diagnostic.*` family paragraph (four methods more), the `Bootstrap` section's "an array that nothing in this build fills", the event-kind list, the method-kind paragraph's list of operations, and a changelog entry. The protocol changelog is what a second implementation reads, so a kind that is not in it is not in the protocol.
+- **`docs/daemon-operations.md`**: the health, log and support-bundle commands beside `daemon.status`, and the note that the daemon's own log is the dated file rather than `daemon.log`.
+- **`docs/parity-matrix.md`**: `LIF-07`, `INT-02` and `OBS-05` - P6-U7 already points all three at this ticket; P6-U8 moves their Status.
+- **`CHANGELOG.md`** and the unit table above.
+
+The website pages under `website/src/pages/` are hand-derived from `mp --help`, and the `daemon` subtree is hidden from it, so they stay as they are.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --offline --test daemon_diagnostics` -> 1 passed, 35 failed, three runs, identical each time; `--lib diagnostics_tests` -> 4 passed, 5 failed, three runs.
+`TMPDIR=/var/tmp cargo test --workspace --offline` with both files set aside and `mod diagnostics_tests;` commented out -> **2279 passed**, 0 failed, 5 ignored, the count at `219811c`; with both present and `--no-fail-fast` -> 2284 passed, 40 failed, which is 2279 plus the five contract rows a missing implementation can still satisfy, and the forty that cannot. Nothing else is disturbed.
+`cargo clippy --offline --test daemon_diagnostics` and `--lib` report nothing in either new file.
+`rustfmt --edition 2021 --check` leaves both unchanged.
 `pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, which is not this tree's.

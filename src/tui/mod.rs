@@ -4,6 +4,8 @@ mod actions;
 mod actions_tests;
 mod bg;
 pub mod commands;
+#[cfg(test)]
+mod diagnostics_tests;
 mod event;
 pub mod events;
 #[cfg(test)]
