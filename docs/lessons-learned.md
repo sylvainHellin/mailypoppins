@@ -2000,3 +2000,17 @@ Moving eleven modules from the root package into `crates/mp-core` (P5-U10a) is a
 The fix is a feature, `#[cfg(any(test, feature = "test-support"))]`, turned on by a second entry for the same crate in the depending package's `[dev-dependencies]`. Resolver v2 (edition 2021 and later) does not unify a dev-dependency's features into a build that is not building dev targets, so this is exactly equivalent to what the attribute did, including that the shipped binary leaves the code out. Verify it rather than trust it: `cargo build -v` must show the dependency compiled with no `--cfg feature="test-support"` and `cargo test -v` must show it with one.
 
 The general rule for any crate split: before the move, grep the moving files for `#[cfg(test)]` on anything that is *not* a `mod tests`, because every one of those is a seam whose meaning the boundary changes in silence.
+
+## A glob re-export of a split module is shadowed by the half that stayed
+
+The split-module shape P5-U10a established is `pub use mp_core::<module>::*;` at the top of the root crate's half, and it works for a flat module.
+It does not work when the module is a directory and one of its *files* is what split: `src/contacts/mod.rs` keeps a private `mod extractor;` beside `pub use mp_core::contacts::*;`, the glob re-exports `mp_core`'s `extractor` module into the same namespace, and the private one shadows it.
+Rust calls that `hidden_glob_reexports` and warns, and the item the root half wanted (`mp_core::contacts::extractor::observe`) stops being reachable as `crate::contacts::extractor::observe`.
+
+Name the re-exports one by one instead, leaving the split file out of the list, and have the root half import from `mp_core::contacts::extractor::…` explicitly (#0126, P5-U10b).
+
+## Splitting a module moves its clippy warnings, and can remove one
+
+`clippy::items_after_test_module` fires on the file, not on the item, so moving the two functions that sat after `src/draft.rs`'s `mod tests` into a new file where they sit above its `mod tests` removed the warning.
+The clippy baseline went 38 -> 37 with nothing silenced.
+A warning that disappears from a move is worth identifying before reporting the count, because "the number went down" and "a lint stopped being checked" look identical in a summary line.

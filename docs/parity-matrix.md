@@ -325,8 +325,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.search` local first, then the server leg as an `operation.*` streaming results on `state.event`
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui/commands.rs`)
-- Status: routed (P5-U6); GUI not started
-- Note: deduplication is by Message-ID, so a message found twice appears once.
+- Status: routed (P5-U6) except the server leg; GUI not started
+- Note: the server leg is still unmigrated after P5-U10b (#0126), which landed its three module splits and none of its four surfaces. It is `message.list_server`, and one method retires both it and `LST-06`'s `CLI_ENGINE_RESIDUE` group.
+  Deduplication is by Message-ID, so a message found twice appears once.
   The local pass is `message.search` with `body: true` since P5-U6; the server leg is still the TUI's own `lib_do_multi_search` behind a background thread, and moving it onto an operation with streamed results is P5-U8's.
   The overlay holds a parsed query and the method takes what a user typed, so the query is rendered back into the grammar (`search::to_query_string`) rather than sent as an engine enum.
 
@@ -337,7 +338,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.get`, `message.materialise_html`, `message.materialise_attachment`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: routed (P5-U6) except the fetch and the Markdown rendition; GUI not started
+- Status: routed (P5-U6) except the fetch and the Markdown rendition, neither taken by P5-U10b (#0126); GUI not started
 - Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6.
   Two keys are not, and are the two rows of `TUI_ACTION_ENGINE_RESIDUE` this entry accounts for: `f` ingests a server-only hit, for which `message.fetch` is not built, and `Enter` / `e` / `y` render a stored message as Markdown, which is `RD-06`.
 
@@ -438,7 +439,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `message.materialize` returning a rendition handle the client opens
 - GUI location: TBD (Phase 9)
 - Validation: TUI golden frames
-- Status: not started
+- Status: not started, and not taken by P5-U10b either (#0126): that unit landed its three module splits and none of its four surfaces
 - Note: the handle keeps its blob alive until release or expiry (`ANO-6`).
   Not built, and it is one of the three surfaces standing between `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) and the zero P5-U10 needs: `readonly_view_for_row`, `handle_search_result_action` and the shared `store_for_mutation` are three of its eight rows.
   `message.materialise_html` is not it: that renders the sender's markup for a browser, where this renders the store's own Markdown view of a message (#0075).
@@ -450,7 +451,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: client-side over the selector already in the snapshot
 - GUI location: TBD (Phase 9)
 - Validation: `tests/cli_selector_contract.rs` for the selector shape
-- Status: not started
+- Status: not started, and not taken by P5-U10b either (#0126): that unit landed its three module splits and none of its four surfaces
 - Note: no listing carries a selector, so `selected_selector` still opens a store to build one, which is one row of `TUI_ACTION_ENGINE_RESIDUE`.
   `message.get` would answer it, at the price of a whole-message read per clipboard copy; a `selector` on the listing row is the shape that would close it.
 
@@ -614,6 +615,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: the only selector-to-path edge, and the handle external editors and agents use, so it stays supported under the filesystem boundary.
   It is also every draft-only key of the TUI since P5-U6: `cursor_draft` resolves the file under the cursor through it, where it used to open the store's drafts index.
   The lookup had two outcomes (not in the index, and the index could not be read) where `draft.path` has one refusal, so the second status line is gone and its reason is in the log.
+  Since P5-U10b (#0126) it is also the Drafts preview: `App::draft_body` asks for the path and parses the file with `mp_core::draft::parse_email_draft`, where `load_draft_body` opened the store to look the id up. The body does not travel, because both ends read the file with the same parser; what the client cannot do is turn an `id:` into a path.
 
 ### DFT-07 Edit a draft in the editor
 

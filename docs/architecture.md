@@ -39,17 +39,23 @@ What follows is the shape that migration imposes on the tree today, which is all
 
 ### The shared crate
 
-`crates/mp-core` owns what a client and the engine both need and neither owns: configuration and the data-directory layout, secrets and the OAuth2 token cache, signature files and `app_state`, RFC822 parsing, the shared types, iCalendar parsing and building, the search grammar, the `mp://` selector grammar, desktop notifications, `TimingSpan` and `SyncHealth`.
-It reaches no store, no IMAP session, no outbox and no sending transport, which is the whole of its definition; P5-U10a (#0126) moved it out of the root package so that a future `crates/mp-tui` has somewhere to depend on.
+`crates/mp-core` owns what a client and the engine both need and neither owns: configuration and the data-directory layout, secrets and the OAuth2 token cache, signature files and `app_state`, RFC822 parsing, the shared types, iCalendar parsing and building, the search grammar, the `mp://` selector grammar, the draft file format, the contact index, the iMIP reply fold, desktop notifications, `TimingSpan` and `SyncHealth`.
+It reaches no store, no IMAP session, no outbox and no sending transport, which is the whole of its definition; P5-U10a (#0126) moved it out of the root package so that a future `crates/mp-tui` has somewhere to depend on, and P5-U10b finished the closure.
 
 Every module it holds is re-exported from `src/lib.rs` under the path it had inside the root package, so `crate::config::…` and `mailypoppins::parse::…` resolve unchanged everywhere: the CLI, the daemon, the TUI and the integration tests.
-Three modules are split rather than moved whole, and in each case the root crate keeps the half that reads an engine and re-exports the rest with `pub use mp_core::<module>::*`:
+Six modules are split rather than moved whole, and in each case the root crate keeps the half that reads an engine and re-exports the rest with `pub use mp_core::<module>::*`:
 
 | module | in `mp-core` | left in the root package |
 |---|---|---|
 | `selector` | the grammar, the parser, the formatter, percent-encoding, `draft_not_found` | `resolve_received`, `resolve_draft` (one indexed lookup each) and the `MessageRowRef` impl for `store::read::MessageRow` |
 | `search` | the whole parser and its four renderers, plus `imap_query`, the three pure IMAP string helpers it reads out of `imap_client` | nothing; `imap_client::search` re-exports the three helpers |
 | `invite` | the ICS building, `Rsvp`, the reply builder, the date and duration grammar | `plan_invite`, `InviteRequest`, `InvitePlan`, `GRAPH_REFUSAL` (they read an account) |
+| `reconcile` | the fold: `InviteMessage`, `fold_replies`, `apply_replies`, `fold_status`, `own_rsvp`, `ReconcileReport` | `load_invites`, `event_for_message`, `reconcile_account` (each opens a store and reads blobs) |
+| `contacts` | `cache`, `filter`, `matcher`, `rank`, `types`, `vcard` whole, plus `extractor`'s observation half (`observe`, `process_header`, `self_address`) | `build_index_for_account`, the store rebuild, and `hooks`, which reads `sync::FreshObservation` |
+| `draft` | the file format: the skeleton, the signature sentinels, the frontmatter rewrites, the reply and forward builders, `validate_draft`, `preview_draft`, `find_drafts`, `mark_as_*` | `new_draft_skeleton` (mints an id), `source_from_row`, `create_draft_from_source`, `settle_sent_draft`, `delete_indexed_draft` |
+
+`mp-core/addresses.rs` arrived the way `imap_query` did: four pure RFC 5322 string functions (`split_addresses`, `normalize_address_for_smtp`, `quote_display_name`, `format_recipient`) that lived in `send` because that is where the first caller was, and that `draft`'s validation reads without wanting a transport.
+`send` re-exports the three public ones.
 
 `#[cfg(test)]` does not cross a crate boundary, so the two test seams the root crate's own tests depend on - `config::test_env`'s thread-local data-dir overrides (#0077) and `parse::test_temp_root`'s per-thread materialisation root - are behind `mp-core`'s `test-support` feature, which the root crate enables through its `[dev-dependencies]` entry.
 Resolver v2 keeps a dev-dependency's features out of a plain `cargo build`, so the shipped binary compiles exactly what `#[cfg(test)]` used to leave out.
@@ -82,8 +88,8 @@ What did not change is the help surface: `mp daemon`, `mp account` and the globa
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
 It counts `#[test]` attributes by scanning `src/tui/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
-The four floors are 464 TUI tests, 329 `mp-core` tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
-The `mp-core` floor is P5-U10a's (#0126) and its arithmetic is the move's proof: the root package's `--lib` run went from 1 398 to 1 069 while `mp-core` runs 329, and 1 069 + 329 is 1 398.
+The four floors are 464 TUI tests, 416 `mp-core` tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
+The `mp-core` floor is #0126's and its arithmetic is the move's proof: the root package's `--lib` run went from 1 398 to 982 across P5-U10a and P5-U10b while `mp-core` runs 416, and 982 + 416 is 1 398.
 
 ### What the daemon owns since Phase 6
 
@@ -330,9 +336,10 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/dump.rs` | `mp dump-mailbox`: path-free NDJSON envelope dump of the store, the parity harness for the data-layer rewrite |
 | `src/read_cmd.rs` | `mp show`, `mp list-messages` (#0062) and the `mp search --local` listing (#0043): the human read surface over `store::read` and `store::search`, offline, rendering to a `String` so the layout is testable. Not the dump: that is an oracle with a pinned record shape. |
 | `src/cutover.rs` | `mp cutover` (#0040): the end of the file-era transition. Mints an `id:` into any draft that has none (the one-time draft "import"; the drafts directory never moved) and reports the dead file-era mailbox directories. Deletes nothing, by design. |
-| `src/reconcile.rs` | iMIP invite reconciliation, folded over the rows at display time and never persisted: attendee `PARTSTAT`s (#0030) and, since #0031, the `(UID, RECURRENCE-ID)` cancellation/version fold (`fold_status`) that marks an event cancelled, superseded, or missing individual occurrences |
+| `mp-core/reconcile.rs` + `src/reconcile.rs` | iMIP invite reconciliation, folded over the rows at display time and never persisted: attendee `PARTSTAT`s (#0030) and, since #0031, the `(UID, RECURRENCE-ID)` cancellation/version fold (`fold_status`) that marks an event cancelled, superseded, or missing individual occurrences. Split at the readers: the fold is in `mp-core`, the three functions that open a store and read blobs stay. |
 | `mp-core/parse.rs` | RFC822 parsing, attachment extraction and sanitisation, `inline_images` and `embed_inline_images` (the `cid:`-referenced image parts, inlined as `data:` URIs for the browser view and the `.html` companion; the in-pane rendering they were written for was retired by #0109), `open_file_with_system()`, `materialisation_dir()`, `stable_attachments_dir()`, `ensure_utf8_charset()` |
-| `src/draft.rs` | Draft parsing and validation, reply and forward creation (`create_draft_from_source`), `source_from_row`, status transitions, `settle_sent_draft` |
+| `mp-core/draft.rs` + `src/draft.rs` | Draft parsing and validation, reply and forward creation, status transitions. Split at what needs an index, a row or an outbox record: the file format is in `mp-core`, `new_draft_skeleton`, `source_from_row`, `create_draft_from_source`, `settle_sent_draft` and `delete_indexed_draft` stay. |
+| `mp-core/addresses.rs` | RFC 5322 address strings: `split_addresses`, `normalize_address_for_smtp`, `quote_display_name`, `format_recipient`. Out of `send` in P5-U10b, which re-exports them, because `draft`'s validation reads them and wants no transport. |
 | `src/send.rs` | `markdown_to_html`, message building, `send_draft` + `SendContext`, per-recipient submission, `DurableSend`, `resume_outbox` |
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
@@ -340,7 +347,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain, by the outbox drain (#0116) and by the IMAP sync ingest (#0122) |
 | `src/graph.rs` | Microsoft Graph REST client: folders, fetch, sync, send, move, delete, read flags, search |
 | `mp-core/calendar.rs` + `mp-core/invite.rs` + `src/invite.rs` | iCalendar receive-side parsing and send-side building. `invite` is split at `plan_invite`, which reads the sending account. |
-| `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. |
+| `mp-core/contacts/` + `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. Split at the store read: the cache, the filter, the ranker, the matcher, the vCard writer and the observation merge are in `mp-core`, the rebuild and the send/sync hooks stay. |
 | `src/config_cmd/` | Config subcommands: init wizard, add-account, show, set-password, oauth2-login, reset-secrets, path |
 | `src/calendar_cmd.rs` | `mp calendar rebuild`: reports what the invite fold resolves, writes nothing |
 | `mp-core/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
@@ -477,6 +484,7 @@ A failed call degrades exactly as it did before, as an empty list, a zeroed coun
 The plan drives it to zero in P5-U10, which is deferred; each remaining row waits on a surface that does not exist yet.
 
 - `app/mod.rs store`, `app/calendar_view.rs store`, `app/store_rows.rs store` are the sessionless readers above. They die with the crate move, when the tests that need them move to the root crate, not with a new method.
+  P5-U10b routed the last reader that had no daemon-backed twin: `App::draft_body` calls `draft.path` and parses the file the daemon names, and `load_draft_body` stays as its oracle. That one opened the store with `Store::open` rather than `open_store`, so `TUI_APP_STORE_RESIDUE` never listed it and still does not.
 - `app/types.rs store`, `app/types.rs ingest`, `queries.rs store` want `MessageRow`, `DraftRow` and `SkippedDraft` as protocol types, which would also delete `src/main.rs`'s duplicate wire-row decoder.
 - `actions.rs store` is `RD-06`'s Markdown rendition, `RD-07`'s `mp://` selector on a listing and `LST-09`'s `message.fetch`, none of which is built.
 - `helpers.rs store`, `helpers.rs imap_client`, `mod.rs store` are `LST-08`'s server search leg, which becomes `message.list_server`.
@@ -491,7 +499,8 @@ The plan's shape is `crates/mp-tui` depending on `mp-client` and `mp-protocol` a
 The obstacle is not the engine residue above; it is the shared modules the allow-list deliberately does not scan.
 `src/tui/` reaches twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure was about 15 000 lines across sixteen modules before any of it moved.
 The three-unit sequencing that does it is in `docs/tickets/0124-tui-cutover.md`.
-**P5-U10a landed** (#0126): eleven of those modules and the engine-free halves of `selector`, `search` and `invite` are `crates/mp-core` above, which leaves `contacts`, `draft` and `reconcile` to split in P5-U10b and the move itself to P5-U10c.
+**P5-U10a and P5-U10b's splits landed** (#0126): eleven of those modules whole, and the engine-free halves of `selector`, `search`, `invite`, `reconcile`, `contacts` and `draft`, are `crates/mp-core` above.
+What P5-U10b did not land is the allow-list half of its brief: `RD-06`, `RD-07`, `LST-08`, `LST-09` and the wire-row types are still unbuilt, so the ten rows below are ten rows still, and they and the move are P5-U10c's.
 
 One consequence to carry into those two units: `secrets` and `oauth2` are named in `ENGINE_MODULES` and now live in `mp-core`.
 No file under `src/tui/` imports either, so the allow-list did not move, but a `crates/mp-tui` depending on `mp-core` would be able to reach both without the textual scan (which looks for `use crate::` / `use mailypoppins::`) ever seeing it.
