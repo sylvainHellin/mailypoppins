@@ -25,14 +25,26 @@
 //! and the table is a record too: a residue that goes away must be struck from
 //! it in the same commit.
 //!
+//! **The TUI's engine calls.** The import scan above reads `use` statements,
+//! and P5-U10c-I2 measured what that misses: most of what stands between
+//! `src/tui/` and `crates/mp-tui` is spelled as a fully-qualified path
+//! (`crate::outbox::counts_for_account(…)`, `crate::store::read::thread_messages(…)`),
+//! which no `use` line mentions, so the import allow-list read six while the
+//! work was six *groups* of call sites it could not see. The third half walks
+//! the same tree for those paths, over production code only, and compares the
+//! result against `tests/fixtures/tui-engine-paths.txt`. It is the same
+//! mechanism as the import allow-list and it is a record in the same sense: a
+//! row that goes away is struck in the commit that removes the call.
+//!
 //! Nothing here is feature-gated: it passes on the pre-daemon tree, which is
 //! the point. `engine_imports` takes the client source root as an argument so
 //! that Phase 5 can re-point it at `crates/mp-tui/` without a rewrite.
 //!
-//! To re-record the TUI allow-list after a deliberate change, run
+//! To re-record the TUI allow-lists after a deliberate change, run
 //! `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`
-//! and commit the diff. The CLI residue has no such switch on purpose: an entry
-//! is added by hand, with its reason, or it is not added.
+//! and commit the diff; the same switch rewrites both fixtures. The CLI residue
+//! has no such switch on purpose: an entry is added by hand, with its reason,
+//! or it is not added.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -58,6 +70,7 @@ pub const ENGINE_MODULES: [&str; 11] = [
 
 const CLIENT_ROOT: &str = "src/tui";
 const ALLOW_LIST: &str = "tests/fixtures/tui-engine-imports.txt";
+const PATH_ALLOW_LIST: &str = "tests/fixtures/tui-engine-paths.txt";
 
 /// Every engine module imported under `root`, as `(path relative to root,
 /// module)` pairs.
@@ -323,6 +336,259 @@ fn engine_imports_reads_every_use_form_and_ignores_shared_modules() {
     ]
     .into_iter()
     .map(|(f, m)| (f.to_string(), m.to_string()))
+    .collect();
+    assert_eq!(found, expected);
+}
+
+// ---------------------------------------------------------------------------
+// The TUI's engine calls (#0126, P5-U10d)
+// ---------------------------------------------------------------------------
+
+/// The paths a `crates/mp-tui` could not resolve, as they are spelled in the
+/// tree, and what each group is about.
+///
+/// Prefixes rather than a parse, for the reason [`ENGINE_SYMBOLS`] is a list of
+/// substrings: a test that needed a Rust front end to attribute a call would be
+/// a second compiler to maintain. The cost is that a comment naming one would
+/// count, which [`strip_line_comments`] removes, and that a `use` line would
+/// count twice, which [`strip_use_statements`] removes.
+///
+/// Three groups:
+///
+/// - **the engine modules**, the same eleven [`ENGINE_MODULES`] names, reached
+///   through a path instead of an import;
+/// - **the root crate's own halves of the shared modules**, which live beside
+///   the engine because they need a store, a row or an index: the agenda
+///   loader and the five `draft` operations. `crate::draft::` on its own would
+///   be wrong, because most of that module is `mp_core`'s and a client may
+///   reach it, so the five are named as the symbols they are spelled by. They
+///   are symbols rather than paths for a second reason too: `src/tui/` imports
+///   them and calls them bare, so there is no `crate::` path to look for;
+/// - **`crate::daemon::`**, which is the daemon crate itself. The TUI reaches
+///   it for one thing, the connect helper, and a client crate that linked the
+///   daemon would have no boundary at all.
+const TUI_ENGINE_PATHS: [&str; 18] = [
+    "crate::agenda::",
+    "crate::daemon::",
+    "crate::graph::",
+    "crate::imap_client::",
+    "crate::ingest::",
+    "crate::oauth2::",
+    "crate::ops::",
+    "crate::outbox::",
+    "crate::pending_ops::",
+    "crate::secrets::",
+    "crate::send::",
+    "crate::store::",
+    "crate::sync::",
+    "create_draft_from_source(",
+    "delete_indexed_draft(",
+    "new_draft_skeleton(",
+    "settle_sent_draft(",
+    "source_from_row(",
+];
+
+/// Every engine path reached from the **production** code under `root`, as
+/// `(path relative to root, path prefix)` pairs.
+///
+/// Production only, which is the difference from [`engine_imports`]: a test
+/// module under `src/tui/` moves with the code it tests, and a file that is
+/// nothing but a test module (declared `#[cfg(test)] mod x;`) moves whole. What
+/// blocks the crate move is the paths a *frame* takes.
+pub fn engine_paths(root: &Path) -> BTreeSet<(String, String)> {
+    let test_only = test_only_files(root);
+    let mut found = BTreeSet::new();
+    for file in rust_files(root) {
+        if test_only.contains(&file) {
+            continue;
+        }
+        let rel = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        let source = strip_use_statements(&strip_test_modules(&strip_line_comments(&source)));
+        for path in TUI_ENGINE_PATHS {
+            if source.contains(path) {
+                found.insert((rel.clone(), path.to_string()));
+            }
+        }
+    }
+    found
+}
+
+/// Every file under `root` that a parent module declares `#[cfg(test)]`.
+///
+/// Derived rather than listed by name: `src/tui/` carries ten such files and a
+/// suffix convention would be a second rule to keep in step with the `mod`
+/// lines that decide it.
+fn test_only_files(root: &Path) -> BTreeSet<PathBuf> {
+    let mut found = BTreeSet::new();
+    for file in rust_files(root) {
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        // The directory the `mod` lines of this file name modules in.
+        let dir = match file.file_stem().and_then(|s| s.to_str()) {
+            Some("mod") | Some("lib") | Some("main") => file.parent().map(Path::to_path_buf),
+            Some(stem) => file.parent().map(|parent| parent.join(stem)),
+            None => None,
+        };
+        let Some(dir) = dir else { continue };
+        for name in test_only_module_names(&source) {
+            found.insert(dir.join(format!("{name}.rs")));
+            found.insert(dir.join(&name).join("mod.rs"));
+        }
+    }
+    found
+}
+
+/// The module names `source` declares behind `#[cfg(test)]`.
+fn test_only_module_names(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("#[cfg(test)]") {
+        rest = &rest[at + "#[cfg(test)]".len()..];
+        let head = rest.trim_start();
+        let head = head
+            .strip_prefix("pub mod ")
+            .or_else(|| head.strip_prefix("mod "));
+        let Some(head) = head else { continue };
+        let name: String = head.chars().take_while(|c| is_ident_char(*c)).collect();
+        // A `#[cfg(test)] mod tests { … }` in the same file declares no file.
+        if !name.is_empty() && head[name.len()..].trim_start().starts_with(';') {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Drop every `use` statement, so an import counted by the allow-list above is
+/// not counted a second time here.
+///
+/// Line-based, and a braced multi-line `use` is covered by its first line: the
+/// continuation lines carry item names, not crate paths.
+fn strip_use_statements(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            !(line.starts_with("use ")
+                || line.starts_with("pub use ")
+                || line.starts_with("pub(crate) use ")
+                || line.starts_with("pub(super) use "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The move's real progress bar: every engine path the TUI's production code
+/// takes is one the allow-list names, and every one it names is still taken.
+#[test]
+fn tui_engine_paths_match_the_allow_list() {
+    let root = repo_root().join(CLIENT_ROOT);
+    assert!(root.is_dir(), "client root {root:?} does not exist");
+
+    let actual = engine_paths(&root);
+    let fixture = repo_root().join(PATH_ALLOW_LIST);
+
+    if std::env::var_os("UPDATE_TUI_ENGINE_IMPORTS").is_some() {
+        fs::write(&fixture, render(&actual)).expect("rewrite the path allow-list");
+        return;
+    }
+
+    let expected = parse_allow_list(&fs::read_to_string(&fixture).expect("read the path allow-list"));
+
+    let added: Vec<_> = actual.difference(&expected).collect();
+    let removed: Vec<_> = expected.difference(&actual).collect();
+    if added.is_empty() && removed.is_empty() {
+        return;
+    }
+
+    let mut report = String::new();
+    for (file, path) in &added {
+        report.push_str(&format!(
+            "  new engine call: {CLIENT_ROOT}/{file} reaches `{path}`\n"
+        ));
+    }
+    for (file, path) in &removed {
+        report.push_str(&format!(
+            "  engine call gone: {CLIENT_ROOT}/{file} no longer reaches `{path}`\n"
+        ));
+    }
+    panic!(
+        "the TUI's engine calls moved ({} in the tree, {} in {PATH_ALLOW_LIST}):\n{report}\n\
+         The client/engine boundary must not widen, and a call that went away belongs struck \
+         from the fixture in the same commit. If the change is deliberate, re-record it with \
+         `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.",
+        actual.len(),
+        expected.len(),
+    );
+}
+
+/// The path allow-list is sorted, deduped and names only scanned paths.
+#[test]
+fn the_path_allow_list_is_sorted_deduped_and_names_only_scanned_paths() {
+    let fixture = repo_root().join(PATH_ALLOW_LIST);
+    let text = fs::read_to_string(&fixture).expect("read the path allow-list");
+    let entries = parse_allow_list(&text);
+    assert_eq!(
+        render(&entries),
+        text,
+        "{PATH_ALLOW_LIST} is not sorted, is not deduped, or is not `<file> <path>` per line"
+    );
+    for (file, path) in &entries {
+        assert!(
+            TUI_ENGINE_PATHS.contains(&path.as_str()),
+            "{PATH_ALLOW_LIST} names `{path}` (from {file}), which the scan does not look for"
+        );
+    }
+}
+
+/// The scanner reads a fully-qualified call, ignores a `use` of the same
+/// module, ignores a comment, and ignores a `#[cfg(test)]` module both in a
+/// file and as a whole file.
+#[test]
+fn the_path_scanner_reads_calls_and_ignores_imports_comments_and_tests() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("app")).expect("mkdir");
+    fs::write(
+        root.join("mod.rs"),
+        "mod real;\n#[cfg(test)]\nmod only_tests;\npub mod app;\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("real.rs"),
+        "use crate::store::open_store;\n\
+         fn paint() { let _ = crate::outbox::counts_for_account(\"a\"); }\n\
+         // crate::sync::tick() is named in a comment\n\
+         #[cfg(test)]\n\
+         mod tests {\n    fn t() { crate::ingest::ingest_message(); }\n}\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("only_tests.rs"),
+        "fn t() { let _ = crate::send::send_draft(); }\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("app/mod.rs"),
+        "fn body() { crate::store::read::thread_messages(); }\n\
+         fn quote() { crate::draft::create_draft_from_source(); }\n\
+         fn parse() { crate::draft::parse_email_draft(); }\n",
+    )
+    .expect("write");
+
+    let found = engine_paths(root);
+    let expected: BTreeSet<(String, String)> = [
+        ("app/mod.rs", "create_draft_from_source("),
+        ("app/mod.rs", "crate::store::"),
+        ("real.rs", "crate::outbox::"),
+    ]
+    .into_iter()
+    .map(|(f, p)| (f.to_string(), p.to_string()))
     .collect();
     assert_eq!(found, expected);
 }

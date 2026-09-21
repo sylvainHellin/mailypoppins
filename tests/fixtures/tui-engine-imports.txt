@@ -3,4 +3,3 @@ app/mod.rs store
 app/store_rows.rs store
 app/types.rs ingest
 app/types.rs store
-mod.rs store
