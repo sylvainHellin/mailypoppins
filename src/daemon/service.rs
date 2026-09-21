@@ -16,6 +16,13 @@
 //! and systemd's. Both files are written 0644 with their parent directories
 //! created as needed, and neither holds a secret.
 //!
+//! All three substituted values are paths a user chose, so the templates quote
+//! every placeholder - a double-quoted systemd value, a plist `<string>` - and
+//! [`escape`] makes the value unable to leave the construct it sits in. A
+//! `$HOME` or a `MAILYPOPPINS_DATA_DIR` with a space in it would otherwise
+//! split an `ExecStart` into two arguments and truncate an `Environment=` at
+//! the space, and an `&` in a path would make the plist unparseable.
+//!
 //! The two templates are byte-for-byte copies of the fixtures
 //! `tests/daemon_service.rs` pins, `src/daemon/templates/`, with three
 //! placeholders: `{{MP}}` is [`std::env::current_exe`], `{{DATA_DIR}}` and
@@ -292,7 +299,7 @@ fn home_dir() -> PathBuf {
 fn render(target: Target) -> Result<String> {
     let exe = std::env::current_exe().context("resolving this executable")?;
     Ok(render_template(
-        template(target),
+        target,
         &canonical(&exe),
         &canonical(&crate::config::mailypoppins_data_dir()),
         &canonical(&crate::config::config_dir()),
@@ -300,11 +307,40 @@ fn render(target: Target) -> Result<String> {
 }
 
 /// The substitution itself, without an environment to read.
-fn render_template(template: &str, mp: &str, data_dir: &str, config_dir: &str) -> String {
-    template
-        .replace("{{MP}}", mp)
-        .replace("{{DATA_DIR}}", data_dir)
-        .replace("{{CONFIG_DIR}}", config_dir)
+///
+/// Every value goes through [`escape`] on its way in, because all three are
+/// paths a user chose and a path may hold a space, an `&` or a quote.
+fn render_template(target: Target, mp: &str, data_dir: &str, config_dir: &str) -> String {
+    template(target)
+        .replace("{{MP}}", &escape(target, mp))
+        .replace("{{DATA_DIR}}", &escape(target, data_dir))
+        .replace("{{CONFIG_DIR}}", &escape(target, config_dir))
+}
+
+/// One substituted value, made safe for the file it is going into.
+///
+/// The templates put every placeholder inside a double-quoted systemd value or
+/// inside a plist `<string>`, so the quoting is the template's and the
+/// escaping is this: what a value must not be able to do is *leave* the
+/// construct it sits in.
+///
+/// - **linux**: `\` and `"` are the two characters systemd reads specially
+///   inside a double-quoted value (`systemd.syntax(7)`), so both are
+///   backslash-escaped. A `$HOME` with a space in it then renders as one
+///   argument instead of two, and an `Environment=` assignment with a space
+///   in its value is no longer silently truncated at the space.
+/// - **darwin**: `&`, `<`, `>` and `"` are XML's, so all four become entities.
+///   A path holding an `&` otherwise makes the whole plist unparseable, which
+///   is a `launchctl bootstrap` that fails at login rather than at install.
+fn escape(target: Target, value: &str) -> String {
+    match target {
+        Target::Linux => value.replace('\\', "\\\\").replace('"', "\\\""),
+        Target::Darwin => value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;"),
+    }
 }
 
 fn template(target: Target) -> &'static str {
@@ -542,13 +578,69 @@ mod tests {
     /// Every placeholder is substituted, and none survives into a written file.
     #[test]
     fn rendering_leaves_no_placeholder_behind() {
-        for template in [UNIT_TEMPLATE, PLIST_TEMPLATE] {
-            let rendered = render_template(template, "/opt/mp", "/data", "/config");
+        for target in [Target::Linux, Target::Darwin] {
+            let rendered = render_template(target, "/opt/mp", "/data", "/config");
             assert!(!rendered.contains("{{"), "rendered:\n{rendered}");
             assert!(rendered.contains("/opt/mp"));
             assert!(rendered.contains("/data"));
             assert!(rendered.contains("/config"));
         }
+    }
+
+    /// A path with a space and an `&` in it survives into both files as one
+    /// value, and neither file can be made to mean something else by it.
+    ///
+    /// A `$HOME` with a space in it is ordinary on macOS and reachable on
+    /// Linux, and `MAILYPOPPINS_DATA_DIR` is whatever the user exported. An
+    /// unquoted `ExecStart` would split it into two argv entries, an unquoted
+    /// `Environment=` would drop everything after the space, and a raw `&` in
+    /// a plist `<string>` is an XML parse error rather than a path.
+    #[test]
+    fn a_path_with_a_space_and_an_ampersand_renders_as_one_value() {
+        let mp = "/home/a b/Mail & More/bin/mp";
+        let data = "/home/a b/Mail & More/data";
+        let config = "/home/a b/Mail & More/config";
+
+        let unit = render_template(Target::Linux, mp, data, config);
+        assert!(
+            unit.contains(&format!("ExecStart=\"{mp}\" daemon run\n")),
+            "the executable is one double-quoted argument; unit:\n{unit}"
+        );
+        assert!(
+            unit.contains(&format!(
+                "Environment=\"MAILYPOPPINS_DATA_DIR={data}\"\nEnvironment=\"MAILYPOPPINS_CONFIG_DIR={config}\"\n"
+            )),
+            "and each assignment is one double-quoted word, space and all; unit:\n{unit}"
+        );
+
+        let plist = render_template(Target::Darwin, mp, data, config);
+        let escaped = "/home/a b/Mail &amp; More";
+        assert!(
+            plist.contains(&format!("<string>{escaped}/bin/mp</string>")),
+            "the `&` is an entity, so the document still parses; plist:\n{plist}"
+        );
+        assert!(
+            !plist.replace("&amp;", "").contains('&'),
+            "every ampersand in the document is an entity; plist:\n{plist}"
+        );
+    }
+
+    /// The two characters each format reads specially are escaped, and only
+    /// those.
+    #[test]
+    fn the_escape_is_the_one_each_format_needs() {
+        assert_eq!(
+            escape(Target::Linux, r#"/a b/c"d\e"#),
+            r#"/a b/c\"d\\e"#,
+            "systemd reads `\\` and `\"` inside a double-quoted value"
+        );
+        assert_eq!(
+            escape(Target::Darwin, r#"/a b/c&d<e>f"g"#),
+            "/a b/c&amp;d&lt;e&gt;f&quot;g",
+            "XML reads four, and a backslash is not one of them"
+        );
+        assert_eq!(escape(Target::Linux, "/plain/path"), "/plain/path");
+        assert_eq!(escape(Target::Darwin, "/plain/path"), "/plain/path");
     }
 
     /// The order of the two `systemctl` lines is the contract, in both

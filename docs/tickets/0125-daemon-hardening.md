@@ -544,9 +544,9 @@ Documentation=https://mailypoppins.dev
 
 [Service]
 Type=simple
-ExecStart={{MP}} daemon run
-Environment=MAILYPOPPINS_DATA_DIR={{DATA_DIR}}
-Environment=MAILYPOPPINS_CONFIG_DIR={{CONFIG_DIR}}
+ExecStart="{{MP}}" daemon run
+Environment="MAILYPOPPINS_DATA_DIR={{DATA_DIR}}"
+Environment="MAILYPOPPINS_CONFIG_DIR={{CONFIG_DIR}}"
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -564,6 +564,7 @@ Four decisions inside those files, all asserted:
 
 - **`ExecStart` is `daemon run`, never `daemon start`.** A `Type=simple` unit whose `ExecStart` forked and returned would be restarted forever by `Restart=on-failure`, and the daemon left behind would be one systemd does not own. The rows also assert `--foreground-logs` is absent: the journal gets what the daemon logs anyway.
 - **`Environment=` is exactly the data and config directories, and nothing else.** A login-started daemon inherits the session manager's environment, not the shell's, so a user whose `MAILYPOPPINS_DATA_DIR` or `XDG_DATA_HOME` is exported from a shell rc file would otherwise get a daemon serving a different tree than the one his `mp` talks to. No `PATH`: the binary is invoked by absolute path and the daemon spawns nothing that needs one.
+- **Every placeholder is quoted where it lands**, because all three are paths a user chose: a double-quoted systemd value with `\` and `"` backslash-escaped, a plist `<string>` with `&`, `<`, `>` and `"` as entities. The Phase 6 review added this; the unquoted original split an `ExecStart` at the first space and truncated an `Environment=` assignment there.
 - **`TimeoutStopSec` and `ExitTimeOut` are `DEFAULT_GRACE_SECS + 5`.** The tie is asserted against the constant rather than assumed, so a grace raised in `src/daemon/shutdown.rs` without the unit following it fails here instead of having the service manager `SIGKILL` a daemon in the middle of the eight steps.
 - **`KillSignal=SIGTERM`** is the signal those eight steps answer (P6-U4), and `KeepAlive {SuccessfulExit: false}` is its launchd equivalent: a crash is restarted, a `mp daemon stop` (exit 0) is not.
 

@@ -79,6 +79,14 @@
 //! `Environment=` / `EnvironmentVariables`: the binary is invoked by absolute
 //! path, and the daemon spawns nothing that needs a `PATH`.
 //!
+//! All three are quoted where they land, because all three are paths a user
+//! chose: the unit's `ExecStart` and both `Environment=` values are
+//! double-quoted systemd values with `\` and `"` backslash-escaped, and the
+//! plist's are `<string>` bodies with `&`, `<`, `>` and `"` as entities.
+//! `src/daemon/service.rs`'s own unit tests render a path holding a space and
+//! an `&` through both templates; the sandbox paths here hold neither, so the
+//! fixture comparison is unaffected by the escaping and stays byte-exact.
+//!
 //! `TimeoutStopSec` and `ExitTimeOut` are the shutdown grace P6-U4 landed plus
 //! a five second margin, and one row ties the literal in the fixture to
 //! `DEFAULT_GRACE_SECS` so a changed grace fails here rather than truncating a
@@ -427,8 +435,9 @@ fn the_unit_starts_the_foreground_run_and_never_the_detached_start() {
 
     assert_eq!(
         unit_value(&unit, "ExecStart"),
-        Some(format!("{} daemon run", canonical(Path::new(MP)))),
-        "ExecStart is the absolute path of this executable plus `daemon run`; unit:\n{unit}"
+        Some(format!("\"{}\" daemon run", canonical(Path::new(MP)))),
+        "ExecStart is the absolute path of this executable, double-quoted so a \
+         space in it is one argument, plus `daemon run`; unit:\n{unit}"
     );
     for forbidden in ["daemon start", "daemon restart", "--foreground-logs"] {
         assert!(
@@ -457,13 +466,17 @@ fn the_unit_starts_the_foreground_run_and_never_the_detached_start() {
     assert_eq!(
         environment,
         vec![
-            format!("MAILYPOPPINS_DATA_DIR={}", canonical(&sandbox.data_dir())),
             format!(
-                "MAILYPOPPINS_CONFIG_DIR={}",
+                "\"MAILYPOPPINS_DATA_DIR={}\"",
+                canonical(&sandbox.data_dir())
+            ),
+            format!(
+                "\"MAILYPOPPINS_CONFIG_DIR={}\"",
                 canonical(&sandbox.config_dir())
             ),
         ],
-        "the unit carries the two directories the installing `mp` resolved, and nothing else"
+        "the unit carries the two directories the installing `mp` resolved, each one \
+         double-quoted so a space in a path does not truncate the assignment, and nothing else"
     );
 }
 

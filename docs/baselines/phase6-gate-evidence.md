@@ -94,7 +94,7 @@ Run at `1ee6bcb` from the release binary, in a sandbox `HOME`, `XDG_CONFIG_HOME`
 | the same four with `MAILYPOPPINS_DAEMON_SERVICE_OS=darwin` | `✓ wrote …/LaunchAgents/dev.mailypoppins.daemon.plist`, `✓ removed …` | 0 |
 
 Each block carried its two `systemctl --user` lines (or its one `launchctl` line) and the `dry run: … nothing was run` line under them.
-The written unit names `ExecStart=<abs>/mp daemon run`, the two directory variables the installing `mp` resolved, `Restart=on-failure`, `KillSignal=SIGTERM` and `TimeoutStopSec=15`, which is `DEFAULT_GRACE_SECS + 5`.
+The written unit names `ExecStart="<abs>/mp" daemon run`, the two directory variables the installing `mp` resolved as double-quoted `Environment=` assignments, `Restart=on-failure`, `KillSignal=SIGTERM` and `TimeoutStopSec=15`, which is `DEFAULT_GRACE_SECS + 5`.
 
 The lifecycle commands were smoked over the benchmark fixture in the same session: `mp daemon start`, `status` (running, with both directories and both accounts), `health` (`✓ daemon healthy, 1 check needs attention`, exit 0, one `⚠` for the account still opening its store), `logs --lines 3 --level info` (three lines, no banner), `support-bundle` (`files: 5`), `restart`, and `stop --grace-secs 3` -> `✓ daemon stopped`, exit 0, with the runtime directory left holding only `daemon.start.lock`.
 
