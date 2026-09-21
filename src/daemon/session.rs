@@ -502,6 +502,7 @@ mod tests {
                 "diagnostic.support_bundle".to_string(),
                 "draft.approve".to_string(),
                 "draft.create".to_string(),
+                "draft.create_from_message".to_string(),
                 "draft.demote".to_string(),
                 "draft.discard".to_string(),
                 "draft.forward".to_string(),

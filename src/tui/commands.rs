@@ -1048,6 +1048,56 @@ pub(super) fn draft_from_source(
     Ok((path, selector))
 }
 
+/// The draft a reply, a reply-all or a forward of a message the client *holds*
+/// writes, as its path and its selector (`DFT-08`, `DFT-09`, #0126).
+///
+/// `draft.create_from_message`, which is the one draft `draft.reply` and
+/// `draft.forward` cannot build: every form of their `source` is an address
+/// into the store, and this is the server-search hit that resolved to no local
+/// row. The message travels instead of the address, and the daemon runs the
+/// same `mp_core::draft` builder over it, so the file is the one the resolved
+/// hit's reply writes.
+///
+/// The payload is the envelope and the two body renditions the overlay is
+/// already rendering, under the hit's own field names. It carries no
+/// attachments, because a hit streamed by `message.search_server` has none on
+/// this side.
+pub(super) fn draft_from_message(
+    commands: &dyn Queries,
+    account: &str,
+    kind: crate::draft::DraftFromSource,
+    fetched: &crate::parse::FetchedEmail,
+) -> Result<(PathBuf, String), String> {
+    let kind = match kind {
+        crate::draft::DraftFromSource::Reply { all: false } => "reply",
+        crate::draft::DraftFromSource::Reply { all: true } => "reply_all",
+        crate::draft::DraftFromSource::Forward => "forward",
+    };
+    let params = json!({
+        "account": account,
+        "kind": kind,
+        "message": {
+            "from": fetched.from,
+            "to": fetched.to,
+            "cc": fetched.cc,
+            "subject": fetched.subject,
+            "message_id": fetched.message_id,
+            "date_display": fetched.date,
+            "body_text": fetched.body_text,
+            "html_body": fetched.html_body,
+        },
+    });
+    let created = commands
+        .call("draft.create_from_message", params)
+        .map_err(|e| format!("{e:#}"))?;
+    let path = created["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| "draft.create_from_message wrote a draft it did not name".to_string())?;
+    let selector = created["selector"].as_str().unwrap_or_default().to_string();
+    Ok((path, selector))
+}
+
 /// The rows of the local index that answer `query`, as the search overlay's
 /// own row type (#0105).
 ///

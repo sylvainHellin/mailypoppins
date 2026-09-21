@@ -16,10 +16,13 @@ use super::helpers::{
 use super::commands;
 use super::session::QueryHandle;
 
-use crate::draft::{
-    create_draft_from_source, new_draft_skeleton, DraftFromSource, DraftRecipientEdit,
-    SourceMessage,
-};
+use crate::draft::{new_draft_skeleton, DraftFromSource, DraftRecipientEdit};
+// The builder itself, for the test modules that assert the daemon's draft
+// against the file `mp reply` and `mp forward` write. No production path here
+// reaches it any more: a reply to a stored row is `draft.reply` and a reply to
+// a hit the store does not hold is `draft.create_from_message`.
+#[cfg(test)]
+use crate::draft::{create_draft_from_source, SourceMessage};
 use crate::selector::Selector;
 
 // ---------------------------------------------------------------------------
@@ -458,19 +461,6 @@ fn cursor_message(app: &mut App, what: &str) -> Option<MessageRef> {
     None
 }
 
-/// The address a draft this account writes is sent from: the SMTP config's,
-/// falling back to the account's own default.
-///
-/// Only the wizard's own writer reads this now: a reply or a forward is built
-/// by the daemon, which resolves the same address off the same configured
-/// account (`SmtpConfig::default_from` is a copy of `AccountConfig`'s).
-fn default_from(app: &App) -> String {
-    app.smtp_config
-        .as_ref()
-        .map(|s| s.default_from.clone())
-        .unwrap_or_else(|| app.account_config.default_from.clone())
-}
-
 /// Build the draft through the daemon and hand it straight to `$EDITOR`, which
 /// is what reply and forward did before the read path moved (the draft is a
 /// starting point, not a finished message).
@@ -507,31 +497,35 @@ fn write_draft_and_edit(
     edit_new_draft(app, terminal, &path, format!("{what} draft ready: {selector}"))
 }
 
-/// [`write_draft_and_edit`] over a source the client already holds, which is
+/// [`write_draft_and_edit`] over a message the client already holds, which is
 /// the server-search hit that resolved to no local row.
 ///
-/// The one draft the daemon cannot build: the message is not in the store, so
-/// there is no row to address, and the content is the fetch the overlay is
-/// rendering. Refusing to quote it would be a limitation of the plumbing
-/// rather than of what is known.
+/// `draft.create_from_message` since P5-U10d (`DFT-08`, `DFT-09`, #0126): the
+/// message is not in the store, so there is no row to address and no `source`
+/// this family takes, and the content is the fetch the overlay is rendering.
+/// So the message travels instead of an address and the daemon runs the same
+/// `mp_core::draft` builder over it that the resolved hit's reply runs.
+///
+/// Composing this out of `message.fetch` plus `draft.reply` is what P5-U10c-I2
+/// was briefed to do and refused: it would ingest the message, move the unread
+/// count and turn the hit into a resolved one, which is what the overlay's
+/// separate `f` key is for.
 fn write_fetched_draft_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    source: &SourceMessage,
+    fetched: &crate::parse::FetchedEmail,
     kind: DraftFromSource,
     what: &str,
 ) -> Result<()> {
     let account = app.account_config.name.clone();
-    let from = default_from(app);
-    let signature = app.signature_content.clone();
-    let (path, selector) =
-        match create_draft_from_source(&account, &from, source, kind, None, signature.as_deref()) {
-            Ok(pair) => pair,
-            Err(e) => {
-                app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
-                return Ok(());
-            }
-        };
+    let built = commands::draft_from_message(&daemon_door(app), &account, kind, fetched);
+    let (path, selector) = match built {
+        Ok(pair) => pair,
+        Err(e) => {
+            app.set_status_level(format!("{what} failed: {e}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
     edit_new_draft(app, terminal, &path, format!("{what} draft ready: {selector}"))
 }
 
@@ -1996,7 +1990,6 @@ fn search_result_draft(
     kind: DraftFromSource,
     what: &str,
 ) -> Result<()> {
-    let with_attachments = matches!(kind, DraftFromSource::Forward);
     let Some(hit) = app.server_search_results.get(app.server_search_index) else {
         return Ok(());
     };
@@ -2013,15 +2006,7 @@ fn search_result_draft(
     let Some(fetched) = fetched else {
         return Ok(());
     };
-    let account_dir = crate::config::account_dir(&app.account_config.name);
-    let source = match crate::draft::source_from_fetched(&account_dir, &fetched, with_attachments) {
-        Ok(source) => source,
-        Err(e) => {
-            app.set_status_level(format!("{what} failed: {e:#}"), StatusLevel::Error);
-            return Ok(());
-        }
-    };
-    write_fetched_draft_and_edit(app, terminal, &source, kind, what)
+    write_fetched_draft_and_edit(app, terminal, &fetched, kind, what)
 }
 
 /// The `f` key of the search overlay (#0104): ingest a server-only hit.

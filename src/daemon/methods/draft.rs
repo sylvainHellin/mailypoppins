@@ -49,14 +49,14 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::draft::{
-    DraftCollision, DraftCreated, DraftEntry, DraftListing, DraftLocation, DraftPreview,
-    DraftReport, DraftSkip, DraftSource, DraftValidation,
+    DraftCollision, DraftCreated, DraftEntry, DraftKind, DraftListing, DraftLocation, DraftMessage,
+    DraftPreview, DraftReport, DraftSkip, DraftSource, DraftValidation,
 };
 use mp_protocol::events::{DraftInvalid, KIND_DRAFT_INVALID};
 use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, EmailSettings};
-use crate::draft::DraftRecipientEdit;
+use crate::draft::{DraftRecipientEdit, SourceMessage};
 use crate::selector::{Namespace, Selector};
 use crate::store::drafts::DraftRow;
 use crate::store::read::MessageRow;
@@ -90,6 +90,22 @@ pub const DRAFT_METHOD_SPECS: [MethodSpec; 10] = [
     MethodSpec::new("draft.validate", MethodKind::Query, 1),
 ];
 
+/// The draft built from a message the client holds rather than from a row the
+/// store holds (`DFT-08`, `DFT-09`, P5-U10d, #0126).
+///
+/// A command and durable like the five above, served by the same type, and in
+/// a separate array for the reason `MESSAGE_MARKDOWN_METHOD_SPECS` is one:
+/// `tests/daemon_draft_slice.rs`, `tests/daemon_mutation_slice.rs` and
+/// `tests/daemon_draft_watch.rs` each pin [`DRAFT_METHOD_SPECS`] at exactly
+/// the ten names P4-U7 left it at, two of them at compile time, so growing it
+/// would edit three pinned tests to say something they were not written to
+/// say.
+pub const DRAFT_FROM_MESSAGE_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    "draft.create_from_message",
+    MethodKind::Command,
+    1,
+)];
+
 /// One of the ten, selected by its own [`MethodSpec`].
 ///
 /// One type for the family because they share every dependency and differ only
@@ -113,7 +129,10 @@ pub fn register(
     watch: Arc<DraftWatch>,
     canonical: Arc<crate::daemon::state::CanonicalState>,
 ) {
-    for spec in DRAFT_METHOD_SPECS {
+    for spec in DRAFT_METHOD_SPECS
+        .into_iter()
+        .chain(DRAFT_FROM_MESSAGE_METHOD_SPECS)
+    {
         dispatcher.register(Arc::new(DraftMethod {
             spec,
             config: Arc::clone(&config),
@@ -141,6 +160,7 @@ impl Method for DraftMethod {
             let result = match self.spec.name {
                 "draft.approve" => self.set_status(&params, accounts, true),
                 "draft.create" => create(&params, accounts, email),
+                "draft.create_from_message" => create_from_message(&params, accounts, email),
                 "draft.demote" => self.set_status(&params, accounts, false),
                 "draft.discard" => discard(&params, accounts),
                 "draft.forward" => from_source(&params, accounts, email, false),
@@ -457,6 +477,100 @@ fn create(
     );
     std::fs::write(&path, skeleton)
         .map_err(|e| internal(format!("writing {}: {e}", path.display())))?;
+
+    created(&account.name, &id, &path, None)
+}
+
+/// The `result` of `draft.create_from_message`: a reply, a reply-all or a
+/// forward built from a message the caller holds (`DFT-08`, `DFT-09`, #0126).
+///
+/// The one draft `draft.reply` and `draft.forward` cannot build. Every form of
+/// their `source` is an address into the store, and this is the server-search
+/// hit that resolved to no local row: no `messages.id`, no uid, no selector,
+/// and a body the client is already rendering. So the message travels instead
+/// of an address.
+///
+/// It reads no message store, which is what lets it quote for an account that
+/// has none, and it **ingests nothing**: no row appears in a mailbox and no
+/// unread count moves. The overlay has a separate key for downloading the
+/// message, and that key is `message.fetch`.
+///
+/// The id is minted and written into the file here, as [`create`] does, rather
+/// than through [`crate::draft::create_draft_from_source`]: that helper ends
+/// with `store::drafts::refresh_account`, which opens - and therefore creates -
+/// the account's store, and an account with no store may not be handed one by
+/// a draft (P5-U10's rule, since materialising an empty database turns the
+/// read family's `-32006` into empty answers). Nothing is owed by skipping it:
+/// every query of this family answers from a fresh directory scan, which is
+/// what makes a draft written a millisecond ago addressable.
+///
+/// It carries no attachments. A forward built from a stored row materialises
+/// the original parts; a client holding a server-only hit has none, because
+/// `message.search_server` streams an envelope and two body renditions.
+fn create_from_message(
+    params: &Value,
+    accounts: &[AccountConfig],
+    email: &EmailSettings,
+) -> Result<Value, RpcError> {
+    let account = configured(accounts, &string_param(params, "account")?)?;
+    let kind = match params.get("kind") {
+        Some(value) => serde_json::from_value::<DraftKind>(value.clone()).map_err(|_| {
+            invalid_params(format!(
+                "kind is one of reply, reply_all or forward, got {value}"
+            ))
+        })?,
+        None => return Err(invalid_params("kind is one of reply, reply_all or forward")),
+    };
+    let message = match params.get("message") {
+        Some(value @ Value::Object(_)) => serde_json::from_value::<DraftMessage>(value.clone())
+            .map_err(|e| invalid_params(format!("message is not a quotable message: {e}")))?,
+        Some(other) => {
+            return Err(invalid_params(format!(
+                "message is the object a reply quotes, got {other}"
+            )))
+        }
+        None => return Err(invalid_params("message is the object a reply quotes")),
+    };
+
+    // The shape `mp_core::draft::source_from_fetched` builds from a fetch,
+    // filled from the payload instead: same builder, same file, and no parts,
+    // because the client holds none.
+    let source = SourceMessage {
+        from: message.from,
+        to: message.to,
+        cc: message.cc,
+        subject: message.subject,
+        message_id: message.message_id,
+        date: Some(message.date_display),
+        body: message.body_text.trim().to_string(),
+        attachments: Vec::new(),
+        html: message.html_body,
+    };
+
+    let dir = crate::config::drafts_dir(&account.name);
+    let signature = signature_of(account, params, email);
+    let path = match kind {
+        DraftKind::Reply | DraftKind::ReplyAll => crate::draft::create_reply_draft_from(
+            &source,
+            matches!(kind, DraftKind::ReplyAll),
+            &account.default_from,
+            Some(&dir),
+            signature.as_deref(),
+        ),
+        DraftKind::Forward => crate::draft::create_forward_draft_from(
+            &source,
+            &account.default_from,
+            Some(&dir),
+            signature.as_deref(),
+        ),
+    }
+    .map_err(|e| internal(format!("writing the draft of {}: {e:#}", account.name)))?;
+
+    // The id goes in before the selector is handed out, which is what makes
+    // that selector resolve the moment it is printed (#0050).
+    let id = crate::store::drafts::new_id();
+    crate::draft::set_draft_id(&path, &id)
+        .map_err(|e| internal(format!("minting the id of {}: {e:#}", path.display())))?;
 
     created(&account.name, &id, &path, None)
 }
