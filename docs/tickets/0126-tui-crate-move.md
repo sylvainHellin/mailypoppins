@@ -7,7 +7,7 @@ status: in progress
 created: 2026-09-22
 ---
 
-Status: in progress. The move itself is still ahead: P5-U10c-I2 drove the action layer's engine residue to zero and measured what the `git mv` costs, which is three more units.
+Status: in progress. The move itself is still ahead: P5-U10c-I2 measured that the `git mv` is three more units, and P5-U10d-T has written the contract for the first of them.
 
 P5-U10a and P5-U10b have landed: `crates/mp-core` holds the engine-free closure the TUI reaches, eleven modules whole and the engine-free half of six more.
 No call site outside the moved files changed, and no behaviour changed: the help surface, the key dump and the twenty golden frames are byte-identical, and the workspace test count did not drop.
@@ -30,7 +30,10 @@ That ticket's proposed sequencing is this one's unit table.
 | P5-U10c-T | T | see below | the contract for the four surfaces: `docs/daemon-protocol.md`, seven fixtures, `mp_protocol::listing`, three test files and both guards moved to their post-unit state | done |
 | P5-U10c-I1 | I | `52a68cb`, `dd35b18`, `9e06bcf` | the four surfaces: `RD-06`, `RD-07`, `LST-08`, `LST-09`, the wire rows, and both guards at their post-unit counts | done |
 | P5-U10c-I2 | I | `ec364ff`, `9258140`, `1182dfe` | the last engine call sites in `src/tui/`: `contact.rebuild`, the agenda out of the TUI, the invite blob onto `message.ics` | done, partially: the move itself did not land |
-| P5-U10c-I3.. | I | - | the move: three units, named in P5-U10c-I2's inventory below | pending |
+| P5-U10d-T | T | `40e2d72`, `061ba7d`, `f946a0f`, `459d7bd` | the contract for the five non-oracle groups: `message.thread`, `draft.create_from_message`, four fixtures, three test files, and the path guard the move is actually measured by | done |
+| P5-U10d-I | I | - | the two methods, the dead outbox field, the drafts poll, and both guards at their post-unit counts | pending |
+| P5-U10e | I | - | the sessionless oracles and their test modules, into the root crate | pending |
+| P5-U10f | I | - | the move itself, plus the connect helper's new home | pending |
 
 ## P5-U10a: the shared crate
 
@@ -579,5 +582,215 @@ Per crate: `mailypoppins` lib 988, `mp-core` 416, `mp-protocol` 18, `mp-client` 
 `scripts/capture-cli-help.sh` and `mp dump-keys --json`, from a binary rebuilt in the same run, diff empty against `docs/baselines/pre-daemon/cli-help.txt` and `docs/baselines/pre-daemon/tui-keys.json`.
 
 `cargo clippy --workspace --offline --all-targets` -> **37 distinct warnings**, the same 37 as `facde0d` by `(lint, file, line)`, none of them on a line this unit wrote.
+
+`pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
+
+## P5-U10d-T: the contract for the five non-oracle groups
+
+A T unit over P5-U10c-I2's inventory: for each of the six groups that block `git mv src/tui crates/mp-tui/src`, whether a served surface already answers it or a method has to be written, and the contract where one does.
+It implements nothing in `src/daemon/methods/`, `src/tui/`, `crates/mp-client/` or the engine, and the implementer does not edit the test files it wrote.
+
+The headline is that only two of the six need a protocol surface at all, and that the guard which was supposed to measure the move could not see ten of the call sites.
+
+### The decisions
+
+| group | decision | what it is |
+|---|---|---|
+| the outbox badge | (a), and the field is dead | `AccountState::outbox` is written twice and read nowhere; the status bar that rendered it is gone |
+| the drafts index | (a) | the daemon's watcher and `draft.list`'s directory scan already answer the poll and the three refreshes |
+| the conversation overlay | (b) | `message.thread`, with `mp_protocol::listing::{ThreadMessage, ThreadListing}` |
+| the sessionless oracles | no contract | a test relocation, listed below by the tests that depend on each |
+| the draft from a server hit | (b) | `draft.create_from_message`, with `mp_protocol::draft::{DraftKind, DraftMessage}` |
+| the connect helper | no contract | not `mp-client`'s job as that crate is written; it moves with the crate, and the shape is decided below |
+
+### The outbox badge: nothing to serve, because nothing reads it
+
+`src/tui/bg.rs:72` and `src/tui/mod.rs:198` call `crate::outbox::counts_for_account` on every account open and every sync completion, and both write `AccountState::outbox`.
+Nothing reads that field.
+The badge it fed left with the status bar (`src/tui/ui/mod.rs:88`: "its outbox and sync badges were sticky by construction"), and the only other mentions of the field are the three struct literals that have to fill it and `BgResult::AccountOpened`'s `outbox` member that carries it there.
+So the group is a deletion: the field, the `BgResult` member, the two reads and the type import go, and no wire shape is needed.
+
+What a *future* badge would use is already on the wire and is worth writing down here so nobody contracts it twice: the bootstrap snapshot carries `outbox: {account: {queued, failed}}` and `Change::OutboxCounts` publishes `state.invalidate` of `outbox:<account>` with `{"query": "counts"}`.
+Two facts about it are true today and would have to be fixed first.
+Nothing in the tree ever constructs `Change::OutboxCounts` outside tests, so the snapshot section is all zeroes and the invalidate never fires.
+And its shape is `{queued, failed}` where the engine's own `OutboxCounts` and `send.outbox_list`'s are `{open, failed, partial}`, so the snapshot cannot express #0063's partly-delivered row, which was one of the three the badge showed.
+
+### The drafts index: the poll dies against three served surfaces
+
+`src/tui/mod.rs` polls `store::drafts::fingerprint` once a second over the *active* account's drafts directory and calls `store::drafts::refresh_account` on a change; `src/tui/actions.rs:560`, `src/tui/actions.rs:1608` and `src/tui/commands.rs:1598` call the same refresh after an editor session and after a recipient edit.
+
+The daemon has answered all of it since P3b-U10.
+Its watcher has a root per configured account, debounced at 300 ms over a one-second poll, and publishes `draft.changed`, `draft.invalid` and `state.remove` of `draft:<account>/<id>`; `draft.list`, `draft.path` and the two mutators answer from a fresh directory scan, so a Drafts reload owes no index refresh first; the bootstrap snapshot carries the same rows.
+`tests/daemon_draft_watch.rs` pins the events over the socket and `tests/daemon_draft_slice.rs` pins the freshness rule for `draft.path` and `draft.approve`.
+
+`tests/daemon_draft_index_slice.rs` adds the two facts neither states, both passing at HEAD deliberately, because an (a) decision's product is the pin that the surface is there:
+
+| test | what it pins |
+|---|---|
+| `a_draft_written_a_moment_ago_is_listed_without_a_refresh` | the next `draft.list` carries a file another process just wrote, and `mailbox.list`'s Drafts total is that listing plus its skipped rows (#0080) |
+| `a_draft_in_another_account_is_announced_as_well` | a write into an account nobody is looking at is announced too, where the client's poll only ever scanned the active one |
+
+The client-side work is therefore a reducer for `draft.changed` / `draft.invalid` / `state.remove` of a `draft:` resource, which `MessageRowDelta::decode` deliberately returns `None` for today, and the deletion of the poll.
+The store's `drafts` table survives as the daemon's own: `mailbox.list` refreshes it for the sidebar count, which is the one thing that reads it.
+
+### `message.thread`
+
+| method | kind | params | result | errors | events |
+|---|---|---|---|---|---|
+| `message.thread` | query, durable | `{account, row_id\|id\|selector, mailbox?}` | `{account, thread_id, subject, messages: [ThreadMessage]}` | `-32602` bad, absent or doubled address and a `row_id` no message has, `-32005` unknown account, `-32006` no store | none |
+
+`ThreadMessage` is `{id, mailbox, message_id, from, date_display, flags, current}` and `ThreadListing` is the answer; both are new in `mp_protocol::listing`.
+The fixtures are `crates/mp-protocol/fixtures/message.thread.{request,response}.json`.
+
+The decisions behind the shape:
+
+**A row type of its own, not `MessageListRow`.**
+A listing names its mailbox once and every row of it is in that mailbox; a conversation holds the Inbox copy and the archived original side by side, and the overlay's `Enter` switches mailbox when it opens one.
+So the row carries `mailbox`, and carries nothing the overlay does not render: no `uid`, no `selector`, no recipients, and no `date_sort`, because the daemon orders the conversation and a client that re-sorted it would be inventing an order the overlay does not have.
+
+**`current` is served, and is decided on the `Message-ID`.**
+`thread_messages` collapses the copies of one message to the first its order yields, so the surviving row for the addressed message can carry an `id` the call did not name; a client computing `current` from the row id it asked about would mark nothing.
+
+**A message with no relatives answers with itself alone.**
+The client's "No related emails for this message in the store" line is a branch on the length, and an empty array would be the different claim that the store does not hold even the addressed message, which is `-32602`.
+
+| test (`tests/daemon_thread_slice.rs`) | fails at HEAD with |
+|---|---|
+| `the_fixture_is_a_conversation_ingest_threaded_itself` | passes, deliberately: the premise that ingest grouped the seeded chain |
+| `the_daemon_advertises_the_conversation_read` | the name is in no capability list |
+| `a_conversation_is_the_store_s_own_fold_oldest_first` | `-32601` |
+| `the_row_carries_every_field_the_overlay_renders` | `-32601` |
+| `exactly_one_row_is_the_message_the_thread_was_opened_from` | `-32601` |
+| `a_message_with_no_relatives_is_a_one_row_conversation` | `-32601` |
+| `a_message_the_store_holds_twice_is_one_row` | `-32601` |
+| `the_three_addresses_reach_the_same_conversation` | `-32601` |
+| `a_bad_address_is_invalid_params` | `-32601` where `-32602` is owed |
+| `the_account_refusals_are_the_read_family_s` | `-32601` where `-32005` and `-32006` are owed |
+
+### `draft.create_from_message`
+
+| method | kind | params | result | errors | events |
+|---|---|---|---|---|---|
+| `draft.create_from_message` | command, durable | `{account, kind, message, no_signature?, signature?}` | `DraftCreated` with `source: null` | `-32602` a `kind` outside the three words and a `message` that is absent or not an object, `-32005` unknown account | the watcher's own `draft.changed` for the file it wrote |
+
+`kind` is `reply`, `reply_all` or `forward`, and `message` is `mp_protocol::draft::DraftMessage` `{from, to, cc, subject, message_id, date_display, body_text, html_body}`, the subset of a `ServerSearchHit` that `mp_core::draft::source_from_fetched` reads, under the hit's own field names.
+The fixtures are `crates/mp-protocol/fixtures/draft.create_from_message.{request,response}.json`.
+
+**Why not a composition, which is P5-U10c-I2's finding restated as a contract.**
+`message.fetch` plus `draft.reply` would ingest the message, need a `Message-ID` and a sidebar mailbox, need the server, and cost a round trip for a payload the client is already rendering.
+
+**Why a method and not a fourth form of `source`.**
+`source` is an address into the store and every form of it takes the family's `-32006`; this one reads no message store, which is what lets it quote for an account that has none.
+Its account gate is `draft.create`'s, `configured` and not `ready_account`, and it may not give an unsynced account a store, for the reason P5-U10 fixed: materialising an empty database turns the read family's `-32006` into empty answers.
+
+**It carries no attachments.**
+A forward built from a stored row materialises the original parts; a forward built from a hit quotes and attaches nothing, because since P5-U10c-I1 the client holds an envelope and two body renditions and no parts at all.
+That is a behaviour difference against the pre-daemon build that I1 introduced and did not record: before it, the TUI ran the IMAP search itself and `hit.fetched.attachments` held the real parts, so `w` on a server-only hit forwarded them.
+`commands::hit_entry` sets `attachments: Vec::new()` today, so the client already forwards nothing, and this contract preserves what the client does rather than what it did.
+
+| test (`tests/daemon_draft_from_message_slice.rs`) | fails at HEAD with |
+|---|---|
+| `the_daemon_advertises_the_draft_built_from_a_message` | the name is in no capability list |
+| `a_reply_quotes_the_message_the_client_holds` | `-32601` |
+| `a_reply_all_keeps_the_other_recipients` | `-32601` |
+| `a_forward_names_no_recipient_and_carries_no_attachment` | `-32601` |
+| `the_new_draft_resolves_through_the_family_s_resolver` | `-32601` |
+| `quoting_a_message_ingests_nothing` | `-32601` |
+| `a_message_without_an_id_is_still_quotable` | `-32601` |
+| `an_account_with_no_store_can_still_quote_a_message` | `-32601` |
+| `the_parameters_are_validated` | `-32601` where `-32602` is owed |
+| `an_unknown_account_is_refused_and_a_storeless_one_is_not` | `-32601` where `-32005` is owed |
+
+### The connect helper: not `mp-client`'s job, and not a pure move
+
+`src/tui/session.rs:159` and `:432` call `crate::daemon::client::{client_session, reopen_session}`, which are `open_session` plus two different failure policies: exit 4 with the diagnostic for the CLI, `None` for a TUI that must not print into a terminal in raw mode.
+
+`mp-client` cannot take them as they are written.
+Its own charter is that it "owns no policy, no paths, and no configuration, and it never depends on the `mailypoppins` crate", and `open_session` needs all three: `runtime::socket_path` for the data directory, `lifecycle::start` to spawn `mp daemon run` on demand, `lifecycle::daemon_log_path` for the diagnostic, and the process-global `ROUTED` flag that `enforce_routing` reads for `MAILYPOPPINS_DAEMON_REQUIRE`.
+Moving them there means moving the auto-start policy into the transport crate, which is a bigger decision than this move needs.
+
+Three shapes, and the recommendation:
+
+1. **The binary injects a connector.** `mp_tui::run` takes what it needs to open and to reopen a session, and `crates/mp-tui` links neither the daemon nor the lifecycle. The exit-4 diagnostic stays in the process that owns the terminal before the alternate screen is entered, which is where `src/tui/session.rs:129` already says it belongs.
+2. A `session` feature on `mp-client` carrying paths and auto-start, which rewrites that crate's charter.
+3. A fourth crate for the policy, which is (2) without the charter problem and with a crate nobody else needs.
+
+The recommendation is (1), and it is the crate move's own decision rather than this unit's: until `crates/mp-tui` exists there is nowhere better for the helper to live, and moving it early buys nothing.
+The path guard keeps `session.rs crate::daemon::` for that reason.
+
+### The sessionless oracles, and the tests that depend on each
+
+No contract: they are the equality oracle every daemon-backed answer is compared against, and they move to the root crate's test tree with the tests that read them.
+The list is here so the implementer moves each with its tests rather than discovering the dependency at compile time.
+
+| oracle | where it is | the tests that depend on it |
+|---|---|---|
+| `store_rows::load_emails` | `src/tui/app/store_rows.rs` | `queries_tests`: `a_daemon_backed_mailbox_load_matches_the_store_backed_one`, `an_empty_mailbox_lists_empty_through_the_daemon_too`, `a_daemon_backed_preview_body_matches_the_store_backed_one`, `a_daemon_backed_drafts_list_matches_the_store_backed_one`, `an_unparseable_draft_still_lists_through_the_daemon`, `the_preview_query_stays_inside_the_p95_delta_ceiling`; `invites_tests`: `the_app_reads_the_same_draft_body_with_and_without_a_session`; `types.rs`: `counts_match_the_number_of_listable_messages`, `the_drafts_mailbox_lists_from_the_drafts_index`, `a_fully_sent_draft_leaves_the_drafts_list_and_a_partial_one_stays`, `the_drafts_count_agrees_with_the_list_on_a_never_synced_account`, `a_draft_written_externally_appears_on_the_next_load`, `counts_are_zero_for_unsynced_mailboxes_and_stay_index_aligned`, `counts_ignore_the_read_flag`, `a_message_whose_body_blob_is_gone_still_lists_and_still_counts`, `the_list_is_newest_first_and_deterministic`, `display_fields_follow_the_file_builds_rules`, `the_list_loads_with_every_body_blob_missing`, `the_preview_body_follows_a_reingest` |
+| `store_rows::count_all_emails` | `src/tui/app/store_rows.rs` | `queries_tests`: `daemon_backed_mailbox_counts_match_the_store_backed_ones`; the nine `types.rs` rows above that name it |
+| `store_rows::load_message_body` | `src/tui/app/store_rows.rs`, through `App::load_message_body` | `queries_tests`: `a_daemon_backed_preview_body_matches_the_store_backed_one`, `a_preview_of_a_row_that_is_gone_is_empty_on_both_paths`, `the_preview_query_stays_inside_the_p95_delta_ceiling` |
+| `row_to_wire` | `src/tui/app/types.rs` | none directly: its one caller is `load_emails`, so it moves with it |
+| `indexed_drafts` | `src/tui/app/types.rs`, behind `load_drafts` and `draft_count` | the `types.rs` drafts rows above, through `load_emails` on the Drafts mailbox |
+| `App::load_calendar_events` and `crate::agenda::` | `src/tui/app/mod.rs` | `invites_tests`: `the_app_answers_the_same_three_things_with_and_without_a_session`; `queries_tests`: `a_preview_walk_leaves_no_handle_behind` (through `TUI_APP_STORE_RESIDUE`) |
+| `App::load_message_invite` | `src/tui/app/mod.rs` | the same two |
+| `App::load_message_ics` | `src/tui/app/mod.rs` | the same two |
+| `App::load_draft_body` | `src/tui/app/mod.rs` | `invites_tests`: `the_app_reads_the_same_draft_body_with_and_without_a_session`, `an_unindexed_draft_id_answers_nothing_on_both_paths` |
+
+`TUI_APP_STORE_RESIDUE` in `src/tui/app/queries_tests.rs` is the fourth guard and names the last three of them.
+Its scan roots are `src/tui/app/{mod.rs,types.rs}`, which is why `open_thread_overlay` in `src/tui/app/keys.rs` was invisible to it as well as to the import allow-list.
+
+### The guards, before and after
+
+`tests/fixtures/tui-engine-imports.txt`: **6 -> 5**.
+The row that goes is `mod.rs store`, the drafts poll's `use crate::store::drafts`.
+The five that stay are the oracles (`app/mod.rs store`, `app/store_rows.rs store`, `app/types.rs store`) and two test-module imports (`actions.rs store`, `app/types.rs ingest`).
+
+`tests/fixtures/tui-engine-paths.txt` is new, and is what the import list could not see: the eleven engine modules reached by a fully-qualified path, `crate::agenda::` and the five root-half `draft` operations reached by symbol, and `crate::daemon::`, over production code only.
+Test modules are stripped, whole test files are stripped by deriving them from the `#[cfg(test)] mod x;` lines that declare them, and `use` lines are stripped so nothing is counted by both guards.
+
+**15 in the tree at HEAD, 5 in the fixture.** The ten that go:
+
+| row | the group it belongs to |
+|---|---|
+| `actions.rs crate::send::` | neither: `crate::send::format_recipient` is `mp_core::addresses::format_recipient` re-exported, so it is a re-spelling |
+| `actions.rs crate::store::` | the drafts index, the two `refresh_account` calls |
+| `actions.rs create_draft_from_source(` | the draft from a server hit |
+| `actions.rs new_draft_skeleton(` | neither: `Action::NewDraft` writes the skeleton client-side while `ACTION_ROUTING` already claims `draft.create`, which is served and does exactly this |
+| `app/keys.rs crate::send::` | the same re-spelling |
+| `app/keys.rs crate::store::` | the conversation overlay |
+| `app/types.rs crate::outbox::` | the outbox badge, the dead field and the `BgResult` member |
+| `bg.rs crate::outbox::` | the outbox badge |
+| `commands.rs crate::store::` | the drafts index |
+| `mod.rs crate::outbox::` | the outbox badge |
+
+The five that stay, and why:
+
+| row | why it survives this unit |
+|---|---|
+| `app/mod.rs crate::agenda::` | sessionless oracle |
+| `app/mod.rs crate::store::` | sessionless oracles |
+| `app/store_rows.rs crate::store::` | sessionless oracles |
+| `app/types.rs crate::store::` | `row_to_wire`'s signature and `indexed_drafts`, both oracle-side |
+| `session.rs crate::daemon::` | the connect helper, which moves with the crate |
+
+Two rows of the ten are findings rather than groups, and both are named above: `new_draft_skeleton` is a routing row that says something the handler does not do, which is the third instance of the class P5-U10c-I2 found twice, and `crate::send::format_recipient` is a path that outlived the function's move into `mp-core`.
+
+### Open decisions left to the implementer
+
+- Whether `message.thread` also answers for a draft. It cannot today: the overlay refuses a draft with "A draft has no conversation to show" before it looks anything up, and a draft has no `messages` row to address. Left as it is.
+- Whether the `draft.changed` reducer replaces the client's row or invalidates the Drafts mailbox. The payload carries the whole row, so a replace is possible; the listing the TUI holds is `EmailEntry`s built by `entry_from_draft` from a `DraftEntry`, which is a different shape from the snapshot's `DraftRow`, so an invalidate plus a `draft.list` is the smaller change and the one the poll already made.
+- Whether `draft.create_from_message` should refuse a `message` whose `from` is empty. The builder writes a draft addressed to nobody for it, which is what the client does today, and validation is `draft.validate`'s job.
+- Whether the outbox snapshot section should be filled and reshaped to `{open, failed, partial}` before a GUI renders a badge from it. Nothing reads it today, so nothing is broken by leaving it; a GUI that renders one will find it empty.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline --no-fail-fast` -> **2 390 passed, 21 failed, 5 ignored**.
+The 21 are this unit's contract rows and nothing else: nine in `daemon_thread_slice`, ten in `daemon_draft_from_message_slice`, and the two allow-list guards.
+2 390 is P5-U10c-I2's 2 379 plus twelve new passing rows (three in `mp_protocol::listing`, four in `mp_protocol::draft`, two in `daemon_draft_index_slice`, the thread fixture's own premise, and the path guard's shape and scanner tests) minus the import guard, which was passing and now fails.
+
+`--test daemon_thread_slice` -> 1 passed, 9 failed. `--test daemon_draft_from_message_slice` -> 0 passed, 10 failed. `--test daemon_draft_index_slice` -> 2 passed.
+`--test architecture_boundaries` -> 7 passed, 2 failed, at 6 imports against 5 and 15 paths against 5.
+`--test daemon_protocol_fixtures` -> 20, the four new fixtures registered. `--test phase5_parity_gate` -> 11. `--test test_selection_guard` -> 6. `-p mp-protocol` -> 25.
+
+`cargo clippy --workspace --offline --all-targets` reports nothing on any line this unit wrote.
 
 `pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
