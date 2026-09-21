@@ -242,7 +242,7 @@ where
 /// a *replacement* id into the file. The draft's identity changed under every
 /// selector and index row, with no error anywhere (#0077's root cause). Making
 /// it an error routes the file through the existing skipped-draft path
-/// ([`crate::store::drafts::SkippedDraft`]), which names the file and the
+/// (`store::drafts::SkippedDraft`), which names the file and the
 /// reason instead of re-identifying it behind the user's back.
 ///
 /// Nothing is coerced: a number is not read as its digits, because the digits
@@ -332,7 +332,7 @@ pub struct EmailFrontmatter {
     /// field that failed to deserialize made such a draft *invisible*: skipped
     /// by the index with a log line nobody reads, absent from `mp list` and
     /// from the TUI. The empty subject is not thereby accepted as sendable;
-    /// [`crate::draft::validate_draft`] still refuses it, which moves the
+    /// `draft::validate_draft` still refuses it, which moves the
     /// diagnosis from a silent skip to `mp validate` saying what is missing.
     /// Tolerance is scoped to this one field: genuinely malformed YAML still
     /// fails to parse and is still skipped with a log line.

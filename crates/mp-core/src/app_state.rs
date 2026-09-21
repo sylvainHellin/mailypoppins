@@ -7,7 +7,7 @@
 //! signature, which #0107 moved out of `[accounts.signatures] default`.
 //!
 //! The file is pretty-printed JSON, load/save modelled on
-//! [`crate::contacts::cache`]. A missing file, a missing account and a missing
+//! `contacts::cache`. A missing file, a missing account and a missing
 //! key all mean "nothing recorded"; a corrupt file is logged and treated as
 //! empty, never fatal, because the state it holds is a preference and losing
 //! it must not stop the app from running.

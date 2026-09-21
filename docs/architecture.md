@@ -22,8 +22,8 @@ No native-Windows code paths (registry, Credential Manager).
 
 ## Crate shape
 
-A Cargo workspace: the root package is the library plus the binary, and `crates/mp-protocol` and `crates/mp-client` are the two daemon crates beside it (see "Daemon and crate boundaries" below).
-All product logic lives in `src/lib.rs` modules, and the daemon in `src/daemon/` drives them; the CLI and the TUI are clients of it over a Unix socket and spawn no subprocess of their own.
+A Cargo workspace: the root package is the library plus the binary, and `crates/mp-core`, `crates/mp-protocol` and `crates/mp-client` are the three crates beside it (see "Daemon and crate boundaries" below).
+The engine lives in the root package's `src/lib.rs` modules, the shared engine-free modules in `mp-core` (re-exported from the root crate under their old paths), and the daemon in `src/daemon/` drives both; the CLI and the TUI are clients of it over a Unix socket and spawn no subprocess of their own.
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).
@@ -37,6 +37,23 @@ mp is being restructured around a local daemon that owns every store read, every
 The wire contract is [daemon-protocol.md](daemon-protocol.md) and the operator's half is [daemon-operations.md](daemon-operations.md).
 What follows is the shape that migration imposes on the tree today, which is all that is built.
 
+### The shared crate
+
+`crates/mp-core` owns what a client and the engine both need and neither owns: configuration and the data-directory layout, secrets and the OAuth2 token cache, signature files and `app_state`, RFC822 parsing, the shared types, iCalendar parsing and building, the search grammar, the `mp://` selector grammar, desktop notifications, `TimingSpan` and `SyncHealth`.
+It reaches no store, no IMAP session, no outbox and no sending transport, which is the whole of its definition; P5-U10a (#0126) moved it out of the root package so that a future `crates/mp-tui` has somewhere to depend on.
+
+Every module it holds is re-exported from `src/lib.rs` under the path it had inside the root package, so `crate::config::…` and `mailypoppins::parse::…` resolve unchanged everywhere: the CLI, the daemon, the TUI and the integration tests.
+Three modules are split rather than moved whole, and in each case the root crate keeps the half that reads an engine and re-exports the rest with `pub use mp_core::<module>::*`:
+
+| module | in `mp-core` | left in the root package |
+|---|---|---|
+| `selector` | the grammar, the parser, the formatter, percent-encoding, `draft_not_found` | `resolve_received`, `resolve_draft` (one indexed lookup each) and the `MessageRowRef` impl for `store::read::MessageRow` |
+| `search` | the whole parser and its four renderers, plus `imap_query`, the three pure IMAP string helpers it reads out of `imap_client` | nothing; `imap_client::search` re-exports the three helpers |
+| `invite` | the ICS building, `Rsvp`, the reply builder, the date and duration grammar | `plan_invite`, `InviteRequest`, `InvitePlan`, `GRAPH_REFUSAL` (they read an account) |
+
+`#[cfg(test)]` does not cross a crate boundary, so the two test seams the root crate's own tests depend on - `config::test_env`'s thread-local data-dir overrides (#0077) and `parse::test_temp_root`'s per-thread materialisation root - are behind `mp-core`'s `test-support` feature, which the root crate enables through its `[dev-dependencies]` entry.
+Resolver v2 keeps a dev-dependency's features out of a plain `cargo build`, so the shipped binary compiles exactly what `#[cfg(test)]` used to leave out.
+
 ### The two client-side crates
 
 `crates/mp-protocol` owns the wire: the JSON-RPC message structs, the numeric error table, the newline framing codec and the event envelope.
@@ -46,7 +63,7 @@ It also owns the pure serde types both ends of the socket speak, which is why `m
 `crates/mp-client` owns the transport: one `Connection` is one Unix-socket connection, and the crate carries the `initialize` handshake and the typed errors a caller branches on.
 It owns no policy, no paths and no configuration.
 
-Neither crate depends on `mailypoppins`, and that is the boundary that matters: a GUI links `mp-client` alone and cannot reach the engine by accident.
+Neither crate depends on `mailypoppins`, and nor does `mp-core`; that is the boundary that matters: a GUI links `mp-client` alone and cannot reach the engine by accident.
 The daemon itself is not a crate; it is `src/daemon/` inside the root package, because it drives the engine that already lives there.
 
 ### The `daemon` feature, and its removal
@@ -64,8 +81,9 @@ cargo test --workspace   # the whole tree, daemon included
 What did not change is the help surface: `mp daemon`, `mp account` and the global `--daemon` flag keep `#[command(hide = true)]` / `hide = true`, so `mp --help` stays byte-identical to `docs/baselines/pre-daemon/cli-help.txt` until a later unit moves it deliberately.
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
-It counts `#[test]` attributes by scanning `src/tui/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
-The three floors are 464 TUI tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
+It counts `#[test]` attributes by scanning `src/tui/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
+The four floors are 464 TUI tests, 329 `mp-core` tests, 20 golden-frame tests and 20 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
+The `mp-core` floor is P5-U10a's (#0126) and its arithmetic is the move's proof: the root package's `--lib` run went from 1 398 to 1 069 while `mp-core` runs 329, and 1 069 + 329 is 1 398.
 
 ### What the daemon owns since Phase 6
 
@@ -300,20 +318,20 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 
 | File | Responsibility |
 |------|---------------|
-| `src/types.rs` | Shared types: `EmailStatus` (the three draft states), `MessageFlags` (the received-mail status axis: seen, answered, forwarded), `MailboxRole` (the store's mailbox key), `EmailFrontmatter`, `EmailDraft`, `EventFrontmatter`, `collapse_hyphens` |
-| `src/config.rs` | Config loading (`~/.config/mailypoppins/config.toml`), `config_dir` + the one-time #0022 legacy move, secrets-backend dispatch, data dir helpers (`mailypoppins_data_dir`, `account_dir`, `store_path`, `blobs_dir`, `drafts_dir`, `tokens_dir`, `logs_dir`, `contacts_cache_path`), legacy-config rejection, logging init |
-| `src/signatures.rs` | App-managed signature files (#0107): one Markdown file per signature at `config_dir()/signatures/<name>.md`, the file stem being both key and display name. Name validation, list/read/write/create/rename/delete, the per-account default via `app_state`, and `migrate_config_signatures`, the one-time copy out of the legacy `[accounts.*.signatures]` tables. |
-| `src/app_state.rs` | App-owned state that is not user-edited config (#0107): `<data_dir>/state.json`, pretty-printed JSON, load/save modelled on `contacts::cache`. Holds the per-account default signature; a missing or corrupt file means "nothing recorded" and is never fatal. |
-| `src/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in). See [secrets.md](secrets.md). |
-| `src/oauth2.rs` | OAuth2 device-code flow, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, XOAUTH2 SASL builder. Scope-parameterised (`IMAP_SMTP_SCOPES` vs `GRAPH_SCOPES`). |
+| `mp-core/types.rs` | Shared types: `EmailStatus` (the three draft states), `MessageFlags` (the received-mail status axis: seen, answered, forwarded), `MailboxRole` (the store's mailbox key), `EmailFrontmatter`, `EmailDraft`, `EventFrontmatter`, `collapse_hyphens` |
+| `mp-core/config.rs` | Config loading (`~/.config/mailypoppins/config.toml`), `config_dir` + the one-time #0022 legacy move, secrets-backend dispatch, data dir helpers (`mailypoppins_data_dir`, `account_dir`, `store_path`, `blobs_dir`, `drafts_dir`, `tokens_dir`, `logs_dir`, `contacts_cache_path`), legacy-config rejection, logging init |
+| `mp-core/signatures.rs` | App-managed signature files (#0107): one Markdown file per signature at `config_dir()/signatures/<name>.md`, the file stem being both key and display name. Name validation, list/read/write/create/rename/delete, the per-account default via `app_state`, and `migrate_config_signatures`, the one-time copy out of the legacy `[accounts.*.signatures]` tables. |
+| `mp-core/app_state.rs` | App-owned state that is not user-edited config (#0107): `<data_dir>/state.json`, pretty-printed JSON, load/save modelled on `contacts::cache`. Holds the per-account default signature; a missing or corrupt file means "nothing recorded" and is never fatal. |
+| `mp-core/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in). See [secrets.md](secrets.md). |
+| `mp-core/oauth2.rs` | OAuth2 device-code flow, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, XOAUTH2 SASL builder. Scope-parameterised (`IMAP_SMTP_SCOPES` vs `GRAPH_SCOPES`). |
 | `src/ingest.rs` | The receive-path writer: fetched message to one `messages` row plus blobs, FTS maintenance, cursors, `prune_vanished`, `apply_seen_flags`, `graph_uid` |
-| `src/search.rs` | The unified search grammar (#0086a): one parser (`parse`) to one AST (`Query`/`Clause`/`Term`, plus the `in:`/`message-id:` directives), the CLI-flag builder (`from_cli`), and four renderers (`to_imap` with a `has:attachment` post-filter split, `to_gmail`/`to_gmail_search_command` for `X-GM-RAW`, `to_graph` for `$search`/`$filter`, `to_fts` for the local index). Malformed queries return a caret-pointed `ParseError`. `fts_expression` survives as a thin renderer wrapper. |
-| `src/selector.rs` | The `mp://account/mailbox/key` grammar: parse, resolve, format. Namespace fixed by the command, never sniffed. |
+| `mp-core/search.rs` | The unified search grammar (#0086a): one parser (`parse`) to one AST (`Query`/`Clause`/`Term`, plus the `in:`/`message-id:` directives), the CLI-flag builder (`from_cli`), and four renderers (`to_imap` with a `has:attachment` post-filter split, `to_gmail`/`to_gmail_search_command` for `X-GM-RAW`, `to_graph` for `$search`/`$filter`, `to_fts` for the local index). Malformed queries return a caret-pointed `ParseError`. `fts_expression` survives as a thin renderer wrapper. `mp-core/imap_query.rs` beside it holds the three pure IMAP string helpers it shares with `imap_client::search` (`normalize_message_id`, `bracketed_message_id`, `parse_date_to_imap`). |
+| `mp-core/selector.rs` + `src/selector.rs` | The `mp://account/mailbox/key` grammar: parse, resolve, format. Namespace fixed by the command, never sniffed. Split at the resolvers: the grammar is in `mp-core`, the two indexed lookups stay beside the store. |
 | `src/dump.rs` | `mp dump-mailbox`: path-free NDJSON envelope dump of the store, the parity harness for the data-layer rewrite |
 | `src/read_cmd.rs` | `mp show`, `mp list-messages` (#0062) and the `mp search --local` listing (#0043): the human read surface over `store::read` and `store::search`, offline, rendering to a `String` so the layout is testable. Not the dump: that is an oracle with a pinned record shape. |
 | `src/cutover.rs` | `mp cutover` (#0040): the end of the file-era transition. Mints an `id:` into any draft that has none (the one-time draft "import"; the drafts directory never moved) and reports the dead file-era mailbox directories. Deletes nothing, by design. |
 | `src/reconcile.rs` | iMIP invite reconciliation, folded over the rows at display time and never persisted: attendee `PARTSTAT`s (#0030) and, since #0031, the `(UID, RECURRENCE-ID)` cancellation/version fold (`fold_status`) that marks an event cancelled, superseded, or missing individual occurrences |
-| `src/parse.rs` | RFC822 parsing, attachment extraction and sanitisation, `inline_images` and `embed_inline_images` (the `cid:`-referenced image parts, inlined as `data:` URIs for the browser view and the `.html` companion; the in-pane rendering they were written for was retired by #0109), `open_file_with_system()`, `materialisation_dir()`, `stable_attachments_dir()`, `ensure_utf8_charset()` |
+| `mp-core/parse.rs` | RFC822 parsing, attachment extraction and sanitisation, `inline_images` and `embed_inline_images` (the `cid:`-referenced image parts, inlined as `data:` URIs for the browser view and the `.html` companion; the in-pane rendering they were written for was retired by #0109), `open_file_with_system()`, `materialisation_dir()`, `stable_attachments_dir()`, `ensure_utf8_charset()` |
 | `src/draft.rs` | Draft parsing and validation, reply and forward creation (`create_draft_from_source`), `source_from_row`, status transitions, `settle_sent_draft` |
 | `src/send.rs` | `markdown_to_html`, message building, `send_draft` + `SendContext`, per-recipient submission, `DurableSend`, `resume_outbox` |
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
@@ -321,13 +339,13 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
 | `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain, by the outbox drain (#0116) and by the IMAP sync ingest (#0122) |
 | `src/graph.rs` | Microsoft Graph REST client: folders, fetch, sync, send, move, delete, read flags, search |
-| `src/calendar.rs` + `src/invite.rs` | iCalendar receive-side parsing and send-side building |
+| `mp-core/calendar.rs` + `mp-core/invite.rs` + `src/invite.rs` | iCalendar receive-side parsing and send-side building. `invite` is split at `plan_invite`, which reads the sending account. |
 | `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. |
 | `src/config_cmd/` | Config subcommands: init wizard, add-account, show, set-password, oauth2-login, reset-secrets, path |
 | `src/calendar_cmd.rs` | `mp calendar rebuild`: reports what the invite fold resolves, writes nothing |
-| `src/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
-| `src/sync_health.rs` | `SyncHealth`, the per-account outcome of the last sync, plus the `mp sync` failure summary and exit code (#0071) |
-| `src/timing.rs` | `TimingSpan`, which emits `[TIMING]` log lines with millisecond precision. Filter logs with `rg '\[TIMING\]'`. |
+| `mp-core/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
+| `mp-core/sync_health.rs` | `SyncHealth`, the per-account outcome of the last sync, plus the `mp sync` failure summary and exit code (#0071) |
+| `mp-core/timing.rs` | `TimingSpan`, which emits `[TIMING]` log lines with millisecond precision. Filter logs with `rg '\[TIMING\]'`. |
 | **`src/sync/`** | |
 | `mod.rs` | The transport-independent sync types and the `SyncBackend` trait (#0059) |
 | `engine.rs` | `run_sync`: the orchestration every backend is driven through, plus `run_sync_guarded`/`run_sync_guarded_at` (the engine lock on the ingest path, #0122), `mark_below_unmet` (#0074) and the fake-backend engine tests |
@@ -345,7 +363,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `pool.rs` | The persistent session pool (`checkout`, `PooledSession`) and `ServerCaps`, the strict post-LOGIN capability gate (#0041) |
 | `fetch.rs` | `fetch_new_raw_on_session` (the two-pass store fetch), `vanished_uids`, `fetch_emails*`, `search_on_session` (runs a pre-rendered `SEARCH`, the seam the unified grammar lowers to), the arrival-coverage arithmetic |
 | `store_sync.rs` | `ImapBackend` (the `SyncBackend` impl: the parallel per-mailbox fetch), `sync_mailboxes()`, `list_mailboxes()` |
-| `search.rs` | `build_imap_search_query()`, `FetchCriteria`, `parse_date_to_imap` (the structured direct-lookup path; the user grammar moved to `crate::search`) |
+| `search.rs` | `build_imap_search_query()`, `FetchCriteria` (the structured direct-lookup path; the user grammar moved to `crate::search`, and `normalize_message_id` / `bracketed_message_id` / `parse_date_to_imap` moved to `mp_core::imap_query` and are re-exported from here) |
 | `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
 | `ops.rs` | Single-message server ops: move, delete, read flags |
 | `batch.rs` | `batch_move_on_server`, `batch_delete_on_server` |
@@ -467,12 +485,17 @@ The plan drives it to zero in P5-U10, which is deferred; each remaining row wait
 
 `src/tui/actions.rs` carries a second, narrower allow-list of its own, `TUI_ACTION_ENGINE_RESIDUE` in `src/tui/actions_tests.rs`: seven `(function, needle, reason)` rows, where the import list says which file and this one says which function still opens a store.
 
-### The crate move, deferred
+### The crate move, in progress
 
 The plan's shape is `crates/mp-tui` depending on `mp-client` and `mp-protocol` and on nothing else.
 The obstacle is not the engine residue above; it is the shared modules the allow-list deliberately does not scan.
-`src/tui/` reaches twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure is about 15 000 lines across sixteen modules, six of which need a genuine split before one line of `src/tui/` can move.
-The three-unit sequencing that does it (P5-U10a the shared crate, P5-U10b the last surfaces, P5-U10c the move) is in `docs/tickets/0124-tui-cutover.md`, and it runs after Phase 6.
+`src/tui/` reaches twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure was about 15 000 lines across sixteen modules before any of it moved.
+The three-unit sequencing that does it is in `docs/tickets/0124-tui-cutover.md`.
+**P5-U10a landed** (#0126): eleven of those modules and the engine-free halves of `selector`, `search` and `invite` are `crates/mp-core` above, which leaves `contacts`, `draft` and `reconcile` to split in P5-U10b and the move itself to P5-U10c.
+
+One consequence to carry into those two units: `secrets` and `oauth2` are named in `ENGINE_MODULES` and now live in `mp-core`.
+No file under `src/tui/` imports either, so the allow-list did not move, but a `crates/mp-tui` depending on `mp-core` would be able to reach both without the textual scan (which looks for `use crate::` / `use mailypoppins::`) ever seeing it.
+P5-U10c has to decide whether they leave that list or whether the scan learns about `mp_core::`.
 
 ## Multi-account
 
