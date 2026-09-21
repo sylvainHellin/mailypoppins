@@ -81,6 +81,21 @@ struct Armed {
 /// One table per daemon process, held by [`DaemonState`](super::server::DaemonState)
 /// because two things outside the dispatcher reach it: the connection loop,
 /// which applies the last-client rule, and the timer tasks.
+///
+/// # Lock order
+///
+/// Two mutexes, and the order is **`armed` before `order`, never the
+/// reverse**. [`HoldScheduler::arm`], [`HoldScheduler::listing`] and
+/// [`HoldScheduler::take`] all hold `armed` while they reach for `order`, so a
+/// method that held `order` while it reached for `armed` would deadlock the
+/// daemon at the first interleaving - and both sides of that interleaving are
+/// reachable from a live socket, `cancel_all` from the last client leaving or
+/// from step 2 of a shutdown and `listing` from `send.hold_status`,
+/// `diagnostic.health` and `state.bootstrap` on another connection.
+/// A method that needs only `order` takes it alone and drops the guard before
+/// it touches `armed`, which is what [`HoldScheduler::cancel_all`] does with
+/// its snapshot; `cancel_all_and_listing_do_not_deadlock` is the row that
+/// fails when that stops being true.
 #[derive(Debug, Default)]
 pub struct HoldScheduler {
     /// Arm order, which is the order a listing and a mass cancel walk in.
@@ -196,11 +211,13 @@ impl HoldScheduler {
     /// Answers how many went, for the log line: a daemon that cancelled a send
     /// the user confirmed has to say so somewhere.
     pub fn cancel_all(&self, canonical: &CanonicalState, operations: &OperationRegistry) -> usize {
-        let doomed: Vec<OperationId> = lock(&self.order)
-            .iter()
-            .filter(|id| lock(&self.armed).contains_key(id))
-            .cloned()
-            .collect();
+        // The snapshot is taken under `order` alone and that guard is dropped
+        // before `cancel` reaches for `armed`, because the lock order of this
+        // type is `armed` before `order` and a walk of the queue that held it
+        // while testing the map would be the one inversion. An id that left
+        // the map between the snapshot and the cancel is what `cancel`'s
+        // `false` already means, so nothing is lost by not filtering here.
+        let doomed: Vec<OperationId> = lock(&self.order).clone();
         doomed
             .iter()
             .filter(|id| self.cancel(canonical, operations, id))
@@ -388,6 +405,77 @@ mod tests {
             scheduler.cancel_all(&canonical, &operations),
             0,
             "and a daemon with nothing holding cancels nothing"
+        );
+    }
+
+    /// `cancel_all` and `listing` run against each other without deadlocking.
+    ///
+    /// The regression this guards is a lock-order inversion: `cancel_all`
+    /// once held `order` for the whole of its snapshot statement and took
+    /// `armed` inside the filter, where `arm`, `listing` and `take` all take
+    /// `armed` first. Both sides are reachable from a live socket at the same
+    /// instant - `cancel_all` from the last client leaving or from step 2 of
+    /// a shutdown, `listing` from `send.hold_status`, `diagnostic.health` or
+    /// `state.bootstrap` on another connection - so the interleaving is a
+    /// daemon that stops answering, not a theoretical one.
+    ///
+    /// A deadlock shows up as the timeout on the channel rather than as a
+    /// hung test binary, which is why the threads report through one.
+    #[test]
+    fn cancel_all_and_listing_do_not_deadlock() {
+        /// Enough interleavings that the inverted version hangs reliably, few
+        /// enough that the row costs milliseconds.
+        const ROUNDS: usize = 200;
+        /// Far longer than the work needs; only a deadlock reaches it.
+        const PATIENCE: Duration = Duration::from_secs(30);
+
+        let scheduler = Arc::new(HoldScheduler::new());
+        let canonical = state();
+        let operations = Arc::new(OperationRegistry::new());
+        let (done, finished) = std::sync::mpsc::channel();
+
+        let cancelling = {
+            let scheduler = Arc::clone(&scheduler);
+            let canonical = Arc::clone(&canonical);
+            let operations = Arc::clone(&operations);
+            let done = done.clone();
+            std::thread::spawn(move || {
+                for round in 0..ROUNDS {
+                    for name in ["a", "b", "c"] {
+                        scheduler.arm(
+                            &canonical,
+                            &OperationId::new(format!("op-{name}-{round}")),
+                            "alice",
+                            "tui",
+                            &plan(),
+                        );
+                    }
+                    scheduler.cancel_all(&canonical, &operations);
+                }
+                let _ = done.send("cancel_all");
+            })
+        };
+        let listing = {
+            let scheduler = Arc::clone(&scheduler);
+            std::thread::spawn(move || {
+                for _ in 0..ROUNDS {
+                    let _ = scheduler.listing(None);
+                    let _ = scheduler.listing(Some("alice"));
+                }
+                let _ = done.send("listing");
+            })
+        };
+
+        for _ in 0..2 {
+            finished.recv_timeout(PATIENCE).unwrap_or_else(|e| {
+                panic!("a hold thread did not finish within {PATIENCE:?}, which is the lock-order inversion: {e}")
+            });
+        }
+        cancelling.join().expect("the cancelling thread");
+        listing.join().expect("the listing thread");
+        assert!(
+            scheduler.listing(None).holds.is_empty(),
+            "and every hold the cancelling thread armed is gone"
         );
     }
 
