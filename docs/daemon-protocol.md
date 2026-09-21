@@ -114,7 +114,7 @@ Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are 
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the six `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
 A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
@@ -692,6 +692,54 @@ The watch is validated before an id is issued - the account, the mailbox, the tr
 A Graph account has no IDLE to offer and is `-32603`.
 No timeout crosses the socket: a client that wants to stop waiting calls `operation.cancel`.
 
+### The server search leg
+
+Two operations carry what the TUI's search overlay still does in process: the merged server search behind `ff` (`LST-08`, and with it `LST-06`'s unmigrated CLI residue) and the `f` that ingests a server-only hit (`LST-09`).
+
+```text
+message.search_server {account, query, mailboxes?: [str], limit?, exclude_message_ids?: [str]}
+        -> {operation_id}
+   streams  state.event kind `message.server_hit`, payload {operation_id, hit}
+   settles  {account, query, hits, deduplicated, unreachable: [{mailbox, error}]}
+
+message.fetch {account, mailbox, message_id} -> {operation_id}
+   settles  {account, mailbox, uid, row_id, selector, already_present}
+```
+
+**The search leg is `message.search_server` and not `message.list_server`**, which is taken: P4-U10 registered that name for `mp fetch`'s one-mailbox query over `criteria`, and redefining it would break a command that has nothing to do with this one.
+`message.search_server` is the name `docs/parity-matrix.md`'s `LST-06` entry already gives it, "the twin of `message.list_server`".
+
+**It is an operation with streamed hits**, because the overlay fills in as the mailboxes answer.
+One `state.event` of kind `message.server_hit` per hit, payload `{operation_id, hit}`, where the id is on the payload because a fast retype leaves two searches in flight and a client has to tell their hits apart.
+A hit is `mp_protocol::listing::ServerSearchHit`: the envelope the overlay renders, the sidebar `mailbox` label it was found under, the `body_text` the preview pane shows and the `html_body` the `b` key hands to a browser, plus `row_id` and `selector`, which are `null` for a message this account has never ingested.
+A server-only hit carries no row and says so with `null` rather than with an empty string, because "not in the store" is the fact every row-dependent key of the overlay branches on.
+
+**`query` is the grammar a user types**, not an engine enum: the overlay holds a parsed `search::Query` and renders it back with `search::to_query_string`, so one parser serves every backend, which is `LST-06`'s whole point.
+`mailboxes` is the sidebar mailboxes the overlay asked for and defaults to every listable one; `limit` is the total hit budget across them, defaulting to 50, split per mailbox the way the in-process leg splits it.
+A query the grammar cannot parse is `-32602`, and so is a mailbox the account does not have.
+
+**Deduplication is by `Message-ID` and it is the daemon's.**
+The local pass has already run when the server leg starts, so the client sends the Message-IDs it is showing as `exclude_message_ids` and the daemon drops a hit that matches one, counting it in `deduplicated`.
+A hit that resolves to a local row is not dropped: it arrives with its `row_id` and `selector` filled in, because it is a row the overlay can act on.
+
+**A mailbox that fails does not fail the search.**
+The in-process leg logs a warning per mailbox and keeps going, because four folders of answers are worth having when the fifth is refused; `unreachable` is that list and the operation still `succeeded`.
+What does fail the operation is a credential that cannot be resolved, which happens once, before any mailbox is selected.
+An account that configures no server at all is `-32006` with `{account, state: "local_only"}` at the call, the same refusal a sync of it makes.
+
+**`message.fetch` is idempotent rather than a refusal.**
+A message the account's store already holds answers with that row and `already_present: true`, opening no session at all; the overlay keeps its "Already in the local store" line by branching on the boolean.
+A client that raced a sync would otherwise be handed an error for the state it wanted, and the short-circuit runs before the backend is resolved, which is what makes it reachable for an account with no credentials.
+
+The address is `{account, mailbox, message_id}`, which is what a server-only hit has in hand: not a uid, because the store has none for it, and not a selector, because a selector names a row and the point is that there is not one yet.
+`mailbox` is the sidebar mailbox the hit came from, resolved by role, slug or label as `message.list` resolves one, and the daemon maps it to the server name itself.
+Graph already carries the whole payload and ingests under the synthetic uid derived from the Message-ID; plain IMAP needs the uid the mailbox holds the message under, since a made-up one would be pruned or duplicated by the next sync, so the fetch asks the server for it by `Message-ID` and ingests the raw bytes it got back.
+
+A fetch that ingested a row publishes the mailbox's counts change, so a listing update rides on the `state.invalidate` of `mailbox:<account>/<slug>` with `{"query": "counts"}` that every other ingest travels as.
+A fetch that found the message already there publishes nothing, having changed nothing.
+
+Both operations are `durable`: a search a user started must not be torn down because the window that started it went away, and a fetch that has written a row has nothing to be cancelled back to.
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
@@ -820,6 +868,9 @@ All three are replacements because they are small and a client that re-queried t
 `signature.changed` says that a signature file was written, with a payload of `{name, path}` where `name` is the file stem.
 It is a lifecycle event and reduces into no snapshot: signatures are global rather than per-account, so no per-account change can carry one, and the event is a "re-read the list" for a client that caches signature bodies.
 A deleted signature publishes nothing in this build.
+
+`message.server_hit` carries one hit of a live `message.search_server`, with a payload of `{operation_id, hit}`.
+It is a lifecycle event: a hit is a fact about a moment in one search, two hits never merge, and no snapshot brings one back, exactly as an `operation.progress` report does not.
 
 `state.invalidate` says that a cached query went stale, with a payload of `{resource, scope}`: `resource` is what to re-read, as the `family:path` a method's `affected` list uses, and `scope` is the identity of the query whose answer is now wrong.
 Mailbox and outbox counts travel this way, as `{"query": "counts"}` over `mailbox:<account>/<slug>` and `outbox:<account>`, because that is what makes them coalescible: a hundred count changes for one mailbox are one thing to re-read.
@@ -1058,6 +1109,14 @@ Absent means the default of 10 seconds and an explicit `0` means no waiting: a p
 The kind `daemon.shutting_down` carries `{grace_secs, pending}` to every bootstrapped connection, and the notification method `daemon.stopped` carries `{instance_id, clean, unsettled}` to the connection that asked, as its last frame; the fixtures are `crates/mp-protocol/fixtures/daemon.stop.request.json`, `daemon.stop.response.json`, `notification.daemon_shutting_down.json`, `notification.daemon_stopped.json` and `error.shutting_down.json`.
 `-32009 shutting_down`, reserved since the error table was written and unreachable until now, is the answer to every method from the instant a stop is accepted, `initialize` included, with exactly two exemptions: `daemon.status`, which is how `mp daemon stop` watches the shutdown it asked for, and a repeated `daemon.stop`, which is not an error. The shutdown gate sits ahead of the handshake gate on purpose, since the handshake gate exempts `initialize` by construction and a client arriving during the grace would otherwise be admitted to a daemon that is leaving.
 The bootstrap snapshot's `holds` array stopped being empty: it carries every window the daemon is counting down, each one the same `HoldStatus` the events and `send.hold_status` carry, so a client that joins mid-hold renders the countdown from its own bootstrap.
+
+P5-U10c added three methods, one row field and one event kind, all additive; no field was renamed, none was dropped, and no command's output moved.
+`message.materialise_markdown` `{account, row_id|id|selector, mailbox?}` -> `{handle, path, name, bytes, expires_at}` is the third materialiser, writing `store::read::render_markdown` at mode 0444 under the family's own handle directory and pinning the row's body blob for the handle's life (`RD-06`, #0075); it is the one member of the family that takes `row_id`.
+`message.search_server` `{account, query, mailboxes?, limit?, exclude_message_ids?}` and `message.fetch` `{account, mailbox, message_id}` are durable operations answering with `{operation_id}` (`LST-08`, `LST-09`, and with the first of them `LST-06`'s CLI residue); the search streams one `message.server_hit` event per hit and settles `{account, query, hits, deduplicated, unreachable}`, and the fetch settles `{account, mailbox, uid, row_id, selector, already_present}`.
+`message.search_server` is deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s query.
+A `message.list` row and a `message.search` hit gained `selector`, the canonical `mp://` of the row, so a clipboard copy costs no store read (`RD-07`); it is the fifteenth key of a row, and the fixture and the two key lists that pin the shape moved with it (`crates/mp-protocol/fixtures/message.list.response.json`, `tests/daemon_read_only_methods.rs`, `tests/daemon_protocol_fixtures.rs`).
+`mp_protocol::listing` is the new module: `MessageListRow`, `MessageListing`, `MessageFlags` and `ServerSearchHit`, the typed decode of a listing for a client that must not link the store.
+The fixtures are `crates/mp-protocol/fixtures/message.materialise_markdown.{request,response}.json`, `message.fetch.{request,response}.json`, `message.search_server.{request,response}.json` and `event.server_search_hit.json`.
 
 P6-U8 added four methods to the `diagnostic.*` family, one event kind and one filled snapshot array, all additive.
 `diagnostic.health` `{}` answers `{instance_id, version, protocol_version, uptime_secs, pid, socket, log_path, clients, accounts, holds, operations: {active}, store: {path, size_bytes}, checks}`, a statement about the live process rather than about the state a client mirrors.

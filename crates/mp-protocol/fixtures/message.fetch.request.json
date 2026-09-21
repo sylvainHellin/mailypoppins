@@ -1,0 +1,10 @@
+{
+  "id": 22,
+  "jsonrpc": "2.0",
+  "method": "message.fetch",
+  "params": {
+    "account": "work",
+    "mailbox": "inbox",
+    "message_id": "<Angebot@example.com>"
+  }
+}

@@ -55,11 +55,17 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "notification.resync_required.json",
 ];
 
-/// The fixtures P5-U10c adds, a pair per surface plus the streamed hit (#0126).
+/// The seven fixtures P5-U10c adds: a pair per surface plus the streamed hit
+/// (#0126).
 ///
 /// Separate from [`REQUIRED_FIXTURES`] so the P2 list stays the record of what
 /// P2 required; the assertion over both is the same.
 const P5_U10C_FIXTURES: &[&str] = &[
+    "event.server_search_hit.json",
+    "message.fetch.request.json",
+    "message.fetch.response.json",
+    "message.search_server.request.json",
+    "message.search_server.response.json",
     "message.materialise_markdown.request.json",
     "message.materialise_markdown.response.json",
 ];
@@ -715,6 +721,101 @@ fn the_markdown_rendition_answers_with_the_handle_shape() {
         path.contains("/runtime/handles/"),
         "a rendition lands under the daemon's own runtime directory: {path:?}"
     );
+}
+
+/// `message.fetch` and `message.search_server` are operations, so each answers
+/// with an operation id and nothing else (`LST-09`, `LST-08`).
+#[test]
+fn the_two_new_operations_answer_with_an_operation_id() {
+    let fetch = load("message.fetch.request.json");
+    assert_eq!(fetch["method"], json!("message.fetch"));
+    assert_keys(
+        &fetch["params"],
+        &["account", "mailbox", "message_id"],
+        "message.fetch params",
+    );
+    assert!(
+        fetch["params"]["message_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with('<') && id.ends_with('>')),
+        "a hit is addressed by its Message-ID verbatim, brackets included: {fetch}"
+    );
+
+    let search = load("message.search_server.request.json");
+    assert_eq!(search["method"], json!("message.search_server"));
+    assert_keys(
+        &search["params"],
+        &[
+            "account",
+            "exclude_message_ids",
+            "limit",
+            "mailboxes",
+            "query",
+        ],
+        "message.search_server params",
+    );
+    assert!(
+        search["params"]["query"].as_str().is_some(),
+        "the query travels as the grammar a user types, not as an engine enum: {search}"
+    );
+
+    for name in [
+        "message.fetch.response.json",
+        "message.search_server.response.json",
+    ] {
+        let value = load(name);
+        assert_keys(&value["result"], &["operation_id"], name);
+        assert_string(&value, "/result/operation_id", name);
+    }
+}
+
+/// The streamed hit: one `state.event` per hit, carrying the operation it
+/// belongs to and the envelope the overlay renders (`LST-08`).
+///
+/// A server-only hit is the case the fixture shows, because it is the one that
+/// cannot be answered from the store and therefore the one this event exists
+/// for: `row_id` and `selector` are `null`, and `html_body` being `null` while
+/// `body_text` is not is what the preview pane and the `b` key branch on.
+#[test]
+fn a_streamed_server_hit_carries_the_operation_and_the_envelope() {
+    const HIT: &[&str] = &[
+        "account",
+        "bcc",
+        "body_text",
+        "cc",
+        "date_display",
+        "date_sort",
+        "flags",
+        "from",
+        "has_attachments",
+        "html_body",
+        "is_invite",
+        "mailbox",
+        "message_id",
+        "reply_to",
+        "row_id",
+        "selector",
+        "subject",
+        "to",
+    ];
+
+    let name = "event.server_search_hit.json";
+    let value = load(name);
+    let typed: EventEnvelope =
+        serde_json::from_value(value.clone()).expect("the fixture is an EventEnvelope");
+    assert_eq!(
+        typed.kind, "message.server_hit",
+        "the kind names the one thing the event says"
+    );
+    assert_keys(&value["payload"], &["hit", "operation_id"], name);
+    assert_string(&value, "/payload/operation_id", name);
+    assert_keys(&value["payload"]["hit"], HIT, "the streamed hit");
+    assert_eq!(
+        value["payload"]["hit"]["row_id"],
+        json!(null),
+        "the fixture shows the server-only hit, which is the case this event exists for"
+    );
+    assert_eq!(value["payload"]["hit"]["selector"], json!(null));
 }
 
 /// `initialize` is deliberately not namespaced: it is the one method a client

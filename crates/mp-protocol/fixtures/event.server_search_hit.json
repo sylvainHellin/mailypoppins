@@ -1,0 +1,33 @@
+{
+  "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+  "kind": "message.server_hit",
+  "payload": {
+    "hit": {
+      "account": "work",
+      "bcc": null,
+      "body_text": "der ledger liegt bei\n",
+      "cc": null,
+      "date_display": "Mon, 29 Jun 2026 08:15:00 +0200",
+      "date_sort": "2026-06-29T06:15:00",
+      "flags": {
+        "answered": false,
+        "flagged": false,
+        "forwarded": false,
+        "seen": true
+      },
+      "from": "Ivana <ivana@example.com>",
+      "has_attachments": false,
+      "html_body": null,
+      "is_invite": false,
+      "mailbox": "Archive",
+      "message_id": "<Angebot@example.com>",
+      "reply_to": null,
+      "row_id": null,
+      "selector": null,
+      "subject": "Angebot mit ledger",
+      "to": "alice@example.com"
+    },
+    "operation_id": "01J8Z6QG5V3D9N0P1Q2R3S4T5U"
+  },
+  "revision": 4219
+}

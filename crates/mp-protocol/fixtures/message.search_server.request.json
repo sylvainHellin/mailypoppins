@@ -1,0 +1,17 @@
+{
+  "id": 23,
+  "jsonrpc": "2.0",
+  "method": "message.search_server",
+  "params": {
+    "account": "work",
+    "exclude_message_ids": [
+      "<Bericht@example.com>"
+    ],
+    "limit": 50,
+    "mailboxes": [
+      "inbox",
+      "Archive"
+    ],
+    "query": "from:ivana ledger"
+  }
+}
