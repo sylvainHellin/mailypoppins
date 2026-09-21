@@ -22,6 +22,7 @@ pub mod operations;
 pub mod runtime;
 pub mod server;
 pub mod session;
+pub mod shutdown;
 pub mod state;
 pub mod sync_outcome;
 pub mod watch;

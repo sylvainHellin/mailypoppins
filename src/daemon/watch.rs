@@ -600,20 +600,39 @@ pub fn roots_from(accounts: &[crate::config::AccountConfig]) -> WatchRoots {
     roots.with_signatures(crate::signatures::signatures_dir())
 }
 
-/// Poll for the life of the daemon, committing what settles.
+/// Poll until `stop` says the daemon is closing its watchers, committing what
+/// settles.
 ///
 /// Independent of the account runtimes: watching drafts takes no engine lock
 /// and opens no store, so it runs for an account whose runtime is blocked and
 /// for one that has not come up yet. The `stat` walk and the reparse run on
 /// `spawn_blocking`, off the
 /// reactor, because both touch a filesystem that may be slow.
-pub fn spawn(watch: Arc<DraftWatch>, canonical: Arc<CanonicalState>) {
+///
+/// `stop` is step 6 of [`shutdown`](super::shutdown): the loop ends there
+/// rather than at process exit, so "closes watchers" is a step of the sequence
+/// and a draft written while the daemon is leaving is not committed into a
+/// state nobody will read.
+pub fn spawn(
+    watch: Arc<DraftWatch>,
+    canonical: Arc<CanonicalState>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     let interval = watch.config().poll_interval;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        debug!("[daemon] the draft watcher is stopping");
+                        return;
+                    }
+                    continue;
+                }
+            }
             let polled = Arc::clone(&watch);
             let events = match tokio::task::spawn_blocking(move || polled.poll()).await {
                 Ok(events) => events,

@@ -298,15 +298,23 @@ pub struct Snapshot {
     /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from the
     /// registry, which is not part of the state a client mirrors.
     pub(super) operations: Vec<Value>,
+    /// The undo-send windows this daemon is carrying, as
+    /// [`HoldStatus`](mp_protocol::send::HoldStatus) renders them, in arm
+    /// order. Filled by
+    /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from the
+    /// hold scheduler, which is not part of the state a client mirrors either.
+    pub(super) holds: Vec<Value>,
 }
 
 impl Snapshot {
     /// The `snapshot` member of a `state.bootstrap` result.
     ///
-    /// `holds` and `diagnostics` are empty arrays rather than absent keys:
-    /// nothing in this build produces one, and a client that iterates them must
-    /// not have to check first. `operations` lists whatever the registry has
-    /// not settled, so a client that bootstraps mid-operation learns about it.
+    /// `diagnostics` is an empty array rather than an absent key: nothing in
+    /// this build produces one, and a client that iterates it must not have to
+    /// check first. `operations` lists whatever the registry has not settled
+    /// and `holds` whatever the scheduler is still counting down, so a client
+    /// that bootstraps mid-operation or mid-window learns about it instead of
+    /// having to ask.
     pub fn to_json(&self) -> Value {
         // `sync_health` is an object rather than a bare string so the reason
         // and the timestamp can join it without a version bump.
@@ -363,7 +371,7 @@ impl Snapshot {
             "mailboxes": mailboxes,
             "drafts": drafts,
             "outbox": outbox,
-            "holds": [],
+            "holds": self.holds,
             "operations": self.operations,
             "diagnostics": [],
         })

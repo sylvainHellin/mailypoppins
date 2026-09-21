@@ -14,8 +14,13 @@
 //! state [`dispatch_request`] gates on.
 //!
 //! Shutdown is a [`watch`] channel rather than a flag: the accept loop selects
-//! on it, a `daemon.stop` handler sends on it after its response is flushed,
-//! and the signal task sends on it from outside any connection.
+//! on it, and [`super::shutdown`] sends on it once it has run the eight steps
+//! of a graceful stop, whether a `daemon.stop` or a signal started them. From
+//! the instant the first of those steps runs, [`dispatch_request`] refuses
+//! every method but `daemon.status` and `daemon.stop` with `-32009`, ahead of
+//! the handshake gate: the gate exempts `initialize` by construction, so a
+//! refusal placed behind it would let a client negotiate its way into a daemon
+//! that is leaving.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,6 +55,7 @@ use super::state::{
 /// [`mp_protocol::ErrorCode`] and is not reachable until P2-U9.
 const PARSE_ERROR: i32 = -32700;
 const INVALID_REQUEST: i32 = -32600;
+const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 
 /// Hands out one id per accepted connection, which is what a
@@ -71,12 +77,16 @@ const READ_CHUNK: usize = 8 * 1024;
 const MAX_PENDING_REPLIES: usize = 32;
 
 /// What a connection does once everything it has queued has been written.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AfterFlush {
     /// Close this connection and nothing else.
     Close,
-    /// Close it and take the daemon down: `daemon.stop` has been answered.
-    Shutdown,
+    /// Write out whatever this connection is still owed, then close: step 7 of
+    /// a shutdown, for a connection that asked for nothing.
+    Drain,
+    /// Write `daemon.stopped` and close: step 7 for the connection that asked,
+    /// which is the one the report is owed to.
+    Report,
 }
 
 /// The live per-account runtimes, keyed by account name (P3b-U4).
@@ -166,6 +176,22 @@ impl RuntimeTable {
         }
     }
 
+    /// Empty the table, handing back every runtime that came up (P6-U4).
+    ///
+    /// Step 6 of the shutdown: dropping what comes back closes the stores and
+    /// releases the engine locks, so the caller drops it on `spawn_blocking`
+    /// exactly as [`RuntimeTable::remove`]'s caller does. A start that only
+    /// ever failed holds nothing and is simply forgotten.
+    pub fn take_all(&self) -> Vec<Arc<AccountRuntime>> {
+        std::mem::take(&mut *lock(&self.entries))
+            .into_values()
+            .filter_map(|entry| match entry {
+                RuntimeEntry::Live(runtime) => Some(runtime),
+                RuntimeEntry::Failed(_) => None,
+            })
+            .collect()
+    }
+
     /// The runtime serving `account`, for a caller that wants to tick it or
     /// read through its pool.
     pub fn get(&self, account: &str) -> Option<Arc<AccountRuntime>> {
@@ -222,6 +248,10 @@ pub struct DaemonState {
     /// reason the operation registry is: the connection loop reaches it from
     /// outside the dispatcher, to apply the last-client rule.
     pub holds: Arc<super::hold::HoldScheduler>,
+    /// This daemon's one graceful shutdown (P6-U4). Marked by the first
+    /// `daemon.stop` or by a signal, read by every dispatch afterwards, and
+    /// carrying the report the asking connection writes as its last frame.
+    pub shutdown: Arc<super::shutdown::Shutdown>,
 }
 
 impl DaemonState {
@@ -267,6 +297,10 @@ impl DaemonState {
         // a promise this daemon changed its mind about.
         let handles = Arc::new(super::handles::HandleTable::from_env());
         let holds = Arc::new(super::hold::HoldScheduler::new());
+        // The snapshot's `holds` array is the scheduler's own listing: a client
+        // that joins mid-window has no other way to learn about a countdown it
+        // may cancel.
+        canonical.attach_holds(Arc::clone(&holds));
         let mut dispatcher = Dispatcher::new();
         super::methods::register(
             &mut dispatcher,
@@ -290,6 +324,7 @@ impl DaemonState {
             watch,
             handles,
             holds,
+            shutdown: Arc::new(super::shutdown::Shutdown::new()),
         }
     }
 
@@ -374,10 +409,17 @@ pub async fn tick_and_commit(
 
 /// Accept connections until `shutdown` fires, then return.
 ///
-/// Open connections are not drained: the caller unlinks the runtime files and
-/// exits immediately afterwards, and a client that loses its socket mid-call
-/// reconnects. Draining belongs with the operations that will need settling
-/// (the undo-send hold, the pending-op drainer), which Phase 5 introduces.
+/// `shutdown` fires at the end of the eight-step sequence [`super::shutdown`]
+/// owns, not at the start of it: by the time this loop breaks the holds are
+/// cancelled, the grace is over, the watchers and the account runtimes are
+/// stopped, and the connection that asked has been handed its `daemon.stopped`
+/// report. What is left for the caller is step 8, unlinking its own three
+/// runtime files.
+///
+/// The connections themselves are closed by the process exiting rather than
+/// one by one: a client that is owed a frame has already been given it, and
+/// everything else on a socket at that point is an event about a daemon that
+/// has already announced it is going.
 pub async fn serve(
     listener: UnixListener,
     state: Arc<DaemonState>,
@@ -459,6 +501,8 @@ async fn handle_connection(
     // approved, which is the plan's own rule and what killing the TUI does
     // today. After the unsubscribe, so the count is what it will be: a hold
     // that fired into an empty daemon would be a send nobody could still undo.
+    // A shutdown reaches the same holds at its step 2, so a daemon that is
+    // already going finds nothing here and says nothing.
     if state.canonical.subscriber_count() == 0 {
         let cancelled = state.holds.cancel_all(&state.canonical, &state.operations);
         if cancelled > 0 {
@@ -492,7 +536,7 @@ async fn handle_connection(
 async fn serve_connection(
     stream: tokio::net::UnixStream,
     connection_id: u64,
-    state: &DaemonState,
+    state: &Arc<DaemonState>,
     shutdown: watch::Sender<bool>,
     mut queue: EventQueue,
 ) -> Result<()> {
@@ -513,6 +557,13 @@ async fn serve_connection(
     let mut frame_out: Vec<u8> = Vec::new();
     let mut written = 0usize;
     let mut after_flush: Option<AfterFlush> = None;
+    // Whether this connection asked the daemon to stop and is therefore owed
+    // the `daemon.stopped` report. It keeps serving `daemon.status` and a
+    // repeated `daemon.stop` while it waits: the report does not exist until
+    // the grace is over, and a connection that stopped answering in the
+    // meantime would be a `mp daemon stop` with nothing to watch.
+    let mut owes_report = false;
+    let mut settled = state.shutdown.settled();
 
     loop {
         if written == frame_out.len() {
@@ -527,14 +578,34 @@ async fn serve_connection(
                 frame_out = reply;
             } else {
                 match after_flush {
-                    // Only now, with the response on the wire, does the client
-                    // learn the daemon is going away.
-                    Some(AfterFlush::Shutdown) => {
-                        info!("[daemon] shutdown requested over the socket");
-                        let _ = shutdown.send(true);
+                    // Everything this connection was owed is on the wire and
+                    // the shutdown has settled: the report is the last frame,
+                    // and the socket closes behind it.
+                    Some(AfterFlush::Report) => {
+                        if let Some(frame) =
+                            state.shutdown.report_frame(&state.meta.instance_id).await
+                        {
+                            writer
+                                .write_all(&frame)
+                                .await
+                                .context("writing the shutdown report")?;
+                            writer.flush().await.context("flushing the report")?;
+                        }
+                        state.shutdown.reported();
                         return Ok(());
                     }
                     Some(AfterFlush::Close) => return Ok(()),
+                    // The events this connection was queued before the
+                    // shutdown reached it, `daemon.shutting_down` among them,
+                    // and then the EOF. Dropping them would make an orderly
+                    // stop indistinguishable from a crash for every client
+                    // that did not ask for it.
+                    Some(AfterFlush::Drain) => match outbound.pop() {
+                        Some(item) => {
+                            frame_out = encode_outgoing(&item, &state.meta.instance_id)?;
+                        }
+                        None => return Ok(()),
+                    },
                     None => {
                         if let Some(item) = outbound.pop() {
                             frame_out = encode_outgoing(&item, &state.meta.instance_id)?;
@@ -546,6 +617,7 @@ async fn serve_connection(
 
         let writing = written < frame_out.len();
         let reading = after_flush.is_none() && replies.len() < MAX_PENDING_REPLIES;
+        let closing = after_flush.is_none();
         tokio::select! {
             written_now = writer.write(&frame_out[written..]), if writing => {
                 let n = written_now.context("writing a frame")?;
@@ -560,6 +632,21 @@ async fn serve_connection(
             _ = queue.ready() => {
                 for (revision, event) in drain_queue(&mut queue) {
                     outbound.push(revision, event);
+                }
+            }
+            changed = settled.changed(), if closing => {
+                // Step 7, on every connection: the one that asked writes the
+                // report and the rest write out what they were queued, and
+                // then all of them close. `changed` is cancellation-safe, so
+                // losing this arm to another one never loses the signal, and a
+                // closed channel means the daemon is gone from under us, which
+                // ends the connection the same way.
+                if changed.is_err() || *settled.borrow() {
+                    after_flush = Some(if owes_report {
+                        AfterFlush::Report
+                    } else {
+                        AfterFlush::Drain
+                    });
                 }
             }
             read = reader.read(&mut buf), if reading => {
@@ -585,17 +672,16 @@ async fn serve_connection(
                         .get("method")
                         .and_then(Value::as_str)
                         .map(str::to_string);
-                    let (reply, stop) = dispatch_request(value, state, &mut session).await;
+                    let (reply, stop) =
+                        dispatch_request(value, state, &mut session, &shutdown, owes_report)
+                            .await;
                     if let Some(reply) = reply {
                         if method.as_deref() == Some("state.bootstrap") {
                             rebootstrap(&mut outbound, &mut queue, &reply);
                         }
                         replies.push_back(encode_capped(&reply, MAX_RESPONSE_BYTES)?);
                     }
-                    if stop {
-                        after_flush = Some(AfterFlush::Shutdown);
-                        break;
-                    }
+                    owes_report |= stop;
                 }
             }
         }
@@ -662,11 +748,19 @@ fn encode_outgoing(item: &Outgoing, instance_id: &str) -> Result<Vec<u8>> {
 /// Answer one frame.
 ///
 /// Returns the message to write back (`None` for a notification, which by
-/// JSON-RPC gets no answer) and whether the daemon should shut down afterwards.
+/// JSON-RPC gets no answer) and whether this connection now owes its peer a
+/// `daemon.stopped` report, which is true of every frame that asked the daemon
+/// to stop.
+///
+/// `owes_report` is whether it already did. A connection that stops a daemon
+/// twice is one reporter and not two, or the driver would sit out its ceiling
+/// waiting for a second frame nobody is going to write.
 async fn dispatch_request(
     value: Value,
-    state: &DaemonState,
+    state: &Arc<DaemonState>,
     session: &mut Session,
+    exit: &watch::Sender<bool>,
+    owes_report: bool,
 ) -> (Option<Value>, bool) {
     let request: Request = match serde_json::from_value(value) {
         Ok(request) => request,
@@ -690,6 +784,24 @@ async fn dispatch_request(
                 INVALID_REQUEST,
                 format!("jsonrpc must be \"{JSONRPC_VERSION}\""),
                 None,
+            )),
+            false,
+        );
+    }
+
+    // The shutdown gate, ahead of the handshake gate on purpose: the handshake
+    // gate exempts `initialize` by construction, and a client that negotiated
+    // its way into a daemon that is leaving would be admitted to a session
+    // whose socket is about to close. The two lifecycle methods keep
+    // answering, because `daemon.status` is how `mp daemon stop` watches the
+    // shutdown it asked for and a second `daemon.stop` is not an error.
+    if state.shutdown.is_stopping() && !super::session::is_lifecycle_method(&request.method) {
+        return (
+            Some(error_value(
+                request.id,
+                ErrorCode::ShuttingDown.code(),
+                "the daemon is shutting down".to_string(),
+                Some(json!({})),
             )),
             false,
         );
@@ -724,7 +836,22 @@ async fn dispatch_request(
             ),
         },
         "daemon.status" => (result_value(id, state.status_result()), false),
-        "daemon.stop" => (result_value(id, json!({"stopping": true})), true),
+        "daemon.stop" => match stop_grace(&request.params) {
+            // Steps 1 to 4 run here, synchronously, so the answer cannot
+            // describe a daemon that has already moved past them; the rest is
+            // the driver's, and this connection waits for its report.
+            Ok(grace) => (
+                result_value(
+                    id,
+                    super::shutdown::request(state, exit, grace, !owes_report),
+                ),
+                true,
+            ),
+            Err(refusal) => (
+                Some(error_value(id, refusal.code, refusal.message, refusal.data)),
+                false,
+            ),
+        },
         _ => {
             // The gate above already refused every unhandshaken connection, so
             // a session without a context here is a daemon bug rather than a
@@ -817,6 +944,24 @@ fn encode_capped(reply: &Value, cap: usize) -> Result<Vec<u8>> {
     Ok(frame::encode(&refusal)?)
 }
 
+/// The grace a `daemon.stop` asked for, in seconds.
+///
+/// `None` for a stop that named none, which takes
+/// [`DEFAULT_STOP_GRACE_SECS`](super::shutdown::DEFAULT_GRACE_SECS). An
+/// explicit `0` is honoured as "no waiting at all" rather than read as unset,
+/// which is the difference between a parameter and one of the daemon's ambient
+/// numeric environment hooks.
+fn stop_grace(params: &Value) -> Result<Option<u64>, RpcError> {
+    match params.get("grace_secs") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| RpcError {
+            code: INVALID_PARAMS,
+            message: format!("grace_secs must be a whole number of seconds, not {value}"),
+            data: None,
+        }),
+    }
+}
+
 /// Map a framing failure onto the wire error that describes it.
 fn frame_error(error: &FrameError) -> RpcError {
     match error {
@@ -871,8 +1016,19 @@ mod tests {
     }
 
     /// A daemon state with no accounts at all.
-    fn state_fixture() -> DaemonState {
-        state_from(super::super::config::ConfigState::Absent, &[])
+    fn state_fixture() -> Arc<DaemonState> {
+        Arc::new(state_from(super::super::config::ConfigState::Absent, &[]))
+    }
+
+    /// [`dispatch_request`] with the two arguments no unit test varies: an
+    /// exit channel nobody is serving, and a connection that owes no report.
+    async fn dispatch(
+        value: Value,
+        state: &Arc<DaemonState>,
+        session: &mut Session,
+    ) -> (Option<Value>, bool) {
+        let (exit, _held) = watch::channel(false);
+        dispatch_request(value, state, session, &exit, false).await
     }
 
     /// The same, with one configured account, so the canonical state has a
@@ -961,8 +1117,7 @@ mod tests {
     async fn status_answers_without_an_initialize() {
         let state = state_fixture();
         let mut session = Session::new(1);
-        let (reply, stop) =
-            dispatch_request(request("daemon.status", Some(7)), &state, &mut session).await;
+        let (reply, stop) = dispatch(request("daemon.status", Some(7)), &state, &mut session).await;
         let reply = reply.expect("a request with an id is answered");
         assert!(!stop);
         assert_eq!(reply["id"], json!(7));
@@ -970,15 +1125,89 @@ mod tests {
         assert_eq!(reply["result"]["accounts"], json!([]));
     }
 
-    /// `daemon.stop` is answered first and only then ends the daemon.
+    /// `daemon.stop` is answered first and only then ends the daemon, and the
+    /// answer names the grace it will honour and the work it has to settle.
     #[tokio::test]
     async fn stop_replies_before_it_shuts_down() {
         let state = state_fixture();
         let mut session = Session::new(1);
-        let (reply, stop) =
-            dispatch_request(request("daemon.stop", Some(1)), &state, &mut session).await;
+        let (reply, stop) = dispatch(request("daemon.stop", Some(1)), &state, &mut session).await;
         assert!(stop, "daemon.stop asks for a shutdown");
-        assert_eq!(reply.expect("answered")["result"]["stopping"], json!(true));
+        let result = reply.expect("answered")["result"].clone();
+        assert_eq!(result["stopping"], json!(true));
+        assert_eq!(
+            result["grace_secs"],
+            json!(super::super::shutdown::DEFAULT_GRACE_SECS),
+            "a stop that named no grace gets the default: {result}"
+        );
+        assert_eq!(
+            result["pending"],
+            json!([]),
+            "and an idle daemon has nothing to settle: {result}"
+        );
+    }
+
+    /// A stop that named a grace is answered with that one, and a stop of a
+    /// stopping daemon is answered rather than refused.
+    #[tokio::test]
+    async fn a_named_grace_is_the_one_the_answer_carries() {
+        let state = state_fixture();
+        let mut session = Session::new(1);
+        let mut stop = request("daemon.stop", Some(1));
+        stop["params"] = json!({"grace_secs": 3});
+        let (reply, _) = dispatch(stop, &state, &mut session).await;
+        assert_eq!(reply.expect("answered")["result"]["grace_secs"], json!(3));
+
+        let (again, _) = dispatch(request("daemon.stop", Some(2)), &state, &mut session).await;
+        let result = again.expect("answered")["result"].clone();
+        assert_eq!(
+            result["grace_secs"],
+            json!(3),
+            "a second stop reads what the first settled rather than deciding again: {result}"
+        );
+        assert_eq!(result["stopping"], json!(true));
+    }
+
+    /// A grace that is not a whole number of seconds is `-32602`, because a
+    /// stop that silently ignored it would wait for a length nobody asked for.
+    #[tokio::test]
+    async fn a_grace_that_is_not_a_number_of_seconds_is_invalid_params() {
+        let state = state_fixture();
+        let mut session = Session::new(1);
+        let mut stop = request("daemon.stop", Some(1));
+        stop["params"] = json!({"grace_secs": "soon"});
+        let (reply, shutting) = dispatch(stop, &state, &mut session).await;
+        assert!(!shutting, "a refused stop stops nothing");
+        assert_eq!(reply.expect("answered")["error"]["code"], json!(-32602));
+        assert!(!state.shutdown.is_stopping());
+    }
+
+    /// Once the stop is accepted, every other method is `-32009` with the one
+    /// sentence a client can print, `initialize` included: the handshake gate
+    /// exempts it, so the refusal has to sit ahead of that gate.
+    #[tokio::test]
+    async fn a_stopping_daemon_refuses_everything_but_the_two_lifecycle_methods() {
+        let state = state_fixture();
+        let mut session = Session::new(1);
+        dispatch(request("daemon.stop", Some(1)), &state, &mut session).await;
+
+        for method in ["initialize", "account.list", "state.bootstrap"] {
+            let (reply, _) = dispatch(request(method, Some(2)), &state, &mut session).await;
+            let error = reply.expect("answered")["error"].clone();
+            assert_eq!(
+                error["code"],
+                json!(ErrorCode::ShuttingDown.code()),
+                "{method} during the grace: {error}"
+            );
+            assert_eq!(error["message"], json!("the daemon is shutting down"));
+        }
+
+        let (status, _) = dispatch(request("daemon.status", Some(3)), &state, &mut session).await;
+        assert_eq!(
+            status.expect("answered")["result"]["instance_id"],
+            json!("abcd"),
+            "daemon.status keeps answering: it is how a stop is watched"
+        );
     }
 
     /// A domain method before the handshake is `-32000`, not `-32601`: the gate
@@ -988,8 +1217,7 @@ mod tests {
     async fn a_domain_method_before_initialize_is_not_initialized() {
         let state = state_fixture();
         let mut session = Session::new(1);
-        let (reply, stop) =
-            dispatch_request(request("account.list", Some(2)), &state, &mut session).await;
+        let (reply, stop) = dispatch(request("account.list", Some(2)), &state, &mut session).await;
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32000));
     }
@@ -1010,14 +1238,14 @@ mod tests {
                 "identity": {"data_dir": "/tmp/data", "config_dir": "/tmp/config"},
             },
         });
-        let (reply, _) = dispatch_request(initialize, &state, &mut session).await;
+        let (reply, _) = dispatch(initialize, &state, &mut session).await;
         assert!(
             reply.expect("answered")["result"]["instance_id"] == json!("abcd"),
             "the handshake succeeds against the fixture's own directories"
         );
 
         let (reply, stop) =
-            dispatch_request(request("no.such.method", Some(2)), &state, &mut session).await;
+            dispatch(request("no.such.method", Some(2)), &state, &mut session).await;
         assert!(!stop);
         assert_eq!(reply.expect("answered")["error"]["code"], json!(-32601));
     }
@@ -1067,8 +1295,7 @@ mod tests {
     async fn a_notification_gets_no_response() {
         let state = state_fixture();
         let mut session = Session::new(1);
-        let (reply, stop) =
-            dispatch_request(request("daemon.status", None), &state, &mut session).await;
+        let (reply, stop) = dispatch(request("daemon.status", None), &state, &mut session).await;
         assert!(reply.is_none());
         assert!(!stop);
     }

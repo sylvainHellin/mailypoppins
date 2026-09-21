@@ -12,7 +12,17 @@
 //! 6. classify whatever is at the socket path and remove it only if stale;
 //! 7. bind the socket at mode 0600;
 //! 8. write `daemon.pid` and `daemon.json`;
-//! 9. serve until `daemon.stop`, SIGTERM or SIGINT, then unlink all three.
+//! 9. serve until `daemon.stop`, SIGTERM or SIGINT, run the eight steps of
+//!    [`super::shutdown`], then unlink all three.
+//!
+//! ## The shutdown sequence, in order
+//!
+//! `daemon.stop` and a signal run the same eight steps, which
+//! [`super::shutdown`] owns and documents: mark, cancel the holds, announce,
+//! answer, sit out the grace, stop the watchers and the runtimes, report, and
+//! only then unlink. `run` sees the last of them: [`serve`] returns once the
+//! sequence is done, and [`cleanup`] removes the three files this daemon
+//! wrote and nobody else's.
 //!
 //! ## Who holds the start lock
 //!
@@ -57,6 +67,7 @@ use super::runtime::{
     remove_stale_socket, socket_path, InstanceMeta, SocketProbe,
 };
 use super::server::{serve, DaemonState};
+use super::shutdown::DEFAULT_GRACE_SECS;
 
 /// Test-only hook: make `run` exit nonzero after logging is up and before the
 /// socket is bound, so `mp daemon start` has a deterministic dead child to
@@ -157,9 +168,12 @@ pub enum DaemonAction {
     },
     /// Ask the running daemon to shut down
     Stop {
-        /// Seconds to wait for the daemon to go away
+        /// Seconds to wait for the daemon to go away, counted after the grace
         #[arg(long, default_value_t = 10)]
         timeout_secs: u64,
+        /// Seconds the daemon may spend settling work in flight (0 waits none)
+        #[arg(long)]
+        grace_secs: Option<u64>,
     },
     /// Stop the running daemon and start this executable's daemon
     Restart,
@@ -171,7 +185,10 @@ pub async fn dispatch(action: DaemonAction) -> i32 {
         DaemonAction::Run { foreground_logs } => run(foreground_logs).await.map(|()| EXIT_OK),
         DaemonAction::Start { timeout_secs } => start(Duration::from_secs(timeout_secs)).await,
         DaemonAction::Status { json } => status(json).await,
-        DaemonAction::Stop { timeout_secs } => stop(Duration::from_secs(timeout_secs)).await,
+        DaemonAction::Stop {
+            timeout_secs,
+            grace_secs,
+        } => stop(Duration::from_secs(timeout_secs), grace_secs).await,
         DaemonAction::Restart => restart().await,
     };
     match outcome {
@@ -291,10 +308,16 @@ async fn run(foreground_logs: bool) -> Result<()> {
     let state = Arc::new(DaemonState::new(meta, config));
     spawn_account_runtimes(Arc::clone(&state));
     // Watching drafts opens no store and takes no engine lock (P3b-U10), so it
-    // is started beside the runtimes rather than by one.
-    super::watch::spawn(Arc::clone(&state.watch), Arc::clone(&state.canonical));
+    // is started beside the runtimes rather than by one. It stops at step 6 of
+    // the shutdown, which is what "closes watchers" means for the one watcher
+    // that is not an account runtime's.
+    super::watch::spawn(
+        Arc::clone(&state.watch),
+        Arc::clone(&state.canonical),
+        state.shutdown.watchers_stopped(),
+    );
     let (shutdown, _) = watch::channel(false);
-    spawn_signal_watch(shutdown.clone())?;
+    spawn_signal_watch(Arc::clone(&state), shutdown.clone())?;
 
     let result = serve(listener, Arc::clone(&state), shutdown).await;
     cleanup(&state.meta);
@@ -342,15 +365,22 @@ fn write_runtime_files(meta: &InstanceMeta) -> Result<()> {
 /// "Removes only its own socket" is a plan requirement, and the same reasoning
 /// covers the other two: a daemon that started after us must not have its
 /// metadata deleted by our shutdown.
+///
+/// All three are guarded by the same instance check, `daemon.json` being what
+/// says whose runtime directory this currently is. The socket used to be
+/// removed unconditionally, which is the one path by which a slow shutdown
+/// could unlink a *successor's* socket: a daemon that started after us wrote
+/// its own `daemon.json` over ours, so the file that named us names it, and
+/// the check that already protected its metadata now protects its socket too.
 fn cleanup(meta: &InstanceMeta) {
-    let socket = socket_path();
-    if let Err(e) = fs::remove_file(&socket) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            warn!("[daemon] could not remove {}: {e}", socket.display());
+    let ours = read_instance_meta().is_some_and(|other| other.instance_id == meta.instance_id);
+    if ours {
+        let socket = socket_path();
+        if let Err(e) = fs::remove_file(&socket) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("[daemon] could not remove {}: {e}", socket.display());
+            }
         }
-    }
-
-    if read_instance_meta().is_some_and(|other| other.instance_id == meta.instance_id) {
         let _ = fs::remove_file(instance_path());
     }
     if fs::read_to_string(pid_path())
@@ -363,7 +393,13 @@ fn cleanup(meta: &InstanceMeta) {
 }
 
 /// Shut the daemon down on SIGTERM or SIGINT.
-fn spawn_signal_watch(shutdown: watch::Sender<bool>) -> Result<()> {
+///
+/// A signal is a `daemon.stop` with the default grace and nobody to answer: it
+/// runs the same eight steps, so a service manager stopping a unit gets the
+/// same announcement, the same cancelled holds and the same released locks a
+/// typed command gets. The only step it skips is the report, which has no
+/// connection to travel on.
+fn spawn_signal_watch(state: Arc<DaemonState>, shutdown: watch::Sender<bool>) -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("installing the SIGINT handler")?;
@@ -373,7 +409,7 @@ fn spawn_signal_watch(shutdown: watch::Sender<bool>) -> Result<()> {
             _ = interrupt.recv() => "SIGINT",
         };
         info!("[daemon] {which} received, shutting down");
-        let _ = shutdown.send(true);
+        super::shutdown::request(&state, &shutdown, None, false);
     });
     Ok(())
 }
@@ -634,7 +670,12 @@ fn string_of(value: &Value) -> String {
 // ---------------------------------------------------------------------------
 
 /// Ask the daemon to stop, and wait until it is really gone.
-async fn stop(timeout: Duration) -> Result<i32> {
+///
+/// Exit 0 whatever the daemon reported: the daemon stopped, which is what was
+/// asked. A nonzero code would make [`restart`] refuse to start the
+/// replacement, and would turn "a sync was still running" into a failure of the
+/// command that succeeded.
+async fn stop(timeout: Duration, grace_secs: Option<u64>) -> Result<i32> {
     let socket = socket_path();
     if query_status().await.is_err() {
         // Nothing answers. A leftover socket from a crashed daemon is swept
@@ -647,8 +688,11 @@ async fn stop(timeout: Duration) -> Result<i32> {
     }
 
     let pid = read_instance_meta().map(|meta| meta.pid);
-    match rpc("daemon.stop").await {
-        Ok(_) => info!("[daemon] stop: the daemon acknowledged the shutdown"),
+    let outcome = match stop_rpc(grace_secs).await {
+        Ok(outcome) => {
+            info!("[daemon] stop: the daemon acknowledged the shutdown");
+            outcome
+        }
         Err(e) => {
             // The socket answered `daemon.status` a moment ago, so an
             // unresponsive stop is a wedged daemon rather than an absent one:
@@ -665,13 +709,18 @@ async fn stop(timeout: Duration) -> Result<i32> {
                     instance_path().display()
                 ),
             }
+            // Nothing told us otherwise, so the clean line is what a fallback
+            // prints: the daemon stopped and named nothing that prevented it.
+            StopOutcome::default()
         }
-    }
+    };
 
+    // Counted from here rather than from the call, so a long grace cannot make
+    // the command give up on a daemon that is doing what it was asked.
     let deadline = Instant::now() + timeout;
     loop {
         if !socket.exists() && query_status().await.is_err() {
-            println!("{} daemon stopped", "\u{2713}".green());
+            print_stop_outcome(&outcome);
             return Ok(EXIT_OK);
         }
         if Instant::now() >= deadline {
@@ -685,10 +734,43 @@ async fn stop(timeout: Duration) -> Result<i32> {
     }
 }
 
+/// What a stop has to say on stdout: the grace the daemon honoured and what it
+/// could not settle inside it.
+#[derive(Debug, Default)]
+struct StopOutcome {
+    /// The effective grace, as the daemon answered it.
+    grace_secs: u64,
+    /// The operations that prevented a clean stop, in the order the daemon
+    /// reported them, as `(method, operation_id)`.
+    unsettled: Vec<(String, String)>,
+}
+
+/// One line for a clean stop, and one line per casualty for an unclean one.
+///
+/// *"`mp daemon stop` names the operations that prevented a clean stop"*, and
+/// nothing more: a user who has to read a paragraph to learn which sync was cut
+/// short will not read it.
+fn print_stop_outcome(outcome: &StopOutcome) {
+    if outcome.unsettled.is_empty() {
+        println!("{} daemon stopped", "\u{2713}".green());
+        return;
+    }
+    let n = outcome.unsettled.len();
+    let plural = if n == 1 { "operation" } else { "operations" };
+    println!(
+        "{} daemon stopped, {n} {plural} did not settle within {}s",
+        "\u{2717}".red(),
+        outcome.grace_secs
+    );
+    for (method, id) in &outcome.unsettled {
+        println!("  {method} ({id})");
+    }
+}
+
 /// Stop whatever runs and start this executable's daemon.
 async fn restart() -> Result<i32> {
     let previous = read_instance_meta().map(|meta| meta.pid);
-    let code = stop(Duration::from_secs(10)).await?;
+    let code = stop(Duration::from_secs(10), None).await?;
     if code != EXIT_OK {
         return Ok(code);
     }
@@ -743,6 +825,73 @@ async fn rpc(method: &str) -> Result<Value> {
             RPC_TIMEOUT.as_secs()
         ),
     }
+}
+
+/// `daemon.stop`, and then the report the daemon sends before it closes.
+///
+/// The one call in this file that outlives its answer. `daemon.stop` is
+/// answered at step 4, long before the daemon knows how the shutdown went, and
+/// the `daemon.stopped` notification is the last frame on this connection: a
+/// client that hung up on the answer would never learn what was cut short.
+///
+/// A connection that ends without a report is a clean stop as far as this
+/// command is concerned, because nothing told it otherwise.
+async fn stop_rpc(grace_secs: Option<u64>) -> Result<StopOutcome> {
+    let socket = socket_path();
+    let params = match grace_secs {
+        Some(secs) => json!({"grace_secs": secs}),
+        None => json!({}),
+    };
+    let call = async {
+        let mut connection = Connection::connect(&socket)
+            .await
+            .with_context(|| format!("connecting to {}", socket.display()))?;
+        let answer = connection
+            .call("daemon.stop", params)
+            .await
+            .context("daemon.stop failed")?;
+        let mut outcome = StopOutcome {
+            grace_secs: answer["grace_secs"].as_u64().unwrap_or_default(),
+            unsettled: Vec::new(),
+        };
+        while let Some(notification) = connection.next_notification().await {
+            if notification.method != mp_protocol::METHOD_DAEMON_STOPPED {
+                continue;
+            }
+            outcome.unsettled = unsettled_operations(&notification.params);
+            break;
+        }
+        Ok::<StopOutcome, anyhow::Error>(outcome)
+    };
+    // The grace is the daemon's to spend and this command asked for it, so the
+    // ceiling is the round trip's on top of it rather than instead of it.
+    let ceiling = RPC_TIMEOUT + Duration::from_secs(grace_secs.unwrap_or(DEFAULT_GRACE_SECS));
+    match tokio::time::timeout(ceiling, call).await {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "the daemon did not finish stopping within {}s",
+            ceiling.as_secs()
+        ),
+    }
+}
+
+/// The `(method, operation_id)` pairs a `daemon.stopped` report named, in the
+/// order it named them.
+fn unsettled_operations(params: &Value) -> Vec<(String, String)> {
+    params["unsettled"]
+        .as_array()
+        .map(|operations| {
+            operations
+                .iter()
+                .map(|operation| {
+                    (
+                        string_of(&operation["method"]),
+                        string_of(&operation["operation_id"]),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `daemon.json`, when it is there and parses.

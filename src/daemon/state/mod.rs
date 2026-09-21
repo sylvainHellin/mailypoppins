@@ -236,6 +236,7 @@ pub struct CanonicalState {
     inner: Arc<Mutex<Inner>>,
     hook: Mutex<Option<RaceHook>>,
     operations: Mutex<Option<Arc<crate::daemon::operations::OperationRegistry>>>,
+    holds: Mutex<Option<Arc<crate::daemon::hold::HoldScheduler>>>,
 }
 
 #[derive(Debug)]
@@ -291,6 +292,7 @@ impl CanonicalState {
             inner: Arc::new(Mutex::new(inner)),
             hook: Mutex::new(None),
             operations: Mutex::new(None),
+            holds: Mutex::new(None),
         }
     }
 
@@ -301,6 +303,18 @@ impl CanonicalState {
     /// state that has none.
     pub fn attach_operations(&self, registry: Arc<crate::daemon::operations::OperationRegistry>) {
         *lock(&self.operations) = Some(registry);
+    }
+
+    /// Point the snapshot's `holds` array at the daemon's hold scheduler
+    /// (P6-U4).
+    ///
+    /// The second projection of something that is not canonical state, for the
+    /// reason the first one is: a client that connects while an undo-send
+    /// window is running has to be able to render the countdown and press `u`,
+    /// and the only other way to learn about it is a `send.hold_status` it has
+    /// no reason to make.
+    pub fn attach_holds(&self, scheduler: Arc<crate::daemon::hold::HoldScheduler>) {
+        *lock(&self.holds) = Some(scheduler);
     }
 
     /// The daemon process this state belongs to.
@@ -489,6 +503,19 @@ impl CanonicalState {
                     .collect()
             })
             .unwrap_or_default();
+        // The same for the holds, and the very object `send.hold_status`
+        // answers, so one renderer serves both.
+        snapshot.holds = lock(&self.holds)
+            .as_ref()
+            .map(|scheduler| {
+                scheduler
+                    .listing(None)
+                    .holds
+                    .iter()
+                    .map(|hold| serde_json::to_value(hold).unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default();
         self.fire(Boundary::AfterCapture);
         self.fire(Boundary::AfterQueueStart);
 
@@ -621,6 +648,7 @@ impl Inner {
             drafts: self.drafts.clone(),
             outbox: self.outbox.clone(),
             operations: Vec::new(),
+            holds: Vec::new(),
         }
     }
 }
