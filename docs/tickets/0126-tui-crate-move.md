@@ -1067,3 +1067,109 @@ Per crate: `mailypoppins` lib 687, `mp-tui` 302, `mp-core` 416, `mp-protocol` 25
 `cargo clippy --workspace --offline --all-targets` -> **37 distinct `(lint, file, line)`**, the same 37 as `e1b5f2b` mapped through the renames.
 `cargo install --path . --offline` -> replaced, release profile, 28 s; `mp --version` -> `mailypoppins 0.9.0`; `MAILYPOPPINS_DATA_DIR=/var/tmp/mp-p5u10f-smoke mp daemon status` -> exit 1, "no daemon running".
 `pgrep -af '[m]p daemon'` showed one pid throughout, the owner's, which no run touched.
+
+## P5-U10 review
+
+Four findings from a review of P5-U10 as landed at `76e9ffe`, each verified against the tree before it was acted on, one commit each and one for the documents.
+One is a daemon method that hands an account a store it never had, one is a guard with a hole the width of a comma, one is a doc block attached to the wrong item, and one is seven documents naming a file, a count or a number that is not the tree's.
+
+### 1. A server search gave a never-synced account a store
+
+`6fb1d1c`.
+`Stream::land` (`src/daemon/methods/message_server.rs`) resolved each hit against `Store::open(crate::config::store_path(&account)).ok()`, and `Store::open` *creates* the file it is handed (`src/store/mod.rs`'s `create_fresh`).
+`message.search_server`'s gate is `syncable_account`, which deliberately admits an account that has never synced, because a sync is what gives one a store and requiring one first would refuse every first search.
+So the first server search against such an account materialised an empty database, after which `account::state_of_path` reports it `ready` and every read method answers an empty listing where `-32006` is owed: a silent wrong answer rather than a refusal a client can act on.
+The pre-move client leg did not have the defect - `git show 062fc8d:src/tui/helpers.rs:321` is `open_store`, which answers `None` for a file that is not there.
+
+`crate::store::open_store(&account)` is the fix, and it is a one-line one: it already yields the `Option<Store>` that `land`, `to_hit` and the attachment post-filter take, and both of them already read a `None` store as "the local store knows nothing about this hit", which is the truth for an account with no store.
+
+`message.fetch`'s two `Store::open` sites are correct and stay: `fetch_request` gates on `ready_account`, which probes the file read-only and refuses `-32006` before an operation id is ever issued, so `held_row` and `ingest` cannot be reached for an account without a store.
+Both doc comments now name the gate they rest on, because the two calls sit forty lines apart in one file and only one of them is safe.
+
+**The approved test edit.**
+`a_server_search_never_gives_a_storeless_account_a_store` in `tests/daemon_server_leg_slice.rs`, with `Slice::start_without_the_server_account_store`, which seeds the fixture and removes `gamma`'s three store files before the daemon starts.
+It asserts the account refuses `message.list` with `-32006` before the search, that the settled search left no `store.sqlite3`, `-wal` or `-shm` behind, and that the refusal afterwards still carries `"state": "blocked"` rather than `ready`.
+No other row moved.
+
+What the row cannot do is fail against the unfixed code, and it is worth saying so plainly: `gamma` has no credentials, so the operation settles `failed` in `open_secrets` and `land` never runs offline.
+What it pins is the whole path either side of the unreachable call - dispatch, validation, the operation, the settle - plus the gate the defect broke, which is the assertion `docs/lessons-learned.md` already recommends for this class ("call the method against the storeless account and assert `account.list` still reports it `blocked`").
+Making it bite would need the fake IMAP server the file's own header records as the missing fixture, which is in `BACKLOG.md` under Later.
+
+### 2. The shared-crate guard matched text where it had to match a path
+
+`b09e742`.
+`MP_CORE_ENGINE_PATHS` was four literals - `mp_core::secrets`, `mp_core::oauth2`, `use mp_core::{secrets`, `use mp_core::{oauth2` - and `use mp_core::{config, secrets::SecretBackend};` is none of them.
+A braced group has no canonical order and nothing makes a developer write the engine module first, so `secrets` anywhere but the head of its group went through unseen.
+That matters more than a usual scan gap: this is the one gate standing in for a crate boundary that cannot exist, because `mp-tui` does depend on `mp-core` and a client that opened a keyring would compile.
+
+`mp_core_engine_reaches` replaces the text scan with two passes over each file, both covering test modules as well as production code.
+The `use` lines are parsed to their module segment by the same `brace_group_roots` / `leading_ident` machinery the import allow-list has always used, which reads a group whatever its order and however deeply it nests; everything that is not a `use` line is matched against the fully-qualified path, which is how a call reaches a module no import mentions.
+A file that does both reports the reach once, because both passes name the same `(file, mp_core::module)` pair.
+`imported_crate_roots` is now `imported_roots(source, prefixes)` with the `crate::` / `mailypoppins::` pair as its caller, which is the whole of what let the same parser read an `mp_core::` prefix.
+
+`the_shared_crate_scanner_reads_a_module_segment_wherever_a_use_puts_it` is the synthetic fixture, in the shape of `engine_imports_reads_every_use_form_and_ignores_shared_modules`: first-in-brace, not-first-in-brace, a nested `mp_core::{config::{..}, oauth2}`, a fully-qualified call, a file that both imports and calls, and a file whose only reaches are in line comments.
+Against the real tree, an `use mp_core::{config, secrets::SecretsBackend};` added to `crates/mp-tui/src/bg.rs` fails the guard naming the file, where the old scan passed.
+The constant's doc comment and `docs/architecture.md`'s sentence about the scan both say what it matches on now.
+
+### 3. `reopen_session` documented a struct literal
+
+`36f14af`.
+`tui_connector` was inserted between `reopen_session`'s doc block and its `fn`, so rustdoc attached the reconnect paragraph - the auto-start policy, the budget, what `None` means - to the connector, and `reopen_session`, a `pub` function, documented nothing.
+Both items carry their own docs now, with `tui_connector` below the two routines it names.
+
+### 4. Seven documents that named the wrong file, count or number
+
+`53ee217`.
+
+**Six test citations at a path the tests do not live in.**
+`docs/parity-matrix.md` cited `the_local_pass_finds_the_row_the_index_holds`, `edit_recipients_finds_the_draft_through_the_index`, `the_cursor_row_materialises_its_blobs_into_daemon_handles`, `the_browser_gets_the_html_blob_written_to_a_file`, `the_browser_rendition_inlines_cid_images_as_data_uris` and `a_refused_sync_is_the_sentence_the_daemon_gave` at `crates/mp-tui/src/{commands,actions}.rs`.
+All six moved to `src/tui_tests/` in P5-U10e, one commit *before* the `git mv` that made the path they were then cited at exist, which is how a document written in the right order ended up citing a file that never held them.
+Two are `src/tui_tests/commands.rs` and four are `src/tui_tests/actions_store.rs`.
+An `rg` of the whole of `docs/` for every test name it cites that lives under `src/tui_tests/` finds these six and no others.
+
+**The selector is the fifteenth key.**
+`MessageListRow` carries fifteen fields with `selector` among them, so the row had fourteen before it.
+`docs/daemon-protocol.md:315` and `docs/parity-matrix.md:466` said "fifteen keys, and this is the sixteenth" against `docs/daemon-protocol.md:1176`, which already said fifteenth.
+
+**Three counts.**
+`CHANGELOG.md` said 2 411 tests for a release whose last unit validated at 2 414.
+`BACKLOG.md` said `tests/test_selection_guard.rs` defends four floors; it defends five, and the fifth is P5-U10e's own `MIN_MOVED_TUI_TESTS`.
+`docs/lessons-learned.md` carried the pinned-spec-array lesson twice, 180 lines apart, each heading naming two of the four instances and neither naming all of them; they are one entry now, at the first heading, at five instances.
+
+**Three paths that outlived the move.**
+`src/tui/actions_tests.rs` is `src/tui_tests/actions.rs`, in `docs/lessons-learned.md` and in `src/tui_tests/hold.rs`'s own header, and `src/tui/test_daemon.rs` is `src/tui_tests/daemon.rs`.
+
+**The behaviour difference the backlog did not carry.**
+`w` on a server-only search hit forwards no attachments, which P5-U10c-I1 introduced and P5-U10d-T recorded in this ticket and in `DFT-09`'s contract section.
+It was in no list of open work, so it is a `BACKLOG.md` item under #0126 now, with what closing it would cost.
+
+### The store-materialisation lesson
+
+`docs/lessons-learned.md` already carried it, from P5-U10d's `create_draft_from_source` finding, under "A helper whose last step refreshes an index also creates the store it indexes into".
+Finding 1 is the same defect one review later and is folded into that entry rather than given a second heading, with the rule stated flatly: a daemon method that *resolves against* a store opens it with `open_store`, and only a method gated on `ready_account` may use `Store::open`.
+
+### Follow-ups
+
+- Nothing here changes a protocol shape, a snapshot or a wire fixture, and no `.snap` was re-approved.
+- The storeless-store row is a filesystem and gate assertion, not a reproduction of the defect; the fake IMAP server that would make it one is the same gap `tests/daemon_server_leg_slice.rs`'s header already records.
+- `docs/lessons-learned.md` and `CHANGELOG.md` still name `src/tui/...` paths inside entries that are narrating what the tree looked like at the time. Those were left alone: a changelog entry is a record of a release, not a pointer, and the three corrected here are pointers ("X is the fixture").
+
+### Validation
+
+`TMPDIR=/var/tmp timeout 1500 cargo test --workspace --offline` -> **2 416 passed, 0 failed**, 5 ignored over 64 result lines.
+That is P5-U10f's 2 414 plus the two rows this review wrote.
+Per crate: `mailypoppins` lib 687, `mp-tui` 302, `mp-core` 416, `mp-protocol` 25, `mp-client` 7, `mp` bin 2, the integration binaries 976, one `mp_client` doc test.
+
+`--test daemon_server_leg_slice` -> 8, three runs, before and after the rest of the review.
+`--test architecture_boundaries` -> 11. `--test daemon_protocol_fixtures` -> 20. `--test phase5_parity_gate` -> 11.
+The guard of finding 2 was run against the defect it names and fails there, naming `crates/mp-tui/src/bg.rs`.
+
+`touch src/main.rs && cargo build --offline && MP=./target/debug/mp scripts/capture-cli-help.sh | diff - docs/baselines/pre-daemon/cli-help.txt` -> empty, and `diff <(./target/debug/mp dump-keys --json) docs/baselines/pre-daemon/tui-keys.json` -> empty.
+
+`cargo clippy --workspace --offline --all-targets` -> **37 distinct warnings**, the phase's baseline, none in a file this review touched: the four `src/tui_tests/hold.rs` rows are at lines 206-209 and the only edit to that file is a doc comment at 578.
+
+`rustfmt --edition 2021 --check` was read rather than applied, for P5-U10a's reason: `tests/daemon_server_leg_slice.rs` and `tests/architecture_boundaries.rs` were not rustfmt-clean before this review, and every diff it reports in them is on a line this review did not write.
+`src/daemon/methods/message_server.rs` and `src/daemon/client.rs` are clean.
+
+`cargo install --path . --offline` -> replaced, release profile, 26 s.
+`pgrep -af '[m]p daemon'` after every run: one line, pid 3667325, the owner's own daemon, which no sandbox in this work could reach.
