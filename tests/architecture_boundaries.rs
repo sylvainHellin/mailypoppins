@@ -83,15 +83,21 @@ pub const ENGINE_MODULES: [&str; 9] = [
 ///
 /// They are the engine's half of the shared crate (#0126, P5-U10a moved them
 /// there), and the daemon is what opens a keyring or runs a device-code flow.
-/// The import scan above cannot see them, because they are `mp_core::` paths
-/// rather than `crate::` ones, so they are scanned for as text in both spellings
-/// over the whole TUI crate, tests included.
-pub const MP_CORE_ENGINE_PATHS: [&str; 4] = [
-    "mp_core::secrets",
-    "mp_core::oauth2",
-    "use mp_core::{secrets",
-    "use mp_core::{oauth2",
-];
+/// The allow-list scan above cannot see them, because they are `mp_core::`
+/// paths rather than `crate::` ones, so [`mp_core_engine_reaches`] scans the
+/// whole TUI crate for them, tests included.
+///
+/// A `use` is read as a path and not as text, by the same
+/// [`brace_group_roots`] / [`leading_ident`] machinery the import allow-list
+/// uses: a braced group has no canonical order, so `use mp_core::{config,
+/// secrets::SecretBackend};` is the same reach as `use mp_core::{secrets,
+/// config};` and a substring match only sees the second one.
+pub const MP_CORE_ENGINE_MODULES: [&str; 2] = ["oauth2", "secrets"];
+
+/// The same two modules as the fully-qualified paths a call spells them with
+/// when no `use` line mentions them, which is what [`TUI_ENGINE_PATHS`] scans
+/// for on the `crate::` side.
+pub const MP_CORE_ENGINE_PATHS: [&str; 2] = ["mp_core::oauth2", "mp_core::secrets"];
 
 const CLIENT_ROOT: &str = "crates/mp-tui/src";
 const ALLOW_LIST: &str = "tests/fixtures/tui-engine-imports.txt";
@@ -109,13 +115,7 @@ const PATH_ALLOW_LIST: &str = "tests/fixtures/tui-engine-paths.txt";
 pub fn engine_imports(root: &Path) -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();
     for file in rust_files(root) {
-        let rel = file
-            .strip_prefix(root)
-            .unwrap_or(&file)
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
+        let rel = relative(root, &file);
         let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
         for module in imported_crate_roots(&strip_line_comments(&source)) {
             if ENGINE_MODULES.contains(&module.as_str()) {
@@ -124,6 +124,50 @@ pub fn engine_imports(root: &Path) -> BTreeSet<(String, String)> {
         }
     }
     found
+}
+
+/// Every engine reach into `mp-core` from under `root`, as `(path relative to
+/// root, `mp_core::<module>`)` pairs.
+///
+/// Two passes over one file, which between them cover both spellings and count
+/// a file that uses both once, because both report the same pair:
+///
+/// - the `use` lines, parsed to their module segment, so a braced group is read
+///   whatever order its items are in and however deeply they nest;
+/// - everything that is not a `use` line, scanned for the fully-qualified path,
+///   which is how a call reaches a module no import mentions.
+///
+/// Test modules are scanned along with production code: a test that opened a
+/// secret backend would be opening the developer's own keyring.
+pub fn mp_core_engine_reaches(root: &Path) -> BTreeSet<(String, String)> {
+    let mut found = BTreeSet::new();
+    for file in rust_files(root) {
+        let rel = relative(root, &file);
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        let source = strip_line_comments(&source);
+        for module in imported_roots(&source, &["mp_core::"]) {
+            if MP_CORE_ENGINE_MODULES.contains(&module.as_str()) {
+                found.insert((rel.clone(), format!("mp_core::{module}")));
+            }
+        }
+        let called = strip_use_statements(&source);
+        for path in MP_CORE_ENGINE_PATHS {
+            if called.contains(path) {
+                found.insert((rel.clone(), path.to_string()));
+            }
+        }
+    }
+    found
+}
+
+/// `file` as a `/`-joined path relative to `root`.
+fn relative(root: &Path, file: &Path) -> String {
+    file.strip_prefix(root)
+        .unwrap_or(file)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Every `*.rs` file under `root`, recursively, in no particular order.
@@ -161,6 +205,12 @@ fn strip_line_comments(source: &str) -> String {
 /// The first path segment of every `use crate::…` / `use mailypoppins::…` in
 /// `source`, with braced groups expanded one level.
 fn imported_crate_roots(source: &str) -> Vec<String> {
+    imported_roots(source, &["crate::", "mailypoppins::"])
+}
+
+/// The first path segment of every `use <prefix>…` in `source`, for any of
+/// `prefixes`, with braced groups expanded one level.
+fn imported_roots(source: &str, prefixes: &[&str]) -> Vec<String> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -173,10 +223,7 @@ fn imported_crate_roots(source: &str) -> Vec<String> {
             continue;
         }
         let rest = source[i..].trim_start();
-        let Some(tail) = rest
-            .strip_prefix("crate::")
-            .or_else(|| rest.strip_prefix("mailypoppins::"))
-        else {
+        let Some(tail) = prefixes.iter().find_map(|prefix| rest.strip_prefix(prefix)) else {
             continue;
         };
         match tail.trim_start().strip_prefix('{') {
@@ -437,13 +484,7 @@ pub fn engine_paths(root: &Path) -> BTreeSet<(String, String)> {
         if test_only.contains(&file) {
             continue;
         }
-        let rel = file
-            .strip_prefix(root)
-            .unwrap_or(&file)
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
+        let rel = relative(root, &file);
         let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
         let source = strip_use_statements(&strip_test_modules(&strip_line_comments(&source)));
         for path in TUI_ENGINE_PATHS {
@@ -576,18 +617,11 @@ fn tui_engine_paths_match_the_allow_list() {
 #[test]
 fn the_tui_crate_reaches_no_engine_module_of_the_shared_crate() {
     let root = repo_root().join(CLIENT_ROOT);
-    let files = rust_files(&root);
-    assert!(!files.is_empty(), "no .rs files under {root:?}");
-    let mut found = Vec::new();
-    for file in files {
-        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
-        let source = strip_line_comments(&source);
-        for path in MP_CORE_ENGINE_PATHS {
-            if source.contains(path) {
-                found.push(format!("  {} reaches `{path}`", file.display()));
-            }
-        }
-    }
+    assert!(!rust_files(&root).is_empty(), "no .rs files under {root:?}");
+    let found: Vec<String> = mp_core_engine_reaches(&root)
+        .into_iter()
+        .map(|(file, path)| format!("  {CLIENT_ROOT}/{file} reaches `{path}`"))
+        .collect();
     assert!(
         found.is_empty(),
         "the TUI crate reaches the engine half of `mp-core`:\n{}\n\
@@ -615,6 +649,69 @@ fn the_path_allow_list_is_sorted_deduped_and_names_only_scanned_paths() {
             "{PATH_ALLOW_LIST} names `{path}` (from {file}), which the scan does not look for"
         );
     }
+}
+
+/// The `mp-core` scanner reads a module segment wherever a `use` puts it, reads
+/// a fully-qualified call, and reads neither out of a comment.
+///
+/// The row exists because the scan it replaced was four substrings, and
+/// `use mp_core::{config, secrets::SecretBackend};` is none of them: it matched
+/// `use mp_core::{secrets` and `mp_core::secrets`, so a `secrets` that was not
+/// the first item of its brace group went through. A braced group has no
+/// canonical order, and nothing makes a developer write the engine module first.
+#[test]
+fn the_shared_crate_scanner_reads_a_module_segment_wherever_a_use_puts_it() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("ui")).expect("mkdir");
+    fs::write(
+        root.join("first.rs"),
+        "use mp_core::{secrets::SecretBackend, config};\n",
+    )
+    .expect("write");
+    // The spelling the four-substring scan could not see.
+    fs::write(
+        root.join("later.rs"),
+        "use mp_core::{config, secrets::SecretBackend};\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("ui/nested.rs"),
+        "use mp_core::{\n    config::{store_path, AccountConfig},\n    oauth2,\n};\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("ui/called.rs"),
+        "fn open() { let _ = mp_core::secrets::backend(); }\n",
+    )
+    .expect("write");
+    // A file that both imports and calls reports the reach once.
+    fs::write(
+        root.join("ui/both.rs"),
+        "use mp_core::oauth2::DeviceFlow;\nfn go() { mp_core::oauth2::start(); }\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("ui/clean.rs"),
+        "use mp_core::{config, parse::FetchedEmail};\n\
+         // use mp_core::secrets::SecretBackend;\n\
+         // mp_core::oauth2::start() is named in a comment\n\
+         fn f() {}\n",
+    )
+    .expect("write");
+
+    let found = mp_core_engine_reaches(root);
+    let expected: BTreeSet<(String, String)> = [
+        ("first.rs", "mp_core::secrets"),
+        ("later.rs", "mp_core::secrets"),
+        ("ui/both.rs", "mp_core::oauth2"),
+        ("ui/called.rs", "mp_core::secrets"),
+        ("ui/nested.rs", "mp_core::oauth2"),
+    ]
+    .into_iter()
+    .map(|(f, p)| (f.to_string(), p.to_string()))
+    .collect();
+    assert_eq!(found, expected);
 }
 
 /// The scanner reads a fully-qualified call, ignores a `use` of the same

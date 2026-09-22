@@ -148,7 +148,9 @@ Test modules are stripped, whole test files are stripped by deriving them from t
 They are kept because a fixture that reached zero and was deleted would have to be written again from memory the day someone adds the dependency back, and because a row appearing names the file and the module where a hundred lines of resolver error would not.
 
 `ENGINE_MODULES` is nine names rather than eleven: `secrets` and `oauth2` moved to `mp-core` in P5-U10a and were carried on the list unchanged for four units, which was untidy while the TUI could not link `mp-core` and wrong the moment it could.
-They are covered instead by `the_tui_crate_reaches_no_engine_module_of_the_shared_crate`, which scans the whole TUI crate, tests included, for the `mp_core::secrets` / `mp_core::oauth2` spellings: the crate boundary cannot refuse those two, because `mp-tui` does depend on `mp-core`, and a client that opened a keyring or ran a device-code flow would compile.
+They are covered instead by `the_tui_crate_reaches_no_engine_module_of_the_shared_crate`, which scans the whole TUI crate, tests included: the crate boundary cannot refuse those two, because `mp-tui` does depend on `mp-core`, and a client that opened a keyring or ran a device-code flow would compile.
+That scan reads a `use` as a path rather than as text, through the same brace-group machinery the import allow-list uses, so the module segment is found wherever the group puts it and however deeply it nests; a line that is not a `use` is scanned for the fully-qualified `mp_core::secrets` / `mp_core::oauth2` instead.
+Matching substrings alone was the defect the P5-U10 review found: `use mp_core::{config, secrets::SecretBackend};` is a reach no literal in the old four-entry list covered, and a braced group has no canonical order.
 
 Both allow-lists are records, not ceilings: a removed import or a removed call fails the test as loudly as a new one, because the counts were the migration's progress bar.
 Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`, which rewrites both fixtures.
