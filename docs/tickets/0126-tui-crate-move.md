@@ -1,13 +1,13 @@
 ---
 id: 0126
-title: The crate boundary for the TUI, P5-U10a/b/c
+title: The crate boundary for the TUI, P5-U10a to P5-U10f
 type: refactor
 priority: now
-status: in progress
+status: done
 created: 2026-09-22
 ---
 
-Status: in progress. The move itself is still ahead: P5-U10c-I2 measured that the `git mv` is three more units, P5-U10d has landed the first of them, and what is left is the oracle relocation (P5-U10e) and the move (P5-U10f).
+Status: done. `crates/mp-tui` exists, depends on `mp-core`, `mp-client` and `mp-protocol`, and names no `mailypoppins` in either dependency table; both engine allow-lists are empty and the boundary is a resolver error rather than a guard's opinion.
 
 P5-U10a and P5-U10b have landed: `crates/mp-core` holds the engine-free closure the TUI reaches, eleven modules whole and the engine-free half of six more.
 No call site outside the moved files changed, and no behaviour changed: the help surface, the key dump and the twenty golden frames are byte-identical, and the workspace test count did not drop.
@@ -33,8 +33,8 @@ That ticket's proposed sequencing is this one's unit table.
 | P5-U10c-I2 | I | `ec364ff`, `9258140`, `1182dfe` | the last engine call sites in `src/tui/`: `contact.rebuild`, the agenda out of the TUI, the invite blob onto `message.ics` | done, partially: the move itself did not land |
 | P5-U10d-T | T | `40e2d72`, `061ba7d`, `f946a0f`, `459d7bd` | the contract for the five non-oracle groups: `message.thread`, `draft.create_from_message`, four fixtures, three test files, and the path guard the move is actually measured by | done |
 | P5-U10d-I | I | `3c8a88a`, `51f181f`, `dd4a30f` | the two methods, the dead outbox field, the drafts poll, and both guards at their post-unit counts | done |
-| P5-U10e | I | - | the sessionless oracles and their test modules, into the root crate | pending |
-| P5-U10f | I | - | the move itself, plus the connect helper's new home | pending |
+| P5-U10e | I | `a758930`, `58f9acc` | the drafts index out of the TUI, the sessionless oracles and their 165 tests into the root crate, both allow-lists at the truth | done |
+| P5-U10f | I | `48d23a3` | `git mv src/tui crates/mp-tui/src`, the injected connector, the guards re-pointed | done |
 
 ## P5-U10a: the shared crate
 
@@ -902,3 +902,168 @@ The T unit reported 42 locations by a wider count that includes cargo's own `gen
 
 `cargo install --path . --offline` -> replaced, release profile, 30 s.
 `pgrep -af '[m]p daemon'` showed one pid throughout, the owner's long-running daemon, which no run touched.
+
+## P5-U10e: the sessionless oracles, and the tests that read one
+
+The unit the import allow-list could not have predicted.
+Four of its five rows and four of the path list's five were the oracles, and behind those eight rows sat **165 tests**: not a relocation of three readers but of every test in `src/tui/` that reaches the store, the ingest path or the daemon's own `Dispatcher`.
+
+### The drafts index, first, because a daemon method read it out of a client
+
+`src/daemon/methods/mailbox.rs` labelled the Drafts mailbox with `crate::tui::app::draft_count`, which is P5-U10c-I2's agenda inversion in miniature.
+`indexed_drafts`, `draft_count` and the two wire mappers are `src/draft.rs`'s now, beside the four other draft operations that need a store, answering the same `mp_protocol::draft::{DraftEntry, DraftSkip}` they always did.
+That is the whole of the first commit, and it is the one part of this unit the daemon depends on.
+
+### What moved, and where each piece went
+
+| from | to | what it is |
+|---|---|---|
+| `app/store_rows.rs`, `row_to_wire` and `load_drafts` from `app/types.rs`, four readers from `app/mod.rs` | `src/tui_tests/oracle.rs` | the store-backed answer every served one is compared against |
+| `test_daemon.rs` | `src/tui_tests/daemon.rs` | the in-process `Dispatcher` the comparisons run over |
+| `app/queries_tests.rs`, `app/invites_tests.rs` | `src/tui_tests/{queries,invites}.rs` | the two equality suites, 29 rows |
+| the store-backed half of `app/types.rs`'s test module | `src/tui_tests/types.rs` | 17 rows over the list, the counts and the preview memo |
+| `actions.rs`'s three `store_backed_*` modules | `src/tui_tests/actions_store.rs` | 27 rows over drafting, sending and the file flows |
+| `commands.rs`'s `mod tests` | `src/tui_tests/commands.rs` | 9 rows, every one over a `TestDaemon` |
+| `actions_tests.rs`, `events_tests.rs`, `hold_tests.rs` | `src/tui_tests/{actions,events,hold}.rs` | 60 rows that build a `DaemonState` |
+| `ui/golden_frames_daemon.rs` + 2 snapshots | `src/tui_tests/golden_frames_daemon.rs` + `src/tui_tests/snapshots/` | 23 frames from a real `state.bootstrap` |
+| one test in `ui/preview.rs` | `src/tui_tests/preview.rs` | the card's RSVP fold, which needs `reconcile`'s store half |
+
+### The shape, and why not `tests/tui_*.rs`
+
+`#[cfg(test)]` modules under `src/`, declared by one `#[cfg(test)] mod tui_tests;` in `src/lib.rs`, rather than integration files.
+Both shapes survive P5-U10f without a second move, and both need the same `pub` surface on `mp-tui` afterwards, because the root crate is outside that crate either way.
+What decided it is the root crate's *own* test seams: `crate::reconcile::tests::{invite_ics, reply_ics, AmbientFixture}` is a `#[cfg(test)]` module of `src/reconcile.rs` and is the fixture two of the moved suites are built on, `crate::config::test_env` is another, and an integration file can reach neither.
+Putting the tests inside the lib keeps every one of those reachable and cost no edit; putting them in `tests/` would have meant a second `test-support` feature on the *root* crate for its own fixtures.
+
+### The fallbacks are gone, which is the behaviour change
+
+`App::load_calendar_events`, `load_message_invite`, `load_message_ics`, `message_body`, `draft_body` and `recount_all_mailboxes` each had a store-backed branch under `if let Some(queries)`; so did `run_loop`'s per-account count and `Action::LoadMailbox`'s list.
+All eight are one branch now: no session means an empty list, zeroed counts, no card, no preview, and a line in the log naming the account.
+The plan's P5-U8 sentence ("no direct fallback") asked for it, P5-U10d-I's conversation overlay set the precedent ("there is no daemon session to ask"), and P5-U10f makes it unfalsifiable rather than merely true.
+
+`App::self_address` went with them: its three callers were the three readers, and the oracle computes the same address from the same `AccountConfig`.
+
+Two suites had to change what they compare, and it is the same change both times: a row that compared *two branches of one method* now compares the served answer against `super::oracle`.
+`the_app_answers_the_same_three_things_with_and_without_a_session` is `the_app_reads_all_three_through_the_daemon`, and one row was added beside it, `an_app_without_a_session_reads_none_of_them`, which asserts the empty answers against a store that really holds the rows.
+`app_on_inbox` and `app_on_drafts` in the moved `types.rs` hold a `TestDaemon` session where they leant on the fallback, so the four preview rows exercise the routed read.
+
+### The guards
+
+`tests/fixtures/tui-engine-imports.txt`: **5 -> 0**, an empty file.
+`tests/fixtures/tui-engine-paths.txt`: **5 -> 1**, `session.rs crate::daemon::` alone, which is the connect helper and P5-U10f's.
+`TUI_APP_STORE_RESIDUE`: **3 -> 0**, kept as a table for the reason `TUI_ACTION_ENGINE_RESIDUE` was kept when it emptied.
+
+`tests/test_selection_guard.rs` gains a fifth floor and re-derives two:
+
+| floor | before | after |
+|---|---:|---:|
+| `MIN_TUI_TESTS` (`src/tui`) | 467 | 302 |
+| `MIN_MOVED_TUI_TESTS` (`src/tui_tests`) | - | 166 |
+| `MIN_SNAPSHOT_FILES` (`src/tui/ui/snapshots`) | 20 | 18 |
+
+302 + 165 = 467, and the 166th is this unit's own new row.
+The two `…_daemon.snap` files moved with the module that mints them, renamed for the module path insta derives a file name from and byte-identical but for the `source:` line, which now names the truth.
+
+`tests/phase5_parity_gate.rs` learned that the two golden-frame families live in two directories: `snapshot_files` takes a directory and a module path instead of assuming both.
+
+### Deviations
+
+**165 tests moved where the brief described a handful.** The oracle dependency list in P5-U10d-T's section names three suites; what the compiler names is every test module that reaches `crate::daemon`, `crate::store` or `crate::ingest`, which is 112 tests in whole files plus 53 in three partial modules. The brief's shape held; its size did not.
+
+**`tests/tui_daemon_recovery.rs` and `tests/phase5_parity_gate.rs` were edited**, both T-unit files. The first only in P5-U10f (the connector argument); the second for the snapshot directory split. Neither assertion changed.
+
+**No `rustfmt` run on the moved files.** P5-U10a's reasoning unchanged: the three partial moves are dedented by one level and nothing else, so the diff is the move.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2 413 passed, 0 failed, 5 ignored**.
+That is P5-U10d-I's 2 411 plus two rows this unit wrote: `an_app_without_a_session_reads_none_of_them` and the new floor's own test.
+Per crate: `mailypoppins` lib 989, `mp-core` 416, `mp-protocol` 25, `mp-client` 7, `mp` bin 2, the integration binaries 974, one `mp_client` doc test.
+
+`--test architecture_boundaries` -> 9, the import list empty and the path list at one row. `--test test_selection_guard` -> 7. `--test phase5_parity_gate` -> 11. `--test daemon_protocol_fixtures` -> 20.
+`--lib 'tui::ui::golden_frames::'` -> 20 and `--lib tui_tests::golden_frames_daemon` -> 22, no snapshot re-approved and no `.snap.new`.
+
+`scripts/capture-cli-help.sh` and `mp dump-keys --json` diff empty against the baselines.
+`cargo clippy --workspace --offline --all-targets` -> **37 distinct `(lint, file, line)`**, the same 37 as `e1b5f2b` with the four `hold_tests.rs` rows at their new path.
+`pgrep -af '[m]p daemon'` showed one pid throughout, the owner's, which no run touched.
+
+## P5-U10f: the move
+
+`git mv src/tui crates/mp-tui/src` in one commit, so git records renames rather than a delete and an add, plus a sed of the paths inside it: `crate::config::` and its fourteen siblings became `mp_core::`, and `crate::tui::` became `crate::`.
+No logic changed. Three things needed a decision instead of a substitution.
+
+### The connect helper: the binary injects it
+
+P5-U10d-T's shape (1), unchanged by anything since.
+`Session::connect` takes a `Connector`, two function pointers (`OpenSession`, `ReopenSession`) onto `daemon::client::{client_session, reopen_session}`, and `mp_tui::run` passes it through from `src/main.rs`; `daemon::client::tui_connector` is the one place that builds one.
+Function pointers rather than a trait or boxed closures because neither routine carries state, and `Copy + Send` is exactly what the session thread needs to keep one for the reconnect loop.
+
+What this preserves is the property the module header has claimed since P5-U2: one connect routine in the tree, so the socket path, the auto-start budget, `MAILYPOPPINS_DAEMON_AUTOSTART` and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping have one implementation, and the exit-4 diagnostic is printed by the process that owns the terminal, before the alternate screen.
+`mp-client` was not asked to take them, for the reason P5-U10d-T gave: that crate owns no policy, no paths and no configuration, and `open_session` needs all three.
+
+### `DraftFromSource` moved to `mp-core`
+
+The one type the TUI names that was still the root crate's.
+It is a two-variant enum with no methods; the compose wizard picks the kind before any draft exists, and `create_draft_from_source`, which consumes it, needs the drafts index and stays.
+So it sits beside `SourceMessage` in `mp_core::draft` and `pub use mp_core::draft::*` keeps every root-crate call site spelled as it was.
+
+### `test-support` on `mp-tui`
+
+`mp-core`'s seam a second time, for the same reason and with the same proof.
+Behind it: `App::default_for_tests`, `prime_preview_body`, `prime_preview_invite`, the `PREVIEW_QUERY_SPANS` counter, `Session::serving` and the whole `ui::golden_frames` module, whose fixtures the 23 daemon-backed frames render.
+The root crate turns it on through `[dev-dependencies]`; `cargo build -v` compiles `mp_tui` with no `--cfg feature="test-support"` and `cargo test -v` compiles it with one.
+
+`insta` stays a plain dev-dependency: the module is feature-gated but its `assert_snapshot!` calls live in `#[test]` functions, which a non-test build strips, so the two imports the frames need are `#[cfg(test)]` and a `test-support` build needs no snapshot crate.
+
+### The visibility the move cost
+
+The root crate's `src/tui_tests/` is outside `mp-tui`, so what those 166 tests drive had to become `pub`: `actions`, `bg` and `ui` as modules, `events::Awaited`, `commands::{Flip, Rendition}`, the two coalescing constants, about twenty functions in `actions.rs` and `commands.rs`, and nine methods on `App` (`handle_key`, `rebuild_visible`, `apply_search_filter`, the three invitation readers, `draft_body`, the two preview refreshes).
+None of them is a new surface in any real sense - the crate is an implementation detail of one binary - but it is worth naming, because "the TUI is a crate" and "the TUI has an API" are different claims and only the first one is intended.
+
+### `ENGINE_MODULES`, decided
+
+Nine names, not eleven: `secrets` and `oauth2` are struck.
+They moved to `mp-core` in P5-U10a and every unit since has repeated the same follow-up, which this unit is the first to have to answer, because `crates/mp-tui` *depends* on `mp-core`: a `use mp_core::secrets::…` in the TUI would compile, and a scan that looks for `crate::` and `mailypoppins::` could not see it.
+Keeping them on a list the scan cannot reach would read as coverage that does not exist.
+
+The gate for those two is `the_tui_crate_reaches_no_engine_module_of_the_shared_crate`, a text scan of the whole TUI crate - tests included, because a test that opened a secret backend would open the developer's keyring - for `mp_core::secrets` and `mp_core::oauth2` in both spellings.
+The other nine need no scan at all: `crate::store::` does not resolve in a crate whose manifest names no `mailypoppins`. Both allow-lists are kept anyway, at zero rows, as the belt to that braces: a fixture that reached zero and was deleted would have to be written again from memory the day someone adds the dependency back.
+
+### Deviations
+
+**The daemon still calls two `mp-tui` functions.** `src/daemon/methods/message.rs` and `src/daemon/state/snapshot.rs` use `build_mailboxes` and `resolve_date`, which compile because the root crate depends on `mp-tui`. It is the agenda inversion in miniature: a server reading a helper out of a client. Both are pure functions over a config and two strings, so the fix is a lift into `mp-core` and not a method; it is recorded in `BACKLOG.md` rather than taken here, because this unit's brief was the move and its one named lift (`draft_count`).
+
+**Eighteen snapshot files were renamed.** insta derives a snapshot's file name from the module path, and the crate name is its first segment, so every `mailypoppins__tui__ui__golden_frames__*.snap` is `mp_tui__ui__golden_frames__*.snap`. `git mv`, contents byte-identical, `source:` corrected; no frame was re-approved and no `.snap.new` exists.
+
+**No `cargo fmt`.** The sed rewrote paths in place and reflowed nothing.
+
+### The gate, against the plan's P5-U10 sentence
+
+> Move `src/tui/` to `crates/mp-tui/` depending on `mp-client` + `mp-protocol` only; `tests/architecture_boundaries.rs` allow-list driven to **zero**; the P2-U1a guard must still report >= 367 TUI tests and >= 20 golden frames after the move.
+
+| clause | state |
+|---|---|
+| `crates/mp-tui` exists and the TUI is in it | yes, `crates/mp-tui/src`, 302 tests |
+| depending on `mp-client` + `mp-protocol` only | `mp-core` as well, which P5-U10a created for exactly this and the plan predates; `cargo tree -p mp-tui -e normal` shows no `mailypoppins` |
+| the allow-list at zero | both at zero: imports and paths |
+| >= 367 TUI tests | 302 in `crates/mp-tui/src` plus 166 in `src/tui_tests/`, 468 together, and the guard defends both floors |
+| >= 20 golden frames | 20 hand-built, 22 daemon-backed, 18 reviewed snapshots |
+
+The Phase 5 gate suite is unmoved: `--test phase5_parity_gate` -> 11, the eight pre-daemon oracle suites, the golden-frame rows and the help/keys rows included.
+
+### Validation
+
+`TMPDIR=/var/tmp cargo test --workspace --offline` -> **2 414 passed, 0 failed, 5 ignored**, across 62 binaries.
+P5-U10e's 2 413 plus `the_tui_crate_reaches_no_engine_module_of_the_shared_crate`.
+Per crate: `mailypoppins` lib 687, `mp-tui` 302, `mp-core` 416, `mp-protocol` 25, `mp-client` 7, `mp` bin 2, the integration binaries 974, one `mp_client` doc test. 687 + 302 = 989, which is the root `--lib` run before the move.
+
+`--test architecture_boundaries` -> 10. `--test test_selection_guard` -> 7. `--test phase5_parity_gate` -> 11. `--test daemon_protocol_fixtures` -> 20.
+`-p mp-tui --lib 'ui::golden_frames::'` -> 20 and `--lib tui_tests::golden_frames_daemon` -> 22, no snapshot re-approved and no `.snap.new`.
+
+`cargo tree -p mp-tui -e normal` -> `mp-client`, `mp-core`, `mp-protocol` and the UI stack; no `mailypoppins` node, in `-e normal` or in `-e dev`.
+`cargo build -v` -> `mp_tui` compiled with no `--cfg feature="test-support"`; `cargo test -v -p mailypoppins --lib` -> compiled with it.
+
+`scripts/capture-cli-help.sh` and `mp dump-keys --json`, from a binary rebuilt in the same run, diff empty against `docs/baselines/pre-daemon/cli-help.txt` and `docs/baselines/pre-daemon/tui-keys.json`.
+`cargo clippy --workspace --offline --all-targets` -> **37 distinct `(lint, file, line)`**, the same 37 as `e1b5f2b` mapped through the renames.
+`cargo install --path . --offline` -> replaced, release profile, 28 s; `mp --version` -> `mailypoppins 0.9.0`; `MAILYPOPPINS_DATA_DIR=/var/tmp/mp-p5u10f-smoke mp daemon status` -> exit 1, "no daemon running".
+`pgrep -af '[m]p daemon'` showed one pid throughout, the owner's, which no run touched.

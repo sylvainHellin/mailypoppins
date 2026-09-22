@@ -2051,3 +2051,25 @@ The pin is cheap and worth writing: call the method against the storeless accoun
 `MESSAGE_READ_METHOD_SPECS` is pinned at three names by `tests/daemon_read_slice.rs` and `DRAFT_METHOD_SPECS` at ten by three test files, two of them with a `const _: () = assert!(ARRAY.len() == NAMES.len())` that fails the *compile* rather than a test.
 Adding `message.thread` and `draft.create_from_message` to those arrays would have meant editing pinned tests to say something they were not written to say, so each got a one-element array of its own, registered by chaining onto the family's loop and served by the family's own type (#0126, P5-U10d, after `MESSAGE_MARKDOWN_METHOD_SPECS` in P5-U10c).
 Three instances now, which makes it the default rather than the exception: grep the array's name across `tests/` before growing it.
+
+## The test that has to move is the one that links something, not the one about the subject
+
+Relocating a subtree into a crate of its own splits its tests, and the split is not by what they are about: it is by what each one has to link.
+`src/tui/` carried 467 tests, and the brief for moving them named three suites; what the compiler named was 165, in every module that reached the store, the ingest path or the daemon's `Dispatcher` (#0126, P5-U10e).
+Three of those modules were *halves* of a file - a `mod tests` whose first twenty rows are pure and whose last seventeen seed a store - so "which files move" is the wrong question too.
+
+Find them before the move rather than during it: grep the subtree for the modules the new crate will not be able to name, over test code as well as production code, because the two allow-lists that measure a boundary usually scan production only and will read zero while a thousand lines of tests still link the engine.
+
+## Insta derives a snapshot's file name from the module path, crate name included
+
+Moving a module that asserts snapshots renames every one of its `.snap` files, because the file name is `<module_path with :: as __>__<name>.snap` and the first segment is the crate.
+`git mv src/tui crates/mp-tui/src` therefore also means `git mv mailypoppins__tui__ui__golden_frames__X.snap mp_tui__ui__golden_frames__X.snap`, eighteen times (#0126, P5-U10f).
+Do it in the same commit, with the contents untouched and the `source:` header corrected, and check `fd -e new` afterwards: a snapshot insta cannot find is a snapshot it offers to create, so the failure mode is a green run that has silently re-approved every frame.
+
+## A crate boundary refuses a dependency, not a module of one the crate still needs
+
+`crates/mp-tui` cannot reach `crate::store::` because its manifest names no `mailypoppins`: that is the whole of the proof for the eleven engine modules, and no scan is needed for it.
+It is not the proof for `secrets` and `oauth2`, which moved into the shared `mp-core` five units earlier and which the TUI crate *does* link (#0126, P5-U10f).
+A textual allow-list that kept naming them read as coverage it did not have, because it scanned for `crate::` and they are spelled `mp_core::` now.
+
+When a shared crate holds both halves of a boundary, say which half is which and gate the engine half by its real spelling, over the whole dependent crate including its tests.

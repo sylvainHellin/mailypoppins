@@ -145,11 +145,12 @@ Since P5-U4 the three reads a frame needs go the same way, through `crate::tui::
 The two that can wait keep the thread they always had and block on a call rather than on a store open: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup, both through a `Session::handle()` a worker thread can own, so nothing about the load moved onto the draw thread.
 The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `docs/plans/preview-latency.md` budgets.
 The listing is transferred whole, once per mailbox open, as `docs/baselines/decisions/list-transfer.md` decided; the row deltas that keep it current decode here already and are applied by nothing until P5-U8 drains the event stream.
-An `App` with no session at all falls back to the store-backed readers of `src/tui/app/store_rows.rs`, which is the shape every TUI unit test runs in and, in a real run, only a `Session::connect` that wedged.
+An `App` with no session at all reads nothing: an empty list, zeroed counts and an empty preview, each with a line in the log (P5-U10e).
+The store-backed readers it used to fall back to are `src/tui_tests/oracle.rs`, in the crate that owns the store, where they are the oracle every daemon-backed answer is compared against.
 
-Since P5-U6 the actions go the same way, through `crate::tui::commands` and the same session.
-Seven call sites are left on the direct path and `TUI_ACTION_ENGINE_RESIDUE` (`src/tui/actions_tests.rs`) is the record of them, all waiting on a surface that is not built: `RD-06`'s Markdown rendition, `LST-09`'s `message.fetch` and `RD-07`'s selector.
-The eighth was `SND-04`'s undo-send hold, and it went in P6-U2 when the hold became the daemon's.
+Since P5-U6 the actions go the same way, through `mp_tui::commands` and the same session.
+No call site is left on the direct path: `TUI_ACTION_ENGINE_RESIDUE` (`src/tui_tests/actions.rs`) is empty since P5-U10c-I2, and since P5-U10f the TUI is a crate that could not reach the engine if one came back.
+The last three to go were `RD-06`'s Markdown rendition, `LST-09`'s `message.fetch` and `RD-07`'s selector, and `SND-04`'s undo-send hold went in P6-U2 when the hold became the daemon's.
 
 **An operation is awaited on the event stream, not polled.**
 `sync.quick`, `sync.full`, `send.approved` and `calendar.rsvp` answer `{operation_id}` at once and finish later.
