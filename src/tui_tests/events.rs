@@ -137,9 +137,9 @@ use crate::tui::app::{build_mailboxes, Action, App, MailboxKind};
 use crate::tui::commands::dispatch;
 use crate::tui::events::{drain, Applied, Incoming, Subscription};
 use crate::tui::queries::{list_emails, Queries};
-use crate::tui::test_daemon::TestDaemon;
+use super::daemon::TestDaemon;
 
-use super::{COALESCE_BUDGET, MAX_COALESCED_EVENTS};
+use crate::tui::{COALESCE_BUDGET, MAX_COALESCED_EVENTS};
 
 /// The one account every fixture configures, and the one every event names.
 const ACCOUNT: &str = "alice";
@@ -882,7 +882,7 @@ fn needles_under(relative: &str, needles: &[&str]) -> BTreeSet<(String, String)>
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
-        if name == "src/tui/events_tests.rs" {
+        if name == "src/tui_tests/events.rs" {
             continue;
         }
         let Ok(source) = std::fs::read_to_string(&path) else {

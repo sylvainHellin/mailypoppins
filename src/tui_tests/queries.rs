@@ -122,7 +122,8 @@ use serde_json::{json, Value};
 
 use mp_protocol::{EventEnvelope, Request, RequestId, JSONRPC_VERSION};
 
-use super::{build_mailboxes, count_all_emails, load_emails, App, EmailEntry, MessageRef};
+use super::oracle::{self, count_all_emails, load_emails};
+use crate::tui::app::{build_mailboxes, EmailEntry, MessageRef};
 use crate::config::{AccountConfig, GlobalConfig};
 use crate::daemon::config::{ConfigState, ConfigStore};
 use crate::daemon::dispatch::{ClientCtx, ClientKind};
@@ -359,20 +360,6 @@ fn same_entries(daemon: &[EmailEntry], store: &[EmailEntry], label: &str) {
     );
 }
 
-/// An `App` whose active account is [`ACCOUNT`], for the incumbent half of the
-/// preview oracle.
-///
-/// `App::load_message_body` resolves its store from `account_config.name`, so
-/// that one field is the whole of what it needs.
-fn app_on_fixture() -> App {
-    let mut app = App::default_for_tests();
-    app.account_config = AccountConfig {
-        name: ACCOUNT.to_string(),
-        ..Default::default()
-    };
-    app
-}
-
 // ---------------------------------------------------------------------------
 // (a) the mailbox listing
 // ---------------------------------------------------------------------------
@@ -466,13 +453,12 @@ fn daemon_backed_mailbox_counts_match_the_store_backed_ones() {
 fn a_daemon_backed_preview_body_matches_the_store_backed_one() {
     let fixture = Fixture::new();
     seed_inbox();
-    let app = app_on_fixture();
 
     for entry in load_emails(ACCOUNT, "inbox") {
         let msg = entry.msg.expect("an ingested row has a MessageRef");
         assert_eq!(
             message_body(&fixture, ACCOUNT, msg).expect("the daemon reads a body"),
-            app.load_message_body(msg),
+            oracle::load_message_body(ACCOUNT, msg),
             "the body of {} ({}) differs",
             msg,
             entry.subject,
@@ -487,12 +473,11 @@ fn a_daemon_backed_preview_body_matches_the_store_backed_one() {
 fn a_preview_of_a_row_that_is_gone_is_empty_on_both_paths() {
     let fixture = Fixture::new();
     seed_inbox();
-    let app = app_on_fixture();
     let gone = MessageRef::new(9_999);
 
     assert_eq!(
         message_body(&fixture, ACCOUNT, gone).expect("a stale reference is not a transport error"),
-        app.load_message_body(gone),
+        oracle::load_message_body(ACCOUNT, gone),
     );
 }
 
@@ -808,54 +793,33 @@ fn a_preview_walk_leaves_no_handle_behind() {
 // (e) the gate over the call sites
 // ---------------------------------------------------------------------------
 
-/// The `open_store` calls P5-U4 may keep in `src/tui/app/`, and why.
+/// The `open_store` calls the TUI's app module may keep, and why.
 ///
-/// `(file, function, reason)`, sorted by file then function. Read it as the
-/// answer to "why is P5-U3's gate not at literal zero": three of the six sites
-/// read data no `message.*` method answers, and contracting a method for them
-/// is neither this unit's nor P5-U4's brief.
+/// `(file, function, reason)`, sorted by file then function. **Empty since
+/// #0126 (P5-U10e)**, and kept as a table rather than deleted, for the reason
+/// `TUI_ACTION_ENGINE_RESIDUE` was kept when it emptied: an empty allow-list
+/// fails on the first store open anyone adds back, which is exactly what it is
+/// for now.
 ///
-/// The table is a record as much as a gate: a residue that goes away must be
-/// struck from it in the same commit, which is why
+/// It read three rows from P5-U4 until this unit: the agenda, the invitation
+/// card and the raw iMIP blob, each a sessionless branch beside the routed
+/// one, and all three are gone with the fallback. What answers them is
+/// `calendar.events`, `message.invite` and `message.ics`; what compares the
+/// answers is [`super::oracle`], in the crate that owns the store.
+///
+/// The table is a record as much as a gate: a residue that comes back must be
+/// entered here with its reason, which is why
 /// [`the_query_layer_replaced_every_open_store_it_could`] fails in both
 /// directions. It follows `tests/architecture_boundaries.rs`'s
-/// `CLI_ENGINE_RESIDUE` in shape and in intent; it lives here rather than
-/// there because it only becomes true when P5-U4 lands, and the plan requires
-/// `cargo test --workspace` to stay green on a T unit's commit. This module is
-/// the target that does not compile, so a gate inside it costs the rest of the
-/// tree nothing.
-const TUI_APP_STORE_RESIDUE: [(&str, &str, &str); 3] = [
-    (
-        "src/tui/app/mod.rs",
-        "load_calendar_events",
-        "the agenda: calendar.rebuild is an operation over the store, not a query that answers \
-         the invite rows the Calendar view lists",
-    ),
-    (
-        "src/tui/app/mod.rs",
-        "load_message_ics",
-        "the raw invite.ics bytes the RSVP reply builder signs; no message.* method hands out an \
-         attachment blob inline",
-    ),
-    (
-        "src/tui/app/mod.rs",
-        "load_message_invite",
-        "the invite card: it folds the account's REPLY rows over one payload (reconcile::*), \
-         which is a whole-account read no method answers",
-    ),
-];
+/// `CLI_ENGINE_RESIDUE` in shape and in intent.
+const TUI_APP_STORE_RESIDUE: [(&str, &str, &str); 0] = [];
 
 /// The two files this unit is accountable for.
 const QUERY_LAYER_SOURCES: [&str; 2] = ["src/tui/app/mod.rs", "src/tui/app/types.rs"];
 
-/// P5-U3's gate: the three call sites a daemon method can answer are gone from
-/// the TUI's app module, and the three that remain are the three
-/// [`TUI_APP_STORE_RESIDUE`] names.
-///
-/// Fails on the tree as committed (six sites against three), which is the
-/// point: it is P5-U4's gate, and P5-U4 passes it by routing the mailbox load,
-/// the sidebar counts and the preview body through
-/// [`crate::tui::queries`](crate::tui::queries).
+/// P5-U3's gate, at zero: the TUI's app module opens no store at all, and
+/// every read it makes goes through [`crate::tui::queries`](crate::tui::queries)
+/// and the session the `App` holds.
 #[test]
 fn the_query_layer_replaced_every_open_store_it_could() {
     let actual = store_opens_in_app();
@@ -1099,7 +1063,6 @@ fn the_preview_query_stays_inside_the_p95_delta_ceiling() {
             ),
         );
     }
-    let app = app_on_fixture();
     let refs: Vec<MessageRef> = load_emails(ACCOUNT, "inbox")
         .iter()
         .filter_map(|entry| entry.msg)
@@ -1109,12 +1072,12 @@ fn the_preview_query_stays_inside_the_p95_delta_ceiling() {
     // One untimed pass each, so neither side pays the page-cache warm-up the
     // other has already paid.
     for msg in &refs {
-        let _ = app.load_message_body(*msg);
+        let _ = oracle::load_message_body(ACCOUNT, *msg);
         let _ = message_body(&fixture, ACCOUNT, *msg);
     }
 
     let store = p95(&refs, |msg| {
-        let _ = app.load_message_body(msg);
+        let _ = oracle::load_message_body(ACCOUNT, msg);
     });
     let daemon = p95(&refs, |msg| {
         let _ = message_body(&fixture, ACCOUNT, msg);

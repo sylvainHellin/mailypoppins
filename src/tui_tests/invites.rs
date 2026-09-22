@@ -24,9 +24,10 @@ use crate::config::AccountConfig;
 use crate::reconcile::tests::{invite_ics, reply_ics, AmbientFixture};
 use crate::tui::app::App;
 use crate::tui::queries::{calendar_events, message_ics, message_invite, Queries};
-use crate::tui::test_daemon::TestDaemon;
+use super::daemon::TestDaemon;
+use super::oracle;
 
-use super::{CalendarEvent, MessageRef};
+use crate::tui::app::{CalendarEvent, MessageRef};
 
 /// The one account every fixture configures, and the one every call names.
 const ACCOUNT: &str = "alice";
@@ -216,20 +217,24 @@ fn a_message_without_an_invitation_answers_no_ics() {
 // The three App call sites
 // ---------------------------------------------------------------------------
 
-/// An `App` with a session reads all three through the daemon, and an `App`
-/// without one reads them from the store: the same three answers either way,
-/// which is what makes the sessionless path an oracle rather than a fallback
-/// with a behaviour of its own.
+/// An `App` with a session reads all three through the daemon, and the three
+/// answers are the store's own: the agenda the loader builds, the card the
+/// fold produces and the bytes the blob holds.
+///
+/// The `App` had a store-backed branch of its own until P5-U10e, and this row
+/// compared the two branches against each other. It compares the served answer
+/// against [`oracle`] now, which is the same equality with the fallback gone:
+/// an `App` with no session reads nothing at all, because
+/// [`crate::tui`](crate::tui) is a crate that may not open a store.
 #[test]
-fn the_app_answers_the_same_three_things_with_and_without_a_session() {
+fn the_app_reads_all_three_through_the_daemon() {
     let fx = AmbientFixture::new(ACCOUNT);
     let row = seed_invited_and_answered(&fx);
     let msg = MessageRef::new(row);
 
-    let store_app = app_without_session();
-    let store_agenda = format!("{:?}", store_app.load_calendar_events());
-    let store_card = store_app.load_message_invite(msg);
-    let store_ics = store_app.load_message_ics(msg);
+    let store_agenda = format!("{:?}", oracle::calendar_events(ACCOUNT, &self_address()));
+    let store_card = oracle::message_invite(ACCOUNT, msg, &self_address());
+    let store_ics = oracle::message_ics(ACCOUNT, msg);
 
     let mut daemon_app = app_without_session();
     daemon_app.session = Some(daemon().session());
@@ -240,6 +245,25 @@ fn the_app_answers_the_same_three_things_with_and_without_a_session() {
     assert_eq!(daemon_app.load_message_invite(msg), store_card);
     assert_eq!(daemon_app.load_message_ics(msg), store_ics);
     assert!(store_ics.is_some(), "the fixture really carries a payload");
+}
+
+/// An `App` with no session answers nothing rather than reading the store
+/// behind the daemon's back, which is the P5-U8 rule ("no direct fallback")
+/// made structural: `crates/mp-tui` cannot link the store at all.
+#[test]
+fn an_app_without_a_session_reads_none_of_them() {
+    let fx = AmbientFixture::new(ACCOUNT);
+    let msg = MessageRef::new(seed_invited_and_answered(&fx));
+
+    let app = app_without_session();
+    assert!(app.load_calendar_events().is_empty());
+    assert_eq!(app.load_message_invite(msg), None);
+    assert_eq!(app.load_message_ics(msg), None);
+    assert_eq!(app.draft_body("d1"), None);
+    assert!(
+        oracle::message_ics(ACCOUNT, msg).is_some(),
+        "the store really holds what the sessionless App declined to read"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -273,10 +297,9 @@ fn the_app_reads_the_same_draft_body_with_and_without_a_session() {
     // The store-backed reader consumes the index rather than refreshing it,
     // which is the render-pass discipline of #0050; one listing is what the
     // one-second poll would have done before the preview ran.
-    let _ = super::store_rows::load_emails(ACCOUNT, crate::selector::DRAFTS_MAILBOX);
+    let _ = oracle::load_emails(ACCOUNT, crate::selector::DRAFTS_MAILBOX);
 
-    let store_app = app_without_session();
-    let store_body = store_app.load_draft_body("d1");
+    let store_body = oracle::draft_body(ACCOUNT, "d1");
 
     let mut daemon_app = app_without_session();
     daemon_app.session = Some(daemon().session());
@@ -294,5 +317,5 @@ fn an_unindexed_draft_id_answers_nothing_on_both_paths() {
     let mut daemon_app = app_without_session();
     daemon_app.session = Some(daemon().session());
     assert_eq!(daemon_app.draft_body("nosuch"), None);
-    assert_eq!(app_without_session().load_draft_body("nosuch"), None);
+    assert_eq!(oracle::draft_body(ACCOUNT, "nosuch"), None);
 }

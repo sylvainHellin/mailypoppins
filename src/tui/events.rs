@@ -155,7 +155,7 @@ pub struct EventState {
 /// bootstrapped connection: an id this table does not hold belongs to another
 /// window.
 #[derive(Clone, Debug)]
-pub(super) enum Awaited {
+pub enum Awaited {
     /// A quick pass, landing as [`BgResult::Fetch`](super::app::BgResult).
     Quick {
         /// The account it belongs to, for the status line and the health mark.

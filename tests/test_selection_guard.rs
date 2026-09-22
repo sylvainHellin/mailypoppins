@@ -9,13 +9,14 @@
 //! exists so the numbers below are a true "before".
 //!
 //! Counting is by **source scan**, not by what the harness selected: the guard
-//! reads the `.rs` files under `src/tui/` and `crates/mp-core/src/` and counts `#[test]` /
+//! reads the `.rs` files under `src/tui/`, `src/tui_tests/` and
+//! `crates/mp-core/src/` and counts `#[test]` /
 //! `#[tokio::test]` attributes, so it reports the same numbers whether or not
 //! those tests are part of the current selection. A guard that counted
 //! *executed* tests would disappear along with the tests it is meant to
 //! defend.
 //!
-//! The four floors started as the counts on the pre-workspace tree and are
+//! The five floors started as the counts on the pre-workspace tree and are
 //! raised to the actual counts as the tree grows: a floor left far below what
 //! the tree carries stops defending anything, because a whole file of tests
 //! can vanish without crossing it. They are floors, not equalities: adding
@@ -28,6 +29,11 @@ use std::path::{Path, PathBuf};
 
 /// Every `.rs` file below here is scanned for test attributes.
 const TUI_ROOT: &str = "src/tui";
+/// The TUI tests the root crate owns (#0126, P5-U10e): the sessionless oracles
+/// and every test that compares a served answer against one. They are the
+/// other half of [`MIN_TUI_TESTS`]'s arithmetic, and a floor here is what says
+/// they arrived.
+const TUI_TESTS_ROOT: &str = "src/tui_tests";
 /// The shared crate (#0126, P5-U10a). Eleven modules and three half-modules
 /// left `src/` for `crates/mp-core/src/`, and their `#[cfg(test)] mod tests`
 /// blocks went with them: a floor here is what keeps `cargo test --workspace`
@@ -42,20 +48,31 @@ const SNAPSHOT_DIR: &str = "src/tui/ui/snapshots";
 /// `#[test]` / `#[tokio::test]` attributes under [`TUI_ROOT`].
 ///
 /// The plan's floor was 367 and the pre-workspace tree carried 368; the tree
-/// carries 467, which is the count CI defends.
+/// carries 302, which is the count CI defends.
 ///
-/// It went through 492: the agenda loader and its 25 tests left `src/tui/` for
-/// `src/agenda.rs` in P5-U10c-I2 (#0126), because a `calendar.events` that
-/// reads its answer out of the TUI is a daemon method depending on a client.
-/// They did not leave the root package, so the `--lib` run is unmoved at 988
-/// and this floor is the only number that had to come down.
-const MIN_TUI_TESTS: usize = 467;
+/// It went through 492 and 467: the agenda loader and its 25 tests left
+/// `src/tui/` for `src/agenda.rs` in P5-U10c-I2, and P5-U10e moved 165 more to
+/// `src/tui_tests/` (#0126), every one of them a test that reaches something
+/// `crates/mp-tui` may not link: the store, the ingest path, or the daemon's
+/// own dispatcher. 467 = 302 (`src/tui`) + 165 (moved), and neither move left
+/// the root package, so the `--lib` run is unmoved at 989: 988 plus the one
+/// row that says a sessionless `App` reads nothing.
+const MIN_TUI_TESTS: usize = 302;
+/// `#[test]` / `#[tokio::test]` attributes under [`TUI_TESTS_ROOT`].
+///
+/// 165 arrived from `src/tui/` in P5-U10e and the unit added one, so the tree
+/// carries 166: the 302 + 166 that were 467 + 1 before the move.
+const MIN_MOVED_TUI_TESTS: usize = 166;
+
 /// `#[test]` functions in [`GOLDEN_FRAMES`]. Plan floor and actual both 20.
 const MIN_GOLDEN_FRAME_TESTS: usize = 20;
 /// `.snap` files in [`SNAPSHOT_DIR`]. Plan floor and pre-workspace actual both
-/// 18; the daemon-backed frames of P5-U1 added the two `…_daemon.snap` scenes
-/// that have no hand-built pair, so the actual is 20.
-const MIN_SNAPSHOT_FILES: usize = 20;
+/// 18, and 18 again: the two `…_daemon.snap` scenes P5-U1 added moved to
+/// `src/tui_tests/snapshots/` with the frames that mint them (#0126, P5-U10e),
+/// byte for byte and renamed only for the module path insta derives a file
+/// name from. The other eighteen are what the daemon-backed frames are
+/// compared against, so they cannot move without the suite that reads them.
+const MIN_SNAPSHOT_FILES: usize = 18;
 /// `#[test]` / `#[tokio::test]` attributes under [`CORE_ROOT`].
 ///
 /// The arithmetic of the move: the root package's `--lib` run was 1 398 before
@@ -82,6 +99,17 @@ fn tui_test_count_has_not_dropped() {
         found >= MIN_TUI_TESTS,
         "{DROPPED}: {TUI_ROOT} declares {found} `#[test]`/`#[tokio::test]` attributes, \
          expected at least {MIN_TUI_TESTS}"
+    );
+}
+
+#[test]
+fn moved_tui_test_count_has_not_dropped() {
+    let root = repo_root().join(TUI_TESTS_ROOT);
+    let found = test_attributes_under(&root);
+    assert!(
+        found >= MIN_MOVED_TUI_TESTS,
+        "{DROPPED}: {TUI_TESTS_ROOT} declares {found} `#[test]`/`#[tokio::test]` attributes, \
+         expected at least {MIN_MOVED_TUI_TESTS}"
     );
 }
 

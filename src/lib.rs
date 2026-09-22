@@ -33,3 +33,14 @@ pub mod store;
 pub mod sync;
 pub mod tui;
 pub mod daemon;
+
+/// The TUI tests that are the root crate's own: the sessionless store-backed
+/// oracles and every test that compares a served answer against one (#0126,
+/// P5-U10e).
+///
+/// They live here rather than under `src/tui/` because each of them reaches
+/// something `crates/mp-tui` may not link - the store, the ingest path, the
+/// daemon's own dispatcher - and the crate move is what they are clearing the
+/// way for.
+#[cfg(test)]
+mod tui_tests;

@@ -1,8 +1,6 @@
 pub mod app;
-mod actions;
-#[cfg(test)]
-mod actions_tests;
-mod bg;
+pub(crate) mod actions;
+pub(crate) mod bg;
 pub mod commands;
 #[cfg(test)]
 mod diagnostics_tests;
@@ -10,17 +8,11 @@ mod event;
 pub mod events;
 #[cfg(test)]
 mod events_resync_tests;
-#[cfg(test)]
-mod events_tests;
 mod helpers;
-#[cfg(test)]
-mod hold_tests;
 pub mod queries;
 pub mod session;
-#[cfg(test)]
-mod test_daemon;
 pub mod theme;
-mod ui;
+pub(crate) mod ui;
 
 use std::io;
 use std::sync::mpsc;
@@ -41,7 +33,7 @@ use session::QueryHandle;
 /// only bites on a flood (a bracketed paste, a stuck key). Past that the loop
 /// paints and comes straight back for the rest, which keeps the screen
 /// responsive instead of frozen behind an unbounded drain.
-const MAX_COALESCED_EVENTS: usize = 64;
+pub const MAX_COALESCED_EVENTS: usize = 64;
 
 /// Wall-clock ceiling on one drain (#0108), the second half of the bound.
 ///
@@ -49,7 +41,7 @@ const MAX_COALESCED_EVENTS: usize = 64;
 /// work (mailbox reload, selection recompute), so 64 slow events could hold
 /// the paint for a noticeable time. 50 ms is about three frames at 60 Hz and
 /// well under the ~100 ms at which input stops feeling immediate.
-const COALESCE_BUDGET: Duration = Duration::from_millis(50);
+pub const COALESCE_BUDGET: Duration = Duration::from_millis(50);
 
 /// Machine-readable dump of the TUI keymap (`mp dump-keys`), used to
 /// regenerate the website key table from the single `KEYMAP` source.
@@ -169,7 +161,12 @@ fn run_loop(
                         vec![0; mailboxes.len()]
                     })
                 }
-                None => app::count_all_emails(&account_name, &mailboxes),
+                None => {
+                    log::warn!(
+                        "[queries] no daemon session: the counts of {account_name} stay zero"
+                    );
+                    vec![0; mailboxes.len()]
+                }
             };
             let _ = tx.send(BgResult::AccountOpened {
                 account_index: i,

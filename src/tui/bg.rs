@@ -150,7 +150,7 @@ fn record_sync_health(app: &mut App, account_index: usize, outcome: Result<(), &
     }
 }
 
-pub(super) fn handle_bg_result(app: &mut App, result: BgResult) {
+pub fn handle_bg_result(app: &mut App, result: BgResult) {
     app.bg_count = app.bg_count.saturating_sub(1);
     match result {
         BgResult::Send { account_index, result } => {

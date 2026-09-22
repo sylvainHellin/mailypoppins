@@ -49,9 +49,14 @@
 //!
 //! # (b) Why a source and snapshot comparison
 //!
-//! `src/tui/ui/golden_frames_daemon.rs` lives inside the library, so its tests
-//! are not reachable from here as tests. What is reachable is what they leave
-//! on disk: the module source and `src/tui/ui/snapshots/`. The oracle the
+//! `src/tui_tests/golden_frames_daemon.rs` lives inside the library, so its
+//! tests are not reachable from here as tests. What is reachable is what they
+//! leave on disk: the module source, its own `src/tui_tests/snapshots/` and the
+//! reviewed `src/tui/ui/snapshots/` it is compared against. The two families
+//! sit in two directories since #0126 (P5-U10e), because the daemon-backed half
+//! builds its `App` from a dispatcher `crates/mp-tui` may not link and moved to
+//! the root crate's own tests; the fixtures both families render are still the
+//! hand-built module's. The oracle the
 //! module chose (P5-U1) is stronger than a second snapshot family - each
 //! daemon-built frame is asserted byte-identical to the hand-built frame of the
 //! same fixture, through `same_frame`, so it inherits the reviewed snapshot
@@ -347,7 +352,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 /// The library module P5-U1 wrote and P5-U2 made pass.
 fn daemon_frames_source() -> String {
-    let path = repo().join("src/tui/ui/golden_frames_daemon.rs");
+    let path = repo().join("src/tui_tests/golden_frames_daemon.rs");
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -379,10 +384,22 @@ fn test_names(source: &str) -> Vec<String> {
     names
 }
 
-/// The scenes `src/tui/ui/snapshots/` holds for a module, by test name.
-fn snapshot_files(module: &str) -> BTreeMap<String, PathBuf> {
-    let dir = repo().join("src/tui/ui/snapshots");
-    let prefix = format!("mailypoppins__tui__ui__{module}__");
+/// Where each family's reviewed snapshots live, and the module path insta
+/// names them after.
+const STORE_SNAPSHOT_DIR: &str = "src/tui/ui/snapshots";
+const STORE_SNAPSHOT_MODULE: &str = "mailypoppins__tui__ui__golden_frames";
+const DAEMON_SNAPSHOT_DIR: &str = "src/tui_tests/snapshots";
+const DAEMON_SNAPSHOT_MODULE: &str = "mailypoppins__tui_tests__golden_frames_daemon";
+
+/// The scenes a snapshot directory holds for a module, by test name.
+///
+/// Two directories and two prefixes since P5-U10e: the hand-built family is
+/// `src/tui/ui/snapshots/` with the module path it has always had, and the
+/// daemon-backed one is `src/tui_tests/snapshots/`, which is what insta derives
+/// from the module that moved.
+fn snapshot_files(dir: &str, module_path: &str) -> BTreeMap<String, PathBuf> {
+    let dir = repo().join(dir);
+    let prefix = format!("{module_path}__");
     let mut found = BTreeMap::new();
     for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
         let entry = entry.expect("a snapshot directory entry");
@@ -421,17 +438,17 @@ fn the_daemon_golden_frames_module_carries_at_least_twenty_two_tests() {
     let names = test_names(&daemon_frames_source());
     assert!(
         names.len() >= DAEMON_FRAME_TESTS,
-        "`src/tui/ui/golden_frames_daemon.rs` carries {} tests, and the P5-U1 contract is at least \
+        "`src/tui_tests/golden_frames_daemon.rs` carries {} tests, and the P5-U1 contract is at least \
          {DAEMON_FRAME_TESTS}: a daemon variant of each hand-built frame, plus the `opening` \
          account and the extra-mailbox bootstrap. Found: {names:?}",
         names.len()
     );
-    let ui_mod =
-        fs::read_to_string(repo().join("src/tui/ui/mod.rs")).expect("read src/tui/ui/mod.rs");
+    let tests_mod = fs::read_to_string(repo().join("src/tui_tests/mod.rs"))
+        .expect("read src/tui_tests/mod.rs");
     assert!(
-        ui_mod.contains("golden_frames_daemon"),
-        "`src/tui/ui/mod.rs` no longer declares the daemon golden-frame module, so none of its \
-         tests run at all"
+        tests_mod.contains("golden_frames_daemon"),
+        "`src/tui_tests/mod.rs` no longer declares the daemon golden-frame module, so none of \
+         its tests run at all"
     );
     assert!(
         store_frames_source().contains("fn frame_snapshot"),
@@ -442,7 +459,7 @@ fn the_daemon_golden_frames_module_carries_at_least_twenty_two_tests() {
 
 #[test]
 fn every_store_backed_golden_frame_has_a_daemon_twin_pinned_to_its_snapshot() {
-    let store_scenes = snapshot_files("golden_frames");
+    let store_scenes = snapshot_files(STORE_SNAPSHOT_DIR, STORE_SNAPSHOT_MODULE);
     assert!(
         store_scenes.len() >= 18,
         "the store-backed family is 18 reviewed snapshots or more, found {}",
@@ -451,7 +468,7 @@ fn every_store_backed_golden_frame_has_a_daemon_twin_pinned_to_its_snapshot() {
 
     let daemon_source = daemon_frames_source();
     let daemon_tests: BTreeSet<String> = test_names(&daemon_source).into_iter().collect();
-    let daemon_scenes = snapshot_files("golden_frames_daemon");
+    let daemon_scenes = snapshot_files(DAEMON_SNAPSHOT_DIR, DAEMON_SNAPSHOT_MODULE);
 
     let mut pairs = Vec::new();
     let mut failures = Vec::new();
@@ -459,7 +476,7 @@ fn every_store_backed_golden_frame_has_a_daemon_twin_pinned_to_its_snapshot() {
         let twin = format!("{scene}_daemon");
         if !daemon_tests.contains(&twin) {
             failures.push(format!(
-                "{scene}: no `{twin}` in src/tui/ui/golden_frames_daemon.rs"
+                "{scene}: no `{twin}` in src/tui_tests/golden_frames_daemon.rs"
             ));
             continue;
         }
@@ -527,7 +544,9 @@ fn body_of(source: &str, name: &str) -> String {
 #[test]
 fn the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair() {
     let daemon_scenes: BTreeSet<String> =
-        snapshot_files("golden_frames_daemon").into_keys().collect();
+        snapshot_files(DAEMON_SNAPSHOT_DIR, DAEMON_SNAPSHOT_MODULE)
+            .into_keys()
+            .collect();
     let expected: BTreeSet<String> = [
         "golden_opening_account_daemon",
         "golden_extra_mailbox_daemon",

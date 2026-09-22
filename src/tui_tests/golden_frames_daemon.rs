@@ -94,7 +94,7 @@ use mp_protocol::state::Bootstrap;
 use mp_protocol::{Request, RequestId, JSONRPC_VERSION};
 use serde_json::json;
 
-use super::golden_frames::{
+use crate::tui::ui::golden_frames::{
     calendar_fixture, calendar_view_cancelled_event_detail_app, command_palette_app,
     compose_wizard_with_body_app, contacts_fixture, drafts_fixture, drafts_view_attach_prompt_app,
     frame_snapshot, help_overlay_app, mail_fixture, mail_view_flagged_filter_app,

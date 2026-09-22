@@ -1131,7 +1131,7 @@ fn a_settled_rebuild_paints_the_lines_the_synchronous_one_painted() {
 
     for (payload, line, level) in cases {
         app.bg_count = 1;
-        super::bg::handle_bg_result(&mut app, settled(&awaited, &payload));
+        crate::tui::bg::handle_bg_result(&mut app, settled(&awaited, &payload));
         assert_eq!(
             app.status_message.as_deref(),
             Some(line),
@@ -1223,12 +1223,12 @@ fn an_operation_and_a_client_only_action_are_not_dispatchs_business() {
 #[test]
 fn the_drain_bounds_are_unchanged() {
     assert_eq!(
-        super::MAX_COALESCED_EVENTS,
+        crate::tui::MAX_COALESCED_EVENTS,
         64,
         "the batch cap sizes one paint's worth of a held key"
     );
     assert_eq!(
-        super::COALESCE_BUDGET,
+        crate::tui::COALESCE_BUDGET,
         std::time::Duration::from_millis(50),
         "the wall-clock ceiling is about three frames at 60 Hz"
     );

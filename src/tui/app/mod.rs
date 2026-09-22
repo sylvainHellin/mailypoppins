@@ -2,11 +2,6 @@ mod bootstrap;
 pub(crate) mod jump_date;
 mod keymap;
 mod keys;
-#[cfg(test)]
-mod invites_tests;
-#[cfg(test)]
-mod queries_tests;
-mod store_rows;
 mod types;
 
 pub use keymap::{
@@ -20,7 +15,6 @@ use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::store::open_store;
 
 /// Top-level application state.
 pub struct App {
@@ -631,34 +625,27 @@ impl App {
     }
 
     /// Build the agenda for the active account, or an empty agenda when there
-    /// is no account, no store yet, or nothing invited.
+    /// is no account, no session, or nothing invited.
     ///
-    /// One `calendar.events` on the session the `App` holds (P5-U10). The
-    /// store-backed build below it is the sessionless path, for the reason
-    /// [`super::store_rows`] gives for every one of them: a wedged
-    /// `Session::connect` and every unit test.
-    fn load_calendar_events(&self) -> Vec<CalendarEvent> {
+    /// One `calendar.events` on the session the `App` holds (P5-U10), and
+    /// nothing else: an `App` with no session shows an empty Calendar view
+    /// rather than reading the store behind the daemon's back (#0126,
+    /// P5-U10e). The store-backed build this used to fall back to is the
+    /// oracle the served answer is compared against, and it lives in the crate
+    /// that owns the store now.
+    pub(crate) fn load_calendar_events(&self) -> Vec<CalendarEvent> {
         let account = self.account_config.name.trim().to_string();
         if account.is_empty() {
             return Vec::new();
         }
-        if let Some(queries) = self.queries() {
-            return super::queries::calendar_events(queries, &account).unwrap_or_else(|e| {
-                log::warn!("[queries] decoding the agenda of {account}: {e:#}");
-                Vec::new()
-            });
-        }
-        let Some(store) = open_store(&account) else {
+        let Some(queries) = self.queries() else {
+            log::warn!("[queries] no daemon session: the agenda of {account} stays empty");
             return Vec::new();
         };
-        let blobs = crate::store::BlobStore::for_account(&account);
-        // The same wire rows `calendar.events` would have answered, decoded
-        // the same way: the agenda moved out of the TUI with #0126 and the
-        // client reads one shape whichever side built it.
-        crate::agenda::load_events_for_account(&store, &blobs, &account, &self.self_address())
-            .into_iter()
-            .map(CalendarEvent::from_wire)
-            .collect()
+        super::queries::calendar_events(queries, &account).unwrap_or_else(|e| {
+            log::warn!("[queries] decoding the agenda of {account}: {e:#}");
+            Vec::new()
+        })
     }
 
     /// Drop the loaded agenda (events are per-account, so the view reloads
@@ -1411,40 +1398,21 @@ impl App {
         msg: MessageRef,
     ) -> Option<crate::types::EventFrontmatter> {
         let account = self.account_config.name.clone();
-        if let Some(queries) = self.queries() {
-            return super::queries::message_invite(queries, &account, msg).unwrap_or_else(|e| {
-                log::warn!("[queries] decoding the invitation on {msg} of {account}: {e:#}");
-                None
-            });
-        }
-        let store = open_store(&account)?;
-        let blobs = crate::store::BlobStore::for_account(&account);
-        crate::reconcile::event_for_message(
-            &store,
-            &blobs,
-            &account,
-            msg.row_id(),
-            &self.self_address(),
-        )
+        let queries = self.queries()?;
+        super::queries::message_invite(queries, &account, msg).unwrap_or_else(|e| {
+            log::warn!("[queries] decoding the invitation on {msg} of {account}: {e:#}");
+            None
+        })
     }
 
     /// The raw `invite.ics` bytes of one message, for the RSVP reply builder.
     pub(crate) fn load_message_ics(&self, msg: MessageRef) -> Option<Vec<u8>> {
         let account = self.account_config.name.clone();
-        if let Some(queries) = self.queries() {
-            return super::queries::message_ics(queries, &account, msg).unwrap_or_else(|e| {
-                log::warn!("[queries] decoding the ics of {msg} of {account}: {e:#}");
-                None
-            });
-        }
-        let store = open_store(&account)?;
-        let blobs = crate::store::BlobStore::for_account(&account);
-        crate::store::read::load_invite_ics(&store, &blobs, msg.row_id())
-    }
-
-    /// The active account's own address, as the iMIP `ATTENDEE` spells it.
-    pub(crate) fn self_address(&self) -> String {
-        crate::parse::extract_email_address(&self.account_config.default_from)
+        let queries = self.queries()?;
+        super::queries::message_ics(queries, &account, msg).unwrap_or_else(|e| {
+            log::warn!("[queries] decoding the ics of {msg} of {account}: {e:#}");
+            None
+        })
     }
 
     /// Read one message body for the preview memo (P5-U4).
@@ -1459,14 +1427,11 @@ impl App {
     /// reference has always behaved.
     pub(crate) fn message_body(&self, msg: MessageRef) -> Option<String> {
         let account = self.account_config.name.clone();
-        match self.queries() {
-            Some(queries) => super::queries::message_body(queries, &account, msg)
-                .unwrap_or_else(|e| {
-                    log::warn!("[queries] previewing {msg} of {account}: {e:#}");
-                    None
-                }),
-            None => self.load_message_body(msg),
-        }
+        let queries = self.queries()?;
+        super::queries::message_body(queries, &account, msg).unwrap_or_else(|e| {
+            log::warn!("[queries] previewing {msg} of {account}: {e:#}");
+            None
+        })
     }
 
     /// The daemon session as a query source, or `None` for an `App` that has
@@ -1477,74 +1442,20 @@ impl App {
             .map(|session| session as &dyn super::queries::Queries)
     }
 
-    /// Read one message body from the active account's blob store.
-    ///
-    /// The pre-daemon path, which is [`Self::message_body`]'s fallback and the
-    /// oracle its contract test compares against; see
-    /// [`super::store_rows`].
-    fn load_message_body(&self, msg: MessageRef) -> Option<String> {
-        store_rows::load_message_body(&self.account_config.name, msg)
-    }
-
     /// Read one draft's body for the preview memo.
     ///
     /// One `draft.path` on the session the `App` holds, and the file it names
     /// parsed here: see [`super::queries::draft_body`] for why the body does
-    /// not travel. The sessionless branch is [`Self::load_draft_body`], which
-    /// is the oracle the contract test compares against.
+    /// not travel. An `App` with no session previews nothing, and the
+    /// store-backed read it used to fall back to is the oracle the contract
+    /// test compares against (#0126, P5-U10e).
     pub(crate) fn draft_body(&self, id: &str) -> Option<String> {
         let account = self.account_config.name.clone();
-        match self.queries() {
-            Some(queries) => {
-                super::queries::draft_body(queries, &account, id).unwrap_or_else(|e| {
-                    log::warn!("[queries] previewing the draft {id} of {account}: {e:#}");
-                    None
-                })
-            }
-            None => self.load_draft_body(id),
-        }
-    }
-
-    /// Read one draft's body from the file the drafts index points at.
-    ///
-    /// The pre-daemon path, which is [`Self::draft_body`]'s fallback and the
-    /// oracle its contract test compares against.
-    ///
-    /// [`crate::store::Store::open`] rather than `open_store`, for the reason
-    /// every drafts path gives: drafts are local-only files, so an account that
-    /// has never synced has no store *file* and still has drafts.
-    ///
-    /// A plain read, deliberately: this runs on the UI thread inside the render
-    /// pass, and `drafts::refresh` is a write transaction over the whole
-    /// directory. The one-second fingerprint poll in the event loop is what
-    /// keeps the index current; the preview only consumes it.
-    ///
-    /// `None` degrades to an empty pane, which is what a stale index looks
-    /// like: the row names a file that has been moved, retired by a send, or
-    /// rewritten into something that no longer parses.
-    fn load_draft_body(&self, id: &str) -> Option<String> {
-        let account = &self.account_config.name;
-        let store = crate::store::Store::open(crate::config::store_path(account))
-            .map_err(|e| log::warn!("[drafts] could not open the store for {account}: {e:#}"))
-            .ok()?;
-        let row = match crate::store::drafts::find(&store, account, id) {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                log::warn!("[drafts] {id} is no longer indexed; previewing an empty body");
-                return None;
-            }
-            Err(e) => {
-                log::warn!("[drafts] looking up {id}: {e:#}");
-                return None;
-            }
-        };
-        match crate::draft::parse_email_draft(&row.path) {
-            Ok(draft) => Some(draft.body_markdown),
-            Err(e) => {
-                log::warn!("[drafts] reading {}: {e:#}", row.path.display());
-                None
-            }
-        }
+        let queries = self.queries()?;
+        super::queries::draft_body(queries, &account, id).unwrap_or_else(|e| {
+            log::warn!("[queries] previewing the draft {id} of {account}: {e:#}");
+            None
+        })
     }
 
     /// Park `text` as the preview body of the current selection, exactly as a
@@ -1945,7 +1856,10 @@ impl App {
                     log::warn!("[queries] recounting the mailboxes of {account}: {e:#}");
                     vec![0; self.mailboxes.len()]
                 }),
-            None => count_all_emails(&account, &self.mailboxes),
+            None => {
+                log::warn!("[queries] no daemon session: the counts of {account} stay zero");
+                vec![0; self.mailboxes.len()]
+            }
         };
     }
 

@@ -192,7 +192,7 @@ fn cancelled_instances_line(instances: &[String]) -> String {
 /// location, organizer, own RSVP state, per-attendee statuses, recurrence, and
 /// the honest "not synced to Exchange" caveat. `is_sent` flips the framing for
 /// our own sent invites (we are the organizer there).
-pub(super) fn event_card_lines(event: &EventFrontmatter, is_sent: bool) -> Vec<Line<'static>> {
+pub fn event_card_lines(event: &EventFrontmatter, is_sent: bool) -> Vec<Line<'static>> {
     let label_style = Style::default()
         .fg(theme::active().heading)
         .add_modifier(Modifier::BOLD);
@@ -857,54 +857,6 @@ mod event_card_tests {
         let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Your RSVP: No response yet"));
         assert!(!lines.is_empty());
-    }
-
-    /// The card renders the *derived* answer, not a stored one: with the sent
-    /// REPLY in the store, the same fold the agenda runs turns the invite's
-    /// `NEEDS-ACTION` into `Declined` on the card (#0038 scope item 6).
-    #[test]
-    fn the_card_shows_the_rsvp_derived_from_the_sent_reply() {
-        use crate::reconcile;
-        use crate::reconcile::tests::{fixture, reply_ics};
-
-        let fx = fixture();
-        let me = "me@example.com";
-        fx.ingest_invite(
-            "inbox",
-            1,
-            "Plan",
-            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n\
-             UID:uid-card\r\nSEQUENCE:0\r\nSUMMARY:Plan\r\nDTSTART:20260801T090000Z\r\n\
-             ORGANIZER:mailto:org@example.com\r\n\
-             ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\n\
-             END:VEVENT\r\nEND:VCALENDAR\r\n",
-        );
-        fx.ingest_invite(
-            "sent",
-            2,
-            "Declined: Plan",
-            &reply_ics("uid-card", 0, me, "DECLINED", "20260710T120000Z"),
-        );
-
-        // The same derivation `App::load_message_invite` performs.
-        let invites = reconcile::load_invites(&fx.store, &fx.blobs, "alice");
-        let replies = reconcile::fold_replies(&invites);
-        let request = invites
-            .iter()
-            .find(|i| i.method() == "REQUEST")
-            .expect("the REQUEST is in the store");
-        let mut event = crate::calendar::event_frontmatter(&request.parsed);
-        let by_addr = replies.get("uid-card");
-        reconcile::apply_replies(&mut event, request.parsed.sequence, by_addr);
-        event.rsvp = reconcile::own_rsvp(&event, me, by_addr);
-
-        let text: String = event_card_lines(&event, false)
-            .iter()
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("Your RSVP: Declined"), "text=\n{text}");
-        assert!(text.contains("me@example.com \u{2014} Declined"), "text=\n{text}");
     }
 }
 

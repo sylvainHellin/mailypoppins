@@ -1,5 +1,5 @@
 ---
-source: src/tui/ui/golden_frames_daemon.rs
+source: src/tui_tests/golden_frames_daemon.rs
 expression: frame
 ---
 == text 120x40 (trailing spaces trimmed) ==
