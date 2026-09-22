@@ -324,7 +324,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ff` (`crates/mp-tui/src/app/keymap.rs:581`), `Action::ServerSearch` (`crates/mp-tui/src/app/types.rs:1619`)
 - Daemon surface: `message.search` local first, then `message.search_server` as a durable `operation.*` streaming hits on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`crates/mp-tui/src/commands.rs`)
+- Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui_tests/commands.rs`)
 - Status: routed (P5-U6 local, P5-U10c-I1 server); GUI not started
 - Note: `message.search_server`, deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s one-mailbox query. The TUI's background thread is gone: the overlay appends each hit as its `message.server_hit` event arrives, matched by operation id because a fast retype leaves two searches in flight.
   Deduplication is by Message-ID and it is the daemon's: the client sends the Message-IDs the local pass is showing as `exclude_message_ids` and the settle counts them in `deduplicated`, so a message found twice appears once and the count is a fact any client reproduces.
@@ -463,7 +463,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: the row carries it rather than a `message.selector` query answering it, because the daemon already had the string in hand when it built the row.
   The TUI's `EmailEntry` carries the daemon's string, so `y` costs neither a round trip nor a store read; a parse-skipped draft and a server-only hit carry `None`, which are the two rows with no name to copy.
   `message.get` would answer it too, at the price of a whole-message read per clipboard copy.
-  The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fifteen keys, and this is the sixteenth.
+  The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fourteen keys, and this is the fifteenth.
   It is rendered daemon-side, so `tests/cli_selector_contract.rs`'s spelling stays the only one in the tree.
 
 ### RD-08 Copy the Markdown rendition path of a search hit
@@ -678,7 +678,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ce` in the drafts mailbox (`crates/mp-tui/src/app/keymap.rs:656`)
 - Daemon surface: `draft.set_recipients`, which re-splices the signature block
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`crates/mp-tui/src/actions.rs`)
+- Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui_tests/actions_store.rs`)
 - Status: not started
 - Note: `draft.set_recipients` is not built and the rewrite is still a client-side write to the file `draft.path` resolved (P5-U6 routed the resolution, not the write).
   It reaches no engine module, so the residue gate does not name it; what it costs is a second drafts-index refresh the daemon could have done in one.
@@ -703,7 +703,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: `mp open <selector> [--mailbox]` (`src/main.rs`), TUI `to`, search overlay `o`
 - Daemon surface: `message.materialise_attachment`, one call per part, opened client-side through `parse::open_file_with_system`
 - GUI location: TBD (Phase 9)
-- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `the_cursor_row_materialises_its_blobs_into_daemon_handles` (`crates/mp-tui/src/actions.rs`)
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `the_cursor_row_materialises_its_blobs_into_daemon_handles` (`src/tui_tests/actions_store.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: the printed path is the one row of the slice that is not byte-identical to the pre-daemon binary and cannot be: a materialised file lives under `<data_dir>/runtime/handles/<handle>/` with a lifetime attached, rather than in the client's own temp directory. The handle is deliberately not released, because the viewer just launched is holding the file.
 
@@ -743,7 +743,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `tb` (`crates/mp-tui/src/app/keymap.rs:633`), search overlay `b`
 - Daemon surface: `message.materialise_html`, opened client-side through `parse::open_file_with_system`
 - GUI location: TBD (Phase 9)
-- Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file` and `the_browser_rendition_inlines_cid_images_as_data_uris` (`crates/mp-tui/src/actions.rs`)
+- Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file` and `the_browser_rendition_inlines_cid_images_as_data_uris` (`src/tui_tests/actions_store.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: the daemon writes the rendition rather than the markup: the charset meta, the CSP tag and the `cid:` inlining are three #0037 fixes, and serving unhardened markup through a new door would undo them.
   A message whose sender wrote no markup is `-32602`, which the client renders as its "No HTML version available" line and not as an error.
@@ -855,7 +855,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ss` (`crates/mp-tui/src/app/keymap.rs:593`) and `sS` (`crates/mp-tui/src/app/keymap.rs:594`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
 - GUI location: TBD (Phase 9)
-- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`crates/mp-tui/src/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui_tests/events.rs`)
+- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui_tests/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui_tests/events.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
   The TUI's two keys went through them in P5-U6, which also collapsed the client-side IMAP/Graph fork: the daemon's pass body loads whichever configuration the account has, so only the progress line still says which transport it is.

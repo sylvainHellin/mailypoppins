@@ -1861,7 +1861,7 @@ tokio::runtime::Builder::new_current_thread()
     })
 ```
 
-`on_thread_start` runs for the blocking pool too, and the guard is forgotten rather than held because the thread it belongs to dies with the runtime, which dies with the fixture. `src/tui/actions_tests.rs` is the first fixture that needed it; any future one that drives a command rather than a query needs it too.
+`on_thread_start` runs for the blocking pool too, and the guard is forgotten rather than held because the thread it belongs to dies with the runtime, which dies with the fixture. `src/tui_tests/actions.rs` is the first fixture that needed it; any future one that drives a command rather than a query needs it too.
 
 ## A YAML value with a colon in it is a draft file that does not parse
 
@@ -1871,15 +1871,17 @@ A test fixture that writes a draft by hand and then asks the daemon for it by id
 
 ## A spec array pinned by a compile-time assertion is a wall, and there is a door beside it
 
-`tests/daemon_mutation_slice.rs` holds `const _: () = assert!(MESSAGE_MUTATION_METHOD_SPECS.len() == MUTATION_METHODS.len());` over its own two-name list, and `tests/daemon_draft_slice.rs` does the same for ten. Adding a method to such a family fails to *compile* the test, naming the constant, which is the assertion working.
+`tests/daemon_mutation_slice.rs` holds `const _: () = assert!(MESSAGE_MUTATION_METHOD_SPECS.len() == MUTATION_METHODS.len());` over its own two-name list, and `tests/daemon_draft_slice.rs` does the same for ten. `MESSAGE_READ_METHOD_SPECS` is pinned at three by `tests/daemon_read_slice.rs` and `DRAFT_METHOD_SPECS` at ten by three files. Adding a method to such a family fails to *compile* the test, naming the constant, which is the assertion working.
 
-Do not grow the pinned array and do not edit the list. Declare the new slice in an array of its own and register both: `MESSAGE_SERVER_METHOD_SPECS` (P4-U10) and `MESSAGE_QUEUE_METHOD_SPECS` (P5-U6) are both that, and both say so in their doc comment. One method type can serve every array, the dispatcher sees one family, and the wire cannot tell there were ever two arrays. What the pinned test keeps saying is what its own slice declared, which is what it was written to say.
+Do not grow the pinned array and do not edit the list. Declare the new slice in an array of its own and register both: `MESSAGE_SERVER_METHOD_SPECS` (P4-U10), `MESSAGE_QUEUE_METHOD_SPECS` (P5-U6), `MESSAGE_MARKDOWN_METHOD_SPECS` (#0126, P5-U10c) and the one-element arrays `message.thread` and `draft.create_from_message` got in P5-U10d are all that, each registered by chaining onto the family's loop and served by the family's own type, and each saying so in its doc comment. One method type can serve every array, the dispatcher sees one family, and the wire cannot tell there were ever two arrays. What the pinned test keeps saying is what its own slice declared, which is what it was written to say.
+
+Five instances now, which makes it the default rather than the exception: grep the array's name across `tests/` before growing it.
 
 ## A `tokio::spawn`ed operation never finishes on a current-thread runtime nobody is blocked on
 
 An in-process daemon fixture built on `Builder::new_current_thread()` serves every query and every command, and then hangs the first time a test drives an **operation**. `sync.*`, `send.*`, `calendar.*` and `contact.rebuild` all answer `{operation_id}` from the method body and do the work on a `tokio::spawn`ed task. A current-thread runtime only drives its tasks while something is inside `block_on`, and a fixture's `block_on` returns the moment the method body is done, so the spawned task is polled once at most. A caller then polls `operation.status` for ever and the operation sits in `running`.
 
-`Builder::new_multi_thread().worker_threads(2)` fixes it: the spawned task gets a worker of its own and settles while the poller is between calls. Keep `on_thread_start` (the entry above) - it covers the worker threads as well as the blocking pool. `src/tui/test_daemon.rs` is the fixture; the symptom is a test that runs for over sixty seconds rather than one that fails.
+`Builder::new_multi_thread().worker_threads(2)` fixes it: the spawned task gets a worker of its own and settles while the poller is between calls. Keep `on_thread_start` (the entry above) - it covers the worker threads as well as the blocking pool. `src/tui_tests/daemon.rs` is the fixture; the symptom is a test that runs for over sixty seconds rather than one that fails.
 
 ## A worker thread's `QueryHandle` must not keep the TUI's session thread alive
 
@@ -2043,14 +2045,11 @@ The general shape: when a per-call client-side sequence number becomes a daemon-
 So the innocuous-looking "build the draft the way `mp reply` does" call hands an account that has never synced a store, which turns the read family's `-32006` into empty answers for every later call about it (the rule P5-U10 fixed).
 `draft.create_from_message` (#0126) builds with `create_reply_draft_from` / `create_forward_draft_from` and mints the id inline instead, which is what `draft.create` had already been doing for the same reason.
 
+`message.search_server`'s hit resolution was the same defect one review later: `Stream::land` opened the account's store with `Store::open` to attach a stored row to a server hit, and that method's gate is `syncable_account`, which admits an account that has never synced because a sync is what gives one a store.
+The rule, with no exception in the tree: a daemon method that *resolves against* a store opens it with `open_store`, which answers `None` for a file that is not there, and only a method whose gate is `ready_account` (which probes the file first) may use `Store::open`.
+
 The general shape: a daemon method that may legitimately serve an account with no store has to be read to its last statement, because the store-creating call is rarely the one the method looks like it is making.
 The pin is cheap and worth writing: call the method against the storeless account and assert `account.list` still reports it `blocked`.
-
-## A family's spec array is usually pinned, so a new method in it needs an array of its own
-
-`MESSAGE_READ_METHOD_SPECS` is pinned at three names by `tests/daemon_read_slice.rs` and `DRAFT_METHOD_SPECS` at ten by three test files, two of them with a `const _: () = assert!(ARRAY.len() == NAMES.len())` that fails the *compile* rather than a test.
-Adding `message.thread` and `draft.create_from_message` to those arrays would have meant editing pinned tests to say something they were not written to say, so each got a one-element array of its own, registered by chaining onto the family's loop and served by the family's own type (#0126, P5-U10d, after `MESSAGE_MARKDOWN_METHOD_SPECS` in P5-U10c).
-Three instances now, which makes it the default rather than the exception: grep the array's name across `tests/` before growing it.
 
 ## The test that has to move is the one that links something, not the one about the subject
 

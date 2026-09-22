@@ -575,7 +575,7 @@ fn send_approved_from_the_tui_asks_for_the_hold() {
 /// `held_send` is the slot, `HeldSend` its type, `fire_held_send` the tail that
 /// hands a parked send to a thread, and `send_one_draft` the blocking call
 /// around `crate::send::send_draft` - the enclosing function of the one row
-/// `src/tui/actions_tests.rs`'s `TUI_ACTION_ENGINE_RESIDUE` still permits, and
+/// `src/tui_tests/actions.rs`'s `TUI_ACTION_ENGINE_RESIDUE` still permits, and
 /// the last engine call the TUI's action layer makes. When the hold moves,
 /// every one of them goes with it, and the TUI keeps only what it renders.
 ///

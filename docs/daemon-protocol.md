@@ -312,7 +312,7 @@ It is per store and per session, it survives no store rebuild, and a client that
 `selector` is the canonical `mp://<account>/<mailbox>/<key>` of the row, rendered daemon-side by `Selector::for_message`, so a client copies it to a clipboard without a store read (`RD-07`).
 It goes on the row rather than behind a `message.selector` query, because the daemon already had the string in hand when it built the row and a query per keypress would be a round trip to learn something the listing could have said.
 A client could compose it from `message_id`, the answer's `mailbox` and its own account name, since `mp_core::selector` is a shared module; it may not, because that is a second implementation of the percent-encoding and of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins only the CLI's spelling.
-The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fifteen keys, and this is the sixteenth, about forty bytes of ASCII, paid once per listing rather than once per copy.
+The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 ms with fourteen keys, and this is the fifteenth, about forty bytes of ASCII, paid once per listing rather than once per copy.
 
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
