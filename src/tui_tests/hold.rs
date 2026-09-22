@@ -583,20 +583,20 @@ fn send_approved_from_the_tui_asks_for_the_hold() {
 /// `TUI_ACTION_ENGINE_RESIDUE`'s, whose scan attributes a call to its
 /// *enclosing function* and drops `#[cfg(test)]` modules, so it tells the
 /// fire path apart from the four engine tests that call
-/// `crate::send::send_draft` directly inside `src/tui/actions.rs`'s own test
-/// module. Those four are about the outbox and the two refusals, they are not
+/// `crate::send::send_draft` directly inside `src/tui_tests/actions_store.rs`'s
+/// own module. Those four are about the outbox and the two refusals, they are not
 /// the hold, and this unit does not ask for them. Striking the
 /// `send_one_draft -> send_draft(` row from that table is what makes them the
 /// only ones left.
 const HOLD_RESIDUE: [(&str, &[&str]); 5] = [
     (
-        "src/tui/actions.rs",
+        "crates/mp-tui/src/actions.rs",
         &["HeldSend", "held_send", "fire_held_send", "send_one_draft"],
     ),
-    ("src/tui/mod.rs", &["held_send", "fire_held_send"]),
-    ("src/tui/app/mod.rs", &["HeldSend", "held_send"]),
-    ("src/tui/app/types.rs", &["HeldSend", "held_send"]),
-    ("src/tui/app/keys.rs", &["held_send"]),
+    ("crates/mp-tui/src/lib.rs", &["held_send", "fire_held_send"]),
+    ("crates/mp-tui/src/app/mod.rs", &["HeldSend", "held_send"]),
+    ("crates/mp-tui/src/app/types.rs", &["HeldSend", "held_send"]),
+    ("crates/mp-tui/src/app/keys.rs", &["held_send"]),
 ];
 
 /// The hold's machinery is gone from the TUI, which keeps only the rendered

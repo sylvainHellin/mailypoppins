@@ -55,7 +55,9 @@
 //!
 //! # Process environment
 //!
-//! [`Session::connect`] reads the ambient `MAILYPOPPINS_DATA_DIR` and
+//! [`Session::connect`] takes the binary's connector
+//! (`mailypoppins::daemon::client::tui_connector`, #0126 P5-U10f) and reads the
+//! ambient `MAILYPOPPINS_DATA_DIR` and
 //! `MAILYPOPPINS_CONFIG_DIR`, so the recovery row sets them on **this** process
 //! rather than on a child. Nothing else in this file reads the process
 //! environment - [`DaemonFixture`] sets every child's explicitly and
@@ -249,7 +251,8 @@ fn a_killed_daemon_is_survived_and_the_session_bootstraps_against_its_replacemen
     std::env::set_var("MAILYPOPPINS_DAEMON_AUTOSTART", "0");
 
     let first = DaemonFixture::start(&root);
-    let mut session = Session::connect().expect("the session thread comes up");
+    let mut session =
+        Session::connect(mailypoppins::daemon::client::tui_connector()).expect("the session thread comes up");
     let before = instance_of(&session).expect("a live daemon bootstraps");
 
     let pid = daemon_pid_file(&root).expect("a running daemon writes its pid file");

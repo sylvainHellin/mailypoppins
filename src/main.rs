@@ -3964,7 +3964,7 @@ async fn main() -> Result<()> {
                 print!("{}", mailypoppins::draft_cmd::render_preview(&preview));
             } else {
                 // No file, no subcommand -> launch TUI
-                mailypoppins::tui::run()?;
+                mailypoppins::tui::run(mailypoppins::daemon::client::tui_connector())?;
             }
         }
         Some(Commands::Account { action }) => match action {

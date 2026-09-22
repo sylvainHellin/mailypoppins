@@ -769,7 +769,7 @@ fn a_disconnect_is_shown_and_calls_nobody() {
 #[test]
 fn the_watcher_threads_are_gone_from_the_tui() {
     assert_eq!(
-        needles_under("src/tui", &WATCHER_NEEDLES),
+        needles_under(TUI_CRATE, &WATCHER_NEEDLES),
         BTreeSet::new(),
         "the TUI still watches a server itself; the runtime does that now"
     );
@@ -784,7 +784,7 @@ fn the_watcher_threads_are_gone_from_the_tui() {
 #[test]
 fn the_tui_never_asks_for_an_operations_status() {
     assert_eq!(
-        needles_under("src/tui", &["\"operation.status\""]),
+        needles_under(TUI_CRATE, &["\"operation.status\""]),
         BTreeSet::new(),
         "an operation finishes by event now, so nothing polls it"
     );
@@ -814,22 +814,22 @@ fn the_account_runtimes_opt_in_is_gone() {
 /// turn all three gates above into green lines about nothing.
 #[test]
 fn the_source_scanner_finds_what_it_looks_for() {
-    let found = needles_under("src/tui", &["fn handle_bg_result"]);
+    let found = needles_under(TUI_CRATE, &["fn handle_bg_result"]);
     assert!(
         found.contains(&(
-            "src/tui/bg.rs".to_string(),
+            format!("{TUI_CRATE}/bg.rs"),
             "fn handle_bg_result".to_string()
         )),
         "the scanner did not find a symbol that is certainly there: {found:?}"
     );
     assert!(
-        needles_under("src/tui", &["fn a_symbol_no_file_carries"]).is_empty(),
+        needles_under(TUI_CRATE, &["fn a_symbol_no_file_carries"]).is_empty(),
         "the scanner reports a symbol nothing declares"
     );
     assert!(
-        needles_under("src/tui", &["MAX_COALESCED_EVENTS"])
+        needles_under(TUI_CRATE, &["MAX_COALESCED_EVENTS"])
             .iter()
-            .all(|(file, _)| file != "src/tui/events_tests.rs"),
+            .all(|(file, _)| file != "src/tui_tests/events.rs"),
         "the scanner reads this file's own mentions as production code"
     );
 }
@@ -860,6 +860,9 @@ const WATCHER_NEEDLES: [&str; 5] = [
     "WatchEvent",
     "GRAPH_POLL_SECS",
 ];
+
+/// Where the TUI's production sources live since #0126 (P5-U10f).
+const TUI_CRATE: &str = "crates/mp-tui/src";
 
 /// Both spellings of the pre-Phase-5 account-runtimes opt-in.
 const RUNTIME_OPT_IN_NEEDLES: [&str; 2] = [

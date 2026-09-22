@@ -261,6 +261,22 @@ pub async fn client_session() -> Connection {
 /// on the alternate screen may not be ended by a diagnostic printed into a
 /// terminal in raw mode. `None` means "still nothing there", which is a state
 /// the client shows and retries out of.
+/// The two halves above, as the TUI takes them (#0126, P5-U10f).
+///
+/// `crates/mp-tui` links neither this module nor the lifecycle it calls: the
+/// socket path comes from the data directory, the on-demand start spawns
+/// `mp daemon run`, and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping is this
+/// process's. So the binary hands the TUI the two routines and the TUI calls
+/// them on its session thread, which leaves exactly one connect routine in the
+/// tree and puts the exit-4 diagnostic where it has always been printed: in
+/// the process that owns the terminal, before the alternate screen.
+pub fn tui_connector() -> mp_tui::session::Connector {
+    mp_tui::session::Connector {
+        open: || Box::pin(client_session()),
+        reopen: || Box::pin(reopen_session()),
+    }
+}
+
 pub async fn reopen_session() -> Option<(Connection, String)> {
     match open_session().await {
         Ok(open) => Some(open),

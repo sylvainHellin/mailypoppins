@@ -1,0 +1,5636 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::{
+    Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ComposeField,
+    ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker,
+    DirPickerMode, EmailEntry, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay,
+    RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
+    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
+};
+
+impl App {
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<Message> {
+        // Single overlay dispatcher (#0032): exactly one overlay is active by
+        // construction, so this matches on `self.overlay` instead of the
+        // former cascade of `is_some()` / bool guards. Arm order preserves the
+        // historical guard precedence (it never actually mattered — overlays
+        // were always mutually exclusive — but keeping it avoids any behavior
+        // question).
+        match &self.overlay {
+            Overlay::Confirm(_) => return self.handle_confirm_key(key),
+            Overlay::Error(_) => return self.handle_persistent_error_key(key),
+            Overlay::Dir(_) => return self.handle_dir_picker_key(key),
+            Overlay::Mailbox(_) => return self.handle_mailbox_picker_key(key),
+            Overlay::Signatures(_) => return self.handle_signatures_key(key),
+            Overlay::Rsvp(_) => return self.handle_rsvp_overlay_key(key),
+            Overlay::Thread(_) => return self.handle_thread_overlay_key(key),
+            Overlay::Palette(_) => return self.handle_command_palette_key(key),
+            Overlay::Attachment(_) => return self.handle_attachment_picker_key(key),
+            Overlay::Help => return self.handle_help_key(key),
+            Overlay::Activity => return self.handle_activity_overlay_key(key),
+            Overlay::Search => return self.handle_search_overlay_key(key),
+            Overlay::Compose(_) => return self.handle_compose_wizard_key(key),
+            Overlay::None => {}
+        }
+
+        if self.focus == Focus::Search {
+            return self.handle_search_key(key);
+        }
+
+        // Jump-to-date input (#0017): armed by `g d`, it owns the keyboard
+        // until Enter or Esc, the same hand-dispatched shape as the two
+        // free-text inputs above.
+        if self.jump_date_input.is_some() {
+            return self.handle_jump_date_key(key);
+        }
+
+        // Attach-file input (#0098): armed by `t a` on a Drafts row, it owns
+        // the keyboard until Enter or Esc, the same hand-dispatched shape as
+        // the jump-to-date prompt above.
+        if self.attach_file_input.is_some() {
+            return self.handle_attach_file_key(key);
+        }
+
+        // Contacts view fuzzy-search input (#0033): free-text, hand-dispatched
+        // like the metadata-search input, once armed by `/`.
+        if self.view == super::View::Contacts && self.contacts_view.searching {
+            return self.handle_contacts_search_key(key);
+        }
+
+        // Normal-mode surface (#0032, (B)-lite): resolve the pressed key through
+        // the KEYMAP table into a `KeyAction`, then run one executor. Global
+        // bindings are always tried first, then the focused pane's context
+        // (mirroring the old "global keys before pane dispatch" precedence).
+        // Guards are evaluated against live state so context-sensitive rules
+        // (`c` only in Drafts, most list keys only when non-empty, multi-account
+        // account jumps) stay in the data model.
+        self.dispatch_normal_mode(key)
+    }
+
+    /// Table-driven dispatch for the no-overlay surface. Returns the `Message`
+    /// (only `Quit` today) or `None`.
+    fn dispatch_normal_mode(&mut self, key: KeyEvent) -> Option<Message> {
+        // Undo-send hold window (#0090, daemon-owned since P6-U2): while a
+        // send is counting down, `u` asks the daemon to cancel it before it
+        // reaches SMTP -- the draft is untouched and recoverable.
+        // Hand-dispatched as a transient prompt (the status line advertises
+        // it), not a KEYMAP row, so it neither collides with the
+        // Message-context `u` (toggle read) once the window has fired nor
+        // needs a website key-table entry.
+        //
+        // The countdown is deliberately left on screen: cancelling is a round
+        // trip, and a client that cleared it here would hide a hold whose
+        // cancel was refused. `send.hold_cancelled` takes it down.
+        if self.hold.is_some()
+            && key.code == KeyCode::Char('u')
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.push_action_dedup(Action::CancelHeldSend);
+            return None;
+        }
+
+        let pending = self.pending_prefix;
+        let guard_ok = |g: super::Guard| self.guard_satisfied(g);
+
+        // The focused pane's context. Mail consults its focused pane; the
+        // Contacts view (#0033) and the Calendar view (#0034) each have a
+        // single list context.
+        let pane_ctx = match self.view {
+            super::View::Mail => self.pane_ctx(),
+            super::View::Contacts => Some(super::KeyCtx::Contacts),
+            super::View::Calendar => Some(super::KeyCtx::Calendar),
+        };
+
+        // Global context first.
+        if let Some(action) = super::resolve(super::KeyCtx::Global, key, pending, &guard_ok) {
+            // In non-Mail views only the view-agnostic Global surface (view
+            // switch / quit / help / activity) is live; a mail-specific Global
+            // key resolves but is swallowed so it cannot fire (#0033) -- UNLESS
+            // the active view's pane context rebinds that key (e.g. Contacts
+            // rebinds `/` to fuzzy search), in which case the pane binding wins.
+            // A family leader stays live iff its family carries a view-agnostic
+            // continuation (today `s`: config/log/activity, #0092 review fix),
+            // so those utilities remain reachable from Contacts and Calendar.
+            let agnostic_leader = matches!(action, super::KeyAction::ArmPrefix)
+                && matches!(key.code, KeyCode::Char(l) if super::leader_is_view_agnostic(l));
+            if self.view != super::View::Mail && !action.is_view_agnostic() && !agnostic_leader {
+                let pane_rebinds = pane_ctx
+                    .and_then(|ctx| super::resolve(ctx, key, pending, &guard_ok))
+                    .is_some();
+                if !pane_rebinds {
+                    self.pending_prefix = None;
+                    return None;
+                }
+            } else {
+                return self.execute(action, key);
+            }
+        }
+        // Then the pane context.
+        if let Some(ctx) = pane_ctx {
+            if let Some(action) = super::resolve(ctx, key, pending, &guard_ok) {
+                return self.execute(action, key);
+            }
+        }
+        // Then the shared MESSAGE context (#0092): a message action resolves
+        // identically in the List, Headers and Body panes, so acting on what
+        // you are reading never needs a focus hop. Tried after the focused
+        // pane so a pane keeps its own scroll keys (`j`/`k`).
+        if let Some(action) = self
+            .message_ctx()
+            .and_then(|ctx| super::resolve(ctx, key, pending, &guard_ok))
+        {
+            return self.execute(action, key);
+        }
+        // No live binding matched: clear any pending leader (an unrecognised
+        // key aborts the chord). Under strict prefix mode a key that is not a
+        // continuation of the pending family cancels the chord here without
+        // firing a flat binding (which-key semantics).
+        self.pending_prefix = None;
+        None
+    }
+
+    /// The KEYMAP context for the currently focused pane (no overlay active).
+    fn pane_ctx(&self) -> Option<super::KeyCtx> {
+        match self.focus {
+            Focus::Sidebar => Some(super::KeyCtx::Sidebar),
+            Focus::List => Some(super::KeyCtx::List),
+            Focus::Headers => Some(super::KeyCtx::Headers),
+            Focus::Preview => Some(super::KeyCtx::Preview),
+            Focus::Search | Focus::ComposeWizard => None,
+        }
+    }
+
+    /// The shared MESSAGE context, live whenever a reading pane (List, Headers,
+    /// Body) holds focus in the Mail view (#0092). `None` off Mail or in the
+    /// sidebar / input panes, so a message action never fires where there is
+    /// no cursor message to act on.
+    fn message_ctx(&self) -> Option<super::KeyCtx> {
+        if self.view != super::View::Mail {
+            return None;
+        }
+        match self.focus {
+            Focus::List | Focus::Headers | Focus::Preview => Some(super::KeyCtx::Message),
+            Focus::Sidebar | Focus::Search | Focus::ComposeWizard => None,
+        }
+    }
+
+    /// Evaluate a keymap `Guard` against live app state.
+    fn guard_satisfied(&self, guard: super::Guard) -> bool {
+        match guard {
+            super::Guard::None => true,
+            super::Guard::MultiAccount => self.accounts.len() > 1,
+            // `c` (edit recipients) is catalogued Drafts-only, but the old code
+            // still *matched* the key outside Drafts to show a status hint. We
+            // resolve it in any mailbox and branch inside the executor so that
+            // UX is preserved; the guard is advisory here.
+            super::Guard::DraftsOnly => true,
+            super::Guard::NonEmptyList => !self.visible.is_empty(),
+        }
+    }
+
+    /// Run a resolved Normal-mode [`KeyAction`]. This is the single executor the
+    /// table dispatches into; it replaces the former per-pane match arms.
+    fn execute(&mut self, action: super::KeyAction, key: KeyEvent) -> Option<Message> {
+        use super::KeyAction as A;
+
+        // Every executed action clears the pending leader except the leader key
+        // itself (handled explicitly below) and the `gg` continuation.
+        match action {
+            // -- Global -------------------------------------------------------
+            A::Quit => return Some(Message::Quit),
+            A::ToggleHelp => {
+                self.pending_prefix = None;
+                self.help_scroll = 0;
+                self.help_filter.clear();
+                self.help_filter_active = false;
+                self.overlay = Overlay::Help;
+            }
+            A::OpenPalette => {
+                // `:` / `Ctrl+p` (#0100): open the command palette, a fuzzy
+                // finder over the runnable KeyAction catalogue.
+                self.pending_prefix = None;
+                self.overlay = Overlay::Palette(CommandPalette::new());
+            }
+            A::ToggleZoom => {
+                self.pending_prefix = None;
+                self.toggle_zoom();
+            }
+            A::ToggleActivityLog => {
+                self.pending_prefix = None;
+                self.show_activity_log = !self.show_activity_log;
+            }
+            A::OpenSignatures => {
+                self.pending_prefix = None;
+                self.open_signatures_overlay();
+            }
+            A::OpenActivityOverlay => {
+                self.pending_prefix = None;
+                self.activity_filter.clear();
+                self.activity_filter_active = false;
+                self.activity_scroll = 0;
+                self.overlay = Overlay::Activity;
+            }
+            A::OpenLogFile => {
+                self.pending_prefix = None;
+                self.push_action(Action::OpenLogFile);
+            }
+            A::OpenConfigFile => {
+                self.pending_prefix = None;
+                self.push_action(Action::OpenConfigFile);
+            }
+            A::FilterMetadata => {
+                self.pending_prefix = None;
+                self.focus = Focus::Search;
+                self.search_query.clear();
+                self.reload_from_cache();
+            }
+            A::SwitchAccount => {
+                self.pending_prefix = None;
+                let next = (self.active_account + 1) % self.accounts.len();
+                self.switch_account(next);
+            }
+            A::JumpAccount => {
+                // Ctrl+1..9 -> direct account jump (guarded to multi-account).
+                self.pending_prefix = None;
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.accounts.len() {
+                        self.switch_account(idx);
+                    }
+                }
+            }
+            A::JumpMailbox => {
+                self.pending_prefix = None;
+                if let KeyCode::Char(c @ '1'..='9') = key.code {
+                    let idx = (c as usize) - ('1' as usize);
+                    if idx < self.mailboxes.len() {
+                        self.sidebar_index = idx;
+                        self.switch_mailbox(idx);
+                        self.focus = Focus::List;
+                    }
+                }
+            }
+            A::ArmPrefix => {
+                // A mnemonic family leader (`f`/`c`/`g`/`t`/`s`) was pressed
+                // with nothing pending: arm it so the next key is resolved as
+                // a continuation and the which-key popup shows the family.
+                if let KeyCode::Char(leader) = key.code {
+                    self.pending_prefix = Some(leader);
+                }
+            }
+            A::GoMailbox => {
+                // `gm`: go to the mailbox sidebar (navigate with j/k, Enter).
+                self.pending_prefix = None;
+                self.focus = Focus::Sidebar;
+            }
+            A::FocusForward => {
+                self.pending_prefix = None;
+                if self.focus == Focus::Sidebar {
+                    self.switch_mailbox(self.sidebar_index);
+                }
+                // Reading order (#0092): Sidebar, List, Headers, Body.
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::List,
+                    Focus::List => Focus::Headers,
+                    Focus::Headers => Focus::Preview,
+                    Focus::Preview => Focus::Sidebar,
+                    Focus::Search => Focus::List,
+                    Focus::ComposeWizard => Focus::ComposeWizard,
+                };
+                // Landing in the body pane is an explicit "I am reading this"
+                // and marks the message read (#0110).
+                if self.focus == Focus::Preview {
+                    self.queue_mark_open_read();
+                }
+            }
+            A::FocusBackward => {
+                self.pending_prefix = None;
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Preview,
+                    Focus::Preview => Focus::Headers,
+                    Focus::Headers => Focus::List,
+                    Focus::List => Focus::Sidebar,
+                    Focus::Search => Focus::List,
+                    Focus::ComposeWizard => Focus::ComposeWizard,
+                };
+                if self.focus == Focus::Preview {
+                    self.queue_mark_open_read();
+                }
+            }
+            A::SwitchView => {
+                // `Space m/c/a`: the continuation key selects the target view.
+                // `switch_view` clears the pending leader itself.
+                if let KeyCode::Char(c) = key.code {
+                    if let Some(&target) =
+                        super::View::ALL.iter().find(|v| v.switch_key() == c)
+                    {
+                        self.switch_view(target);
+                    }
+                }
+                self.pending_prefix = None;
+            }
+            // -- Sidebar ------------------------------------------------------
+            A::SidebarDown => {
+                self.pending_prefix = None;
+                if self.sidebar_index < self.mailboxes.len().saturating_sub(1) {
+                    self.sidebar_index += 1;
+                }
+            }
+            A::SidebarUp => {
+                self.pending_prefix = None;
+                self.sidebar_index = self.sidebar_index.saturating_sub(1);
+            }
+            A::SidebarSelect => {
+                self.pending_prefix = None;
+                self.switch_mailbox(self.sidebar_index);
+                self.focus = Focus::List;
+            }
+            // -- Headers ------------------------------------------------------
+            A::HeadersDown => {
+                self.pending_prefix = None;
+                self.headers_scroll = self.headers_scroll.saturating_add(1);
+            }
+            A::HeadersUp => {
+                self.pending_prefix = None;
+                self.headers_scroll = self.headers_scroll.saturating_sub(1);
+            }
+            // -- Preview / body ----------------------------------------------
+            A::PreviewDown => {
+                self.pending_prefix = None;
+                self.preview_scroll = self.preview_scroll.saturating_add(1);
+            }
+            A::PreviewUp => {
+                self.pending_prefix = None;
+                self.preview_scroll = self.preview_scroll.saturating_sub(1);
+            }
+            A::PreviewHalfDown => {
+                self.pending_prefix = None;
+                self.preview_scroll = self.preview_scroll.saturating_add(10);
+            }
+            A::PreviewHalfUp => {
+                self.pending_prefix = None;
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+            }
+            A::PreviewToList => {
+                self.pending_prefix = None;
+                self.focus = Focus::List;
+            }
+            // -- Contacts view (#0033) ---------------------------------------
+            A::ContactsDown => {
+                self.pending_prefix = None;
+                let len = self.contacts_view.matches.len();
+                if len > 0 && self.contacts_view.list_index < len - 1 {
+                    self.contacts_view.list_index += 1;
+                }
+            }
+            A::ContactsUp => {
+                self.pending_prefix = None;
+                self.contacts_view.list_index =
+                    self.contacts_view.list_index.saturating_sub(1);
+            }
+            A::ContactsTop => {
+                // Reached only with `g` pending (the leader continuation).
+                self.contacts_view.list_index = 0;
+                self.pending_prefix = None;
+            }
+            A::ContactsBottom => {
+                self.pending_prefix = None;
+                self.contacts_view.list_index =
+                    self.contacts_view.matches.len().saturating_sub(1);
+            }
+            A::ContactsSearch => {
+                self.pending_prefix = None;
+                self.contacts_view.searching = true;
+            }
+            A::ContactsCompose => {
+                self.pending_prefix = None;
+                if let Some(contact) = self.selected_contact() {
+                    let to = mp_core::addresses::format_recipient(
+                        &contact.display_name,
+                        &contact.address,
+                    );
+                    self.push_action(Action::ComposeToContact { to });
+                }
+            }
+            A::ContactsVcard => {
+                self.pending_prefix = None;
+                if let Some(contact) = self.selected_contact() {
+                    self.push_action(Action::SendContactVcard {
+                        contact: contact.clone(),
+                    });
+                }
+            }
+            A::ContactsCopyEmail => {
+                self.pending_prefix = None;
+                match self.selected_contact() {
+                    Some(contact) => {
+                        let address = contact.address.clone();
+                        self.push_action(Action::CopyContactEmail { address });
+                    }
+                    None => self.set_status("No contact selected".to_string()),
+                }
+            }
+            A::ContactsRefresh => {
+                self.pending_prefix = None;
+                self.push_action(Action::RefreshContacts);
+            }
+            // -- Calendar view (#0034) ---------------------------------------
+            A::CalendarDown => {
+                self.pending_prefix = None;
+                let len = self.calendar_view.visible.len();
+                if len > 0 && self.calendar_view.list_index < len - 1 {
+                    self.calendar_view.list_index += 1;
+                }
+            }
+            A::CalendarUp => {
+                self.pending_prefix = None;
+                self.calendar_view.list_index =
+                    self.calendar_view.list_index.saturating_sub(1);
+            }
+            A::CalendarTop => {
+                // Reached only with `g` pending (the leader continuation).
+                self.calendar_view.list_index = 0;
+                self.pending_prefix = None;
+            }
+            A::CalendarBottom => {
+                self.pending_prefix = None;
+                self.calendar_view.list_index =
+                    self.calendar_view.visible.len().saturating_sub(1);
+            }
+            A::CalendarOpenSource => {
+                self.pending_prefix = None;
+                if let Some(event) = self.selected_event() {
+                    let msg = event.msg;
+                    self.push_action(Action::OpenEventSource { msg });
+                }
+            }
+            A::CalendarRsvp => {
+                self.pending_prefix = None;
+                self.open_rsvp_overlay_for_event();
+            }
+            A::CalendarToggleScope => {
+                self.pending_prefix = None;
+                self.calendar_view.show_past = !self.calendar_view.show_past;
+                self.calendar_view.list_index = 0;
+                self.recompute_calendar_visible();
+                let scope = if self.calendar_view.show_past {
+                    "all events"
+                } else {
+                    "upcoming events"
+                };
+                self.set_status(format!("Calendar: showing {scope}"));
+            }
+            A::CalendarRefresh => {
+                self.pending_prefix = None;
+                self.refresh_calendar();
+            }
+            // -- List / shared -----------------------------------------------
+            _ => return self.execute_list(action, key),
+        }
+
+        None
+    }
+
+    /// List-context actions (and the shared attachment/browser/RSVP actions the
+    /// list, headers, and preview panes all use). Split out to keep `execute`
+    /// readable; it also owns the list-cursor scroll-reset bookkeeping.
+    fn execute_list(&mut self, action: super::KeyAction, key: KeyEvent) -> Option<Message> {
+        use super::KeyAction as A;
+        let old_index = self.list_index;
+
+        match action {
+            A::ListDown => {
+                self.pending_prefix = None;
+                // Saturating like `NextMessage` below: key dispatch never gets
+                // here on an empty list (`Guard::NonEmptyList`), but the
+                // command palette (#0100) runs executors directly, and
+                // `0 - 1` on an empty `visible` underflows.
+                if self.list_index < self.visible.len().saturating_sub(1) {
+                    self.list_index += 1;
+                }
+            }
+            A::ListUp => {
+                self.pending_prefix = None;
+                self.list_index = self.list_index.saturating_sub(1);
+            }
+            // Next / previous message from any reading pane (`J`/`K`, `gj`/`gk`,
+            // #0092): move the list cursor without changing focus, so the
+            // preview follows while the body pane keeps the keyboard.
+            A::NextMessage => {
+                self.pending_prefix = None;
+                if self.list_index < self.visible.len().saturating_sub(1) {
+                    self.list_index += 1;
+                }
+            }
+            A::PrevMessage => {
+                self.pending_prefix = None;
+                self.list_index = self.list_index.saturating_sub(1);
+            }
+            // Esc in any reading pane: clear a live selection first, else
+            // return focus to the list (#0092, symmetric across the panes).
+            A::EscMessage => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    self.selection.clear();
+                } else if self.focus != Focus::List {
+                    self.focus = Focus::List;
+                }
+            }
+            A::ListTop => {
+                // Reached only with `g` pending (the leader continuation).
+                self.list_index = 0;
+                self.pending_prefix = None;
+            }
+            A::ListBottom => {
+                self.pending_prefix = None;
+                self.list_index = self.visible.len().saturating_sub(1);
+            }
+            A::JumpToDate => {
+                // Reached only with `g` pending (the leader continuation).
+                self.pending_prefix = None;
+                self.jump_date_input = Some(String::new());
+            }
+            A::AttachFile => {
+                // Catalogued Drafts-only, but resolved everywhere so the miss
+                // shows a hint (the same advisory-guard shape as `ce` edit
+                // recipients). Only a Drafts row has an `attachments:` list to
+                // grow, so arming the prompt outside Drafts would be a lie.
+                self.pending_prefix = None;
+                if self.active_kind() == MailboxKind::Drafts {
+                    if self.selected_email().and_then(|e| e.draft_id.as_ref()).is_some() {
+                        self.attach_file_input = Some(String::new());
+                    } else {
+                        self.set_status(
+                            "Attach needs a draft; this row has none".to_string(),
+                        );
+                    }
+                } else {
+                    self.set_status(
+                        "Attach file (t a) is only available in Drafts".to_string(),
+                    );
+                }
+            }
+            A::OpenEditor => {
+                self.pending_prefix = None;
+                self.push_action(Action::EditCurrent);
+            }
+            A::Reply => {
+                self.pending_prefix = None;
+                self.push_action(Action::Reply(false));
+            }
+            A::ReplyAll => {
+                self.pending_prefix = None;
+                self.push_action(Action::Reply(true));
+            }
+            A::Forward => {
+                self.pending_prefix = None;
+                if let Some(msg) = self.selected_email_ref() {
+                    self.push_action(Action::OpenComposeWizard(ComposeMode::Forward { msg }));
+                } else if self.selected_email().is_some() {
+                    // A Drafts row has no message behind it to forward.
+                    self.set_status(
+                        "Forward needs a received message; a draft has none to quote".to_string(),
+                    );
+                }
+            }
+            A::EditRecipients => {
+                // Only meaningful in Drafts; outside Drafts keep the old status
+                // hint (the guard is advisory, resolved everywhere).
+                self.pending_prefix = None;
+                if self.active_kind() == MailboxKind::Drafts {
+                    // The draft is named by its `id:`, not by the path it
+                    // happens to sit at: the wizard resolves it through the
+                    // drafts index when it opens and again when it submits.
+                    if let Some(id) = self.selected_email().and_then(|e| e.draft_id.clone()) {
+                        self.push_action(Action::OpenComposeWizard(ComposeMode::EditDraft {
+                            id,
+                        }));
+                    }
+                } else {
+                    self.set_status(
+                        "Edit recipients (c) is only available in Drafts".to_string(),
+                    );
+                }
+            }
+            A::SelectAllVisible => {
+                self.pending_prefix = None;
+                self.selection = self.visible_emails().filter_map(|e| e.key()).collect();
+            }
+            A::Archive => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: format!("Archive {} emails?", count),
+                        detail: format!("{} selected emails", count),
+                        action: ConfirmAction::Archive,
+                    });
+                } else if let Some(email) = self.selected_email() {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: "Archive this email?".to_string(),
+                        detail: format!("{} - {}", email.from, email.subject),
+                        action: ConfirmAction::Archive,
+                    });
+                }
+            }
+            A::Delete => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    let count = self.selection.len();
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: format!("Delete {} emails?", count),
+                        detail: format!("{} selected emails", count),
+                        action: ConfirmAction::Delete,
+                    });
+                } else if let Some(email) = self.selected_email() {
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: "Delete this email?".to_string(),
+                        detail: format!("{} - {}", email.from, email.subject),
+                        action: ConfirmAction::Delete,
+                    });
+                }
+            }
+            A::Approve => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    self.confirm_draft_batch(
+                        "Approve",
+                        |count| format!("Approve {count} drafts?"),
+                        ConfirmAction::Approve,
+                    );
+                } else {
+                    self.push_action(Action::Approve);
+                }
+            }
+            A::MarkDraft => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    self.confirm_draft_batch(
+                        "Mark as draft",
+                        |count| format!("Mark {count} drafts as draft?"),
+                        ConfirmAction::MarkDraft,
+                    );
+                } else {
+                    self.push_action(Action::MarkDraft);
+                }
+            }
+            A::Send => {
+                self.pending_prefix = None;
+                if let Some(email) = self.selected_email() {
+                    // One dialog either way (#0089): an unapproved draft warns
+                    // that confirming approves and sends in the same step; an
+                    // approved draft keeps the plain send confirm.
+                    let title = if email.status == "draft" {
+                        "Draft is not approved. Approve and send?"
+                    } else {
+                        "Send this email?"
+                    };
+                    self.overlay = Overlay::Confirm(ConfirmDialog {
+                        title: title.to_string(),
+                        detail: format!("To: {} - {}", email.to, email.subject),
+                        action: ConfirmAction::Send,
+                    });
+                }
+            }
+            A::SendAll => {
+                self.pending_prefix = None;
+                self.overlay = Overlay::Confirm(ConfirmDialog {
+                    title: "Send all approved emails?".to_string(),
+                    detail: format!("In {}", self.active_label()),
+                    action: ConfirmAction::SendApproved,
+                });
+            }
+            A::CopyMessageRef => {
+                self.pending_prefix = None;
+                self.push_action(Action::CopyMessageRef);
+            }
+            A::ToggleRead => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    let msgs: Vec<MessageRef> =
+                        self.selection.iter().filter_map(|k| k.msg()).collect();
+                    self.push_action(Action::BatchToggleRead(msgs));
+                } else {
+                    self.push_action(Action::ToggleRead);
+                }
+            }
+            A::ToggleFlag => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    let msgs: Vec<MessageRef> =
+                        self.selection.iter().filter_map(|k| k.msg()).collect();
+                    self.push_action(Action::BatchToggleFlag(msgs));
+                } else {
+                    self.push_action(Action::ToggleFlag);
+                }
+            }
+            A::ToggleFlaggedFilter => {
+                self.pending_prefix = None;
+                self.flagged_only = !self.flagged_only;
+                let anchor = self.cursor_anchor();
+                let fallback = self.list_index;
+                self.selection.clear();
+                self.rebuild_visible();
+                self.restore_cursor(anchor, fallback);
+                self.headers_scroll = 0;
+                self.preview_scroll = 0;
+                let shown = self.visible.len();
+                if self.flagged_only {
+                    self.set_status(format!("Flagged only ({shown})"));
+                } else {
+                    self.set_status("Showing all messages".to_string());
+                }
+            }
+            A::MovePicker => {
+                self.pending_prefix = None;
+                self.open_mailbox_picker();
+            }
+            A::Rsvp => {
+                self.pending_prefix = None;
+                self.open_rsvp_overlay();
+            }
+            A::OpenThread => {
+                self.pending_prefix = None;
+                self.open_thread_overlay();
+            }
+            A::NewDraft => {
+                self.pending_prefix = None;
+                self.push_action(Action::OpenComposeWizard(ComposeMode::New));
+            }
+            A::QuickSync => {
+                self.pending_prefix = None;
+                self.push_action(Action::Fetch);
+            }
+            A::FullSync => {
+                self.pending_prefix = None;
+                self.push_action(Action::Sync);
+            }
+            A::ServerSearch => {
+                self.pending_prefix = None;
+                self.search_form = crate::app::SearchForm::default();
+                self.server_search_results.clear();
+                self.server_search_index = 0;
+                self.server_search_scroll = 0;
+                self.server_search_headers_scroll = 0;
+                self.server_search_focus = SearchOverlayFocus::Field(SearchField::From);
+                self.server_search_loading = false;
+                self.server_search_status = None;
+                self.overlay = Overlay::Search;
+            }
+            A::OpenAttachment => {
+                self.pending_prefix = None;
+                self.open_attachment_picker(AttachmentPickerMode::Open);
+            }
+            A::SaveAttachment => {
+                self.pending_prefix = None;
+                self.open_attachment_picker(AttachmentPickerMode::Save);
+            }
+            A::OpenInBrowser => {
+                self.pending_prefix = None;
+                // The markup is a blob (or the html part of the raw message),
+                // not a `.html` beside a `.md`, so it is written to a temp
+                // file on demand and that is what the browser opens (#0052
+                // scope item 9).
+                if let Some(msg) = self.selected_email_ref() {
+                    if let Some(path) =
+                        crate::actions::html_rendition_for_row(self, msg.row_id())
+                    {
+                        self.push_action(Action::OpenHtmlInBrowser(path));
+                    }
+                }
+            }
+            A::ToggleSelect => {
+                self.pending_prefix = None;
+                // Drafts are selectable too (#0052): the set is keyed on
+                // `EntryKey`, so the Drafts mailbox has a batch again.
+                if let Some(key) = self.selected_email().and_then(|e| e.key()) {
+                    if self.selection.contains(&key) {
+                        self.selection.remove(&key);
+                    } else {
+                        self.selection.insert(key);
+                    }
+                    if self.list_index < self.visible.len() - 1 {
+                        self.list_index += 1;
+                    }
+                }
+            }
+            A::ClearSelection => {
+                self.pending_prefix = None;
+                if !self.selection.is_empty() {
+                    self.selection.clear();
+                }
+            }
+            // The leader key itself: begin/toggle the pending leader chord.
+            // This is the only action that intentionally leaves a leader armed.
+            // Two leaders exist (#0033 follow-up): Space (view switcher) and
+            // `g` (list `gg`/`G`); the pressed key identifies which one.
+            A::Manual => {
+                if let KeyCode::Char(leader) = key.code {
+                    self.pending_prefix = if self.pending_prefix == Some(leader) {
+                        None
+                    } else {
+                        Some(leader)
+                    };
+                }
+            }
+            // Any pane-only action mistakenly routed here is a no-op.
+            _ => {
+                self.pending_prefix = None;
+            }
+        }
+
+        if self.list_index != old_index {
+            self.headers_scroll = 0;
+            self.preview_scroll = 0;
+        }
+
+        None
+    }
+
+    /// Open the confirmation for a batch that writes to draft files, or say
+    /// why there is nothing to confirm.
+    ///
+    /// The batch takes the drafts half of the selection (see
+    /// [`Self::handle_confirm_key`]), so a selection holding no draft key --
+    /// `A` over a received-mail selection, which the keymap allows -- has
+    /// nothing to approve. Without this guard the dialog opened on the full
+    /// count and the batch then reported "Approved 0 drafts", asking a
+    /// question whose only honest answer was already known.
+    fn confirm_draft_batch(
+        &mut self,
+        what: &str,
+        title: impl Fn(usize) -> String,
+        action: ConfirmAction,
+    ) {
+        let count = self
+            .selection
+            .iter()
+            .filter(|key| key.draft().is_some())
+            .count();
+        if count == 0 {
+            self.set_status(format!(
+                "{what} needs drafts; the selection has no draft in it"
+            ));
+            return;
+        }
+        self.overlay = Overlay::Confirm(ConfirmDialog {
+            title: title(count),
+            detail: format!("{count} selected drafts"),
+            action,
+        });
+    }
+
+    fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                if let Overlay::Confirm(dialog) =
+                    std::mem::replace(&mut self.overlay, Overlay::None)
+                {
+                    match dialog.action {
+                        // Approve and mark-draft write to draft files, so they
+                        // take the drafts half of the selection; archive and
+                        // delete are store mutations and take the messages
+                        // half (#0052). A selection never holds both -- one
+                        // mailbox lists one kind of row and switching clears
+                        // the set -- but each side filters rather than assumes.
+                        ConfirmAction::Approve if !self.selection.is_empty() => {
+                            let ids: Vec<String> = self
+                                .selection
+                                .drain()
+                                .filter_map(|k| k.draft().map(str::to_string))
+                                .collect();
+                            self.push_action(Action::BatchApprove(ids));
+                        }
+                        ConfirmAction::MarkDraft if !self.selection.is_empty() => {
+                            let ids: Vec<String> = self
+                                .selection
+                                .drain()
+                                .filter_map(|k| k.draft().map(str::to_string))
+                                .collect();
+                            self.push_action(Action::BatchMarkDraft(ids));
+                        }
+                        ConfirmAction::Archive if !self.selection.is_empty() => {
+                            let msgs: Vec<MessageRef> =
+                                self.selection.drain().filter_map(|k| k.msg()).collect();
+                            self.push_action(Action::BatchArchive(msgs));
+                        }
+                        ConfirmAction::Delete if !self.selection.is_empty() => {
+                            // Delete takes the messages half, as archive does:
+                            // a received message is a store mutation. A Drafts
+                            // selection holds draft ids and no `messages` row,
+                            // so once the messages half is empty the delete is
+                            // the local file removal instead (#0073), not
+                            // `prepare_delete` reporting nothing to delete. A
+                            // selection never mixes the two in practice; each
+                            // half still filters rather than assumes.
+                            let msgs: Vec<MessageRef> =
+                                self.selection.iter().filter_map(|k| k.msg()).collect();
+                            if msgs.is_empty() {
+                                let drafts: Vec<String> = self
+                                    .selection
+                                    .drain()
+                                    .filter_map(|k| k.draft().map(str::to_string))
+                                    .collect();
+                                self.push_action(Action::BatchDeleteDrafts(drafts));
+                            } else {
+                                self.selection.clear();
+                                self.push_action(Action::BatchDelete(msgs));
+                            }
+                        }
+                        // The one confirmed action that is a local file
+                        // removal rather than a queued `Action`: deleting a
+                        // signature is a `signatures::delete` call, and the
+                        // overlay it came from is restored (refreshed, so a
+                        // default the delete cleared stops being marked).
+                        ConfirmAction::DeleteSignature(mut overlay) => {
+                            let name = overlay.selected_name().map(str::to_string);
+                            if let Some(name) = name {
+                                match mp_core::signatures::delete(&name) {
+                                    Ok(()) => {
+                                        self.set_status(format!("Deleted signature '{name}'"))
+                                    }
+                                    Err(e) => self.set_status_level(
+                                        format!("Cannot delete: {e:#}"),
+                                        StatusLevel::Error,
+                                    ),
+                                }
+                            }
+                            overlay.refresh();
+                            self.refresh_signature_content();
+                            self.overlay = Overlay::Signatures(overlay);
+                        }
+                        _ => {
+                            self.push_action(match dialog.action {
+                                ConfirmAction::Approve => Action::Approve,
+                                ConfirmAction::MarkDraft => Action::MarkDraft,
+                                ConfirmAction::Archive => Action::Archive,
+                                ConfirmAction::Delete => Action::Delete,
+                                ConfirmAction::Send => Action::Send,
+                                ConfirmAction::SendApproved => Action::SendApproved,
+                                // Consumed by the arm above; the resolver never
+                                // reaches this one.
+                                ConfirmAction::DeleteSignature(_) => return None,
+                            });
+                        }
+                    }
+                    // Consume-and-close: the confirm dialog was taken above.
+                    // Promote any error that had been queued behind it.
+                    self.promote_pending_error();
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                // A cancelled signature delete goes back to the signatures
+                // overlay it floated over, not to the mail view (#0107).
+                let taken = std::mem::replace(&mut self.overlay, Overlay::None);
+                if let Overlay::Confirm(ConfirmDialog {
+                    action: ConfirmAction::DeleteSignature(overlay),
+                    ..
+                }) = taken
+                {
+                    self.overlay = Overlay::Signatures(overlay);
+                } else {
+                    self.promote_pending_error();
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_search_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match self.server_search_focus {
+            SearchOverlayFocus::Field(field) => self.handle_search_form_key(key, field),
+            SearchOverlayFocus::List => self.handle_search_overlay_list_key(key),
+        }
+    }
+
+    /// The Outlook-shape search form (#0086b). Tab/Shift-Tab cycle the fields
+    /// (reusing the compose-wizard convention), Space flips the scope /
+    /// attachment toggles, typing edits the focused text field, Enter searches
+    /// and Esc closes. The form builds a `search::Query` AST and routes it
+    /// through the same lowering path the CLI uses.
+    fn handle_search_form_key(&mut self, key: KeyEvent, field: SearchField) -> Option<Message> {
+        // A non-blank Advanced line disables the structured fields: skip over
+        // them when cycling so Tab lands only on Scope / Attachment / Advanced,
+        // and refuse edits to a greyed field.
+        let advanced_active = self.search_form.advanced_active();
+        let field_enabled = |f: SearchField| {
+            !advanced_active || matches!(f, SearchField::Advanced)
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.close_overlay();
+            }
+            KeyCode::Tab => {
+                let mut next = field.next();
+                while !field_enabled(next) {
+                    next = next.next();
+                }
+                self.server_search_focus = SearchOverlayFocus::Field(next);
+            }
+            KeyCode::BackTab => {
+                let mut prev = field.prev();
+                while !field_enabled(prev) {
+                    prev = prev.prev();
+                }
+                self.server_search_focus = SearchOverlayFocus::Field(prev);
+            }
+            KeyCode::Down => {
+                // From the Advanced line (last field) Down drops into the
+                // results list if there are hits, matching the old overlay.
+                if field == SearchField::Advanced && !self.server_search_results.is_empty() {
+                    self.server_search_focus = SearchOverlayFocus::List;
+                }
+            }
+            KeyCode::Char(' ') if field == SearchField::Scope => {
+                self.search_form.scope.0 = self.search_form.scope.0.toggled();
+            }
+            KeyCode::Char(' ') if field == SearchField::Attachment && !advanced_active => {
+                self.search_form.attachment = !self.search_form.attachment;
+            }
+            KeyCode::Enter => {
+                self.submit_search_form();
+            }
+            KeyCode::Backspace => {
+                if field_enabled(field) {
+                    if let Some(text) = self.search_form.text_field_mut(field) {
+                        text.pop();
+                        self.server_search_status = None;
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                // Ctrl-prefixed chars are not text.
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return None;
+                }
+                if field_enabled(field) {
+                    if let Some(text) = self.search_form.text_field_mut(field) {
+                        text.push(c);
+                        self.server_search_status = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Build the AST from the form and dispatch, or surface the parse error
+    /// verbatim. A blank form is a no-op.
+    fn submit_search_form(&mut self) {
+        let query = match self.search_form.build_query() {
+            Ok(Some(q)) => q,
+            Ok(None) => return, // blank form: nothing to search for
+            Err(e) => {
+                self.server_search_status = Some(e);
+                return;
+            }
+        };
+
+        // `in:` inside the Advanced line still resolves a mailbox; otherwise the
+        // scope toggle decides the targets (Q3: mailbox or account, never all
+        // accounts).
+        let (targets, scope_label) = if let Some(ref name) = query.in_mailbox {
+            match self.search_target_by_name(name) {
+                Some(target) => {
+                    let label = target.label.clone();
+                    (vec![target], label)
+                }
+                None => {
+                    self.server_search_status = Some(format!("Unknown mailbox: {name}"));
+                    return;
+                }
+            }
+        } else {
+            match self.search_form.scope.0 {
+                SearchScope::CurrentMailbox => match self.current_mailbox_target() {
+                    Some(target) => {
+                        let label = target.label.clone();
+                        (vec![target], label)
+                    }
+                    None => {
+                        self.server_search_status =
+                            Some("Current mailbox has no server search target".to_string());
+                        return;
+                    }
+                },
+                SearchScope::CurrentAccount => (self.all_search_targets(), "All".to_string()),
+            }
+        };
+
+        // Scope for the immediate local FTS pass (#0105): the same mailbox the
+        // server targets cover, spelled as the `messages.mailbox` key.
+        let local_mailbox = if let Some(ref name) = query.in_mailbox {
+            self.local_mailbox_key_by_name(name)
+        } else {
+            match self.search_form.scope.0 {
+                SearchScope::CurrentMailbox => self.current_local_mailbox_key(),
+                SearchScope::CurrentAccount => None,
+            }
+        };
+
+        self.server_search_scope_label = scope_label;
+        self.server_search_generation = self.server_search_generation.wrapping_add(1);
+        self.push_action(Action::ServerSearch { query, targets, local_mailbox });
+    }
+
+    fn handle_search_overlay_list_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let len = self.server_search_results.len();
+        if len == 0 {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.server_search_focus = SearchOverlayFocus::Field(SearchField::Advanced);
+                }
+                KeyCode::Esc => {
+                    self.close_overlay();
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.server_search_index < len - 1 {
+                    self.server_search_index += 1;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                }
+                // Navigating means the result-count / decline message has been
+                // seen; clearing it uncovers the list-key hints (#0104).
+                self.server_search_status = None;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.server_search_index > 0 {
+                    self.server_search_index -= 1;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                }
+                self.server_search_status = None;
+            }
+            KeyCode::Char('g') => {
+                if self.pending_prefix == Some('g') {
+                    self.server_search_index = 0;
+                    self.server_search_scroll = 0;
+                    self.server_search_headers_scroll = 0;
+                    self.pending_prefix = None;
+                } else {
+                    self.pending_prefix = Some('g');
+                }
+                return None;
+            }
+            KeyCode::Char('G') => {
+                self.pending_prefix = None;
+                self.server_search_index = len.saturating_sub(1);
+                self.server_search_scroll = 0;
+                self.server_search_headers_scroll = 0;
+            }
+            KeyCode::Char('d') => {
+                self.server_search_scroll = self.server_search_scroll.saturating_add(10);
+            }
+            KeyCode::Char('u') => {
+                self.server_search_scroll = self.server_search_scroll.saturating_sub(10);
+            }
+            KeyCode::Enter => {
+                self.push_action(Action::SearchResultJump);
+            }
+            KeyCode::Char('e') => {
+                self.push_action(Action::SearchResultOpen);
+            }
+            KeyCode::Char('y') => {
+                self.push_action(Action::SearchResultYankPath);
+            }
+            KeyCode::Char('f') => {
+                self.push_action(Action::SearchResultFetch);
+            }
+            KeyCode::Char('r') => {
+                self.push_action(Action::SearchResultReply(false));
+            }
+            KeyCode::Char('R') => {
+                self.push_action(Action::SearchResultReply(true));
+            }
+            KeyCode::Char('w') => {
+                self.push_action(Action::SearchResultForward);
+            }
+            KeyCode::Char('a') => {
+                self.push_action(Action::SearchResultArchive);
+            }
+            KeyCode::Char('b') => {
+                self.push_action(Action::SearchResultOpenInBrowser);
+            }
+            KeyCode::Char('o') => {
+                self.open_search_result_attachment_picker(AttachmentPickerMode::Open);
+            }
+            KeyCode::Char('O') => {
+                self.open_search_result_attachment_picker(AttachmentPickerMode::Save);
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.server_search_focus = SearchOverlayFocus::Field(SearchField::Advanced);
+            }
+            KeyCode::Esc => {
+                self.close_overlay();
+            }
+            _ => {}
+        }
+        self.pending_prefix = None;
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Activity log overlay
+    // -----------------------------------------------------------------
+
+    fn handle_activity_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        if self.activity_filter_active {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.activity_filter.push(c);
+                    self.activity_scroll = 0;
+                }
+                KeyCode::Backspace => {
+                    self.activity_filter.pop();
+                    self.activity_scroll = 0;
+                }
+                KeyCode::Enter => {
+                    self.activity_filter_active = false;
+                }
+                KeyCode::Esc => {
+                    if !self.activity_filter.is_empty() {
+                        self.activity_filter.clear();
+                        self.activity_filter_active = false;
+                        self.activity_scroll = 0;
+                    } else {
+                        self.close_overlay();
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.pending_prefix = None;
+                    self.activity_scroll = self.activity_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.pending_prefix = None;
+                    self.activity_scroll = self.activity_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    if self.pending_prefix == Some('g') {
+                        self.activity_scroll = 0;
+                        self.pending_prefix = None;
+                    } else {
+                        self.pending_prefix = Some('g');
+                    }
+                    return None;
+                }
+                KeyCode::Char('G') => {
+                    self.pending_prefix = None;
+                    self.activity_scroll = u16::MAX;
+                }
+                KeyCode::Char('d') => {
+                    self.pending_prefix = None;
+                    self.activity_scroll = self.activity_scroll.saturating_add(10);
+                }
+                KeyCode::Char('u') => {
+                    self.pending_prefix = None;
+                    self.activity_scroll = self.activity_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('/') => {
+                    self.pending_prefix = None;
+                    self.activity_filter_active = true;
+                    self.activity_filter.clear();
+                    self.activity_scroll = 0;
+                }
+                KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => {
+                    self.pending_prefix = None;
+                    self.close_overlay();
+                    self.activity_scroll = 0;
+                    self.activity_filter.clear();
+                    self.activity_filter_active = false;
+                }
+                _ => {
+                    self.pending_prefix = None;
+                }
+            }
+        }
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Compose wizard
+    // -----------------------------------------------------------------
+
+    fn handle_compose_wizard_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let wizard = self.compose_wizard_mut()?;
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::Esc => {
+                self.push_action(Action::ComposeWizardCancel);
+                return None;
+            }
+            KeyCode::Tab => {
+                wizard.focus = wizard.next_field();
+                wizard.suggestion_idx = 0;
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::BackTab => {
+                wizard.focus = wizard.prev_field();
+                wizard.suggestion_idx = 0;
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::Up => {
+                if wizard.focus == ComposeField::Signature {
+                    cycle_signature(wizard, false);
+                } else if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx > 0
+                {
+                    wizard.suggestion_idx -= 1;
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if wizard.focus == ComposeField::Signature {
+                    cycle_signature(wizard, true);
+                } else if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx + 1 < wizard.suggestions.len()
+                {
+                    wizard.suggestion_idx += 1;
+                }
+                return None;
+            }
+            KeyCode::Char('g') if ctrl => {
+                // Force-submit from any field.
+                self.push_action(Action::ComposeWizardSubmit);
+                return None;
+            }
+            KeyCode::Char('e') if ctrl => {
+                if wizard.focus == ComposeField::Signature {
+                    self.push_action(Action::ComposeEditSignature);
+                }
+                return None;
+            }
+            KeyCode::Char('n') if ctrl => {
+                if wizard.focus == ComposeField::Signature {
+                    cycle_signature(wizard, true);
+                } else if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx + 1 < wizard.suggestions.len()
+                {
+                    wizard.suggestion_idx += 1;
+                }
+                return None;
+            }
+            KeyCode::Char('p') if ctrl => {
+                if wizard.focus == ComposeField::Signature {
+                    cycle_signature(wizard, false);
+                } else if wizard.focus.is_address()
+                    && !wizard.suggestions.is_empty()
+                    && wizard.suggestion_idx > 0
+                {
+                    wizard.suggestion_idx -= 1;
+                }
+                return None;
+            }
+            KeyCode::Char('u') if ctrl => {
+                // The Signature field is a selector, not a buffer to clear.
+                if wizard.focus == ComposeField::Signature {
+                    return None;
+                }
+                // Clear the current field.
+                current_field_mut(wizard).clear();
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::Enter => {
+                // The Signature field submits from Enter like any non-last
+                // field: advance to the next field (Body / To).
+                if wizard.focus == ComposeField::Signature {
+                    wizard.focus = wizard.next_field();
+                    wizard.suggestion_idx = 0;
+                    self.recompute_compose_suggestions();
+                    return None;
+                }
+                // On an address field with a highlighted suggestion, accept it.
+                if wizard.focus.is_address() && !wizard.suggestions.is_empty() {
+                    let sug = wizard.suggestions[wizard.suggestion_idx].clone();
+                    accept_suggestion(current_field_mut(wizard), &sug);
+                    // After accepting, clear the suggestion list so another
+                    // Enter moves on rather than re-appending the same contact.
+                    wizard.suggestions.clear();
+                    wizard.suggestion_idx = 0;
+                    return None;
+                }
+                // The body is multi-line (#0097): Enter inserts a newline, and
+                // Ctrl+g is the submit key.
+                if wizard.focus == ComposeField::Body {
+                    wizard.body.push('\n');
+                    return None;
+                }
+                // Subject is the last field only when there is no body field
+                // (Forward / EditDraft): Enter there submits. In a New compose
+                // Enter advances to the body instead.
+                if wizard.focus == ComposeField::Subject && !wizard.has_body_field() {
+                    self.push_action(Action::ComposeWizardSubmit);
+                    return None;
+                }
+                // Otherwise cycle to the next field.
+                wizard.focus = wizard.next_field();
+                wizard.suggestion_idx = 0;
+                self.recompute_compose_suggestions();
+                return None;
+            }
+            KeyCode::Backspace => {
+                if wizard.focus == ComposeField::Signature {
+                    return None;
+                }
+                current_field_mut(wizard).pop();
+                if wizard.focus.is_address() {
+                    wizard.suggestion_idx = 0;
+                    self.recompute_compose_suggestions();
+                }
+                return None;
+            }
+            KeyCode::Char(c) => {
+                // Ctrl-prefixed chars not handled above are ignored.
+                if ctrl {
+                    return None;
+                }
+                // The Signature field is cycled, not typed into; `e` opens the
+                // selected signature in `$EDITOR`, everything else is a no-op.
+                if wizard.focus == ComposeField::Signature {
+                    if c == 'e' {
+                        self.push_action(Action::ComposeEditSignature);
+                    }
+                    return None;
+                }
+                let _ = shift; // Shift+letter is just the uppercase char.
+                current_field_mut(wizard).push(c);
+                if wizard.focus.is_address() {
+                    wizard.suggestion_idx = 0;
+                    self.recompute_compose_suggestions();
+                }
+                return None;
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    pub(crate) fn recompute_compose_suggestions(&mut self) {
+        let Some(wizard) = self.compose_wizard_mut() else {
+            return;
+        };
+        if !wizard.focus.is_address() {
+            wizard.suggestions.clear();
+            wizard.suggestion_idx = 0;
+            return;
+        }
+        let field_value = match wizard.focus {
+            ComposeField::To => &wizard.to,
+            ComposeField::Cc => &wizard.cc,
+            ComposeField::Bcc => &wizard.bcc,
+            ComposeField::Subject | ComposeField::Signature | ComposeField::Body => {
+                wizard.suggestions.clear();
+                return;
+            }
+        };
+        let query = field_value
+            .rsplit(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let Some(index) = wizard.contacts.as_ref() else {
+            wizard.suggestions.clear();
+            return;
+        };
+
+        // Don't flood with N untyped entries — only show suggestions
+        // once the user has typed at least 1 char of the partial.
+        if query.is_empty() {
+            wizard.suggestions.clear();
+            wizard.suggestion_idx = 0;
+            return;
+        }
+
+        let results = mp_core::contacts::search(index, &query, 12);
+        wizard.suggestions = results
+            .into_iter()
+            .map(|r| ComposeSuggestion {
+                address: r.contact.address.clone(),
+                display_name: r.contact.display_name.clone(),
+                tier: if r.contact.sent_to > 0 {
+                    2
+                } else if r.contact.sent_cc > 0 {
+                    1
+                } else {
+                    0
+                },
+            })
+            .collect();
+        wizard.suggestion_idx = 0;
+    }
+
+    /// Open the RSVP overlay for the cursor email, guarding against
+    /// non-invites and self-authored (organizer-side) invites. RSVP is only
+    /// for received REQUEST invites (D3): our own Sent invites make us the
+    /// organizer, so we hint instead of opening.
+    fn open_rsvp_overlay(&mut self) {
+        let Some(email) = self.selected_email() else {
+            return;
+        };
+        if !email.is_invite {
+            self.set_status("Not a calendar invite".to_string());
+            return;
+        }
+        if self.active_kind() == MailboxKind::Sent {
+            self.set_status(
+                "You are the organizer of this invite — nothing to RSVP".to_string(),
+            );
+            return;
+        }
+        let subject = email.subject.clone();
+        let Some(msg) = email.msg else {
+            self.set_status("This search hit has no local copy to RSVP from".to_string());
+            return;
+        };
+        // The method and the summary live in the ics blob, which is parsed for
+        // the selected message only (#0038 item 6). The cursor is on it, so
+        // this is the memo the render pass already filled in the common case.
+        let event = self.load_message_invite(msg);
+        if let Some(refusal) = rsvp_refusal(event.as_ref()) {
+            self.set_status(refusal);
+            return;
+        }
+        let summary = event
+            .and_then(|e| e.summary)
+            .unwrap_or(subject);
+        self.overlay = Overlay::Rsvp(RsvpOverlay {
+            msg,
+            summary,
+            selected: 0,
+        });
+    }
+
+    /// Calendar-view sibling of [`Self::open_rsvp_overlay`] (#0034): the same
+    /// guards (not our own / must be a REQUEST), plus one the mail path cannot
+    /// need, since cancelled rows exist only here: RSVP'ing to a meeting the
+    /// organizer already cancelled would mail a reply about a dead event. Read
+    /// from the selected agenda row instead of the mail cursor; organizer-ness
+    /// comes from the row (the winning copy's mailbox), not the active mailbox.
+    fn open_rsvp_overlay_for_event(&mut self) {
+        let Some(event) = self.selected_event() else {
+            return;
+        };
+        if event.cancelled {
+            self.set_status(
+                "This event was cancelled by the organizer — nothing to RSVP".to_string(),
+            );
+            return;
+        }
+        if event.is_organizer {
+            self.set_status(
+                "You are the organizer of this invite — nothing to RSVP".to_string(),
+            );
+            return;
+        }
+        let is_request = event
+            .event
+            .method
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case("REQUEST"));
+        if !is_request {
+            self.set_status(
+                "Only received invitations (REQUEST) can be RSVP'd".to_string(),
+            );
+            return;
+        }
+        let summary = event
+            .event
+            .summary
+            .clone()
+            .unwrap_or_else(|| event.subject.clone());
+        let msg = event.msg;
+        self.overlay = Overlay::Rsvp(RsvpOverlay {
+            msg,
+            summary,
+            selected: 0,
+        });
+    }
+
+    /// Build and open the conversation overlay for the cursor message (#0008).
+    ///
+    /// `message.thread` on the session the `App` holds (`LST-10`, P5-U10d):
+    /// the selected row's `thread_id` and every message ingest gave that same
+    /// id, oldest first and one row per `Message-ID`. Nothing re-parses headers
+    /// anywhere; the grouping was decided at ingest and the daemon reads it out
+    /// of the indexed column. The fold is the daemon's because it is a query
+    /// over every mailbox of the account and this client holds one mailbox's
+    /// listing at a time.
+    ///
+    /// A message with no related mail in the store (a lone message, or a reply
+    /// whose parents are not downloaded) answers with itself alone, and that is
+    /// the sentence below rather than a one-line overlay.
+    ///
+    /// The refusals collapse into one line, which is the trade every routed
+    /// read of this migration has made: the account with no store and the row
+    /// that is gone are both the daemon's own sentence now, with the code in
+    /// it, where the store read branched on two outcomes of its own.
+    fn open_thread_overlay(&mut self) {
+        let Some(msg) = self.selected_email_ref() else {
+            // A draft or an unresolved server-search hit has no store row.
+            if self.selected_email().is_some() {
+                self.set_status("A draft has no conversation to show".to_string());
+            }
+            return;
+        };
+        let account = self.account_config.name.clone();
+        let answer = match self.queries() {
+            Some(queries) => crate::queries::thread(queries, &account, msg),
+            None => Err(anyhow::anyhow!("there is no daemon session to ask")),
+        };
+        let thread = match answer {
+            Ok(thread) => thread,
+            Err(e) => {
+                self.set_status(format!("Could not load the conversation: {e:#}"));
+                return;
+            }
+        };
+        if thread.messages.len() <= 1 {
+            self.set_status("No related emails for this message in the store".to_string());
+            return;
+        }
+        let subject = Some(thread.subject.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(no subject)".to_string());
+        let mut selected = 0;
+        let messages: Vec<ThreadEntry> = thread
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                if r.current {
+                    selected = i;
+                }
+                ThreadEntry {
+                    msg: MessageRef::new(r.id),
+                    mailbox: r.mailbox.clone(),
+                    from: super::extract_display_name(&r.from),
+                    date_display: super::resolve_date(
+                        &Some(r.date_display.clone()),
+                        &None,
+                        std::path::Path::new(""),
+                    )
+                    .0,
+                    read: r.flags.seen,
+                    answered: r.flags.answered,
+                    forwarded: r.flags.forwarded,
+                    flagged: r.flags.flagged,
+                    current: r.current,
+                }
+            })
+            .collect();
+        self.overlay = Overlay::Thread(ThreadOverlay {
+            subject,
+            messages,
+            selected,
+        });
+    }
+
+    /// Input for the conversation overlay (#0008): `j`/`k` move, `Enter`/`e`
+    /// opens the highlighted message (switching mailbox when it lives in
+    /// another), `Esc`/`q`/`T` closes.
+    fn handle_thread_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let Overlay::Thread(overlay) = &mut self.overlay else {
+            return None;
+        };
+        let len = overlay.messages.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if overlay.selected + 1 < len {
+                    overlay.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                overlay.selected = 0;
+            }
+            KeyCode::Char('G') => {
+                overlay.selected = len.saturating_sub(1);
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                let target = overlay.messages.get(overlay.selected).cloned();
+                self.close_overlay();
+                if let Some(entry) = target {
+                    self.open_message(entry.msg, &entry.mailbox);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => {
+                self.close_overlay();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_rsvp_overlay_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let overlay = self.rsvp_overlay_mut()?;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                if overlay.selected < 2 {
+                    overlay.selected += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                overlay.selected = overlay.selected.saturating_sub(1);
+            }
+            KeyCode::Char('a') => overlay.selected = 0,
+            KeyCode::Char('t') => overlay.selected = 1,
+            KeyCode::Char('d') => overlay.selected = 2,
+            KeyCode::Enter => {
+                let choice = match overlay.selected {
+                    0 => RsvpChoice::Accept,
+                    1 => RsvpChoice::Tentative,
+                    _ => RsvpChoice::Decline,
+                };
+                let Overlay::Rsvp(overlay) =
+                    std::mem::replace(&mut self.overlay, Overlay::None)
+                else {
+                    return None;
+                };
+                self.push_action(Action::Rsvp {
+                    msg: overlay.msg,
+                    choice,
+                });
+                // Consume-and-close: promote any error queued behind it.
+                self.promote_pending_error();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_overlay();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_attachment_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let picker = self.attachment_picker_mut().unwrap();
+        match picker.mode {
+            AttachmentPickerMode::Open => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if picker.selected < picker.files.len().saturating_sub(1) {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    let Overlay::Attachment(picker) =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return None;
+                    };
+                    let path = picker.files[picker.selected].clone();
+                    self.push_action(Action::OpenAttachment(path));
+                    // Consume-and-close: promote any error queued behind it.
+                    self.promote_pending_error();
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.close_overlay();
+                }
+                _ => {}
+            },
+            AttachmentPickerMode::Save => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if picker.selected < picker.files.len().saturating_sub(1) {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Char(' ') => {
+                    let idx = picker.selected;
+                    if picker.selected_set.contains(&idx) {
+                        picker.selected_set.remove(&idx);
+                    } else {
+                        picker.selected_set.insert(idx);
+                    }
+                    // Advance cursor
+                    if picker.selected < picker.files.len().saturating_sub(1) {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if picker.selected_set.len() == picker.files.len() {
+                        picker.selected_set.clear();
+                    } else {
+                        picker.selected_set = (0..picker.files.len()).collect();
+                    }
+                }
+                KeyCode::Enter => {
+                    let Overlay::Attachment(picker) =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return None;
+                    };
+                    // Collect selected files, or cursor item if none selected
+                    let sources: Vec<PathBuf> = if picker.selected_set.is_empty() {
+                        vec![picker.files[picker.selected].clone()]
+                    } else {
+                        let mut indices: Vec<usize> =
+                            picker.selected_set.iter().copied().collect();
+                        indices.sort();
+                        indices
+                            .iter()
+                            .filter_map(|&i| picker.files.get(i).cloned())
+                            .collect()
+                    };
+                    // Overlay->overlay handoff: `open_dir_picker` sets
+                    // `Overlay::Dir`, so `promote_pending_error` (guarded on
+                    // `Overlay::None`) correctly does NOT fire between taking
+                    // the attachment picker and opening the dir picker.
+                    self.open_dir_picker(sources);
+                    self.promote_pending_error();
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.close_overlay();
+                }
+                _ => {}
+            },
+        }
+        None
+    }
+
+    fn handle_dir_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let picker = match self.dir_picker_mut() {
+            Some(p) => p,
+            None => return None,
+        };
+
+        match picker.mode {
+            DirPickerMode::Zoxide => match key.code {
+                KeyCode::Down => {
+                    if !picker.zoxide_results.is_empty()
+                        && picker.selected < picker.zoxide_results.len().saturating_sub(1)
+                    {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Backspace => {
+                    picker.query.pop();
+                    picker.selected = 0;
+                    refresh_zoxide_results(picker);
+                }
+                KeyCode::Tab => {
+                    // Switch to browser mode. Use highlighted result or default dir.
+                    let start_dir = picker
+                        .zoxide_results
+                        .get(picker.selected)
+                        .cloned()
+                        .unwrap_or_else(|| picker.current_dir.clone());
+                    picker.mode = DirPickerMode::Browser;
+                    picker.current_dir = start_dir;
+                    picker.selected = 0;
+                    refresh_browser_entries(picker);
+                }
+                KeyCode::Enter => {
+                    if let Some(dir) = picker.zoxide_results.get(picker.selected).cloned() {
+                        let sources = picker.sources.clone();
+                        self.close_overlay();
+                        self.push_action(Action::SaveAttachments {
+                            sources,
+                            dest_dir: dir,
+                        });
+                    }
+                }
+                KeyCode::Esc => {
+                    self.close_overlay();
+                }
+                KeyCode::Char(c) => {
+                    picker.query.push(c);
+                    picker.selected = 0;
+                    refresh_zoxide_results(picker);
+                }
+                _ => {}
+            },
+            DirPickerMode::Browser => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let max = picker.dir_entries.len(); // entry 0 = [ Save here ]
+                    if picker.selected < max {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    picker.selected = 0;
+                }
+                KeyCode::Char('G') => {
+                    picker.selected = picker.dir_entries.len(); // last entry (save-here is 0)
+                }
+                KeyCode::Char('~') => {
+                    let home =
+                        PathBuf::from(shellexpand::tilde("~").into_owned());
+                    picker.current_dir = home;
+                    picker.selected = 0;
+                    refresh_browser_entries(picker);
+                }
+                KeyCode::Char('h') | KeyCode::Backspace => {
+                    if let Some(parent) = picker.current_dir.parent() {
+                        picker.current_dir = parent.to_path_buf();
+                        picker.selected = 0;
+                        refresh_browser_entries(picker);
+                    }
+                }
+                KeyCode::Char('l') => {
+                    // Descend into selected directory (no-op on "[ Save here ]")
+                    if picker.selected > 0 {
+                        let idx = picker.selected - 1;
+                        if let Some(dir) = picker.dir_entries.get(idx).cloned() {
+                            picker.current_dir = dir;
+                            picker.selected = 0;
+                            refresh_browser_entries(picker);
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if picker.selected == 0 {
+                        // "[ Save here ]" -- confirm
+                        let sources = picker.sources.clone();
+                        let dest_dir = picker.current_dir.clone();
+                        self.close_overlay();
+                        self.push_action(Action::SaveAttachments {
+                            sources,
+                            dest_dir,
+                        });
+                    } else {
+                        // Descend into selected directory
+                        let idx = picker.selected - 1;
+                        if let Some(dir) = picker.dir_entries.get(idx).cloned() {
+                            picker.current_dir = dir;
+                            picker.selected = 0;
+                            refresh_browser_entries(picker);
+                        }
+                    }
+                }
+                KeyCode::Tab => {
+                    picker.mode = DirPickerMode::Zoxide;
+                    picker.selected = 0;
+                    refresh_zoxide_results(picker);
+                }
+                KeyCode::Esc => {
+                    self.close_overlay();
+                }
+                _ => {}
+            },
+        }
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Quick-move mailbox picker (#0018)
+    // -----------------------------------------------------------------
+
+    /// Open the quick-move picker for the current selection (or the
+    /// cursor email). Candidates are all server-backed mailboxes other
+    /// than the active one, so "move to the same mailbox" cannot happen.
+    fn open_mailbox_picker(&mut self) {
+        // The source mailbox must have a server-side folder; Drafts
+        // (local-only) can't be quick-moved -- drafts leave via send.
+        if self
+            .mailboxes
+            .get(self.active_mailbox)
+            .and_then(|m| m.server_name.as_ref())
+            .is_none()
+        {
+            self.set_status("Quick-move is not available in this mailbox".to_string());
+            return;
+        }
+
+        let msgs: Vec<MessageRef> = if !self.selection.is_empty() {
+            self.selection.iter().filter_map(|k| k.msg()).collect()
+        } else if let Some(m) = self.selected_email_ref() {
+            vec![m]
+        } else {
+            return;
+        };
+
+        let candidates: Vec<(usize, String)> = self
+            .mailboxes
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| *i != self.active_mailbox && m.server_name.is_some())
+            .map(|(i, m)| (i, m.label.clone()))
+            .collect();
+        if candidates.is_empty() {
+            self.set_status("No other mailboxes to move to".to_string());
+            return;
+        }
+
+        let filtered = (0..candidates.len()).collect();
+        self.overlay = Overlay::Mailbox(MailboxPicker {
+            query: String::new(),
+            candidates,
+            filtered,
+            selected: 0,
+            msgs,
+        });
+    }
+
+    fn handle_mailbox_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let picker = self.mailbox_picker_mut()?;
+
+        match key.code {
+            KeyCode::Down | KeyCode::Tab => {
+                if !picker.filtered.is_empty()
+                    && picker.selected < picker.filtered.len() - 1
+                {
+                    picker.selected += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                picker.selected = picker.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(&cand_idx) = picker.filtered.get(picker.selected) {
+                    let dest_idx = picker.candidates[cand_idx].0;
+                    let Overlay::Mailbox(picker) =
+                        std::mem::replace(&mut self.overlay, Overlay::None)
+                    else {
+                        return None;
+                    };
+                    self.selection.clear();
+                    self.push_action(Action::MoveToMailbox {
+                        msgs: picker.msgs,
+                        dest_idx,
+                    });
+                    // Consume-and-close: promote any error queued behind it.
+                    self.promote_pending_error();
+                }
+            }
+            KeyCode::Esc => {
+                self.close_overlay();
+            }
+            KeyCode::Backspace => {
+                picker.query.pop();
+                refresh_mailbox_picker_filter(picker);
+            }
+            KeyCode::Char(c) => {
+                picker.query.push(c);
+                refresh_mailbox_picker_filter(picker);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    // -----------------------------------------------------------------
+    // Signature management overlay (#0107)
+    // -----------------------------------------------------------------
+
+    /// Open the signatures overlay on the active account (`cs`).
+    ///
+    /// An empty signatures directory is not a reason to refuse: the overlay is
+    /// where a first signature gets created, so it opens on an empty list that
+    /// says so.
+    fn open_signatures_overlay(&mut self) {
+        let account = self.account_config.name.clone();
+        self.overlay = Overlay::Signatures(SignaturesOverlay::for_account(&account));
+    }
+
+    /// Route to the browse surface or to whichever prompt owns the keyboard.
+    fn handle_signatures_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let mode = match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.mode,
+            _ => return None,
+        };
+        match mode {
+            SignaturesMode::Browse => self.handle_signatures_browse_key(key),
+            SignaturesMode::New | SignaturesMode::Rename => {
+                self.handle_signatures_prompt_key(key, mode)
+            }
+        }
+    }
+
+    /// The list surface: navigate, set the default, and the four file
+    /// operations. Each mutation goes through [`mp_core::signatures`] and
+    /// surfaces its validation error on the status line rather than failing
+    /// quietly.
+    fn handle_signatures_browse_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    if overlay.selected + 1 < overlay.names.len() {
+                        overlay.selected += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter => self.toggle_selected_signature_default(),
+            KeyCode::Char('e') => {
+                match self.selected_signature_name() {
+                    Some(name) => self.push_action(Action::EditSignatureFile { name }),
+                    None => self.set_status(
+                        "No signature to edit; press n to create one".to_string(),
+                    ),
+                }
+            }
+            KeyCode::Char('n') => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::New;
+                    overlay.input.clear();
+                }
+            }
+            KeyCode::Char('r') => {
+                // Seed the prompt with the current name: a rename is usually an
+                // edit of what is there, not a retype.
+                let current = self.selected_signature_name();
+                match current {
+                    Some(name) => {
+                        if let Some(overlay) = self.signatures_overlay_mut() {
+                            overlay.mode = SignaturesMode::Rename;
+                            overlay.input = name;
+                        }
+                    }
+                    None => self.set_status("No signature to rename".to_string()),
+                }
+            }
+            KeyCode::Char('d') => self.confirm_delete_signature(),
+            KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
+            _ => {}
+        }
+        None
+    }
+
+    /// The two name prompts (create / rename): free text until Enter commits
+    /// or Esc goes back to the list.
+    fn handle_signatures_prompt_key(
+        &mut self,
+        key: KeyEvent,
+        mode: SignaturesMode,
+    ) -> Option<Message> {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::Browse;
+                    overlay.input.clear();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.input.pop();
+                }
+            }
+            KeyCode::Enter => match mode {
+                SignaturesMode::New => self.commit_new_signature(),
+                SignaturesMode::Rename => self.commit_signature_rename(),
+                SignaturesMode::Browse => {}
+            },
+            KeyCode::Char(c) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.input.push(c);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The signature under the overlay's cursor, owned so the caller can then
+    /// take `&mut self` again.
+    fn selected_signature_name(&self) -> Option<String> {
+        match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.selected_name().map(str::to_string),
+            _ => None,
+        }
+    }
+
+    /// Enter on the list: make the cursor signature the account default, or
+    /// clear the default when it already is one. Without the second half there
+    /// would be no way back to "no signature by default" short of deleting the
+    /// file.
+    fn toggle_selected_signature_default(&mut self) {
+        let (account, name, already_default) = match &self.overlay {
+            Overlay::Signatures(overlay) => (
+                overlay.account.clone(),
+                overlay.selected_name().map(str::to_string),
+                overlay.selected_is_default(),
+            ),
+            _ => return,
+        };
+        let Some(name) = name else {
+            self.set_status("No signature selected".to_string());
+            return;
+        };
+
+        let target = if already_default { None } else { Some(name.as_str()) };
+        match mp_core::signatures::set_default_signature(&account, target) {
+            Ok(()) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.refresh();
+                }
+                self.refresh_signature_content();
+                let msg = if already_default {
+                    format!("'{name}' is no longer the default signature")
+                } else {
+                    format!("'{name}' is now the default signature")
+                };
+                self.set_status(msg);
+            }
+            Err(e) => self.set_status_level(
+                format!("Cannot set the default signature: {e:#}"),
+                StatusLevel::Error,
+            ),
+        }
+    }
+
+    /// Enter at the create prompt. A name the signatures module refuses (empty,
+    /// a path separator, already taken) leaves the prompt open with the text
+    /// intact so it can be fixed; a good one creates the file and drops the
+    /// user straight into `$EDITOR`, which is what they wanted `n` for.
+    fn commit_new_signature(&mut self) {
+        let name = match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.input.clone(),
+            _ => return,
+        };
+        match mp_core::signatures::create(&name) {
+            Ok(_) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::Browse;
+                    overlay.input.clear();
+                    overlay.refresh();
+                    overlay.select(&name);
+                }
+                self.push_action(Action::EditSignatureFile { name: name.clone() });
+                self.set_status(format!("Created signature '{name}'"));
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot create: {e:#}"), StatusLevel::Error)
+            }
+        }
+    }
+
+    /// Enter at the rename prompt. Same error contract as the create prompt:
+    /// the prompt stays open on a refusal.
+    fn commit_signature_rename(&mut self) {
+        let (old, new) = match &self.overlay {
+            Overlay::Signatures(overlay) => (
+                overlay.selected_name().map(str::to_string),
+                overlay.input.clone(),
+            ),
+            _ => return,
+        };
+        let Some(old) = old else {
+            self.set_status("No signature to rename".to_string());
+            return;
+        };
+        match mp_core::signatures::rename(&old, &new) {
+            Ok(()) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.mode = SignaturesMode::Browse;
+                    overlay.input.clear();
+                    // `rename` carries the account default across, so the
+                    // refresh is what shows the marker on the new name.
+                    overlay.refresh();
+                    overlay.select(&new);
+                }
+                self.refresh_signature_content();
+                self.set_status(format!("Renamed '{old}' to '{new}'"));
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot rename: {e:#}"), StatusLevel::Error)
+            }
+        }
+    }
+
+    /// `d`: raise the shared confirm dialog over the overlay, handing it the
+    /// overlay so either answer lands back on the list.
+    fn confirm_delete_signature(&mut self) {
+        let name = self.selected_signature_name();
+        let Some(name) = name else {
+            self.set_status("No signature to delete".to_string());
+            return;
+        };
+        let Overlay::Signatures(overlay) =
+            std::mem::replace(&mut self.overlay, Overlay::None)
+        else {
+            return;
+        };
+        self.overlay = Overlay::Confirm(ConfirmDialog {
+            title: format!("Delete signature '{name}'?"),
+            detail: mp_core::signatures::signature_file(&name).display().to_string(),
+            action: ConfirmAction::DeleteSignature(overlay),
+        });
+    }
+
+    /// Command-palette input (`:` / `Ctrl+p`, #0100): a text-input fuzzy finder
+    /// over the runnable `KeyAction` catalogue, modelled on the mailbox picker.
+    /// Typed characters filter (family leaders are literal here); Up/Down (and
+    /// Tab/BackTab) move the cursor; Enter closes the palette and runs the
+    /// selected action against the current context through the same executor a
+    /// keypress uses; Esc closes.
+    fn handle_command_palette_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let palette = match &mut self.overlay {
+            Overlay::Palette(p) => p,
+            _ => return None,
+        };
+        match key.code {
+            KeyCode::Down | KeyCode::Tab => {
+                if !palette.filtered.is_empty()
+                    && palette.selected < palette.filtered.len() - 1
+                {
+                    palette.selected += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                palette.selected = palette.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(action) = palette.selected_action() {
+                    // Consume-and-close, then run the action in the context the
+                    // palette floated over. `execute` reads no digit/leader key
+                    // for any palette-runnable action, so the Enter event is a
+                    // fine stand-in for the key that would have armed it.
+                    self.close_overlay();
+                    return self.execute(action, key);
+                }
+            }
+            KeyCode::Esc => {
+                self.close_overlay();
+            }
+            KeyCode::Backspace => {
+                palette.query.pop();
+                refresh_palette_filter(palette);
+            }
+            KeyCode::Char(c) => {
+                palette.query.push(c);
+                refresh_palette_filter(palette);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Helper to open the attachment picker in the given mode.
+    ///
+    /// The files come out of `message_blobs` (#0052 scope item 8): the row
+    /// under the cursor is materialised into a temp directory the way
+    /// `mp open` and `mp save` do it, and the picker and the save pipeline
+    /// below it address those files, as they always did.
+    fn open_attachment_picker(&mut self, mode: AttachmentPickerMode) {
+        let Some(files) = crate::actions::cursor_attachment_files(self) else {
+            return;
+        };
+        self.present_attachments(files, mode);
+    }
+
+    /// Helper to open the attachment picker for a search result.
+    ///
+    /// A hit that resolved to a local row is [`Self::open_attachment_picker`]
+    /// exactly; one that did not has the attachment bytes of the fetch the
+    /// overlay is rendering, which are written out to the same temp area, so
+    /// neither half declines (#0052 scope item 11).
+    fn open_search_result_attachment_picker(&mut self, mode: AttachmentPickerMode) {
+        let Some(hit) = self.server_search_results.get(self.server_search_index) else {
+            return;
+        };
+        let msg = hit.entry.msg;
+        let index = self.server_search_index;
+        // Cloned only for the unresolved hit, which is the one case that needs
+        // the fetched payload while `self` is borrowed mutably below.
+        let fetched = msg.is_none().then(|| hit.fetched.clone());
+        let files = match (msg, fetched) {
+            (Some(msg), _) => crate::actions::row_attachment_files(self, msg.row_id()),
+            (None, Some(fetched)) => {
+                crate::actions::fetched_attachment_files(self, &fetched, index)
+            }
+            (None, None) => None,
+        };
+        let Some(files) = files else {
+            return;
+        };
+        self.present_attachments(files, mode);
+    }
+
+    /// Put a materialised attachment list in front of the user: nothing to
+    /// show says so, one file skips the picker (`o` opens it, `O` goes
+    /// straight to the directory picker), several open the picker.
+    ///
+    /// The pre-store build's own branching, kept: only the origin of the files
+    /// changed. `mp open`'s CLI shortcut of opening every attachment at once
+    /// stays CLI-only, because a TUI that opened six windows on one keypress
+    /// would be the surprising half of the two.
+    fn present_attachments(&mut self, files: Vec<PathBuf>, mode: AttachmentPickerMode) {
+        match files.len() {
+            0 => self.set_status("No attachments".to_string()),
+            1 if mode == AttachmentPickerMode::Open => {
+                self.push_action(Action::OpenAttachment(files.into_iter().next().unwrap()));
+            }
+            1 => self.open_dir_picker(files),
+            _ => {
+                self.overlay = Overlay::Attachment(AttachmentPicker {
+                    files,
+                    selected: 0,
+                    mode,
+                    selected_set: HashSet::new(),
+                });
+            }
+        }
+    }
+
+    /// Open the directory picker overlay with the given source files.
+    fn open_dir_picker(&mut self, sources: Vec<PathBuf>) {
+        let default_dir = self
+            .last_save_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(shellexpand::tilde("~/Downloads").into_owned()));
+
+        let zoxide_available = which_zoxide();
+        let start_mode = if zoxide_available {
+            DirPickerMode::Zoxide
+        } else {
+            DirPickerMode::Browser
+        };
+
+        let mut picker = DirPicker {
+            mode: start_mode,
+            query: String::new(),
+            zoxide_results: Vec::new(),
+            zoxide_available,
+            current_dir: default_dir,
+            dir_entries: Vec::new(),
+            selected: 0,
+            sources,
+        };
+
+        if zoxide_available {
+            refresh_zoxide_results(&mut picker);
+        } else {
+            refresh_browser_entries(&mut picker);
+        }
+
+        self.overlay = Overlay::Dir(picker);
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) -> Option<Message> {
+        if self.help_filter_active {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.help_filter.push(c);
+                    self.help_scroll = 0;
+                }
+                KeyCode::Backspace => {
+                    self.help_filter.pop();
+                    self.help_scroll = 0;
+                }
+                KeyCode::Enter => {
+                    self.help_filter_active = false;
+                }
+                KeyCode::Esc => {
+                    if !self.help_filter.is_empty() {
+                        self.help_filter.clear();
+                        self.help_filter_active = false;
+                        self.help_scroll = 0;
+                    } else {
+                        self.close_overlay();
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.pending_prefix = None;
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.pending_prefix = None;
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    if self.pending_prefix == Some('g') {
+                        self.help_scroll = 0;
+                        self.pending_prefix = None;
+                    } else {
+                        self.pending_prefix = Some('g');
+                    }
+                }
+                KeyCode::Char('G') => {
+                    self.pending_prefix = None;
+                    self.help_scroll = u16::MAX;
+                }
+                KeyCode::Char('d') => {
+                    self.pending_prefix = None;
+                    self.help_scroll = self.help_scroll.saturating_add(10);
+                }
+                KeyCode::Char('u') => {
+                    self.pending_prefix = None;
+                    self.help_scroll = self.help_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('/') => {
+                    self.pending_prefix = None;
+                    self.help_filter_active = true;
+                    self.help_filter.clear();
+                    self.help_scroll = 0;
+                }
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    self.pending_prefix = None;
+                    self.close_overlay();
+                    self.help_scroll = 0;
+                    self.help_filter.clear();
+                    self.help_filter_active = false;
+                }
+                _ => {
+                    self.pending_prefix = None;
+                }
+            }
+        }
+        None
+    }
+
+    fn handle_persistent_error_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Char('s') => {
+                self.close_overlay();
+                self.push_action(Action::Sync);
+            }
+            KeyCode::Char('d') | KeyCode::Esc => {
+                self.close_overlay();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_search_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Enter => {
+                self.focus = Focus::List;
+            }
+            KeyCode::Esc => {
+                self.search_query.clear();
+                self.reload_from_cache();
+                self.focus = Focus::List;
+            }
+            KeyCode::Char(c) => {
+                let old_lower = self.search_query.to_lowercase();
+                self.search_query.push(c);
+                // Appending a character normally only shrinks the match
+                // set (substring containment is monotone), so narrow the
+                // current visible set instead of rescanning everything.
+                // But lowercasing is not always append-monotone: Greek
+                // capital sigma is context-sensitive ("ΘΕΟΣ" -> "θεος"
+                // with final ς, yet "ΘΕΟΣΦ" -> "θεοσφ" with medial σ),
+                // so a haystack can match the extended query without
+                // matching the shorter one. Narrow only when the old
+                // lowercased query is a prefix of the new one; otherwise
+                // recompute from the full list.
+                let narrow = self.search_query.to_lowercase().starts_with(&old_lower);
+                self.apply_search_filter(narrow);
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.apply_search_filter(false);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Jump-to-date input (#0017).
+    ///
+    /// `Enter` resolves the typed date and moves the cursor, `Esc` abandons
+    /// it, and an unreadable date leaves the prompt armed with the reason on
+    /// the status line -- a typo costs a correction, not a re-arm.
+    ///
+    /// `now()` is read here, at the moment the user commits, and passed into
+    /// the pure grammar: `last week` means a week before the keypress, and
+    /// nothing below this line knows what day it is.
+    fn handle_jump_date_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Enter => {
+                let input = self.jump_date_input.clone().unwrap_or_default();
+                let today = chrono::Local::now().date_naive();
+                match super::jump_date::parse_jump_date(&input, today) {
+                    Ok(target) => {
+                        self.jump_date_input = None;
+                        self.jump_to_date(target);
+                    }
+                    Err(reason) => {
+                        self.set_status_level(reason, crate::app::StatusLevel::Warning);
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.jump_date_input = None;
+            }
+            KeyCode::Char(c) => {
+                if let Some(buf) = self.jump_date_input.as_mut() {
+                    buf.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(buf) = self.jump_date_input.as_mut() {
+                    buf.pop();
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Attach-file input (#0098).
+    ///
+    /// `Enter` resolves the typed path and, when it is on disk, hands it to
+    /// [`Action::AttachFileToDraft`] which appends it to the cursor draft's
+    /// `attachments:` frontmatter. A path that does not resolve is named on the
+    /// status line and the prompt stays armed, so a typo costs a correction
+    /// rather than a re-arm -- the same shape the jump-to-date prompt uses.
+    /// `Esc` abandons it, and an empty commit is a silent cancel.
+    ///
+    /// The path is expanded for the existence check the way
+    /// [`crate::send::resolve_attachment_paths`] expands it (`~` to `$HOME`),
+    /// but the raw text the user typed is what is stored, so a portable
+    /// `~`-relative entry survives to be re-expanded at send time.
+    fn handle_attach_file_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Enter => {
+                let input = self.attach_file_input.clone().unwrap_or_default();
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    // An empty commit cancels rather than storing a blank entry.
+                    self.attach_file_input = None;
+                    return None;
+                }
+                let expanded = shellexpand::tilde(trimmed).into_owned();
+                if !std::path::Path::new(&expanded).exists() {
+                    self.set_status_level(
+                        format!("No such file: {trimmed}"),
+                        crate::app::StatusLevel::Warning,
+                    );
+                    return None;
+                }
+                self.attach_file_input = None;
+                self.push_action(Action::AttachFileToDraft {
+                    path: trimmed.to_string(),
+                });
+            }
+            KeyCode::Esc => {
+                self.attach_file_input = None;
+            }
+            KeyCode::Char(c) => {
+                if let Some(buf) = self.attach_file_input.as_mut() {
+                    buf.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(buf) = self.attach_file_input.as_mut() {
+                    buf.pop();
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Contacts view fuzzy-search input (#0033). Free-text like the metadata
+    /// search: each edit recomputes the matched contact list. `Enter` leaves
+    /// the input but keeps the filter; `Esc` clears it.
+    fn handle_contacts_search_key(&mut self, key: KeyEvent) -> Option<Message> {
+        match key.code {
+            KeyCode::Enter => {
+                self.contacts_view.searching = false;
+            }
+            KeyCode::Esc => {
+                self.contacts_view.searching = false;
+                self.contacts_view.query.clear();
+                self.recompute_contact_matches();
+            }
+            KeyCode::Char(c) => {
+                self.contacts_view.query.push(c);
+                self.recompute_contact_matches();
+            }
+            KeyCode::Backspace => {
+                self.contacts_view.query.pop();
+                self.recompute_contact_matches();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Recompute the visible view for the current `search_query` (P3).
+    ///
+    /// `narrow` may be true only when the *lowercased* query changed by
+    /// appending characters to the lowercased query the current view was
+    /// built from (i.e. a keystroke in search mode that keeps the old
+    /// lowered query as a prefix): substring matching is monotone under
+    /// query extension, so the new match set is a subset of the current
+    /// one and we can retain-filter `visible` instead of rescanning the
+    /// full list. Backspace/edits/resets — and appends where lowercasing
+    /// rewrites earlier characters (Greek final sigma) — must pass
+    /// `narrow = false`.
+    ///
+    /// The needle is lowercased once per call, not once per email.
+    pub fn apply_search_filter(&mut self, narrow: bool) {
+        self.selection.clear();
+
+        if self.search_query.is_empty() {
+            self.visible = (0..self.emails.len()).collect();
+        } else {
+            let kind = self.active_kind();
+            if narrow {
+                let needle = self.search_query.to_lowercase();
+                narrow_visible(&self.emails, &mut self.visible, &needle, kind);
+            } else {
+                // `filter_visible` lowercases the needle once internally.
+                self.visible = filter_visible(&self.emails, &self.search_query, kind);
+            }
+        }
+        self.apply_flagged_filter();
+
+        self.list_index = 0;
+        self.headers_scroll = 0;
+        self.preview_scroll = 0;
+    }
+
+    /// Reset the view after clearing/entering search: reapply the (now
+    /// usually empty) query to the full list and reset the cursor. The
+    /// full list is always at hand in `self.emails` (it is never
+    /// filtered in place anymore), so no cache round-trip is needed.
+    pub(crate) fn reload_from_cache(&mut self) {
+        self.rebuild_visible();
+        self.list_index = 0;
+        self.headers_scroll = 0;
+        self.preview_scroll = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search filter helpers (P2/P3: visible-indices model)
+// ---------------------------------------------------------------------------
+
+/// Does `email` match the (already lowercased) search needle?
+///
+/// `bodies` is `Some` only in body-search mode (`\`), and holds the mailbox's
+/// bodies already lowercased, so the body test is the same substring test the
+/// entry used to answer from its own `body` field before it became lazy
+/// (#0038 scope item 5). An entry the index has no body for (no store row, or
+/// a blob the retention sweep evicted) simply does not match on body.
+/// Why the invite under the mail cursor cannot be RSVP'd, or `None` when it
+/// can (#0029 for the REQUEST guard, #0031 for the version guards).
+///
+/// Pure so the version rules are pinned without a store: the payload the card
+/// shows is one *version* of the event, and a reply to a cancelled or
+/// superseded version would carry a `SEQUENCE` the organizer has already moved
+/// past. Refuse and say why rather than mailing an answer about a dead
+/// version; the invite itself stays readable either way.
+fn rsvp_refusal(event: Option<&mp_core::types::EventFrontmatter>) -> Option<String> {
+    let is_request = event
+        .and_then(|e| e.method.as_deref())
+        .is_some_and(|m| m.eq_ignore_ascii_case("REQUEST"));
+    if !is_request {
+        return Some("Only received invitations (REQUEST) can be RSVP'd".to_string());
+    }
+    if event.is_some_and(|e| e.cancelled) {
+        return Some("This event was cancelled by the organizer \u{2014} nothing to RSVP".to_string());
+    }
+    if event.is_some_and(|e| e.superseded) {
+        return Some(
+            "A newer version of this invitation has arrived \u{2014} RSVP from that one".to_string(),
+        );
+    }
+    None
+}
+
+fn email_matches(email: &EmailEntry, needle_lower: &str, kind: MailboxKind) -> bool {
+    email.subject.to_lowercase().contains(needle_lower)
+        || email
+            .display_contact(kind)
+            .to_lowercase()
+            .contains(needle_lower)
+        || email.date_display.to_lowercase().contains(needle_lower)
+        || email.from.to_lowercase().contains(needle_lower)
+        || email.to.to_lowercase().contains(needle_lower)
+}
+
+/// Build the visible-index view of `emails` for `query` from scratch.
+/// Empty query -> all indices (in order). The needle is lowercased once.
+pub(super) fn filter_visible(emails: &[EmailEntry], query: &str, kind: MailboxKind) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..emails.len()).collect();
+    }
+    let needle = query.to_lowercase();
+    emails
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| email_matches(e, &needle, kind))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Narrow an existing visible set in place: keep only the indices whose
+/// email still matches the (extended) needle. Valid only when the new
+/// query is an extension of the one `visible` was built from.
+fn narrow_visible(
+    emails: &[EmailEntry],
+    visible: &mut Vec<usize>,
+    needle_lower: &str,
+    kind: MailboxKind,
+) {
+    visible.retain(|&i| {
+        emails
+            .get(i)
+            .is_some_and(|e| email_matches(e, needle_lower, kind))
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Compose wizard free helpers
+// ---------------------------------------------------------------------------
+
+fn current_field_mut(wizard: &mut ComposeWizard) -> &mut String {
+    match wizard.focus {
+        ComposeField::To => &mut wizard.to,
+        ComposeField::Cc => &mut wizard.cc,
+        ComposeField::Bcc => &mut wizard.bcc,
+        ComposeField::Subject => &mut wizard.subject,
+        // The Signature field has no editable buffer; the key handler never
+        // routes text-editing keys here when it is focused (#0106).
+        ComposeField::Signature => unreachable!("signature field has no text buffer"),
+        ComposeField::Body => &mut wizard.body,
+    }
+}
+
+/// Move the compose wizard's signature selection one step through the
+/// available signatures (#0106). `forward` cycles To -> next; wraps around.
+/// No-op when there are no signatures.
+fn cycle_signature(wizard: &mut ComposeWizard, forward: bool) {
+    let n = wizard.available_signatures.len();
+    if n == 0 {
+        return;
+    }
+    let cur = wizard
+        .signature_name
+        .as_ref()
+        .and_then(|name| wizard.available_signatures.iter().position(|x| x == name));
+    let next = match cur {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None => 0,
+    };
+    wizard.signature_name = Some(wizard.available_signatures[next].clone());
+}
+
+/// Aerc-style suggestion acceptance: replace the trailing partial
+/// (everything after the last comma) with the suggestion's address,
+/// then append `, ` so the user can keep typing more recipients.
+fn accept_suggestion(field: &mut String, suggestion: &ComposeSuggestion) {
+    let prefix_end = field.rfind(',').map(|i| i + 1).unwrap_or(0);
+    field.truncate(prefix_end);
+    if prefix_end > 0 && !field.ends_with(' ') {
+        field.push(' ');
+    }
+    // If we have a display name, render "Name <addr>, ". Otherwise just "addr, ".
+    if suggestion.display_name.is_empty() {
+        field.push_str(&suggestion.address);
+    } else {
+        // Quote the display name if it contains commas.
+        if suggestion.display_name.contains(',') {
+            field.push('"');
+            field.push_str(&suggestion.display_name);
+            field.push('"');
+        } else {
+            field.push_str(&suggestion.display_name);
+        }
+        field.push_str(" <");
+        field.push_str(&suggestion.address);
+        field.push('>');
+    }
+    field.push_str(", ");
+}
+
+// ---------------------------------------------------------------------------
+// Quick-move mailbox picker helpers (#0018)
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive subsequence ("fuzzy") match: every char of `needle`
+/// must appear in `haystack` in order. Empty needle matches everything.
+pub(super) fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    let hay = haystack.to_lowercase();
+    let mut hay_chars = hay.chars();
+    needle
+        .to_lowercase()
+        .chars()
+        .all(|nc| hay_chars.any(|hc| hc == nc))
+}
+
+/// Recompute `picker.filtered` from `picker.query` and reset the cursor.
+pub(super) fn refresh_mailbox_picker_filter(picker: &mut MailboxPicker) {
+    picker.filtered = picker
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, label))| fuzzy_match(&picker.query, label))
+        .map(|(i, _)| i)
+        .collect();
+    picker.selected = 0;
+}
+
+/// Recompute `palette.filtered` from `palette.query` and reset the cursor
+/// (#0100). Fuzzy-matches the same way the mailbox picker filters its labels.
+pub(super) fn refresh_palette_filter(palette: &mut CommandPalette) {
+    palette.filtered = palette
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| fuzzy_match(&palette.query, entry.label))
+        .map(|(i, _)| i)
+        .collect();
+    palette.selected = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Directory picker helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether `zoxide` is available on PATH.
+fn which_zoxide() -> bool {
+    std::process::Command::new("zoxide")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Run `zoxide query --list <terms>` and populate `picker.zoxide_results`.
+fn refresh_zoxide_results(picker: &mut DirPicker) {
+    if !picker.zoxide_available {
+        picker.zoxide_results.clear();
+        return;
+    }
+
+    let mut cmd = std::process::Command::new("zoxide");
+    cmd.arg("query").arg("--list");
+    if !picker.query.is_empty() {
+        // Split query on whitespace so "no do" becomes two positional args
+        for term in picker.query.split_whitespace() {
+            cmd.arg(term);
+        }
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+
+    picker.zoxide_results = match cmd.output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .filter(|l| !l.is_empty())
+                .take(20)
+                .map(|l| PathBuf::from(l.trim()))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+}
+
+/// Scan `picker.current_dir` for sub-directories and populate `picker.dir_entries`.
+fn refresh_browser_entries(picker: &mut DirPicker) {
+    picker.dir_entries = match std::fs::read_dir(&picker.current_dir) {
+        Ok(rd) => {
+            let mut dirs: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+                .filter(|e| {
+                    // Hide dotfiles
+                    e.file_name()
+                        .to_str()
+                        .map(|s| !s.starts_with('.'))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+                .collect();
+            dirs.sort_by(|a, b| {
+                a.file_name()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .cmp(&b.file_name().unwrap_or_default().to_ascii_lowercase())
+            });
+            dirs
+        }
+        Err(_) => Vec::new(),
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AttachmentPicker, EntryKey};
+    use super::super::PersistentError;
+    use std::path::PathBuf;
+
+    /// A `MessageRef` derived from the subject, so the same fixture email
+    /// built twice (a reload delivering a re-sorted `sample()`) carries the
+    /// same identity, exactly as two loads of one store row would. The
+    /// subject is the fixtures' de-facto primary key.
+    fn ref_for(subject: &str) -> MessageRef {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        subject.hash(&mut h);
+        MessageRef::new((h.finish() >> 1) as i64)
+    }
+
+    fn entry(subject: &str, from: &str) -> EmailEntry {
+        EmailEntry {
+            msg: Some(ref_for(subject)),
+            draft_id: None,
+            skip: None,
+            selector: None,
+            from: from.to_string(),
+            to: "me@example.com".to_string(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: subject.to_string(),
+            status: "inbox".to_string(),
+            date_display: "2026-07-01".to_string(),
+            date_sort: "2026-07-01T00:00:00".to_string(),
+            has_attachments: false,
+            read: false,
+            answered: false,
+            forwarded: false,
+            flagged: false,
+            is_invite: false,
+        }
+    }
+
+    fn sample() -> Vec<EmailEntry> {
+        vec![
+            entry("Invoice March", "Alice"),
+            entry("Invoice April", "Bob"),
+            entry("Weekly report", "Alice"),
+            entry("Holiday plans", "Carol"),
+        ]
+    }
+
+    // -----------------------------------------------------------------------
+    // filter_visible (P2: visible-index mapping)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_query_yields_all_indices_in_order() {
+        let emails = sample();
+        assert_eq!(
+            filter_visible(&emails, "", MailboxKind::Inbox),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn filter_matches_subject_case_insensitively() {
+        let emails = sample();
+        assert_eq!(
+            filter_visible(&emails, "INVOICE", MailboxKind::Inbox),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn filter_matches_contact_field() {
+        let emails = sample();
+        // Inbox displays `from`; Alice appears in entries 0 and 2.
+        assert_eq!(
+            filter_visible(&emails, "alice", MailboxKind::Inbox),
+            vec![0, 2]
+        );
+    }
+
+    /// #0088: the in-list metadata filter matches the sender even where the
+    /// sender is not the *displayed* contact, which the old `/` metadata
+    /// filter could not do (UX audit §b.5). In a Sent-style mailbox the list
+    /// shows the recipient (`to`), yet a search on the sender still lands.
+    #[test]
+    fn filter_matches_the_sender_even_when_the_recipient_is_shown() {
+        let mut outbound = entry("Quarterly numbers", "cfo@acme.example");
+        outbound.to = "board@acme.example".to_string();
+        let emails = vec![outbound];
+        // Sent shows `to` (board@...), so the displayed contact never contains
+        // "cfo"; the match can only come from the sender path.
+        assert_eq!(
+            filter_visible(&emails, "cfo", MailboxKind::Sent),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn filter_indices_map_back_to_underlying_entries() {
+        let emails = sample();
+        let visible = filter_visible(&emails, "invoice", MailboxKind::Inbox);
+        // "invoice" hits subjects 0 and 1.
+        assert_eq!(visible, vec![0, 1]);
+        // Selecting position 1 of the view must resolve to "Invoice April":
+        // the actions layer operates on the underlying entry via this map.
+        assert_eq!(emails[visible[1]].subject, "Invoice April");
+    }
+
+    // -----------------------------------------------------------------------
+    // narrow_visible (P3: incremental search narrowing)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn narrowing_equals_full_recompute_on_append() {
+        let emails = sample();
+        // Simulate typing "inv" then "invo": narrow from the "inv" view.
+        let mut visible = filter_visible(&emails, "inv", MailboxKind::Inbox);
+        narrow_visible(&emails, &mut visible, "invo", MailboxKind::Inbox);
+        assert_eq!(
+            visible,
+            filter_visible(&emails, "invo", MailboxKind::Inbox)
+        );
+    }
+
+    #[test]
+    fn narrowing_removes_entries_that_stop_matching() {
+        let emails = sample();
+        let mut visible = filter_visible(&emails, "invoice", MailboxKind::Inbox);
+        assert_eq!(visible, vec![0, 1]);
+        narrow_visible(&emails, &mut visible, "invoice m", MailboxKind::Inbox);
+        assert_eq!(visible, vec![0]);
+        narrow_visible(&emails, &mut visible, "invoice mx", MailboxKind::Inbox);
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn narrowing_ignores_out_of_range_indices() {
+        let emails = sample();
+        // A stale index beyond the list must be dropped, not panic.
+        let mut visible = vec![0, 99];
+        narrow_visible(&emails, &mut visible, "invoice", MailboxKind::Inbox);
+        assert_eq!(visible, vec![0]);
+    }
+
+    #[test]
+    fn greek_final_sigma_append_falls_back_to_full_recompute() {
+        // Lowercasing is context-sensitive for Greek capital sigma:
+        // "ΘΕΟΣ".to_lowercase() == "θεος" (final ς) does NOT match the
+        // haystack "θεοσφανια", but "ΘΕΟΣΦ".to_lowercase() == "θεοσφ"
+        // (medial σ) does. Naive narrowing over the previous visible set
+        // would drop the entry forever; the fifth keystroke must fall
+        // back to a full recompute and bring it back.
+        let mut emails = sample();
+        emails.push(entry("θεοσφανια", "Dora"));
+        let theos_idx = emails.len() - 1;
+        let mut app = app_with_emails(emails);
+        app.focus = Focus::Search;
+        for c in "ΘΕΟΣ".chars() {
+            app.handle_search_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        // "θεος" matches nothing.
+        assert!(app.visible.is_empty());
+        app.handle_search_key(KeyEvent::from(KeyCode::Char('Φ')));
+        // "θεοσφ" matches the haystack again.
+        assert_eq!(app.visible, vec![theos_idx]);
+    }
+
+    // -----------------------------------------------------------------------
+    // App-level: selection mapping through the visible view
+    // -----------------------------------------------------------------------
+
+    fn app_with_emails(emails: Vec<EmailEntry>) -> App {
+        let mut app = App::default_for_tests();
+        app.emails = std::sync::Arc::new(emails);
+        app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
+        app.mailbox_counts = vec![app.emails.len()];
+        app.rebuild_visible();
+        app
+    }
+
+    /// A parked conversation-jump target lands on its row once the list holds
+    /// it, and clears itself so a later switch is not hijacked (#0008).
+    #[test]
+    fn a_pending_select_lands_on_its_row_and_clears() {
+        let mut app = app_with_emails(sample());
+        let target = app.emails[2].msg.unwrap();
+        app.list_index = 0;
+        app.pending_select = Some(target);
+        app.consume_pending_select();
+        assert_eq!(app.list_index, 2, "the cursor moved onto the parked target");
+        assert!(app.pending_select.is_none(), "the target cleared once it landed");
+    }
+
+    /// A target the current list does not hold is left parked (the async load
+    /// for a cross-mailbox jump has not arrived yet), not silently dropped.
+    #[test]
+    fn a_pending_select_absent_from_the_list_stays_parked() {
+        let mut app = app_with_emails(sample());
+        let absent = MessageRef::new(-999);
+        app.list_index = 1;
+        app.pending_select = Some(absent);
+        app.consume_pending_select();
+        assert_eq!(app.list_index, 1, "the cursor did not move");
+        assert_eq!(app.pending_select, Some(absent), "the target is still parked");
+    }
+
+    /// A Drafts row: no `messages` row behind it, its indexed `id:` instead
+    /// (what `entry_from_draft` builds).
+    fn draft_entry(id: &str, subject: &str) -> EmailEntry {
+        EmailEntry {
+            msg: None,
+            draft_id: Some(id.to_string()),
+            skip: None,
+            selector: None,
+            subject: subject.to_string(),
+            status: "draft".to_string(),
+            read: true,
+            answered: false,
+            forwarded: false,
+            ..entry(subject, "me")
+        }
+    }
+
+    /// A draft can enter the selection (#0052).
+    ///
+    /// It could not while the set was keyed on `MessageRef`: a draft has no
+    /// store row, so `Ctrl+a` in Drafts selected nothing and `A` fell through
+    /// to the single-draft path. The batch it guarded was reachable by
+    /// keystroke and dead in fact.
+    #[test]
+    fn select_all_in_drafts_takes_the_draft_keys() {
+        let mut app = app_with_emails(vec![draft_entry("aaa", "One"), draft_entry("bbb", "Two")]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.selection.len(), 2);
+        let mut ids: Vec<&str> = app.selection.iter().filter_map(|k| k.draft()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["aaa", "bbb"]);
+    }
+
+    /// `v` toggles a Drafts row in and out of the selection like any other.
+    #[test]
+    fn toggling_selects_the_draft_under_the_cursor() {
+        let mut app = app_with_emails(vec![draft_entry("aaa", "One"), draft_entry("bbb", "Two")]);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(
+            app.selection.iter().next().and_then(|k| k.draft()),
+            Some("aaa")
+        );
+        // The cursor moved on; toggling the second row leaves both selected.
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(app.selection.len(), 2);
+    }
+
+    // The batch approve / mark-draft keys (`A` / `D`) were removed by the
+    // #0092 keymap redesign: sending a single draft with `x` approves it, and
+    // batch approve / send-all now live on the CLI (`mp mark-approved`,
+    // `mp send-approved`). The batch-approve confirm path is therefore no
+    // longer reachable from the TUI; the batch delete over `d` is, and still
+    // takes only the messages half of a mixed selection.
+    #[test]
+    fn batch_delete_takes_only_the_messages_half_of_a_mixed_selection() {
+        let mut app = app_with_emails(sample());
+        let msg = app.emails[0].msg.unwrap();
+        app.selection = std::collections::HashSet::from([
+            EntryKey::Msg(msg),
+            EntryKey::Draft("aaa".to_string()),
+        ]);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        match app.pending_actions.pop_front() {
+            Some(Action::BatchDelete(msgs)) => assert_eq!(msgs, vec![msg]),
+            other => panic!("expected BatchDelete, got {other:?}"),
+        }
+    }
+
+    /// `d` over a Drafts selection deletes the draft files, not store rows
+    /// (#0073): a draft has no `messages` row, so the old `BatchDelete` half
+    /// found nothing and reported "nothing to delete".
+    #[test]
+    fn delete_over_a_drafts_selection_takes_the_draft_ids() {
+        let mut app = app_with_emails(vec![draft_entry("aaa", "One"), draft_entry("bbb", "Two")]);
+        app.selection = std::collections::HashSet::from([
+            EntryKey::Draft("aaa".to_string()),
+            EntryKey::Draft("bbb".to_string()),
+        ]);
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        match app.pending_actions.pop_front() {
+            Some(Action::BatchDeleteDrafts(mut ids)) => {
+                ids.sort();
+                assert_eq!(ids, vec!["aaa".to_string(), "bbb".to_string()]);
+            }
+            other => panic!("expected BatchDeleteDrafts, got {other:?}"),
+        }
+        assert!(app.selection.is_empty(), "the selection is consumed");
+    }
+
+    /// `y` queues the selector copy, not the dead path copy (#0050 scope item
+    /// 7). Dispatch-level only, like the contacts copy test: the `arboard`
+    /// call lives in `actions.rs` and would touch the real system clipboard.
+    #[test]
+    fn copy_key_queues_the_selector_copy() {
+        let mut app = app_with_emails(sample());
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        assert!(
+            matches!(app.pending_actions.pop_front(), Some(Action::CopyMessageRef)),
+            "y must queue CopyMessageRef"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mark-read on an explicit open (#0110, reversing #0087)
+    // -----------------------------------------------------------------------
+
+    fn queued_mark_reads(app: &App) -> usize {
+        app.pending_actions
+            .iter()
+            .filter(|a| matches!(a, Action::MarkAsRead(_)))
+            .count()
+    }
+
+    fn queued_mark_read_refs(app: &App) -> Vec<MessageRef> {
+        app.pending_actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::MarkAsRead(msg) => Some(*msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `Tab` into the body pane is an explicit open and marks the message read
+    /// (#0110). The intermediate stop on the headers pane is not: only the
+    /// keypress that lands on `Focus::Preview` queues the mutation, and it
+    /// queues exactly one.
+    #[test]
+    fn tab_into_the_body_pane_queues_one_mark_read() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        assert_eq!(app.focus, Focus::List);
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Headers);
+        assert_eq!(queued_mark_reads(&app), 0, "headers is not an open");
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 1);
+    }
+
+    /// `Shift+Tab` reaches the body pane from the sidebar, and marks read there
+    /// for the same reason (#0110).
+    #[test]
+    fn shift_tab_into_the_body_pane_queues_one_mark_read() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Sidebar;
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 1);
+    }
+
+    /// An already-read row has nothing to write, so focusing the body pane on
+    /// it queues nothing at all rather than a no-op action that would still
+    /// cost a store open in `actions.rs` (#0110).
+    #[test]
+    fn focusing_the_body_pane_on_a_read_message_queues_nothing() {
+        let mut read_row = entry("Read already", "Alice");
+        read_row.read = true;
+        let mut app = app_with_emails(vec![read_row]);
+        app.list_index = 0;
+        app.focus = Focus::Headers;
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// A Drafts row has no `messages` row behind it, so it can never be marked
+    /// read however the body pane is reached (#0110).
+    #[test]
+    fn focusing_the_body_pane_on_a_draft_queues_nothing() {
+        let mut app = app_with_emails(vec![draft_entry("aaa", "One")]);
+        app.list_index = 0;
+        app.focus = Focus::Headers;
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// The queued mark names the row that was opened, so a cursor move landing
+    /// in the same coalesced batch (#0108) cannot redirect it: `Tab` then `J`
+    /// still marks the row `Tab` opened, not the one the cursor ended on.
+    #[test]
+    fn a_queued_mark_read_survives_a_later_cursor_move() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Headers;
+        let opened = app.emails[0].msg.unwrap();
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.list_index, 1, "the cursor moved off the opened row");
+
+        assert_eq!(
+            queued_mark_read_refs(&app),
+            vec![opened],
+            "the mark must name the opened row, not the one under the cursor"
+        );
+    }
+
+    /// `J` / `K` move the cursor without changing focus, so they are not an
+    /// open and mark nothing (#0110, Decision D1). This is the whole point of
+    /// the reversal: walking an unread inbox leaves it unread.
+    #[test]
+    fn next_message_queues_no_mark_read() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.list_index, 1);
+        assert_eq!(app.focus, Focus::List, "J must not move focus");
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    /// Coming back to Mail from Contacts restores the saved focus, which may be
+    /// the body pane. That restore is not an open (#0110): triggering there
+    /// would re-mark a message the user had manually `u`-toggled to unread
+    /// every time they left and returned.
+    #[test]
+    fn returning_to_the_mail_view_with_the_body_focused_queues_nothing() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Preview;
+
+        app.switch_view(View::Contacts);
+        app.pending_actions.clear();
+        app.switch_view(View::Mail);
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    #[test]
+    fn selected_email_resolves_through_visible_indices() {
+        let mut app = app_with_emails(sample());
+        app.search_query = "invoice".to_string();
+        app.apply_search_filter(false);
+        // View: [Invoice March, Invoice April]
+        app.list_index = 1;
+        assert_eq!(app.selected_email().unwrap().subject, "Invoice April");
+    }
+
+    #[test]
+    fn remove_selected_maps_back_to_underlying_entry_under_filter() {
+        let mut app = app_with_emails(sample());
+        app.search_query = "invoice".to_string();
+        app.apply_search_filter(false);
+        // View: [Invoice March, Invoice April].
+        app.list_index = 1; // "Invoice April"
+
+        let removed = app.remove_selected_from_list().unwrap();
+        assert_eq!(removed, ref_for("Invoice April"));
+        // The underlying list lost exactly that entry...
+        assert_eq!(app.emails.len(), 3);
+        assert!(app.emails.iter().all(|e| e.subject != "Invoice April"));
+        // ...the cache slot shares the same (updated) allocation...
+        let cached = app.email_cache[0].as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(cached, &app.emails));
+        // ...and the filtered view is rebuilt with the cursor clamped onto the
+        // one remaining "invoice" hit ("Invoice March").
+        assert_eq!(app.visible, vec![0]);
+        assert_eq!(app.list_index, 0);
+    }
+
+    #[test]
+    fn set_email_read_updates_shared_cache_without_deep_clone() {
+        let mut app = app_with_emails(sample());
+        let msg = app.emails[1].msg.unwrap();
+        app.set_email_read(msg, true);
+        assert!(app.emails[1].read);
+        let cached = app.email_cache[0].as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(cached, &app.emails));
+        assert!(cached[1].read);
+    }
+
+    #[test]
+    fn with_emails_mut_leaves_invalidated_cache_slot_none() {
+        let mut app = app_with_emails(sample());
+        app.email_cache[0] = None; // e.g. load in flight
+        let msg = app.emails[0].msg.unwrap();
+        app.set_email_read(msg, true);
+        assert!(app.emails[0].read);
+        assert!(app.email_cache[0].is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cursor stability across list rebuilds
+    //
+    // `list_index` is a bare position into `visible`, so any reload that
+    // re-sorts or grows the entry list used to move the cursor to a
+    // different email (approving a draft re-sorted the list; new inbox mail
+    // shifted every row down under queued keystrokes). The cursor is
+    // anchored on the entry's `MessageRef` and restored after the rebuild.
+    // -----------------------------------------------------------------------
+
+    /// Deliver a fresh entry list through the real async funnel
+    /// (`BgResult::MailboxLoaded`), the single path every reload takes.
+    fn deliver_mailbox_load(app: &mut App, entries: Vec<EmailEntry>) {
+        crate::bg::handle_bg_result(
+            app,
+            super::super::BgResult::MailboxLoaded {
+                account_index: app.active_account,
+                mailbox_idx: app.active_mailbox,
+                generation: app.mailbox_load_generation,
+                entries,
+            },
+        );
+    }
+
+    #[test]
+    fn cursor_follows_its_email_when_the_reload_resorts_the_list() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 1;
+        let anchored = app.selected_email().unwrap().msg;
+
+        // The approved draft's status/date changed, so the reload sorts it
+        // last instead of second.
+        let mut resorted = sample();
+        let moved = resorted.remove(1);
+        resorted.push(moved);
+        deliver_mailbox_load(&mut app, resorted);
+
+        assert_eq!(app.list_index, 3);
+        assert_eq!(app.selected_email().unwrap().msg, anchored);
+    }
+
+    #[test]
+    fn cursor_stays_put_when_new_mail_is_prepended() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 2;
+        let anchored = app.selected_email().unwrap().msg;
+
+        // New inbox mail sorts above everything and shifts every row down.
+        let mut grown = vec![entry("Fresh arrival", "Dave")];
+        grown.extend(sample());
+        deliver_mailbox_load(&mut app, grown);
+
+        assert_eq!(app.list_index, 3);
+        assert_eq!(app.selected_email().unwrap().msg, anchored);
+    }
+
+    #[test]
+    fn cursor_falls_back_to_the_clamped_index_when_its_email_is_gone() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 3; // "Holiday plans"
+
+        // The reload lost the anchored email (archived from another client)
+        // and is shorter than the old cursor position.
+        let shorter = vec![sample()[0].clone(), sample()[1].clone()];
+        deliver_mailbox_load(&mut app, shorter);
+
+        assert_eq!(app.list_index, 1);
+        assert_eq!(app.selected_email().unwrap().subject, "Invoice April");
+    }
+
+    #[test]
+    fn empty_reload_leaves_the_cursor_at_zero() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 3;
+        deliver_mailbox_load(&mut app, Vec::new());
+        assert_eq!(app.list_index, 0);
+        assert!(app.selected_email().is_none());
+    }
+
+    #[test]
+    fn batch_removal_above_the_cursor_does_not_drag_it() {
+        // Six rows, cursor in the middle: with only four survivors the old
+        // clamp (`min(list_index, len - 1)`) would have left the cursor at
+        // row 3, two emails below the one the user was looking at.
+        let mut emails = sample();
+        emails.push(entry("Team sync", "Dave"));
+        emails.push(entry("Renewal notice", "Eve"));
+        let mut app = app_with_emails(emails);
+        app.list_index = 3; // "Holiday plans"
+        let anchored = app.selected_email().unwrap().msg;
+
+        // Archive the two rows above the cursor: the cursor's own email
+        // survives, so it must stay under the cursor (at its new position).
+        let mut batch = std::collections::HashSet::new();
+        batch.insert(app.emails[0].msg.unwrap());
+        batch.insert(app.emails[1].msg.unwrap());
+        let removed = app.remove_selected_from_list_batch(&batch);
+
+        assert_eq!(removed.len(), 2);
+        assert_eq!(app.list_index, 1);
+        assert_eq!(app.selected_email().unwrap().msg, anchored);
+    }
+
+    #[test]
+    fn batch_removal_including_the_cursor_lands_on_the_next_survivor() {
+        let mut emails = sample();
+        emails.push(entry("Team sync", "Dave"));
+        emails.push(entry("Renewal notice", "Eve"));
+        let mut app = app_with_emails(emails);
+        app.list_index = 3; // "Holiday plans"
+
+        // The cursor's own row is part of the batch, together with two rows
+        // above it: the cursor falls back to the count of survivors above
+        // it, i.e. the row that took its place.
+        let mut batch = std::collections::HashSet::new();
+        batch.insert(app.emails[0].msg.unwrap());
+        batch.insert(app.emails[1].msg.unwrap());
+        batch.insert(app.emails[3].msg.unwrap());
+        app.remove_selected_from_list_batch(&batch);
+
+        assert_eq!(app.list_index, 1);
+        assert_eq!(app.selected_email().unwrap().subject, "Team sync");
+    }
+
+    /// A deleted row's `MessageRef` must not survive in the selection.
+    ///
+    /// The id of a deleted row is not reserved: the next ingest is handed the
+    /// same number (pinned by `store::write`'s
+    /// `a_deleted_row_id_can_be_handed_to_the_next_message`), so a reference
+    /// held across the boundary can name a *different* message. The list drops
+    /// it, and so must the selection set (#0038 scope item 7).
+    #[test]
+    fn removing_a_row_drops_its_reference_from_the_selection() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 2;
+        let doomed = app.selected_email().unwrap().msg.unwrap();
+        let survivor = app.emails[0].msg.unwrap();
+        app.selection.insert(EntryKey::Msg(doomed));
+        app.selection.insert(EntryKey::Msg(survivor));
+
+        app.remove_selected_from_list();
+
+        assert!(
+            !app.selection.contains(&EntryKey::Msg(doomed)),
+            "the selection kept a reference to a row that no longer exists"
+        );
+        assert!(app.selection.contains(&EntryKey::Msg(survivor)));
+        assert!(app.cursor_anchor().is_none_or(|m| m != doomed));
+    }
+
+    /// Same guarantee for a batch: every removed reference leaves the
+    /// selection, so a follow-up mutation cannot act on a freed row id.
+    #[test]
+    fn batch_removal_drops_every_removed_reference_from_the_selection() {
+        let mut app = app_with_emails(sample());
+        let batch: std::collections::HashSet<MessageRef> = app.emails[..2]
+            .iter()
+            .filter_map(|e| e.msg)
+            .collect();
+        app.selection = app.emails.iter().filter_map(|e| e.key()).collect();
+
+        app.remove_selected_from_list_batch(&batch);
+
+        assert_eq!(app.selection.len(), 2);
+        assert!(app
+            .selection
+            .iter()
+            .all(|k| !k.msg().is_some_and(|m| batch.contains(&m))));
+        assert!(app.emails.iter().all(|e| !e.msg.is_some_and(|m| batch.contains(&m))));
+    }
+
+    // -----------------------------------------------------------------------
+    // Quick-move mailbox picker (#0018)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fuzzy_match_empty_needle_matches_everything() {
+        assert!(fuzzy_match("", "Inbox"));
+        assert!(fuzzy_match("", ""));
+    }
+
+    #[test]
+    fn fuzzy_match_is_case_insensitive_subsequence() {
+        assert!(fuzzy_match("arc", "Archive"));
+        assert!(fuzzy_match("ACV", "archive")); // a..c..v in order
+        assert!(fuzzy_match("inbx", "Inbox"));
+        assert!(!fuzzy_match("xz", "Inbox"));
+        assert!(!fuzzy_match("xobni", "Inbox")); // order matters
+    }
+
+    fn picker_with_labels(labels: &[&str]) -> super::super::MailboxPicker {
+        super::super::MailboxPicker {
+            query: String::new(),
+            candidates: labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i, l.to_string()))
+                .collect(),
+            filtered: (0..labels.len()).collect(),
+            selected: 0,
+            msgs: vec![MessageRef::new(1)],
+        }
+    }
+
+    #[test]
+    fn picker_filter_narrows_and_resets_cursor() {
+        let mut picker = picker_with_labels(&["Inbox", "Sent", "Archive", "Newsletters"]);
+        picker.selected = 3;
+        picker.query = "ne".to_string();
+        refresh_mailbox_picker_filter(&mut picker);
+        // "ne" (subsequence): Se~n~t? no 'e' after 'n'... Sent = s,e,n,t:
+        // n then e fails (e precedes n). Archive has no 'n'. Newsletters
+        // and Inbox? i-n-b-o-x: n then no e. Only Newsletters matches.
+        assert_eq!(picker.filtered, vec![3]);
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn picker_filter_empty_query_restores_all() {
+        let mut picker = picker_with_labels(&["Inbox", "Archive"]);
+        picker.query = "arch".to_string();
+        refresh_mailbox_picker_filter(&mut picker);
+        assert_eq!(picker.filtered, vec![1]);
+        picker.query.clear();
+        refresh_mailbox_picker_filter(&mut picker);
+        assert_eq!(picker.filtered, vec![0, 1]);
+    }
+
+    #[test]
+    fn picker_filter_no_match_yields_empty() {
+        let mut picker = picker_with_labels(&["Inbox", "Archive"]);
+        picker.query = "zzz".to_string();
+        refresh_mailbox_picker_filter(&mut picker);
+        assert!(picker.filtered.is_empty());
+    }
+
+    fn mb_info(label: &str, id: &str, kind: MailboxKind, server: Option<&str>) -> super::super::MailboxInfo {
+        super::super::MailboxInfo {
+            label: label.to_string(),
+            icon: "",
+            id: id.to_string(),
+            kind,
+            server_name: server.map(|s| s.to_string()),
+        }
+    }
+
+    fn app_with_mailboxes() -> App {
+        let mut app = app_with_emails(sample());
+        app.mailboxes = vec![
+            mb_info("Inbox", "inbox", MailboxKind::Inbox, Some("INBOX")),
+            mb_info("Drafts", "drafts", MailboxKind::Drafts, None),
+            mb_info("Sent", "sent", MailboxKind::Sent, Some("Sent")),
+            mb_info("Archive", "archive", MailboxKind::Archive, Some("Archive")),
+        ];
+        app.active_mailbox = 0;
+        app
+    }
+
+    #[test]
+    fn open_picker_excludes_active_mailbox_and_local_only() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("picker should open");
+        };
+        // Active mailbox (Inbox) and local-only Drafts are excluded.
+        let labels: Vec<&str> = picker
+            .candidates
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(labels, vec!["Sent", "Archive"]);
+        // Cursor email is carried as the move target.
+        assert_eq!(picker.msgs.len(), 1);
+    }
+
+    #[test]
+    fn open_picker_uses_selection_when_present() {
+        let mut app = app_with_mailboxes();
+        app.selection.insert(EntryKey::Msg(app.emails[0].msg.unwrap()));
+        app.selection.insert(EntryKey::Msg(app.emails[2].msg.unwrap()));
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("picker should open");
+        };
+        assert_eq!(picker.msgs.len(), 2);
+    }
+
+    #[test]
+    fn open_picker_refused_in_local_only_mailbox() {
+        let mut app = app_with_mailboxes();
+        app.active_mailbox = 1; // Drafts: no server folder
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert!(!matches!(app.overlay, Overlay::Mailbox(_)));
+    }
+
+    #[test]
+    fn picker_enter_pushes_move_action_with_dest() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        // Filter to "Archive", then confirm.
+        for c in "arch".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(!matches!(app.overlay, Overlay::Mailbox(_)));
+        match app.pending_actions.pop_front() {
+            Some(Action::MoveToMailbox { msgs, dest_idx }) => {
+                assert_eq!(dest_idx, 3); // Archive
+                assert_eq!(msgs.len(), 1);
+            }
+            other => panic!("expected MoveToMailbox, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn picker_esc_closes_without_action() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert!(matches!(app.overlay, Overlay::Mailbox(_)));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!matches!(app.overlay, Overlay::Mailbox(_)));
+        assert!(app.pending_actions.is_empty());
+    }
+
+    #[test]
+    fn picker_enter_on_no_match_is_noop() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        for c in "zzz".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        // No match highlighted: picker stays open, nothing queued.
+        assert!(matches!(app.overlay, Overlay::Mailbox(_)));
+        assert!(app.pending_actions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Signature management overlay (#0107)
+    // -----------------------------------------------------------------------
+
+    /// Both path layers redirected into one tempdir: `config_dir()` for the
+    /// signature files, `mailypoppins_data_dir()` for the state file that
+    /// records the default. Mirrors `signatures::tests::fixture`.
+    struct SigFixture {
+        _dir: tempfile::TempDir,
+        _config: mp_core::config::test_env::ConfigDirOverride,
+        _data: mp_core::config::test_env::TestDataDir,
+    }
+
+    fn sig_fixture() -> SigFixture {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = mp_core::config::test_env::ConfigDirOverride::new(dir.path());
+        config.set_config_dir(&dir.path().join("config"));
+        SigFixture {
+            _dir: dir,
+            _config: config,
+            _data: mp_core::config::test_env::TestDataDir::new(),
+        }
+    }
+
+    /// An app on account `work` with `names` already on disk.
+    fn app_with_signatures(names: &[&str]) -> App {
+        let mut app = app_with_emails(sample());
+        app.account_config.name = "work".to_string();
+        for name in names {
+            mp_core::signatures::write(name, &format!("-- \n{name}")).unwrap();
+        }
+        app
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, c);
+        }
+    }
+
+    /// `cs` opens the overlay on the account's signature files, `Esc` closes it.
+    #[test]
+    fn cs_opens_the_signatures_overlay_and_esc_closes_it() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work", "casual"]);
+
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("`cs` should open the signatures overlay");
+        };
+        assert_eq!(overlay.names, vec!["casual".to_string(), "work".to_string()]);
+        assert_eq!(overlay.account, "work");
+        assert_eq!(overlay.default, None);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// The overlay opens on an empty directory too: it is where the first
+    /// signature gets created.
+    #[test]
+    fn the_overlay_opens_with_no_signatures_at_all() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&[]);
+
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("the overlay should open on an empty list");
+        };
+        assert!(overlay.names.is_empty());
+        assert_eq!(overlay.selected_name(), None);
+    }
+
+    /// j/k move the cursor and stop at both ends.
+    #[test]
+    fn signatures_navigation_clamps_at_both_ends() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+
+        press(&mut app, 'k'); // already at the top
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 0);
+        press(&mut app, 'j');
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
+        press(&mut app, 'j'); // already at the bottom
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
+        assert_eq!(app.signatures_overlay_mut().unwrap().selected_name(), Some("work"));
+    }
+
+    /// Enter records the cursor signature as the account default; Enter on the
+    /// one that already is clears it.
+    #[test]
+    fn enter_sets_and_then_clears_the_account_default() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'j'); // cursor on "work"
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            mp_core::signatures::default_signature_name("work").as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().default.as_deref(),
+            Some("work"),
+            "the list marks the new default"
+        );
+        // The cached content follows, or a reply written next still carries
+        // nothing (or the previous default).
+        let cached = app.signature_content.clone().unwrap_or_default();
+        assert!(cached.contains("work"), "{cached:?}");
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(mp_core::signatures::default_signature_name("work"), None);
+        assert_eq!(app.signatures_overlay_mut().unwrap().default, None);
+        assert_eq!(
+            app.signature_content, None,
+            "clearing the default clears the cached content too"
+        );
+    }
+
+    /// `e` hands the selected file to the `$EDITOR` action (the suspend /
+    /// restore dance lives in `actions.rs`).
+    #[test]
+    fn e_queues_an_editor_launch_for_the_selected_signature() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'j');
+        press(&mut app, 'e');
+
+        match app.pending_actions.pop_front() {
+            Some(Action::EditSignatureFile { name }) => assert_eq!(name, "work"),
+            other => panic!("expected EditSignatureFile, got {other:?}"),
+        }
+        assert!(
+            matches!(app.overlay, Overlay::Signatures(_)),
+            "the overlay stays open under the editor"
+        );
+    }
+
+    /// `n` prompts for a name; a valid one creates the file, puts the cursor on
+    /// it and opens `$EDITOR`.
+    #[test]
+    fn n_creates_a_signature_and_opens_it_in_the_editor() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+
+        press(&mut app, 'n');
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().mode,
+            SignaturesMode::New
+        );
+        type_text(&mut app, "casual");
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        type_text(&mut app, "l");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(mp_core::signatures::exists("casual"));
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::Browse);
+        assert_eq!(overlay.selected_name(), Some("casual"));
+        match app.pending_actions.pop_front() {
+            Some(Action::EditSignatureFile { name }) => assert_eq!(name, "casual"),
+            other => panic!("expected EditSignatureFile, got {other:?}"),
+        }
+    }
+
+    /// A name the signatures module refuses is reported and leaves the prompt
+    /// open with the text intact, so it can be fixed rather than retyped.
+    #[test]
+    fn an_invalid_new_name_is_reported_and_keeps_the_prompt_open() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'n');
+        type_text(&mut app, "../evil");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        let status = app.status_message.clone().unwrap_or_default();
+        assert!(status.contains("Cannot create"), "{status}");
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::New);
+        assert_eq!(overlay.input, "../evil");
+        assert_eq!(mp_core::signatures::list(), vec!["work".to_string()]);
+        assert!(app.pending_actions.is_empty());
+
+        // Esc abandons the prompt and returns to the list.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::Browse);
+        assert!(overlay.input.is_empty());
+    }
+
+    /// `r` seeds the prompt with the current name; committing moves the file
+    /// and carries the account default with it.
+    #[test]
+    fn r_renames_the_selected_signature_and_carries_the_default() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["work"]);
+        mp_core::signatures::set_default_signature("work", Some("work")).unwrap();
+        press(&mut app, 'c');
+        press(&mut app, 's');
+
+        press(&mut app, 'r');
+        assert_eq!(app.signatures_overlay_mut().unwrap().input, "work");
+        type_text(&mut app, "-external");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(mp_core::signatures::list(), vec!["work-external".to_string()]);
+        assert_eq!(
+            mp_core::signatures::default_signature_name("work").as_deref(),
+            Some("work-external")
+        );
+        let overlay = app.signatures_overlay_mut().unwrap();
+        assert_eq!(overlay.mode, SignaturesMode::Browse);
+        assert_eq!(overlay.selected_name(), Some("work-external"));
+        assert_eq!(overlay.default.as_deref(), Some("work-external"));
+    }
+
+    /// A rename onto an existing name is refused and reported, and the prompt
+    /// stays open.
+    #[test]
+    fn a_rename_onto_an_existing_name_is_refused() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's'); // cursor on "casual"
+
+        press(&mut app, 'r');
+        for _ in 0.."casual".len() {
+            app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        }
+        type_text(&mut app, "work");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        let status = app.status_message.clone().unwrap_or_default();
+        assert!(status.contains("Cannot rename"), "{status}");
+        assert_eq!(
+            mp_core::signatures::list(),
+            vec!["casual".to_string(), "work".to_string()]
+        );
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().mode,
+            SignaturesMode::Rename
+        );
+    }
+
+    /// `d` goes through the shared confirm dialog; `y` deletes the file, clears
+    /// a default that named it, and hands the refreshed list back.
+    #[test]
+    fn d_deletes_behind_the_confirm_dialog_and_clears_the_default() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        mp_core::signatures::set_default_signature("work", Some("work")).unwrap();
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'j'); // cursor on "work"
+
+        press(&mut app, 'd');
+        let Overlay::Confirm(dialog) = &app.overlay else {
+            panic!("`d` should raise the confirm dialog");
+        };
+        assert!(dialog.title.contains("work"), "{}", dialog.title);
+
+        press(&mut app, 'y');
+        assert!(!mp_core::signatures::exists("work"));
+        assert_eq!(mp_core::signatures::default_signature_name("work"), None);
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("the list comes back after the delete");
+        };
+        assert_eq!(overlay.names, vec!["casual".to_string()]);
+        assert_eq!(overlay.default, None);
+        assert_eq!(overlay.selected_name(), Some("casual"), "the cursor stays in range");
+    }
+
+    /// A minimal `AccountState` for `name`, carrying `content` as its cached
+    /// signature. A struct literal rather than `AccountState::new`, which
+    /// reads the user's config and keyring (mirrors `helpers::tests::account`).
+    fn account_state(name: &str, content: Option<&str>) -> crate::app::AccountState {
+        crate::app::AccountState {
+            account_config: mp_core::config::AccountConfig {
+                name: name.to_string(),
+                ..Default::default()
+            },
+            imap_config: None,
+            smtp_config: None,
+            graph_config: None,
+            signature_content: content.map(str::to_string),
+            archive_server_name: "Archive".to_string(),
+            drafts_dir: None,
+            mailboxes: Vec::new(),
+            mailbox_counts: Vec::new(),
+            email_cache: Vec::new(),
+            sidebar_index: 0,
+            active_mailbox: 0,
+            list_index: 0,
+            cursor_ref: None,
+            headers_scroll: 0,
+            preview_scroll: 0,
+            selection: std::collections::HashSet::new(),
+            search_query: String::new(),
+            watcher_active: false,
+            opening: false,
+            has_unseen: false,
+            sync_health: mp_core::sync_health::SyncHealth::default(),
+        }
+    }
+
+    /// `signatures::delete` clears the default of *every* account that named
+    /// the file, so the cached content of the accounts that are not active has
+    /// to be re-resolved too: `load_from_account` restores it on a switch and
+    /// `resolve_send_account` hands it to a reply sent from that identity, so a
+    /// stale copy signs mail with a signature that no longer exists.
+    #[test]
+    fn deleting_a_shared_default_refreshes_every_accounts_cached_signature() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["shared"]);
+        mp_core::signatures::set_default_signature("work", Some("shared")).unwrap();
+        mp_core::signatures::set_default_signature("home", Some("shared")).unwrap();
+        let cached = mp_core::config::resolve_signature_markdown(&app.account_config, None);
+        assert!(cached.is_some(), "the fixture starts with a resolved signature");
+        app.signature_content = cached.clone();
+        app.accounts = vec![
+            account_state("work", cached.as_deref()),
+            account_state("home", cached.as_deref()),
+        ];
+        app.active_account = 0;
+
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'd');
+        press(&mut app, 'y');
+
+        assert!(!mp_core::signatures::exists("shared"));
+        assert_eq!(mp_core::signatures::default_signature_name("home"), None);
+        assert_eq!(app.signature_content, None);
+        assert_eq!(app.accounts[0].signature_content, None);
+        assert_eq!(
+            app.accounts[1].signature_content, None,
+            "the non-active account kept a signature that no longer exists"
+        );
+    }
+
+    /// The global toggle still wins: with signatures off, a refresh clears
+    /// every account rather than resolving one.
+    #[test]
+    fn refreshing_with_signatures_disabled_clears_every_account() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["shared"]);
+        mp_core::signatures::set_default_signature("work", Some("shared")).unwrap();
+        mp_core::signatures::set_default_signature("home", Some("shared")).unwrap();
+        app.accounts = vec![
+            account_state("work", Some("stale")),
+            account_state("home", Some("stale")),
+        ];
+        app.global_config.email.include_signature = false;
+
+        app.refresh_signature_content();
+
+        assert_eq!(app.signature_content, None);
+        assert_eq!(app.accounts[0].signature_content, None);
+        assert_eq!(app.accounts[1].signature_content, None);
+    }
+
+    /// Answering `n` to the delete keeps the file and returns to the list.
+    #[test]
+    fn a_cancelled_signature_delete_returns_to_the_list() {
+        let _fx = sig_fixture();
+        let mut app = app_with_signatures(&["casual", "work"]);
+        press(&mut app, 'c');
+        press(&mut app, 's');
+        press(&mut app, 'd');
+        press(&mut app, 'n');
+
+        assert!(mp_core::signatures::exists("casual"));
+        let Overlay::Signatures(overlay) = &app.overlay else {
+            panic!("cancelling returns to the signatures overlay");
+        };
+        assert_eq!(
+            overlay.names,
+            vec!["casual".to_string(), "work".to_string()]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Command palette (#0100)
+    // -----------------------------------------------------------------------
+
+    /// `:` and `Ctrl+p` both open the command palette over the runnable
+    /// KeyAction catalogue, and Esc closes it without side effects.
+    #[test]
+    fn command_palette_opens_on_colon_and_ctrl_p() {
+        let mut app = app_with_emails(sample());
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("`:` should open the palette");
+        };
+        assert!(!palette.entries.is_empty(), "the catalogue is non-empty");
+        assert_eq!(
+            palette.filtered.len(),
+            palette.entries.len(),
+            "an empty query matches every entry"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.pending_actions.is_empty());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(
+            matches!(app.overlay, Overlay::Palette(_)),
+            "Ctrl+p opens it too"
+        );
+    }
+
+    /// A family leader typed into the palette is literal text (it filters, it
+    /// does not arm the leader), consistent with the search prompt.
+    #[test]
+    fn command_palette_treats_family_leaders_as_literal_text() {
+        let mut app = app_with_emails(sample());
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        assert!(app.pending_prefix.is_none(), "`f` must not arm a leader here");
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("palette should still be open");
+        };
+        assert_eq!(palette.query, "f");
+    }
+
+    /// The palette runs executors without the key dispatch's guard checks
+    /// (#0100 review finding): running a `Guard::NonEmptyList` action by name
+    /// on an empty mailbox must not underflow the cursor arithmetic.
+    #[test]
+    fn command_palette_runs_a_list_action_on_an_empty_list_without_panicking() {
+        let mut app = app_with_emails(Vec::new());
+        assert!(app.visible.is_empty(), "the mailbox must start empty");
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        for c in "navigate emails".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(matches!(app.overlay, Overlay::None), "the palette closed");
+        assert_eq!(app.list_index, 0, "the cursor stays put on an empty list");
+    }
+
+    /// Typing filters the catalogue, and Enter closes the palette and runs the
+    /// selected action against the current context.
+    #[test]
+    fn command_palette_filters_and_runs_the_selected_action() {
+        let mut app = app_with_emails(sample());
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        for c in "toggle this help".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("palette should be open");
+        };
+        assert_eq!(
+            palette.selected_action(),
+            Some(crate::app::KeyAction::ToggleHelp),
+            "the query narrowed to the one help action"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        // The palette closed and the action ran in the current context: the
+        // help overlay is now up.
+        assert!(matches!(app.overlay, Overlay::Help));
+    }
+
+    /// Enter with no match (an over-narrow query) is a no-op: nothing runs and
+    /// the palette stays open.
+    #[test]
+    fn command_palette_enter_on_no_match_is_noop() {
+        let mut app = app_with_emails(sample());
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        for c in "zzzznope".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("palette should be open");
+        };
+        assert!(palette.filtered.is_empty());
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.overlay, Overlay::Palette(_)), "stays open");
+        assert!(app.pending_actions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Flagged-only view (#0079)
+    // -----------------------------------------------------------------------
+
+    /// `F` narrows the list to flagged rows and widens it back, keeping the
+    /// cursor on the row it was on when that row survives the narrowing.
+    #[test]
+    fn f_toggles_the_flagged_only_view() {
+        let mut app = app_with_emails(sample());
+        let mut emails = (*app.emails).clone();
+        emails[1].flagged = true;
+        app.emails = std::sync::Arc::new(emails);
+        app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
+        app.rebuild_visible();
+        app.list_index = 1;
+
+        // `fF` (the find family's flagged-only filter, #0092).
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+
+        assert!(app.flagged_only);
+        assert_eq!(app.visible, vec![1]);
+        assert_eq!(app.list_index, 0, "cursor followed its row");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+
+        assert!(!app.flagged_only);
+        assert_eq!(app.visible, vec![0, 1, 2, 3]);
+        assert_eq!(app.list_index, 1, "cursor still on the same row");
+    }
+
+    /// The flagged view and the `/` search are independent narrowings: what is
+    /// visible is the intersection, whichever order they were armed in.
+    #[test]
+    fn the_flagged_view_intersects_with_the_search_filter() {
+        let mut app = app_with_emails(sample());
+        let mut emails = (*app.emails).clone();
+        for e in emails.iter_mut() {
+            e.flagged = true;
+        }
+        emails[3].flagged = false;
+        app.emails = std::sync::Arc::new(emails);
+        app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
+        app.rebuild_visible();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        assert_eq!(app.visible, vec![0, 1, 2]);
+
+        // The query that alone would match only the one unflagged row.
+        app.search_query = "holiday".to_string();
+        app.apply_search_filter(false);
+        assert!(app.visible.is_empty(), "flagged view still applies");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        assert_eq!(app.visible, vec![3], "search alone again");
+    }
+
+    /// The toggle is not guarded by a non-empty list: a filter that emptied
+    /// the list must still be undoable with the key that armed it.
+    #[test]
+    fn the_flagged_view_can_be_left_when_it_shows_nothing() {
+        let mut app = app_with_emails(sample());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        assert!(app.visible.is_empty(), "no flagged rows in the fixture");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        assert!(!app.flagged_only);
+        assert_eq!(app.visible, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn clearing_search_restores_full_view() {
+        let mut app = app_with_emails(sample());
+        app.search_query = "holiday".to_string();
+        app.apply_search_filter(false);
+        assert_eq!(app.visible, vec![3]);
+        app.search_query.clear();
+        app.reload_from_cache();
+        assert_eq!(app.visible, vec![0, 1, 2, 3]);
+        assert_eq!(app.list_index, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Background error over an open overlay (#0032 regression)
+    //
+    // `set_persistent_error` is called from bg.rs regardless of overlay
+    // state. It must NOT clobber an active overlay (that both destroys the
+    // overlay's unsaved state and, for the compose wizard, leaves
+    // `focus == Focus::ComposeWizard` while `overlay == None` -- a state
+    // that hits `keys.rs`'s `unreachable!()` on the next keystroke). The
+    // error is queued and promoted to `Overlay::Error` when the overlay
+    // actually closes.
+    // -----------------------------------------------------------------------
+
+    fn open_compose_wizard_for_test(app: &mut App) {
+        app.overlay = Overlay::Compose(ComposeWizard {
+            mode: ComposeMode::New,
+            to: "alice@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "draft in progress".to_string(),
+            body: String::new(),
+            focus: ComposeField::To,
+            signature_name: None,
+            signature_initial: None,
+            signature_edited: false,
+            available_signatures: Vec::new(),
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
+            contacts: None,
+        });
+        app.focus = Focus::ComposeWizard;
+    }
+
+    /// A background failure while the compose wizard is open must not
+    /// clobber the wizard (which would strand `focus == ComposeWizard` and
+    /// panic on the next key). The error is queued, surfaced on the status
+    /// line, and promoted only after the wizard closes -- and the wizard
+    /// close resets focus, so the panicking `None`+`ComposeWizard` combo
+    /// never occurs.
+    #[test]
+    fn bg_error_over_compose_wizard_does_not_clobber_or_panic() {
+        let mut app = app_with_emails(sample());
+        open_compose_wizard_for_test(&mut app);
+
+        app.set_persistent_error(
+            "Archive failed: boom\nEmail restored to inbox. Sync (F) to fix?".to_string(),
+        );
+
+        // The wizard is preserved (draft intact), focus stays consistent
+        // with the overlay, and the error is queued + surfaced immediately.
+        assert!(
+            matches!(app.overlay, Overlay::Compose(_)),
+            "wizard must not be clobbered by a background error"
+        );
+        assert_eq!(app.focus, Focus::ComposeWizard);
+        assert!(app.pending_error.is_some());
+        assert_eq!(app.status_message.as_deref(), Some("Archive failed: boom"));
+
+        // Close the wizard the way `Action::ComposeWizardCancel` does.
+        app.close_overlay();
+        app.focus = Focus::List;
+
+        // The queued error is now the active overlay, and focus is a valid
+        // pane -- the `overlay == None && focus == ComposeWizard` state that
+        // would hit `unreachable!()` never exists.
+        assert!(matches!(app.overlay, Overlay::Error(_)));
+        assert_eq!(app.focus, Focus::List);
+        assert!(app.pending_error.is_none());
+
+        // Dismissing the promoted error returns to the normal view and does
+        // not re-open anything.
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// Tab order in a New compose reaches the inline body field (#0097) right
+    /// after Subject, and BackTab from To lands back on it.
+    #[test]
+    fn compose_wizard_tab_reaches_the_body_field() {
+        let mut app = app_with_emails(sample());
+        open_compose_wizard_for_test(&mut app);
+        app.compose_wizard_mut().unwrap().focus = ComposeField::Subject;
+
+        // Subject -> Signature -> Body (#0106 inserts the Signature field).
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.compose_wizard().unwrap().focus, ComposeField::Signature);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.compose_wizard().unwrap().focus, ComposeField::Body);
+
+        // One more Tab wraps back to the first field.
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.compose_wizard().unwrap().focus, ComposeField::To);
+
+        // BackTab from To lands on Body (the last field).
+        app.handle_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.compose_wizard().unwrap().focus, ComposeField::Body);
+    }
+
+    /// On the multi-line body field Enter inserts a newline rather than
+    /// submitting (#0097); typed characters accumulate into the body.
+    #[test]
+    fn compose_wizard_enter_on_body_inserts_a_newline() {
+        let mut app = app_with_emails(sample());
+        open_compose_wizard_for_test(&mut app);
+        app.compose_wizard_mut().unwrap().focus = ComposeField::Body;
+
+        for c in "hi".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
+        assert_eq!(app.compose_wizard().unwrap().body, "hi\nx");
+        // Enter did not queue a submit and the wizard is still open.
+        assert!(matches!(app.overlay, Overlay::Compose(_)));
+        assert!(
+            !app.pending_actions
+                .iter()
+                .any(|a| matches!(a, Action::ComposeWizardSubmit)),
+            "Enter on the body must not submit"
+        );
+    }
+
+    /// Ctrl+g is the submit key from the body field (#0097): it queues the
+    /// submit action from anywhere in the wizard.
+    #[test]
+    fn compose_wizard_ctrl_g_submits_from_the_body() {
+        let mut app = app_with_emails(sample());
+        open_compose_wizard_for_test(&mut app);
+        app.compose_wizard_mut().unwrap().focus = ComposeField::Body;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert!(
+            app.pending_actions
+                .iter()
+                .any(|a| matches!(a, Action::ComposeWizardSubmit)),
+            "Ctrl+g must submit from the body field"
+        );
+    }
+
+    /// A background failure while the mailbox picker is open preserves the
+    /// picker (and its selection/paths) and shows the error only after the
+    /// picker closes.
+    #[test]
+    fn bg_error_over_mailbox_picker_preserves_picker_until_close() {
+        let mut app = app_with_mailboxes();
+        app.handle_key(KeyEvent::from(KeyCode::Char('M')));
+        assert!(matches!(app.overlay, Overlay::Mailbox(_)));
+
+        app.set_persistent_error("Move failed: boom\nEmail restored.".to_string());
+
+        // Picker (and its carried messages) survive; the error is queued.
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("picker must not be clobbered by a background error");
+        };
+        assert_eq!(picker.msgs.len(), 1);
+        assert!(app.pending_error.is_some());
+        assert_eq!(app.status_message.as_deref(), Some("Move failed: boom"));
+
+        // Closing the picker promotes the queued error.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::Error(_)));
+        assert!(app.pending_error.is_none());
+    }
+
+    /// With no overlay open, `set_persistent_error` behaves exactly as
+    /// before: it opens the error overlay directly and queues nothing.
+    #[test]
+    fn persistent_error_with_no_overlay_opens_directly() {
+        let mut app = app_with_emails(sample());
+        app.set_persistent_error("Delete failed: boom".to_string());
+        assert!(matches!(app.overlay, Overlay::Error(_)));
+        assert!(app.pending_error.is_none());
+    }
+
+    /// The attachment picker -> dir picker handoff (`O` save) must not let a
+    /// queued error fire mid-transition: promotion is guarded on
+    /// `Overlay::None`, so after the handoff the dir picker is active and
+    /// the error stays queued until the dir picker itself closes.
+    #[test]
+    fn pending_error_does_not_fire_during_attachment_to_dir_handoff() {
+        let mut app = app_with_emails(sample());
+        // Simulate the attachment save picker with a queued error behind it.
+        app.overlay = Overlay::Attachment(AttachmentPicker {
+            files: vec![PathBuf::from("/tmp/a.pdf")],
+            selected: 0,
+            mode: AttachmentPickerMode::Save,
+            selected_set: std::collections::HashSet::new(),
+        });
+        app.pending_error = Some(PersistentError { message: "bg boom".to_string() });
+
+        // Enter triggers the attachment -> dir picker handoff.
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        // The dir picker is now active; the error did NOT fire in between.
+        assert!(matches!(app.overlay, Overlay::Dir(_)));
+        assert!(app.pending_error.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-view: leader switching, per-view key gating (#0033)
+    // -----------------------------------------------------------------------
+
+    use super::super::View;
+
+    /// `Space c` / `Space a` / `Space m` switch the active top-level view; the
+    /// leader is consumed and `App::view` updates. Space alone only arms the
+    /// leader (#0033 follow-up: Space is the view leader).
+    #[test]
+    fn leader_switches_top_level_view() {
+        let mut app = app_with_mailboxes();
+        assert_eq!(app.view, View::Mail);
+
+        // Bare Space arms the leader without switching.
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.pending_prefix, Some(' '), "Space must arm the leader");
+        assert_eq!(app.view, View::Mail);
+
+        // `Space c` -> Contacts.
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(app.view, View::Contacts);
+        assert_eq!(app.pending_prefix, None, "leader consumed by the switch");
+
+        // `Space a` -> Calendar (proving Space arms from a non-Mail view).
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.view, View::Calendar);
+
+        // `Space m` -> back to Mail.
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.view, View::Mail);
+    }
+
+    /// `v` toggles list selection (the binding that moved off Space, #0033
+    /// follow-up). Space no longer touches selection.
+    #[test]
+    fn v_toggles_list_selection_and_space_does_not() {
+        let mut app = app_with_mailboxes();
+        app.focus = Focus::List;
+        assert!(!app.visible.is_empty(), "fixture must have selectable emails");
+        let before = app.selection.len();
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(app.selection.len(), before + 1, "v must add to the selection");
+
+        // Space with a non-empty list arms the view leader instead of toggling.
+        let sel_after_v = app.selection.len();
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.pending_prefix, Some(' '), "Space arms the view leader");
+        assert_eq!(
+            app.selection.len(),
+            sel_after_v,
+            "Space must not change the selection"
+        );
+    }
+
+    /// `g` arms only where continuations exist. Both content views own
+    /// `gg`/`G` jumps, so `g` arms in each (Calendar gained them in #0034 --
+    /// this test previously asserted the opposite, when Calendar was a
+    /// placeholder with no pane context).
+    #[test]
+    fn g_leader_arms_in_both_content_views() {
+        let mut app = app_with_mailboxes();
+        app.switch_view(View::Calendar);
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.pending_prefix, Some('g'), "g arms in Calendar (#0034)");
+
+        app.switch_view(View::Contacts);
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.pending_prefix, Some('g'), "g arms in Contacts");
+    }
+
+    /// Space switches views from the Contacts view too (Global leader).
+    #[test]
+    fn space_leader_switches_view_from_contacts() {
+        let mut app = app_with_mailboxes();
+        app.switch_view(View::Contacts);
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.pending_prefix, Some(' '));
+        app.handle_key(KeyEvent::from(KeyCode::Char('m')));
+        assert_eq!(app.view, View::Mail);
+    }
+
+    /// ...and from the Calendar view, now that it owns a pane context (#0034):
+    /// the Global Space leader still resolves before the pane.
+    #[test]
+    fn space_leader_switches_view_from_calendar() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.pending_prefix, Some(' '));
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert_eq!(app.view, View::Contacts);
+    }
+
+    /// `Tab` follows reading order — Sidebar, List, Headers, Body — and
+    /// `Shift+Tab` mirrors it (#0092 review fix).
+    #[test]
+    fn tab_cycles_focus_in_reading_order() {
+        let mut app = app_with_mailboxes();
+        app.focus = Focus::List;
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Headers);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.handle_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Preview);
+        app.handle_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Headers);
+    }
+
+    /// The `s` system family carries view-agnostic utilities, so its leader
+    /// arms in the content views and `sl` opens the activity overlay there;
+    /// the other four families stay Mail-only (#0092 review fix).
+    #[test]
+    fn the_system_leader_arms_in_non_mail_views() {
+        for view in [View::Contacts, View::Calendar] {
+            let mut app = app_with_mailboxes();
+            app.switch_view(view);
+            app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+            assert_eq!(app.pending_prefix, Some('s'), "`s` must arm in {view:?}");
+            app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+            assert!(
+                matches!(app.overlay, Overlay::Activity),
+                "`sl` must open the activity overlay in {view:?}"
+            );
+        }
+    }
+
+    /// Switching to Mail restores the parked focus (the `MailView` proxy),
+    /// mirroring the `AccountState` save/load pattern.
+    #[test]
+    fn switching_back_to_mail_restores_parked_focus() {
+        let mut app = app_with_mailboxes();
+        app.focus = Focus::Preview;
+        app.switch_view(View::Contacts);
+        // Focus is irrelevant while in a non-Mail view; on return it is
+        // restored from the parked mail-view snapshot.
+        app.switch_view(View::Mail);
+        assert_eq!(app.focus, Focus::Preview);
+    }
+
+    /// Mail-specific keys must not fire while a non-Mail view is active: the
+    /// Global mail surface (mailbox jump) is gated off, and the Mail pane
+    /// contexts are not consulted at all (`a` = archive is not rebound by
+    /// either content view).
+    #[test]
+    fn mail_keys_do_not_fire_in_contacts_or_calendar() {
+        for view in [View::Contacts, View::Calendar] {
+            let mut app = app_with_mailboxes();
+            app.switch_view(view);
+            let before = app.active_mailbox;
+
+            // Digit jump (a Global mail action) is swallowed.
+            app.handle_key(KeyEvent::from(KeyCode::Char('2')));
+            assert_eq!(app.active_mailbox, before, "digit jump must not fire in {view:?}");
+
+            // A List-context key (archive) does nothing: the Mail pane contexts
+            // are not consulted outside Mail, and it is not rebound there.
+            app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+            assert!(matches!(app.overlay, Overlay::None));
+            assert!(app.pending_actions.is_empty());
+            assert_eq!(app.view, view, "a bare mail key must not change the view");
+        }
+    }
+
+    /// View-agnostic Global keys (help, quit) still work in the non-Mail views.
+    #[test]
+    fn view_agnostic_keys_work_in_non_mail_views() {
+        for view in [View::Contacts, View::Calendar] {
+            let mut app = app_with_mailboxes();
+            app.switch_view(view);
+
+            // Help overlay toggles.
+            app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+            assert!(matches!(app.overlay, Overlay::Help), "? in {view:?}");
+            app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+            assert!(matches!(app.overlay, Overlay::None));
+
+            // Quit is honoured.
+            let msg = app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+            assert!(matches!(msg, Some(Message::Quit)), "q in {view:?}");
+        }
+    }
+
+    /// Digits 1-9 still jump mailboxes in the Mail view (no leader collision).
+    #[test]
+    fn digits_still_jump_mailboxes_in_mail_view() {
+        let mut app = app_with_mailboxes();
+        assert_eq!(app.view, View::Mail);
+        assert_eq!(app.active_mailbox, 0);
+
+        // `2` -> mailbox index 1 (Drafts).
+        app.handle_key(KeyEvent::from(KeyCode::Char('2')));
+        assert_eq!(app.active_mailbox, 1);
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    // -- Contacts view (#0033) -------------------------------------------
+
+    fn contact(addr: &str, name: &str, sent_to: u32) -> mp_core::contacts::Contact {
+        mp_core::contacts::Contact {
+            address: addr.into(),
+            display_name: name.into(),
+            sent_to,
+            sent_cc: 0,
+            received: 0,
+            first_seen: "2026-01-01T00:00:00Z".into(),
+            last_seen: "2026-04-08T00:00:00Z".into(),
+            source: mp_core::contacts::ContactSource::Local,
+        }
+    }
+
+    /// Build an app already in the Contacts view with a seeded index.
+    fn app_in_contacts() -> App {
+        let mut app = app_with_mailboxes();
+        let mut contacts = std::collections::HashMap::new();
+        for c in [
+            contact("alice@foo.com", "Alice Smith", 3),
+            contact("bob@bar.com", "Bob Jones", 2),
+            contact("carol@baz.com", "Carol", 1),
+        ] {
+            contacts.insert(c.address.clone(), c);
+        }
+        app.contacts_view.index = Some(mp_core::contacts::ContactIndex {
+            account: "test".into(),
+            contacts,
+            built_at: "2026-04-08T00:00:00Z".into(),
+        });
+        app.contacts_view.loaded = true;
+        app.view = View::Contacts;
+        app.recompute_contact_matches();
+        app
+    }
+
+    /// The fuzzy-search input filters the contact list at the App level, and
+    /// `Esc` clears the query and restores the full ranked list.
+    #[test]
+    fn contacts_fuzzy_search_filters_list() {
+        let mut app = app_in_contacts();
+        // Empty query: all three, rank-ordered (sent_to desc): alice, bob, carol.
+        assert_eq!(app.contacts_view.matches.len(), 3);
+        assert_eq!(app.contacts_view.matches[0], "alice@foo.com");
+
+        // `/` arms the search input; typing narrows the list.
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert!(app.contacts_view.searching);
+        for c in "bob".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.contacts_view.matches, vec!["bob@bar.com".to_string()]);
+
+        // `Esc` clears the query and restores the full list.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.contacts_view.searching);
+        assert!(app.contacts_view.query.is_empty());
+        assert_eq!(app.contacts_view.matches.len(), 3);
+    }
+
+    /// Contacts navigation keys move the list cursor and drive the selection.
+    #[test]
+    fn contacts_navigation_moves_cursor() {
+        let mut app = app_in_contacts();
+        assert_eq!(app.contacts_view.list_index, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.contacts_view.list_index, 1);
+        assert_eq!(app.selected_contact().unwrap().address, "bob@bar.com");
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.contacts_view.list_index, 0);
+    }
+
+    /// `Enter`/`n` in Contacts opens the compose wizard seeded with the
+    /// selected contact's address.
+    #[test]
+    fn compose_to_contact_seeds_wizard() {
+        let mut app = app_in_contacts();
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // select bob
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match app.pending_actions.pop_front() {
+            Some(Action::ComposeToContact { to }) => {
+                assert_eq!(to, "Bob Jones <bob@bar.com>");
+            }
+            other => panic!("expected ComposeToContact, got {other:?}"),
+        }
+    }
+
+    /// `v` in Contacts queues a vCard export for the selected contact.
+    #[test]
+    fn vcard_key_queues_export_for_selection() {
+        let mut app = app_in_contacts();
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        match app.pending_actions.pop_front() {
+            Some(Action::SendContactVcard { contact }) => {
+                assert_eq!(contact.address, "alice@foo.com");
+            }
+            other => panic!("expected SendContactVcard, got {other:?}"),
+        }
+    }
+
+    /// `c` in Contacts queues the clipboard copy for the selected contact.
+    /// Dispatch-level only: the actual `arboard` call lives in `actions.rs` and
+    /// would touch the real system clipboard (unavailable headless), so tests
+    /// stop at the queued `Action`, like the vCard test above.
+    #[test]
+    fn copy_email_key_queues_clipboard_copy_for_selection() {
+        let mut app = app_in_contacts();
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // select bob
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        match app.pending_actions.pop_front() {
+            Some(Action::CopyContactEmail { address }) => {
+                assert_eq!(address, "bob@bar.com");
+            }
+            other => panic!("expected CopyContactEmail, got {other:?}"),
+        }
+    }
+
+    /// With no contact selected (empty index) `c` is a no-op with a status
+    /// hint, not a queued copy.
+    #[test]
+    fn copy_email_key_is_noop_without_selection() {
+        let mut app = app_with_mailboxes();
+        app.view = View::Contacts;
+        app.contacts_view.loaded = true;
+        app.recompute_contact_matches();
+        assert!(app.selected_contact().is_none());
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert!(
+            app.pending_actions
+                .iter()
+                .all(|a| !matches!(a, Action::CopyContactEmail { .. })),
+            "c must not queue a copy without a selection"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("No contact selected"));
+    }
+
+    /// Contacts keys must not fire in the Mail view: pressing `v` (vCard) in
+    /// Mail does not queue a contact action (it is not a Mail binding).
+    #[test]
+    fn contacts_keys_do_not_fire_in_mail() {
+        let mut app = app_with_mailboxes();
+        assert_eq!(app.view, View::Mail);
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert!(
+            !app
+                .pending_actions
+                .iter()
+                .any(|a| matches!(a, Action::SendContactVcard { .. })),
+            "v must not queue a vCard export in Mail"
+        );
+        // And a bare `n` in Mail is the New-draft path, not compose-to-contact.
+        app.pending_actions.clear();
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(
+            app
+                .pending_actions
+                .iter()
+                .all(|a| !matches!(a, Action::ComposeToContact { .. })),
+            "n in Mail must be NewDraft, not ComposeToContact"
+        );
+        // `c` in Mail is edit-recipients (Drafts-only), never a contact copy.
+        app.pending_actions.clear();
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert!(
+            app.pending_actions
+                .iter()
+                .all(|a| !matches!(a, Action::CopyContactEmail { .. })),
+            "c in Mail must not queue a contact copy"
+        );
+    }
+
+    /// `c` must not queue a contact copy from the Calendar view either (it has
+    /// no `c` binding, and the Global `c` is only a `Space` continuation).
+    #[test]
+    fn copy_email_key_does_not_fire_in_calendar() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        assert!(
+            app.pending_actions
+                .iter()
+                .all(|a| !matches!(a, Action::CopyContactEmail { .. })),
+            "c must not queue a contact copy in Calendar"
+        );
+    }
+
+    // -- Calendar view (#0034) -------------------------------------------
+
+    fn cal_event(
+        summary: &str,
+        start: &str,
+        is_organizer: bool,
+        method: &str,
+    ) -> super::super::CalendarEvent {
+        super::super::CalendarEvent {
+            msg: ref_for(summary),
+            event: mp_core::types::EventFrontmatter {
+                uid: Some(format!("uid-{summary}")),
+                method: Some(method.to_string()),
+                sequence: 0,
+                summary: Some(summary.to_string()),
+                start: Some(start.to_string()),
+                end: None,
+                location: None,
+                organizer: Some("org@example.com".into()),
+                rsvp: "needs-action".into(),
+                recurrence: String::new(),
+                attendees: Vec::new(),
+                ..Default::default()
+            },
+            subject: format!("Invitation: {summary}"),
+            start_sort: start.to_string(),
+            end_sort: String::new(),
+            start_display: start.to_string(),
+            is_organizer,
+            cancelled: false,
+        }
+    }
+
+    /// Build an app already in the Calendar view with a seeded agenda. Events
+    /// are far-future so the default upcoming-only scope keeps them all.
+    fn app_in_calendar() -> App {
+        let mut app = app_with_mailboxes();
+        app.calendar_view.events = vec![
+            cal_event("Standup", "2099-08-01T09:00:00", false, "REQUEST"),
+            cal_event("Retro", "2099-08-02T09:00:00", true, "REQUEST"),
+            cal_event("Review", "2099-08-03T09:00:00", false, "REQUEST"),
+        ];
+        app.calendar_view.loaded = true;
+        app.view = View::Calendar;
+        app.recompute_calendar_visible();
+        app
+    }
+
+    /// Calendar navigation keys move the cursor and drive the selection.
+    #[test]
+    fn calendar_navigation_moves_cursor() {
+        let mut app = app_in_calendar();
+        assert_eq!(app.calendar_view.visible.len(), 3);
+        assert_eq!(app.calendar_view.list_index, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.calendar_view.list_index, 1);
+        assert_eq!(
+            app.selected_event().unwrap().event.summary.as_deref(),
+            Some("Retro")
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.calendar_view.list_index, 0);
+    }
+
+    /// `gg` / `G` jump to the ends of the agenda.
+    #[test]
+    fn calendar_top_bottom_jumps() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('G')));
+        assert_eq!(app.calendar_view.list_index, 2);
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.pending_prefix, Some('g'));
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.calendar_view.list_index, 0);
+        assert_eq!(app.pending_prefix, None);
+    }
+
+    /// `V` on a received agenda invite opens the RSVP overlay against that
+    /// row's own message, not the mail cursor's: the agenda carries a
+    /// `MessageRef` since the calendar moved onto the store (#0038 item 6).
+    #[test]
+    fn calendar_rsvp_opens_against_the_agenda_rows_message() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        let Overlay::Rsvp(overlay) = &app.overlay else {
+            panic!("V on a received agenda invite must open the RSVP overlay");
+        };
+        assert_eq!(overlay.msg, ref_for("Standup"), "the agenda row's own message");
+        assert_eq!(overlay.summary, "Standup");
+        assert_eq!(overlay.selected, 0);
+    }
+
+    /// `V` on an invite we sent refuses with a hint (we are the organizer).
+    #[test]
+    fn calendar_rsvp_refused_for_organizer_event() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Char('j'))); // Retro (organizer)
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("organizer")));
+    }
+
+    /// #0031: the mail-view RSVP refuses a cancelled or superseded version of
+    /// an event, so no reply goes out carrying a `SEQUENCE` the organizer has
+    /// already moved past. A current REQUEST is still accepted.
+    #[test]
+    fn rsvp_refusal_covers_cancelled_and_superseded_versions() {
+        let request = |f: fn(&mut mp_core::types::EventFrontmatter)| {
+            let mut ev = mp_core::types::EventFrontmatter {
+                method: Some("REQUEST".into()),
+                ..Default::default()
+            };
+            f(&mut ev);
+            ev
+        };
+        assert!(super::rsvp_refusal(Some(&request(|_| {}))).is_none());
+        assert!(super::rsvp_refusal(None)
+            .is_some_and(|m| m.contains("Only received invitations")));
+        assert!(super::rsvp_refusal(Some(&mp_core::types::EventFrontmatter {
+            method: Some("CANCEL".into()),
+            ..Default::default()
+        }))
+        .is_some_and(|m| m.contains("Only received invitations")));
+        assert!(
+            super::rsvp_refusal(Some(&request(|e| e.cancelled = true)))
+                .is_some_and(|m| m.contains("cancelled")),
+        );
+        assert!(
+            super::rsvp_refusal(Some(&request(|e| e.superseded = true)))
+                .is_some_and(|m| m.contains("newer version")),
+        );
+    }
+
+    /// `V` on a cancelled row refuses: the organizer already called the
+    /// meeting off, so an RSVP would be mailed about a dead event.
+    #[test]
+    fn calendar_rsvp_refused_for_cancelled_event() {
+        let mut app = app_in_calendar();
+        app.calendar_view.events[0].cancelled = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("cancelled")));
+    }
+
+    /// `V` on a non-REQUEST row refuses: only a received invitation can be
+    /// RSVP'd, the same guard the mail path applies.
+    #[test]
+    fn calendar_rsvp_refused_for_non_request_event() {
+        let mut app = app_in_calendar();
+        app.calendar_view.events[0].event.method = Some("PUBLISH".to_string());
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("REQUEST")));
+    }
+
+    /// With the RSVP overlay open, `t` selects Tentative rather than toggling
+    /// the Calendar scope: overlays intercept before normal-mode dispatch.
+    #[test]
+    fn calendar_rsvp_overlay_t_selects_tentative_not_scope_toggle() {
+        let mut app = app_in_calendar();
+        // Opened directly rather than with `V`: what this test is about is
+        // key precedence with the overlay already up, not how it got there.
+        app.overlay = Overlay::Rsvp(RsvpOverlay {
+            msg: MessageRef::new(1),
+            summary: "Standup".to_string(),
+            selected: 0,
+        });
+        let scope_before = app.calendar_view.show_past;
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        let Overlay::Rsvp(overlay) = &app.overlay else {
+            panic!("t must not close the RSVP overlay");
+        };
+        assert_eq!(overlay.selected, 1, "t selects Tentative");
+        assert_eq!(app.calendar_view.show_past, scope_before);
+    }
+
+    /// An in-progress meeting (started, not yet ended) stays in the upcoming
+    /// scope until its `end_sort` passes, rather than vanishing at its start.
+    #[test]
+    fn in_progress_meeting_stays_upcoming_until_it_ends() {
+        let mut app = app_with_mailboxes();
+        let now = chrono::Utc::now();
+        let fmt = |dt: chrono::DateTime<chrono::Utc>| dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let mut running = cal_event(
+            "Running",
+            &fmt(now - chrono::Duration::minutes(30)),
+            false,
+            "REQUEST",
+        );
+        running.end_sort = fmt(now + chrono::Duration::minutes(30));
+        let mut finished = cal_event(
+            "Finished",
+            &fmt(now - chrono::Duration::hours(3)),
+            false,
+            "REQUEST",
+        );
+        finished.end_sort = fmt(now - chrono::Duration::hours(2));
+        app.calendar_view.events = vec![running, finished];
+        app.calendar_view.loaded = true;
+        app.recompute_calendar_visible();
+        let visible: Vec<&str> = app
+            .calendar_view
+            .visible
+            .iter()
+            .map(|&i| app.calendar_view.events[i].subject.as_str())
+            .collect();
+        assert_eq!(visible, vec!["Invitation: Running"]);
+    }
+
+    /// `Enter` queues opening the source invite email, carrying the agenda
+    /// row's own message reference (the invite may live in any mailbox).
+    #[test]
+    fn calendar_enter_opens_the_source_invite() {
+        let mut app = app_in_calendar();
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match app.pending_actions.pop_front() {
+            Some(Action::OpenEventSource { msg }) => {
+                assert_eq!(msg, ref_for("Standup"));
+            }
+            other => panic!("expected OpenEventSource, got {other:?}"),
+        }
+    }
+
+    /// `t` toggles the upcoming-only scope; past events appear only when on.
+    #[test]
+    fn calendar_scope_toggle_reveals_past_events() {
+        let mut app = app_in_calendar();
+        app.calendar_view
+            .events
+            .push(cal_event("Old", "2000-01-01T09:00:00", false, "REQUEST"));
+        app.recompute_calendar_visible();
+        assert_eq!(app.calendar_view.visible.len(), 3, "past event hidden");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(app.calendar_view.show_past);
+        assert_eq!(app.calendar_view.visible.len(), 4);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert_eq!(app.calendar_view.visible.len(), 3);
+    }
+
+    /// Calendar keys must not fire in Mail: `V` there is the mail-list RSVP
+    /// path (guarded on the cursor email being an invite), never the calendar
+    /// one, and `t` is not a Mail binding at all.
+    #[test]
+    fn calendar_keys_do_not_fire_in_mail() {
+        let mut app = app_with_mailboxes();
+        app.calendar_view.events =
+            vec![cal_event("Standup", "2099-08-01T09:00:00", false, "REQUEST")];
+        app.calendar_view.loaded = true;
+        app.recompute_calendar_visible();
+        assert_eq!(app.view, View::Mail);
+
+        // The cursor email is not an invite, so `V` hints instead of opening.
+        app.handle_key(KeyEvent::from(KeyCode::Char('V')));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        // `t` (calendar scope toggle) does nothing in Mail.
+        let before = app.calendar_view.show_past;
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert_eq!(app.calendar_view.show_past, before);
+        assert!(app.pending_actions.is_empty());
+    }
+
+    /// Mail-specific Global keys stay swallowed in Calendar even though it now
+    /// owns a pane context: digits do not jump mailboxes, `/` does not open the
+    /// metadata filter (Calendar rebinds neither).
+    #[test]
+    fn mail_global_keys_stay_swallowed_in_calendar() {
+        let mut app = app_in_calendar();
+        let before = app.active_mailbox;
+        app.handle_key(KeyEvent::from(KeyCode::Char('2')));
+        assert_eq!(app.active_mailbox, before, "digit jump must not fire");
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert_ne!(app.focus, Focus::Search, "/ must not arm the mail filter");
+        assert_eq!(app.view, View::Calendar);
+    }
+
+    // -----------------------------------------------------------------------
+    // Jump to date (#0017)
+    // -----------------------------------------------------------------------
+
+    /// A dated list, newest first, the way `store::read` orders one.
+    fn dated_emails(days: &[&str]) -> Vec<EmailEntry> {
+        days.iter()
+            .map(|day| {
+                let mut e = entry(day, "Alice");
+                e.date_display = (*day).to_string();
+                e.date_sort = format!("{day}T09:00:00");
+                e
+            })
+            .collect()
+    }
+
+    fn app_on_dates() -> App {
+        let mut app = App::default_for_tests();
+        app.emails = std::sync::Arc::new(dated_emails(&[
+            "2026-08-10", "2026-08-01", "2026-07-15", "2026-06-30", "2025-12-24",
+        ]));
+        app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
+        app.mailbox_counts = vec![app.emails.len()];
+        app.rebuild_visible();
+        app
+    }
+
+    fn day(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// The cursor lands on the newest row that is not after the target, and
+    /// the list itself does not move: this is navigation, not a filter.
+    #[test]
+    fn a_jump_lands_on_the_newest_row_on_or_before_the_date() {
+        let mut app = app_on_dates();
+        let before = app.visible.clone();
+
+        app.jump_to_date(day("2026-07-20"));
+        assert_eq!(app.list_index, 2, "2026-07-15 is the newest row on or before it");
+        assert_eq!(app.visible, before, "nothing is filtered out");
+
+        // An exact hit lands on that row, not past it.
+        app.jump_to_date(day("2026-08-01"));
+        assert_eq!(app.list_index, 1);
+
+        // A date newer than everything lands on the newest row.
+        app.jump_to_date(day("2026-12-31"));
+        assert_eq!(app.list_index, 0);
+    }
+
+    /// A date older than the whole mailbox parks on the oldest row and says
+    /// so, rather than silently pretending it found it.
+    #[test]
+    fn a_jump_past_the_oldest_row_says_where_it_stopped() {
+        let mut app = app_on_dates();
+        app.jump_to_date(day("2020-01-01"));
+        assert_eq!(app.list_index, 4);
+        let status = app.status_message.clone().unwrap();
+        assert!(status.contains("Nothing on or before 2020-01-01"), "{status}");
+    }
+
+    /// `g t` arms the prompt, typing edits it, Enter jumps and disarms, and a
+    /// date the grammar cannot read keeps the prompt up with the reason shown.
+    #[test]
+    fn the_prompt_is_armed_typed_and_committed_by_the_keyboard() {
+        let mut app = app_on_dates();
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert_eq!(app.jump_date_input.as_deref(), Some(""), "the prompt is armed");
+
+        for c in "2026-07-20".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(app.jump_date_input.as_deref(), Some("2026-07-20"));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.jump_date_input.as_deref(), Some("2026-07-2"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('0')));
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.jump_date_input.is_none(), "committing disarms the prompt");
+        assert_eq!(app.list_index, 2);
+    }
+
+    /// While the prompt is armed it owns the keyboard: `d` types a character,
+    /// it does not delete the message under the cursor.
+    #[test]
+    fn the_armed_prompt_swallows_the_keys_that_would_otherwise_act() {
+        let mut app = app_on_dates();
+        app.jump_date_input = Some(String::new());
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.jump_date_input.as_deref(), Some("d"));
+        assert!(app.pending_actions.is_empty(), "{:?}", app.pending_actions);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.jump_date_input.is_none(), "Esc abandons the prompt");
+        assert_eq!(app.list_index, 0, "an abandoned prompt moves nothing");
+    }
+
+    /// An unreadable date is a correction, not a re-arm: the prompt stays up
+    /// and the status line names the forms that would have worked.
+    #[test]
+    fn an_unreadable_date_keeps_the_prompt_and_explains() {
+        let mut app = app_on_dates();
+        app.jump_date_input = Some("tomorrow".to_string());
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.jump_date_input.as_deref(), Some("tomorrow"));
+        assert_eq!(app.list_index, 0, "nothing moved");
+        let status = app.status_message.clone().unwrap();
+        assert!(status.contains("YYYY-MM-DD"), "{status}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Attach file to a draft (#0098)
+    // -----------------------------------------------------------------------
+
+    /// The Drafts mailbox active with one draft under the cursor and the list
+    /// focused: the surface `t a` (attach) is reachable from.
+    fn app_in_drafts() -> App {
+        let mut app = app_with_mailboxes();
+        app.active_mailbox = 1; // Drafts
+        app.emails = std::sync::Arc::new(vec![draft_entry("draft-1", "Re: report")]);
+        app.email_cache = vec![None, Some(std::sync::Arc::clone(&app.emails)), None, None];
+        app.rebuild_visible();
+        app.list_index = 0;
+        app.focus = Focus::List;
+        app
+    }
+
+    /// `t a` on a Drafts row arms the prompt, typing edits it, an on-disk path
+    /// commits (disarms and queues the append), and a path that is not on disk
+    /// keeps the prompt up with the reason on the status line -- the same
+    /// correction-not-re-arm shape the jump-to-date prompt uses (#0098).
+    #[test]
+    fn the_attach_prompt_is_armed_typed_and_committed_by_the_keyboard() {
+        let mut app = app_in_drafts();
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(app.attach_file_input.as_deref(), Some(""), "the prompt is armed");
+
+        // A path that is not on disk is surfaced, not stored: the prompt stays.
+        for c in "/no/such/file".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            app.attach_file_input.as_deref(),
+            Some("/no/such/file"),
+            "a missing path keeps the prompt armed"
+        );
+        assert!(app.pending_actions.is_empty(), "nothing was queued");
+        assert!(app.status_message.as_deref().unwrap().contains("No such file"));
+
+        // A path that exists: Enter disarms and queues the append verbatim.
+        let tmp = std::env::temp_dir().join(format!("mp-attach-test-{}.txt", std::process::id()));
+        std::fs::write(&tmp, b"x").unwrap();
+        let tmp_str = tmp.to_string_lossy().into_owned();
+        app.attach_file_input = Some(tmp_str.clone());
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.attach_file_input.is_none(), "an on-disk path disarms the prompt");
+        assert!(
+            matches!(
+                app.pending_actions.front(),
+                Some(Action::AttachFileToDraft { path }) if *path == tmp_str
+            ),
+            "the append is queued with the typed path: {:?}",
+            app.pending_actions
+        );
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    /// While the attach prompt is armed it owns the keyboard: `d` types a
+    /// character, it does not delete the draft under the cursor; Esc abandons.
+    #[test]
+    fn the_armed_attach_prompt_swallows_the_keys_that_would_otherwise_act() {
+        let mut app = app_in_drafts();
+        app.attach_file_input = Some(String::new());
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(app.attach_file_input.as_deref(), Some("d"));
+        assert!(app.pending_actions.is_empty(), "{:?}", app.pending_actions);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.attach_file_input.is_none(), "Esc abandons the prompt");
+    }
+
+    /// Attach is Drafts-only: pressed in a received-mail mailbox it arms
+    /// nothing and says why (the advisory-guard shape `ce` edit recipients
+    /// uses), so `t a` never grows a non-existent `attachments:` list (#0098).
+    #[test]
+    fn attach_is_refused_outside_drafts() {
+        let mut app = app_with_mailboxes(); // Inbox active, received mail
+        app.focus = Focus::List;
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert!(app.attach_file_input.is_none(), "no prompt outside Drafts");
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("only available in Drafts"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pane zoom (#TKT-0044)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn z_zooms_the_focused_pane_and_z_again_restores_the_split() {
+        let mut app = app_with_emails(sample());
+        app.focus = Focus::Preview;
+        assert_eq!(app.zoomed_pane(), None);
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.zoomed_pane(), Some(Focus::Preview));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.zoomed_pane(), None);
+    }
+
+    #[test]
+    fn the_zoom_follows_the_focus() {
+        // herdr zooms *the active pane*, so cycling focus under a zoom moves
+        // the zoom rather than leaving a zoomed pane the keyboard no longer
+        // drives.
+        let mut app = app_with_emails(sample());
+        app.focus = Focus::List;
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.zoomed_pane(), Some(Focus::List));
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Headers);
+        assert_eq!(app.zoomed_pane(), Some(Focus::Headers));
+    }
+
+    #[test]
+    fn the_search_prompt_zooms_the_list_it_filters() {
+        let mut app = app_with_emails(sample());
+        app.focus = Focus::Search;
+        app.zoomed = true;
+        assert_eq!(app.zoomed_pane(), Some(Focus::List));
+    }
+
+    #[test]
+    fn the_compose_wizard_has_nothing_to_zoom_and_says_so() {
+        let mut app = app_with_emails(sample());
+        app.focus = Focus::ComposeWizard;
+        app.toggle_zoom();
+        assert!(!app.zoomed, "the flag must not arm for a later pane");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Nothing to zoom here.")
+        );
+    }
+
+    #[test]
+    fn zoom_is_a_mail_view_layout_and_is_ignored_elsewhere() {
+        // `z` never fires off Mail (`is_view_agnostic` leaves `ToggleZoom`
+        // out), and even a flag set before the switch changes nothing there.
+        let mut app = app_with_emails(sample());
+        app.zoomed = true;
+        app.view = View::Contacts;
+        assert_eq!(app.zoomed_pane(), None);
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.zoomed, "the flag is untouched off Mail");
+        // Back on Mail the zoom the user armed is still there.
+        app.view = View::Mail;
+        assert_eq!(app.zoomed_pane(), Some(Focus::List));
+    }
+
+    #[test]
+    fn a_zoom_survives_an_account_switch() {
+        // Session state, not per-account state: switching accounts must not
+        // silently un-zoom the pane the user is reading.
+        let mut app = app_with_emails(sample());
+        app.focus = Focus::Preview;
+        app.zoomed = true;
+        app.save_to_account();
+        app.load_from_account(0);
+        assert_eq!(app.zoomed_pane(), Some(Focus::Preview));
+    }
+}

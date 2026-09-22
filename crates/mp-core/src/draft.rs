@@ -259,6 +259,18 @@ pub fn set_draft_id(path: &Path, id: &str) -> Result<()> {
     rewrite_frontmatter_scalars_at(path, &[("id", FieldWrite::Set(yaml_dq_escape(id)))])
 }
 
+/// Which draft a [`SourceMessage`] is turned into.
+///
+/// It lives beside the source rather than beside the builder that consumes it
+/// (`create_draft_from_source`, which needs an index and stayed in the root
+/// crate): the compose wizard names the kind before anything is built, and
+/// since #0126 (P5-U10f) that wizard is in a crate that links no engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftFromSource {
+    Reply { all: bool },
+    Forward,
+}
+
 /// The message a reply or a forward is built from, independent of where it
 /// came from.
 ///

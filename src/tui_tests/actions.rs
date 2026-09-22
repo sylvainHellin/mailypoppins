@@ -1255,7 +1255,7 @@ fn the_drain_bounds_are_unchanged() {
 /// of `pending_actions` *after* `app.update`.
 #[test]
 fn the_pre_draw_drain_still_stops_on_its_four_clauses() {
-    let source = read_source("src/tui/mod.rs");
+    let source = read_source("crates/mp-tui/src/lib.rs");
     let (start, _) = source
         .match_indices("let drain_started")
         .next()
@@ -1354,12 +1354,12 @@ const TUI_ACTION_ENGINE_RESIDUE: &[(&str, &str, &str, &str)] = &[];
 
 /// The two files this unit is accountable for.
 ///
-/// `src/tui/mutations.rs` has no caller left once the five message mutations
+/// `mutations.rs` has no caller left once the five message mutations
 /// are routed, so the expected end state is a file that is gone (moved into the
 /// daemon, which is where its four `queue_*` functions are needed). The scan
 /// treats a missing file as a file with no residue rather than failing, so
 /// deleting it is not a reason to edit this table.
-const ACTION_SOURCES: [&str; 2] = ["src/tui/actions.rs", "src/tui/mutations.rs"];
+const ACTION_SOURCES: [&str; 2] = ["crates/mp-tui/src/actions.rs", "crates/mp-tui/src/mutations.rs"];
 
 /// The symbols that mean "this function is on the direct path".
 ///

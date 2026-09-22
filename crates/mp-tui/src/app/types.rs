@@ -1,0 +1,2651 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use chrono::NaiveDate;
+
+use mp_protocol::draft::{DraftEntry, DraftSkip};
+use mp_protocol::listing::MessageListRow;
+
+use mp_core::parse::FetchedEmail;
+use mp_core::types::MailboxRole;
+
+// ---------------------------------------------------------------------------
+// MessageRef
+// ---------------------------------------------------------------------------
+
+/// Stable in-process handle for one stored message: `messages.id`, the
+/// synthetic primary key of the row.
+///
+/// This is what replaced `EmailEntry.path` when the read path moved onto the
+/// store (#0038). Everything that used to key on the file path keys on this:
+/// the list selection set, the cursor anchor across a list rebuild, and the
+/// payload of every queued `Action`.
+///
+/// The synthetic id rather than `(account, mailbox, uid)` because those are
+/// precisely the coordinates that move. `src/store/schema.rs` puts it plainly:
+/// the id exists "so a move or a UIDVALIDITY reset does not invalidate
+/// references held elsewhere", and a selection the user made two seconds
+/// before a sync renumbered the mailbox is exactly such a reference.
+///
+/// Scoped to one account, because the store is: two accounts can hold the same
+/// id for different messages. Every holder (`selection`, `cursor_ref`, a queued
+/// `Action`) is per-account state that is dropped or re-anchored on account
+/// switch, so the scope never has to be carried alongside.
+///
+/// The user-facing name of a message is the `mp://<account>/<mailbox>/<key>`
+/// selector, which is a different thing with a different job (it survives a
+/// restart, this does not) and landed with #0050.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MessageRef(i64);
+
+impl MessageRef {
+    /// Wrap a `messages.id` read back from the store.
+    pub fn new(row_id: i64) -> Self {
+        Self(row_id)
+    }
+
+    /// The `messages.id` this refers to.
+    pub fn row_id(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for MessageRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "message #{}", self.0)
+    }
+}
+
+/// What the multi-select set holds: one list entry, named in whichever of the
+/// two namespaces it lives in (#0052).
+///
+/// The list has exactly two kinds of row and they are named differently: a
+/// received message is a `messages` row ([`MessageRef`]), a draft is a file the
+/// drafts index knows by its `id:`. Keying the selection on `MessageRef` alone
+/// meant a draft could never enter it, which left batch approve and batch
+/// mark-draft reachable by keystroke and dead in fact. The enum makes the two
+/// namespaces explicit, the same way the `mp://` selector does at the CLI
+/// boundary, so a handler that only accepts one of them says so in its types.
+///
+/// A selection never mixes the two in practice: a mailbox lists one kind of row
+/// and [`crate::app::App::switch_mailbox`] clears the set on the way out.
+/// The batch handlers still filter rather than assume, because a filter is
+/// honest about a set it did not build.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EntryKey {
+    /// A received message, by its store row.
+    Msg(MessageRef),
+    /// A draft, by its indexed `id:` (#0050 scope item 4).
+    Draft(String),
+}
+
+impl EntryKey {
+    /// The store row this names, or `None` for a draft.
+    pub fn msg(&self) -> Option<MessageRef> {
+        match self {
+            EntryKey::Msg(msg) => Some(*msg),
+            EntryKey::Draft(_) => None,
+        }
+    }
+
+    /// The indexed draft id this names, or `None` for a received message.
+    pub fn draft(&self) -> Option<&str> {
+        match self {
+            EntryKey::Msg(_) => None,
+            EntryKey::Draft(id) => Some(id),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EmailEntry (ported from beautifulmail's email.rs)
+// ---------------------------------------------------------------------------
+
+/// Parsed email entry for display in the list and preview.
+///
+/// It carries no body. A mailbox load is rows only (#0038 scope item 5), and
+/// the body of the one message the preview shows is fetched from the blob
+/// store on demand and memoised in [`PreviewBody`]. The list is shared behind
+/// an `Arc` between the active mailbox and its cache slot, so a body parked
+/// here would be paid for by every message in the mailbox to serve the one on
+/// screen, and could not be refreshed without cloning the whole vector.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EmailEntry {
+    /// Identity of the underlying `messages` row. Replaced the file path in
+    /// #0038; see [`MessageRef`].
+    ///
+    /// `None` means "this entry has no store row", which happens for exactly
+    /// one kind of entry: a server-search hit whose Message-ID does not
+    /// resolve locally (see `tui::helpers::fetched_to_email_entry`). Such an
+    /// entry can be listed and previewed from the fetched content, and every
+    /// row-dependent operation on it must decline with a status message
+    /// rather than act on some other message. A sentinel `MessageRef` would
+    /// be a lie that could reach the selection set, so the absence is typed.
+    pub msg: Option<MessageRef>,
+    /// Identity of the underlying drafts-index row: the `id:` frontmatter
+    /// field (#0050 scope item 4).
+    ///
+    /// A drafts entry has no `messages` row, so `msg` is `None` for it and
+    /// this carries its name instead. The two are mutually exclusive by
+    /// construction: `entry_from_row` fills `msg`, `entry_from_draft` fills
+    /// `draft_id`, and nothing fills both. Anything that needs to name the
+    /// selected entry (`Action::CopyMessageRef`) asks this first, because a
+    /// draft's canonical selector is `mp://<account>/drafts/<id>` and never
+    /// goes through the store.
+    pub draft_id: Option<String>,
+    /// Set when this row is a draft file the index could not parse (#0080).
+    ///
+    /// Such a file has no `id:` to index under, so `msg` and `draft_id` are
+    /// both `None` and it would otherwise be a keyless nobody. This carries
+    /// its path and the one-line parse error instead, so the Drafts list can
+    /// show it as an unopenable error row where the user expects the draft to
+    /// be, rather than let the file vanish. It is mutually exclusive with both
+    /// `msg` and `draft_id`: a row is a message, a parsed draft, or a skip.
+    pub skip: Option<DraftSkip>,
+    /// The canonical `mp://` name of this row, as the daemon spelled it
+    /// (`RD-07`, #0126).
+    ///
+    /// A listed message carries `message.list`'s own `selector`, a draft
+    /// carries `draft.list`'s, and both are the daemon's rendering of
+    /// `mp_core::selector` rather than a second one composed here. `None` is
+    /// the row that has no name to copy: a parse-skipped file, which has no
+    /// `id:` to be named by, and a server-search hit that does not resolve to
+    /// a local row, which has no `messages` row for a selector to point at.
+    ///
+    /// It is on the row rather than behind a query because the daemon already
+    /// had the string in hand when it built the row; `y` therefore costs no
+    /// round trip and no store read.
+    pub selector: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub cc: Option<String>,
+    /// `Reply-To:` header, surfaced in the header pane when present (#0096).
+    pub reply_to: Option<String>,
+    /// `Bcc:` header, surfaced in the header pane when present (#0096).
+    pub bcc: Option<String>,
+    pub subject: String,
+    pub status: String,
+    pub date_display: String,
+    pub date_sort: String,
+    pub has_attachments: bool,
+    pub read: bool,
+    /// True when a reply to this message has gone out (#TKT-0051), either from
+    /// here or from another client the server told us about.
+    ///
+    /// Three booleans rather than one collapsed state, because the axis is a
+    /// set: a message can be read, answered and forwarded at once. Which one
+    /// the marker column shows is [`crate::ui::list`]'s decision.
+    pub answered: bool,
+    /// True when this message has been forwarded (#TKT-0051).
+    pub forwarded: bool,
+    /// True when the user starred this message with `\Flagged` (#0007).
+    ///
+    /// Orthogonal to the read/answered/forwarded axis: a message can be flagged
+    /// and unread at once, so the list renders it as its own coloured marker
+    /// rather than folding it into the single status glyph.
+    pub flagged: bool,
+    /// True when the message carries an iMIP payload, i.e. the store row has
+    /// an `invite.ics` attachment blob (#0029, #0038 scope item 6).
+    ///
+    /// A flag rather than the parsed event: the badge is needed for every row
+    /// of the mailbox and the answer rides on the listing query itself, while
+    /// the event card is needed for one row at a time and is parsed from that
+    /// row's ics blob on demand (see [`PreviewInvite`]). Parsing every
+    /// mailbox row's invite eagerly would put back exactly the per-row blob
+    /// read the lazy body work removed.
+    pub is_invite: bool,
+}
+
+impl EmailEntry {
+    /// The contact to display depends on the mailbox kind:
+    /// Inbox/Archive/Extra show `from`, Drafts/Sent show `to`.
+    pub fn display_contact(&self, kind: MailboxKind) -> &str {
+        match kind {
+            MailboxKind::Inbox | MailboxKind::Archive | MailboxKind::Extra => &self.from,
+            MailboxKind::Drafts | MailboxKind::Sent => &self.to,
+        }
+    }
+
+    /// How the selection set names this entry, or `None` for the one entry
+    /// that has no name: a server-search hit that resolved to no local row.
+    pub fn key(&self) -> Option<EntryKey> {
+        match (self.msg, self.draft_id.as_deref()) {
+            (Some(msg), _) => Some(EntryKey::Msg(msg)),
+            (None, Some(id)) => Some(EntryKey::Draft(id.to_string())),
+            (None, None) => None,
+        }
+    }
+}
+
+/// The `messages.mailbox` value for a sidebar mailbox.
+pub fn mailbox_key(mb: &MailboxInfo) -> String {
+    mb.id.clone()
+}
+
+/// The `status` string a listed message shows, derived from the mailbox it was
+/// listed from. Rendered in the headers pane as `[inbox]`, `[archived]` and so
+/// on.
+///
+/// The one derivation there is. `EmailStatus` no longer carries the file-era
+/// placement states this returns, and the `kind_to_status` copy that mapped a
+/// `MailboxKind` to the same four strings is gone with the write-only search
+/// fields that were its only reader (#0064).
+pub fn status_for_mailbox(mailbox: &str) -> String {
+    if mailbox == mp_core::selector::DRAFTS_MAILBOX {
+        return "draft".to_string();
+    }
+    match MailboxRole::from(mailbox) {
+        MailboxRole::Archive => "archived".to_string(),
+        MailboxRole::Sent => "sent".to_string(),
+        MailboxRole::Inbox | MailboxRole::Other(_) => "inbox".to_string(),
+    }
+}
+
+/// Map one store row into a display entry. The body is not part of it and is
+/// not read here (#0038 scope item 5).
+///
+/// Date display and sort keys are derived from the stored `Date:` header by
+/// the same [`resolve_date`] the file build used, so both stacks apply one
+/// rule; the path argument is empty because the filename fallback died with
+/// the filenames.
+///
+/// `is_invite` comes off the listing query, so the badge costs no blob read;
+/// the event card behind it is parsed lazily from the ics blob of the one row
+/// the preview shows (#0038 scope item 6, [`PreviewInvite`]).
+/// The row is the wire row (`RD-07`, #0126), not the store's: every value an
+/// entry reads off a listing is on it, `selector` included, so a client builds
+/// its list out of what the daemon sent and never opens a store to do it.
+/// `date_sort` is recomputed here rather than taken from the wire because
+/// [`resolve_date`] also produces the display string, and deriving one of the
+/// pair from the row and the other from the wire would be two rules.
+pub fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
+    let (date_display, date_sort) = resolve_date(
+        &Some(row.date_display.clone()).filter(|d| !d.is_empty()),
+        &None,
+        Path::new(""),
+    );
+    EmailEntry {
+        msg: Some(MessageRef::new(row.id)),
+        draft_id: None,
+        skip: None,
+        selector: Some(row.selector),
+        from: extract_display_name(&row.from),
+        to: extract_display_name(&row.to),
+        cc: row.cc,
+        reply_to: row.reply_to,
+        bcc: row.bcc,
+        subject: if row.subject.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            row.subject
+        },
+        status: status.to_string(),
+        date_display,
+        date_sort,
+        read: row.flags.seen,
+        answered: row.flags.answered,
+        forwarded: row.flags.forwarded,
+        flagged: row.flags.flagged,
+        has_attachments: row.has_attachments,
+        is_invite: row.is_invite,
+    }
+}
+
+/// Map one drafts-index row into a display entry.
+///
+/// `msg` stays `None`: there is no `messages` row behind a draft, and a
+/// sentinel would be a lie that could reach the selection set. `read` is true
+/// because a draft the user wrote is not unread mail, and the list renders
+/// unread rows bold.
+///
+/// The date falls back to the filename through the same [`resolve_date`] the
+/// file build used, so a draft whose frontmatter has no `date:` yet still
+/// sorts by its `YYYY-MM-DD-...` stem rather than collapsing to the bottom.
+pub fn entry_from_draft(row: DraftEntry) -> EmailEntry {
+    let (date_display, date_sort) = resolve_date(&row.date, &None, Path::new(&row.path));
+    EmailEntry {
+        msg: None,
+        draft_id: Some(row.id),
+        skip: None,
+        selector: Some(row.selector),
+        from: String::new(),
+        to: extract_display_name(row.to.as_deref().unwrap_or_default()),
+        cc: row.cc,
+        // Drafts index carries no reply_to/bcc column yet; the header pane
+        // shows them for stored messages (#0096).
+        reply_to: None,
+        bcc: None,
+        subject: row
+            .subject
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(no subject)".to_string()),
+        status: row.status,
+        date_display,
+        date_sort,
+        read: true,
+        // The second axis is a property of received mail: a draft has neither
+        // been answered nor forwarded, it *is* the answer.
+        answered: false,
+        forwarded: false,
+        flagged: false,
+        has_attachments: false,
+        is_invite: false,
+    }
+}
+
+/// Map one parse-skipped draft into an unopenable error row (#0080).
+///
+/// The file has no `id:` and no index row, so `msg` and `draft_id` are both
+/// `None` and its identity is the `skip` field. The subject is the filename
+/// (what the user sees in the directory), and the full parse error rides on
+/// the `skip` for the preview pane and the row's error styling. `read` is true
+/// so the list does not render it bold as if it were unread mail; the error
+/// colour is what marks it, decided by [`crate::ui::list`].
+pub fn entry_from_skip(skip: DraftSkip) -> EmailEntry {
+    let path = PathBuf::from(&skip.path);
+    let (date_display, date_sort) = resolve_date(&None, &None, &path);
+    let filename = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    EmailEntry {
+        msg: None,
+        draft_id: None,
+        skip: Some(skip),
+        selector: None,
+        from: String::new(),
+        to: String::new(),
+        cc: None,
+        reply_to: None,
+        bcc: None,
+        subject: filename,
+        status: "error".to_string(),
+        date_display,
+        date_sort,
+        read: true,
+        answered: false,
+        forwarded: false,
+        flagged: false,
+        has_attachments: false,
+        is_invite: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lazy bodies
+// ---------------------------------------------------------------------------
+
+/// What a memoised body belongs to: the account it was read for, the entry,
+/// and the list generation that was current at the time.
+///
+/// The entry is an [`EntryKey`] and not a bare [`MessageRef`] because the
+/// preview has two kinds of row to answer for: a received message, whose body
+/// is a blob, and a draft, whose body is the markdown in its file. Keying on
+/// the message alone meant a draft row could never build a key, which left the
+/// Body pane blank for every draft.
+///
+/// The generation is the guard. `App::mailbox_load_generation` is bumped by
+/// every mailbox load request and by every optimistic list mutation, so a body
+/// read before a re-sync is discarded by the same counter that discards a
+/// stale background load. The account index is in the key because a
+/// [`MessageRef`] is only meaningful inside one account's store, and a drafts
+/// `id:` inside one account's index.
+pub(crate) type BodyKey = (usize, EntryKey, u64);
+
+/// One-slot memo of the body behind the preview pane.
+///
+/// One slot rather than a map: the preview shows exactly one message, and a
+/// map would grow to hold every body the user scrolled past, which is the
+/// eager load this ticket removed wearing a different hat. Moving the cursor
+/// costs one blob read; moving it back costs another.
+///
+/// It is refreshed from [`crate::app::App::refresh_preview_body`] at the top of the
+/// render pass, where `&mut App` is available, so the renderer itself stays a
+/// pure function of state and needs no interior mutability.
+#[derive(Debug, Default, Clone)]
+pub struct PreviewBody {
+    key: Option<BodyKey>,
+    text: String,
+    /// Monotonic stamp of the *content*, bumped by [`Self::fill`] only when the
+    /// key or the text actually changes. The wrapped-line memo
+    /// ([`crate::ui::preview::PreviewLinesCache`]) keys on this so it can
+    /// decide a cache hit in O(1) instead of re-comparing the whole body
+    /// string every frame. The skip-draft and primed paths refill the same
+    /// text every frame; a plain compare here keeps the stamp (and so the
+    /// wrapped lines) stable across those frames.
+    epoch: u64,
+}
+
+impl PreviewBody {
+    /// The memoised body, empty when nothing is selected.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The content stamp, bumped whenever the body or its key changes. The
+    /// wrapped-line memo pairs this with the pane width to detect a rebuild.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// True when the memo already answers for `key`.
+    pub(crate) fn holds(&self, key: &Option<BodyKey>) -> bool {
+        &self.key == key
+    }
+
+    /// Park `text` as the body for `key`, bumping the content stamp when either
+    /// the key or the text moved. Called every frame on the skip-draft and
+    /// primed paths, so it must not bump on an unchanged refill.
+    pub(crate) fn fill(&mut self, key: Option<BodyKey>, text: String) {
+        if self.key != key || self.text != text {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
+        self.key = key;
+        self.text = text;
+    }
+}
+
+/// One-slot memo of the parsed invite behind the preview pane (#0038 scope
+/// item 6).
+///
+/// The sibling of [`PreviewBody`], keyed the same way and refreshed in the
+/// same place, for the same reason: the event card is needed for the message
+/// under the cursor and for no other, so its ics blob is read and parsed once
+/// per cursor move instead of once per mailbox row. `EmailEntry.is_invite`
+/// answers the list badge without any of this, so a mailbox of invites still
+/// loads with zero blob reads.
+///
+/// The parsed event is the ics folded with the replies the store holds
+/// (`mp_core::reconcile`), so the card shows the same attendee statuses the
+/// agenda does.
+#[derive(Debug, Default, Clone)]
+pub struct PreviewInvite {
+    key: Option<BodyKey>,
+    event: Option<mp_core::types::EventFrontmatter>,
+}
+
+impl PreviewInvite {
+    /// The memoised event, `None` when the selected message is not an invite.
+    pub fn event(&self) -> Option<&mp_core::types::EventFrontmatter> {
+        self.event.as_ref()
+    }
+
+    /// True when the memo already answers for `key`.
+    pub(crate) fn holds(&self, key: &Option<BodyKey>) -> bool {
+        &self.key == key
+    }
+
+    /// Park `event` as the invite for `key`.
+    pub(crate) fn fill(
+        &mut self,
+        key: Option<BodyKey>,
+        event: Option<mp_core::types::EventFrontmatter>,
+    ) {
+        self.key = key;
+        self.event = event;
+    }
+}
+
+/// Extract a short display name from an email address.
+pub fn extract_display_name(addr: &str) -> String {
+    let addr = addr.trim().trim_matches('"');
+    if let Some(idx) = addr.find('<') {
+        let name = addr[..idx].trim().trim_matches('"');
+        if name.is_empty() {
+            addr.trim_matches(|c| c == '<' || c == '>').to_string()
+        } else {
+            name.to_string()
+        }
+    } else {
+        addr.to_string()
+    }
+}
+
+/// Resolve date for display and sorting.
+pub fn resolve_date(
+    date_field: &Option<String>,
+    sent_at_field: &Option<String>,
+    path: &Path,
+) -> (String, String) {
+    // Sort key is always formatted in UTC so that emails from different
+    // timezones on the same calendar day order by actual instant, not by
+    // sender-local wallclock. Display stays in the sender's local time so
+    // dates match what the user sees in other clients.
+    if let Some(date_str) = date_field {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(date_str) {
+            let display = dt.format("%Y-%m-%d").to_string();
+            let sort = dt
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string();
+            return (display, sort);
+        }
+    }
+
+    if let Some(sent_str) = sent_at_field {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(sent_str) {
+            let display = dt.format("%Y-%m-%d").to_string();
+            let sort = dt
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string();
+            return (display, sort);
+        }
+        // Trailing 'Z' means UTC, so the naive value is already in UTC.
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(sent_str, "%Y-%m-%dT%H:%M:%SZ") {
+            let display = dt.format("%Y-%m-%d").to_string();
+            let sort = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+            return (display, sort);
+        }
+    }
+
+    let filename = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    if filename.len() >= 10 {
+        let date_part = &filename[..10];
+        if NaiveDate::parse_from_str(date_part, "%Y-%m-%d").is_ok() {
+            if filename.len() >= 15 && filename.as_bytes()[10] == b'-' {
+                let time_part = &filename[11..15];
+                if time_part.chars().all(|c| c.is_ascii_digit()) && time_part.len() == 4 {
+                    let sort = format!("{}T{}:{}:00", date_part, &time_part[..2], &time_part[2..4]);
+                    return (date_part.to_string(), sort);
+                }
+            }
+            return (date_part.to_string(), format!("{date_part}T00:00:00"));
+        }
+    }
+
+    ("".to_string(), "".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// App types
+// ---------------------------------------------------------------------------
+
+/// Per-account TUI state (config, caches, cursor positions).
+pub struct AccountState {
+    pub account_config: mp_core::config::AccountConfig,
+    pub imap_config: Option<mp_core::config::ImapConfig>,
+    pub smtp_config: Option<mp_core::config::SmtpConfig>,
+    pub graph_config: Option<mp_core::config::GraphConfig>,
+    pub signature_content: Option<String>,
+    pub archive_server_name: String,
+    pub drafts_dir: Option<PathBuf>,
+    pub mailboxes: Vec<MailboxInfo>,
+    pub mailbox_counts: Vec<usize>,
+    /// Per-mailbox cache of parsed entries. `Arc` so switching mailboxes
+    /// or accounts shares the allocation with `App::emails` instead of
+    /// deep-cloning thousands of entries (P2); see
+    /// `App::with_emails_mut` for the mutation strategy.
+    pub email_cache: Vec<Option<Arc<Vec<EmailEntry>>>>,
+    pub sidebar_index: usize,
+    pub active_mailbox: usize,
+    pub list_index: usize,
+    /// Identity of the email `list_index` pointed at when this account was
+    /// parked. `list_index` alone is a bare position, so a list that grew
+    /// or re-sorted while the account was in the background would put the
+    /// cursor on a different email on switch-back; `App::restore_cursor`
+    /// re-anchors on this reference and falls back to `list_index`.
+    pub cursor_ref: Option<MessageRef>,
+    pub headers_scroll: u16,
+    pub preview_scroll: u16,
+    pub selection: std::collections::HashSet<EntryKey>,
+    pub search_query: String,
+    pub watcher_active: bool,
+    pub has_unseen: bool,
+    /// Whether this account's store has not yet been opened in the background
+    /// (#0003 two-phase startup). `AccountState::new` no longer opens the
+    /// store -- the per-account `PRAGMA integrity_check` (~240 ms on a 44 MB
+    /// store) used to sum serially before the first paint. It starts `true`,
+    /// with `mailbox_counts` all-zero, and is cleared by
+    /// `BgResult::AccountOpened` once the background open has read the real
+    /// counts. The sidebar shows a loading marker while it is set.
+    pub opening: bool,
+    /// Outcome of this account's last completed sync (#0071). Written when
+    /// that account's own `BgResult::Fetch`/`BgResult::Sync` lands, so it
+    /// survives every later success of a *different* account: the exact race
+    /// #0068 lost. Session-scoped, never read from disk.
+    pub sync_health: mp_core::sync_health::SyncHealth,
+}
+
+impl AccountState {
+    pub fn new(
+        account_config: mp_core::config::AccountConfig,
+        email_settings: &mp_core::config::EmailSettings,
+    ) -> Self {
+        let imap_config = mp_core::config::ImapConfig::load(&account_config).ok();
+        let smtp_config = mp_core::config::SmtpConfig::load(&account_config).ok();
+        let graph_config = mp_core::config::GraphConfig::load(&account_config).ok();
+
+        // The account's Markdown signature, appended to the draft body at
+        // compose/reply/forward time (#0099). `None` when the account has none
+        // or the user turned signatures off.
+        let signature_content = if email_settings.include_signature {
+            mp_core::config::resolve_signature_markdown(&account_config, None)
+        } else {
+            None
+        };
+
+        let archive_server_name = account_config
+            .mailboxes
+            .archive
+            .as_ref()
+            .map(|m| m.server.as_str())
+            .unwrap_or("Archive")
+            .to_string();
+        let drafts_dir = Some(mp_core::config::drafts_dir(&account_config.name));
+
+        let mut span = mp_core::timing::TimingSpan::with_context(
+            "AccountState::new",
+            account_config.name.clone(),
+        );
+        // No store is opened here (#0003 two-phase startup). The grouped count
+        // query and the outbox read both open `store.sqlite3`, and the first
+        // open of each file runs the full `PRAGMA integrity_check` (~240 ms on
+        // a 44 MB store); summed serially across accounts that was ~1.2 s of
+        // blank terminal before the first paint. `build_mailboxes` is
+        // config-only and cheap, so the sidebar shape is known immediately;
+        // the counts start at zero, the outbox empty, and `opening` marks the
+        // account as not-yet-read. `run_loop` spawns one background open per
+        // account after the first `terminal.draw`, and `BgResult::AccountOpened`
+        // fills the real counts, refreshes the outbox and clears `opening`.
+        let mailboxes = build_mailboxes(&account_config);
+        let n = mailboxes.len();
+        span.mark(&format!("built {} mailbox(es), store open deferred", n));
+
+        Self {
+            account_config,
+            imap_config,
+            smtp_config,
+            graph_config,
+            signature_content,
+            archive_server_name,
+            drafts_dir,
+            mailboxes,
+            mailbox_counts: vec![0; n],
+            email_cache: vec![None; n],
+            sidebar_index: 0,
+            active_mailbox: 0,
+            list_index: 0,
+            cursor_ref: None,
+            headers_scroll: 0,
+            preview_scroll: 0,
+            selection: std::collections::HashSet::new(),
+            search_query: String::new(),
+            watcher_active: false,
+            has_unseen: false,
+            opening: true,
+            sync_health: mp_core::sync_health::SyncHealth::default(),
+        }
+    }
+
+    pub fn is_graph(&self) -> bool {
+        self.account_config.auth_method == mp_core::config::AuthMethod::Graph
+    }
+}
+
+/// Result from a background CLI operation.
+#[derive(Debug)]
+pub enum BgResult {
+    Fetch {
+        account_index: usize,
+        result: Result<String, String>,
+        /// Sender + subject of every genuinely new inbox email the sync
+        /// ingested. Drives the opt-in desktop notification (#0009); empty
+        /// on failure or when nothing new arrived.
+        new_inbox_mail: Vec<mp_core::notify::NewMailMeta>,
+    },
+    Sync {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    Send {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    /// An attendee RSVP (#0029) finished sending its METHOD:REPLY.
+    Rsvp {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    SendApproved {
+        account_index: usize,
+        result: Result<String, String>,
+    },
+    // Archive / Move / Delete / ToggleRead / ToggleFlag are gone (#0039):
+    // a mutation no longer fires a per-op server thread that reports back
+    // here. It enqueues into the durable `pending_ops` queue and the drain
+    // retires it at the sync/fetch resume point, surfacing failures through
+    // the sync result rather than a dedicated BgResult.
+    /// A `message.search_server` settled (`LST-08`, #0126).
+    ///
+    /// The hits are not here: they streamed as `message.server_hit` events
+    /// while it ran and are already in the list. What settles is
+    /// `{account, query, hits, deduplicated, unreachable}`, which is the
+    /// footer's count and the per-mailbox failures.
+    ServerSearch {
+        /// Matched against `App::server_search_generation`: a settle for a
+        /// search the user has since re-submitted is stale and dropped
+        /// (#0105).
+        generation: u64,
+        result: Result<serde_json::Value, String>,
+    },
+    /// A `contact.rebuild` settled (#0126).
+    ///
+    /// The payload is `{account, contacts, kept, saved, cache_path}`, which is
+    /// everything the pre-daemon `App::refresh_contacts` rendered: `saved`
+    /// decides between the refreshed line and the two refusals, and the
+    /// written cache is the file the view reloads. Carried raw rather than
+    /// pre-rendered because the three outcomes have three status levels and
+    /// one of them also replaces the loaded index; `tui::bg` is where that
+    /// presentation lives.
+    ContactsRebuilt {
+        /// The account the rebuild was started for, so a settle that arrives
+        /// after the user switched accounts does not paint another account's
+        /// correspondents into the view.
+        account_index: usize,
+        result: Result<serde_json::Value, String>,
+    },
+    /// A server-only search hit was fetched and ingested into the store
+    /// (#0104). `message_id` names the hit (indices shift when another hit is
+    /// archived mid-flight); the result carries the new `messages.id` row.
+    SearchHitFetched {
+        generation: u64,
+        message_id: String,
+        result: Result<i64, String>,
+    },
+    /// A background `load_emails` query for one mailbox has
+    /// finished (P1 step 2: the load blocks for seconds on large
+    /// mailboxes, so it runs off the UI thread). Applied only while
+    /// `generation` still matches `App::mailbox_load_generation` --
+    /// stale/out-of-order results are dropped (see
+    /// `mailbox_loaded_disposition` in `tui/bg.rs`).
+    MailboxLoaded {
+        account_index: usize,
+        mailbox_idx: usize,
+        generation: u64,
+        entries: Vec<EmailEntry>,
+    },
+    /// One account's store has been opened in the background and its real
+    /// counts read (#0003 two-phase startup). `AccountState::new` defers the
+    /// per-account store open (and its `PRAGMA integrity_check`) off the
+    /// first-paint path; `run_loop` spawns one open per account after the
+    /// first `terminal.draw`, and this carries the grouped mailbox counts back
+    /// so the sidebar fills in. The handler clears `AccountState::opening`,
+    /// loads the active account's open mailbox, and kicks the startup
+    /// auto-fetch for that account (once the store is known good, not before).
+    /// The store open runs the integrity check and, on failure, the
+    /// drop-and-rebuild path (#0066) exactly as a foreground open would -- only
+    /// the thread it runs on changed.
+    ///
+    /// It carried the outbox badge too until P5-U10d (#0126). That badge left
+    /// with the status bar, so `AccountState::outbox` was written here and on
+    /// every sync completion and read nowhere; what a badge would read today
+    /// is the bootstrap snapshot's `outbox` section and
+    /// `Change::OutboxCounts`, both of which are on the wire already.
+    AccountOpened {
+        account_index: usize,
+        counts: Vec<usize>,
+    },
+}
+
+/// A mailbox target for server search.
+#[derive(Debug, Clone)]
+pub struct SearchTarget {
+    pub server_name: String,
+    pub label: String,
+}
+
+/// A single server search result held in memory.
+///
+/// It used to carry the path it had been saved to; nothing saves a hit to a
+/// file any more (#0038), and naming one without a file is #0050's selector.
+#[derive(Debug, Clone)]
+pub struct SearchResultEntry {
+    pub entry: EmailEntry,
+    pub fetched: FetchedEmail,
+    pub source_label: String,
+}
+
+/// Which control of the Outlook-shape server-search form (#0086b) is focused,
+/// or the results list once a search has returned hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOverlayFocus {
+    /// One of the form's structured / advanced controls.
+    Field(SearchField),
+    /// The results list (only reachable once there are hits).
+    List,
+}
+
+/// The fields of the server-search form (#0086b), in Tab order. The Outlook
+/// shape trimmed to the #0086 decisions: a scope toggle (no All-Accounts), the
+/// four text fields, two custom date fields, an attachment toggle, and the
+/// raw-grammar Advanced power lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchField {
+    /// Search In: Current Mailbox / Current Account (toggle).
+    Scope,
+    From,
+    To,
+    Subject,
+    /// Free text (incl. OR groups / phrases); lowers to `Text` clauses.
+    Keywords,
+    /// `after:` custom date (YYYY-MM-DD).
+    After,
+    /// `before:` custom date (YYYY-MM-DD).
+    Before,
+    /// Attachment toggle -> `Term::HasAttachment`.
+    Attachment,
+    /// Raw #0086a grammar; when non-empty it takes over and the structured
+    /// fields are greyed / ignored.
+    Advanced,
+}
+
+impl SearchField {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SearchField::Scope => "Search In",
+            SearchField::From => "From",
+            SearchField::To => "To",
+            SearchField::Subject => "Subject",
+            SearchField::Keywords => "Keywords",
+            SearchField::After => "After",
+            SearchField::Before => "Before",
+            SearchField::Attachment => "Attachment",
+            SearchField::Advanced => "Advanced",
+        }
+    }
+
+    /// True for the free-text fields that accept typed characters. The scope
+    /// and attachment toggles are flipped, not typed into.
+    pub fn is_text(&self) -> bool {
+        !matches!(self, SearchField::Scope | SearchField::Attachment)
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            SearchField::Scope => SearchField::From,
+            SearchField::From => SearchField::To,
+            SearchField::To => SearchField::Subject,
+            SearchField::Subject => SearchField::Keywords,
+            SearchField::Keywords => SearchField::After,
+            SearchField::After => SearchField::Before,
+            SearchField::Before => SearchField::Attachment,
+            SearchField::Attachment => SearchField::Advanced,
+            SearchField::Advanced => SearchField::Scope,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            SearchField::Scope => SearchField::Advanced,
+            SearchField::From => SearchField::Scope,
+            SearchField::To => SearchField::From,
+            SearchField::Subject => SearchField::To,
+            SearchField::Keywords => SearchField::Subject,
+            SearchField::After => SearchField::Keywords,
+            SearchField::Before => SearchField::After,
+            SearchField::Attachment => SearchField::Before,
+            SearchField::Advanced => SearchField::Attachment,
+        }
+    }
+}
+
+/// Scope of a server search (#0086b, Q3: per-account only; no All-Accounts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    /// Just the focused mailbox.
+    CurrentMailbox,
+    /// Every mailbox of the current account.
+    CurrentAccount,
+}
+
+impl SearchScope {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SearchScope::CurrentMailbox => "Current Mailbox",
+            SearchScope::CurrentAccount => "Current Account",
+        }
+    }
+
+    pub fn toggled(&self) -> Self {
+        match self {
+            SearchScope::CurrentMailbox => SearchScope::CurrentAccount,
+            SearchScope::CurrentAccount => SearchScope::CurrentMailbox,
+        }
+    }
+}
+
+/// Scratch state for the Outlook-shape server-search form (#0086b).
+///
+/// The form builds a [`mp_core::search::Query`] AST directly (no string
+/// concatenation) and routes it through the same lowering path the CLI uses:
+/// the free-text `keywords` field is parsed by [`mp_core::search::parse`] and the
+/// structured fields become [`mp_core::search::Flags`], so both feed
+/// [`mp_core::search::from_cli`]. The `advanced` line, when non-empty, takes over
+/// entirely and is parsed on its own.
+#[derive(Debug, Clone, Default)]
+pub struct SearchForm {
+    pub scope: SearchScopeState,
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    pub keywords: String,
+    pub after: String,
+    pub before: String,
+    pub attachment: bool,
+    pub advanced: String,
+}
+
+/// Wrapper so [`SearchForm`] can `derive(Default)` with a sensible scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchScopeState(pub SearchScope);
+
+impl Default for SearchScopeState {
+    fn default() -> Self {
+        SearchScopeState(SearchScope::CurrentAccount)
+    }
+}
+
+impl SearchForm {
+    /// True when the Advanced line is the active input (it takes precedence
+    /// over every structured field once it holds anything non-blank).
+    pub fn advanced_active(&self) -> bool {
+        !self.advanced.trim().is_empty()
+    }
+
+    /// True when nothing has been entered anywhere: neither the Advanced line
+    /// nor any structured field nor the attachment toggle. An empty form is a
+    /// no-op (Enter does not dispatch a search).
+    pub fn is_blank(&self) -> bool {
+        !self.advanced_active()
+            && self.from.trim().is_empty()
+            && self.to.trim().is_empty()
+            && self.subject.trim().is_empty()
+            && self.keywords.trim().is_empty()
+            && self.after.trim().is_empty()
+            && self.before.trim().is_empty()
+            && !self.attachment
+    }
+
+    /// A mutable handle to the text of the focused field, or `None` for the
+    /// toggles (scope / attachment) which are flipped rather than typed into.
+    pub fn text_field_mut(&mut self, field: SearchField) -> Option<&mut String> {
+        match field {
+            SearchField::From => Some(&mut self.from),
+            SearchField::To => Some(&mut self.to),
+            SearchField::Subject => Some(&mut self.subject),
+            SearchField::Keywords => Some(&mut self.keywords),
+            SearchField::After => Some(&mut self.after),
+            SearchField::Before => Some(&mut self.before),
+            SearchField::Advanced => Some(&mut self.advanced),
+            SearchField::Scope | SearchField::Attachment => None,
+        }
+    }
+
+    /// Build the [`mp_core::search::Query`] this form describes.
+    ///
+    /// When the Advanced line is active it is parsed directly. Otherwise the
+    /// structured fields lower through [`mp_core::search::from_cli`]: `keywords`
+    /// is the positional grammar (so `a OR b` and quoted phrases work) and the
+    /// rest are flags. Returns the `ParseError` / validation message verbatim
+    /// for the overlay to surface. Returns `Ok(None)` for a blank form.
+    pub fn build_query(&self) -> Result<Option<mp_core::search::Query>, String> {
+        if self.advanced_active() {
+            return mp_core::search::parse(self.advanced.trim())
+                .map(Some)
+                .map_err(|e| e.to_string());
+        }
+        if self.is_blank() {
+            return Ok(None);
+        }
+        let opt = |s: &str| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
+        let flags = mp_core::search::Flags {
+            from: opt(&self.from),
+            to: opt(&self.to),
+            cc: None,
+            subject: opt(&self.subject),
+            body: None,
+            filename: None,
+            has_attachment: self.attachment,
+            after: opt(&self.after),
+            before: opt(&self.before),
+        };
+        mp_core::search::from_cli(self.keywords.trim(), &flags).map(Some)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compose wizard
+// ---------------------------------------------------------------------------
+
+/// Which field of the compose wizard is currently focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeField {
+    To,
+    Cc,
+    Bcc,
+    Subject,
+    /// The signature selector (#0106). Not a text input: cycling picks among
+    /// the account's named signatures, and `e` edits the selected one in
+    /// `$EDITOR`. Always participates in field navigation.
+    Signature,
+    /// The optional inline body (#0097). Multi-line and the last field before
+    /// submit: a non-empty body is written straight into the draft, an empty
+    /// one falls back to opening `$EDITOR` on the draft.
+    Body,
+}
+
+impl ComposeField {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ComposeField::To => "To",
+            ComposeField::Cc => "Cc",
+            ComposeField::Bcc => "Bcc",
+            ComposeField::Subject => "Subject",
+            ComposeField::Signature => "Signature",
+            ComposeField::Body => "Body",
+        }
+    }
+
+    pub fn is_address(&self) -> bool {
+        matches!(
+            self,
+            ComposeField::To | ComposeField::Cc | ComposeField::Bcc
+        )
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            ComposeField::To => ComposeField::Cc,
+            ComposeField::Cc => ComposeField::Bcc,
+            ComposeField::Bcc => ComposeField::Subject,
+            ComposeField::Subject => ComposeField::Signature,
+            ComposeField::Signature => ComposeField::Body,
+            ComposeField::Body => ComposeField::To,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            ComposeField::To => ComposeField::Body,
+            ComposeField::Cc => ComposeField::To,
+            ComposeField::Bcc => ComposeField::Cc,
+            ComposeField::Subject => ComposeField::Bcc,
+            ComposeField::Signature => ComposeField::Subject,
+            ComposeField::Body => ComposeField::Signature,
+        }
+    }
+}
+
+/// Wizard mode: blank new draft, forward of a stored message, or edit of the
+/// recipient/subject fields of an existing draft in place.
+///
+/// Both non-blank modes name their subject on the substrate that owns it
+/// (#0052): a forward carries the [`MessageRef`] of the row it quotes, the way
+/// `mp forward <selector>` names a row, and an edit carries the draft's `id:`,
+/// which the drafts index turns into a path at the moment it is needed. A
+/// cached path would be a second copy of an answer the index already owns, and
+/// `$EDITOR` can rename the file between opening the wizard and submitting it.
+#[derive(Debug, Clone)]
+pub enum ComposeMode {
+    New,
+    Forward { msg: MessageRef },
+    EditDraft { id: String },
+}
+
+/// A fuzzy-matched contact suggestion under the focused address field.
+#[derive(Debug, Clone)]
+pub struct ComposeSuggestion {
+    pub address: String,
+    pub display_name: String,
+    /// Tier marker for visual: 0=received, 1=sent-cc, 2=sent-to.
+    pub tier: u8,
+}
+
+/// State for the compose wizard overlay.
+pub struct ComposeWizard {
+    pub mode: ComposeMode,
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+    /// The inline body typed in the wizard (#0097). Multi-line: `Enter` on the
+    /// Body field inserts a newline rather than submitting. Only a `New`
+    /// compose exposes it (see [`ComposeWizard::has_body_field`]); a non-empty
+    /// value is written into the draft body and skips the `$EDITOR` round-trip.
+    pub body: String,
+    pub focus: ComposeField,
+    /// The currently selected signature name (#0106), or `None` for the account
+    /// default / no signature. Shown on the Signature field and resolved to
+    /// Markdown when the draft is written or re-spliced.
+    pub signature_name: Option<String>,
+    /// The signature name the wizard opened with (#0106). An `EditDraft` submit
+    /// only re-splices the body when the selection changed from this, so a plain
+    /// recipient edit never disturbs the signature block.
+    pub signature_initial: Option<String>,
+    /// Whether `e` / `Ctrl+E` on the Signature field has opened the file in
+    /// `$EDITOR` during this wizard (#0107). The selection is then unchanged
+    /// but its content is not, so an `EditDraft` submit still has to re-splice
+    /// the block; see [`ComposeWizard::signature_needs_respice`].
+    pub signature_edited: bool,
+    /// The signature names, loaded from the signatures directory when the
+    /// wizard opens (#0106, #0107). Empty when none exist; the field then shows
+    /// "(none)" and cycling/edit are no-ops.
+    pub available_signatures: Vec<String>,
+    /// Fuzzy-matched suggestions for the currently-focused field
+    /// (empty for Subject/Body or when no cache exists).
+    pub suggestions: Vec<ComposeSuggestion>,
+    pub suggestion_idx: usize,
+    /// The contact index for the active account, loaded once when the
+    /// wizard opens. `None` means "no cache yet — run rebuild first".
+    pub contacts: Option<mp_core::contacts::ContactIndex>,
+}
+
+impl ComposeWizard {
+    /// Whether the inline body field participates in this wizard (#0097).
+    ///
+    /// Only a brand-new draft can take an inline body: `Forward` always opens
+    /// `$EDITOR` on the quoted draft, and `EditDraft` only rewrites the header
+    /// fields in place. Field navigation skips `Body` when this is false, so
+    /// the field never receives focus outside a `New` compose.
+    pub fn has_body_field(&self) -> bool {
+        matches!(self.mode, ComposeMode::New)
+    }
+
+    /// Whether an `EditDraft` submit must rewrite the draft's signature block.
+    ///
+    /// Either the selection moved off what the wizard opened with, or the
+    /// selected file itself was edited from the wizard (#0107): the draft then
+    /// still carries the pre-edit block, and only a re-splice replaces it.
+    pub fn signature_needs_respice(&self) -> bool {
+        self.signature_edited || self.signature_name != self.signature_initial
+    }
+
+    /// The field after `focus` in Tab order, skipping `Body` when this wizard
+    /// has no body field.
+    pub fn next_field(&self) -> ComposeField {
+        let next = self.focus.next();
+        if next == ComposeField::Body && !self.has_body_field() {
+            next.next()
+        } else {
+            next
+        }
+    }
+
+    /// The field before `focus` in Tab order, skipping `Body` when this wizard
+    /// has no body field.
+    pub fn prev_field(&self) -> ComposeField {
+        let prev = self.focus.prev();
+        if prev == ComposeField::Body && !self.has_body_field() {
+            prev.prev()
+        } else {
+            prev
+        }
+    }
+}
+
+/// Which pane currently has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    Sidebar,
+    #[default]
+    List,
+    Headers,
+    Preview,
+    Search,
+    ComposeWizard,
+}
+
+/// The active top-level view (#0033). `Mail` is the full email client (the
+/// original TUI); `Contacts` (#0033) and `Calendar` (#0034) are the two
+/// content panes. Each owns its state (`MailView` / `ContactsView` /
+/// `CalendarView`) on `App`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Mail,
+    Contacts,
+    Calendar,
+}
+
+impl View {
+    /// The three views in switcher / cycle order.
+    pub const ALL: &'static [View] = &[View::Mail, View::Contacts, View::Calendar];
+
+    /// Short chip label for the bottom-left view switcher.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Mail => "mail",
+            View::Contacts => "contacts",
+            View::Calendar => "calendar",
+        }
+    }
+
+    /// The leader continuation key that switches to this view (`g <key>`).
+    pub fn switch_key(self) -> char {
+        match self {
+            View::Mail => 'm',
+            View::Contacts => 'c',
+            View::Calendar => 'a',
+        }
+    }
+}
+
+/// Snapshot of the mail view's proxy state (#0033).
+///
+/// Mirrors the `AccountState` proxy pattern: the mail view's working fields
+/// live *flat* on `App` (so the ~550 existing call sites are untouched), and
+/// this struct is where they are parked when the user switches to another
+/// view and restored when they switch back. `App::save_to_mail_view` /
+/// `App::load_from_mail_view` are the sync points, exactly like
+/// `save_to_account` / `load_from_account`.
+///
+/// Only the *transient* mail-view state that is not already account-proxied
+/// needs parking (focus + the pending leader). The account-proxied fields
+/// (`emails`, `mailboxes`, cursor, selection, ...) are restored from the
+/// active `AccountState` on demand and never diverge across a view switch, so
+/// they do not need duplicating here.
+#[derive(Debug, Clone, Default)]
+pub struct MailView {
+    pub focus: Focus,
+}
+
+/// State for the Contacts view (#0033).
+///
+/// A read-only list + fuzzy search + detail pane over the local contacts index
+/// (`mp_core::contacts`). Sibling of [`MailView`]: it owns the Contacts view's
+/// transient state and lives on `App` beside `mail_view`. The index is loaded
+/// lazily from the on-disk cache the first time the user switches to the view
+/// (`App::ensure_contacts_loaded`); a manual refresh key rebuilds it.
+///
+/// `matches` is the ordered list of contact addresses currently shown (the
+/// result of fuzzy-matching `query` against `index`), recomputed whenever the
+/// query or index changes via `App::recompute_contact_matches`. `list_index`
+/// indexes into `matches`; the detail pane shows `index.contacts[matches[list_index]]`.
+#[derive(Debug, Clone, Default)]
+pub struct ContactsView {
+    /// True once the on-disk cache load has been attempted (whether or not a
+    /// cache existed). Gates the lazy first-switch load.
+    pub loaded: bool,
+    /// The loaded contact index for the active account. `None` means no cache
+    /// yet (the pane shows a "run rebuild" hint).
+    pub index: Option<mp_core::contacts::ContactIndex>,
+    /// Incremental fuzzy-filter query (edited while `searching`).
+    pub query: String,
+    /// Whether the search input is focused (type-to-filter mode).
+    pub searching: bool,
+    /// Addresses of the current matches, in rank/score order.
+    pub matches: Vec<String>,
+    /// Cursor into `matches`.
+    pub list_index: usize,
+}
+
+/// One agenda row of the Calendar view (#0034): a single logical event
+/// derived from the local iMIP files on disk.
+///
+/// Plain data (no borrows, `Send`) so the loader is unit-testable and could be
+/// moved off the UI thread later. `event` is the frontmatter block the shared
+/// event card (`ui::preview::event_card_lines`) renders; the derived fields
+/// carry what the agenda list itself needs.
+#[derive(Debug, Clone)]
+pub struct CalendarEvent {
+    /// The store row the winning copy of this event came from, so an RSVP
+    /// from the agenda addresses the same message the mail list would
+    /// (#0038 scope item 6 replaced the `.md` path with it).
+    pub msg: MessageRef,
+    /// The `event:` frontmatter block, rendered by the shared event card.
+    pub event: mp_core::types::EventFrontmatter,
+    /// Email subject, used as the row title when the event has no `summary`.
+    pub subject: String,
+    /// UTC-normalised `YYYY-MM-DDTHH:MM:SS` sort key, empty when the start is
+    /// missing or unparseable (those rows sort last). Display stays local, the
+    /// sort key is always UTC -- same rule as `resolve_date` (#0024).
+    pub start_sort: String,
+    /// UTC-normalised end key (same format), empty when unknown. Used to keep
+    /// an in-progress event in the "upcoming" view until it actually ends; an
+    /// all-day event with no explicit end gets the start of the next local day.
+    pub end_sort: String,
+    /// Local, human-readable start (`YYYY-MM-DD HH:MM`, or the date alone for
+    /// all-day events). Empty when the start is unknown.
+    pub start_display: String,
+    /// True when the winning copy came from the Sent mailbox, i.e. we are the
+    /// organizer (no own-RSVP, and RSVP is refused).
+    pub is_organizer: bool,
+    /// True when a `METHOD:CANCEL` for this event's `(UID, RECURRENCE-ID)`
+    /// exists in the store with a sequence at least as high as this event's
+    /// (#0031). The row stays listed and readable: a cancellation tombstones
+    /// the event, it never deletes it. Mirrors `event.cancelled`, which the
+    /// shared card renders.
+    pub cancelled: bool,
+}
+
+impl CalendarEvent {
+    /// The wire form of this row, for `calendar.events` (P5-U10).
+    ///
+    /// The whole row travels: every derived column is a fold over the
+    /// account's *other* rows, which is exactly what a client without a store
+    /// cannot recompute.
+    pub fn to_wire(self) -> mp_protocol::calendar::AgendaEvent {
+        mp_protocol::calendar::AgendaEvent {
+            row_id: self.msg.row_id(),
+            event: self.event,
+            subject: self.subject,
+            start_sort: self.start_sort,
+            end_sort: self.end_sort,
+            start_display: self.start_display,
+            is_organizer: self.is_organizer,
+            cancelled: self.cancelled,
+        }
+    }
+
+    /// The inverse of [`Self::to_wire`]: one decoded `calendar.events` row.
+    pub fn from_wire(row: mp_protocol::calendar::AgendaEvent) -> Self {
+        Self {
+            msg: MessageRef::new(row.row_id),
+            event: row.event,
+            subject: row.subject,
+            start_sort: row.start_sort,
+            end_sort: row.end_sort,
+            start_display: row.start_display,
+            is_organizer: row.is_organizer,
+            cancelled: row.cancelled,
+        }
+    }
+}
+
+/// State for the Calendar view (#0034).
+///
+/// Sibling of [`ContactsView`]: a read-only agenda over the events the local
+/// iMIP traffic already produced (received invites, our own sent invites),
+/// loaded lazily on the first switch to the view (`App::ensure_calendar_loaded`)
+/// and rebuilt by the manual refresh key. Scoped to the active account and
+/// reset on `switch_account`.
+///
+/// `events` holds every event found on disk, sorted by start instant with
+/// undated ones last; `visible` is the subset currently shown (upcoming only
+/// unless `show_past`), recomputed by `App::recompute_calendar_visible`.
+/// `list_index` indexes into `visible`, exactly like the mail list.
+#[derive(Debug, Clone, Default)]
+pub struct CalendarView {
+    /// True once the on-disk walk has been attempted. Gates the lazy load.
+    pub loaded: bool,
+    /// Every event found for the active account, sorted (undated last).
+    pub events: Vec<CalendarEvent>,
+    /// Indices into `events` forming the current agenda view.
+    pub visible: Vec<usize>,
+    /// Cursor into `visible`.
+    pub list_index: usize,
+    /// When true, past events are listed too (toggled with `t`).
+    pub show_past: bool,
+}
+
+/// Messages that drive state transitions (TEA pattern).
+#[derive(Debug)]
+pub enum Message {
+    Key(crossterm::event::KeyEvent),
+    Resize(u16, u16),
+    Quit,
+    /// Background watcher detected new mail for a given account.
+    MailboxChanged {
+        account_index: usize,
+    },
+}
+
+/// Behavioral kind of a mailbox (used for action differentiation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxKind {
+    Inbox,
+    Drafts,
+    Sent,
+    Archive,
+    Extra,
+}
+
+/// A sidebar mailbox: how it is named on screen, on the server, and in the
+/// store.
+///
+/// `id` is the store key -- the `messages.mailbox` value ingest wrote and the
+/// mailbox segment of an `mp://` selector. It replaced a `dir: PathBuf` whose
+/// leaf everything actually wanted, and whose directory had not been read
+/// since the store cutover; for an unmapped mailbox the leaf was a *slug* of
+/// the server name while ingest filed the rows under the server name itself,
+/// so such a mailbox listed empty (#0064).
+#[derive(Debug, Clone)]
+pub struct MailboxInfo {
+    pub label: String,
+    pub icon: &'static str,
+    pub id: String,
+    pub kind: MailboxKind,
+    pub server_name: Option<String>,
+}
+
+/// Side-effects that the main loop must execute (keeps update pure).
+#[derive(Debug)]
+pub enum Action {
+    EditCurrent,
+    Reply(bool),
+    Send,
+    SendApproved,
+    /// Stop the undo-send hold the daemon is counting down (`SND-04`,
+    /// P6-U2), whichever client armed it: `send.cancel_hold` over the
+    /// operation id [`App::hold`](super::App) carries.
+    ///
+    /// An action rather than a cleared slot, because cancelling is a round
+    /// trip now and the countdown stays on screen until the daemon says it
+    /// stopped: a client that cleared it optimistically would hide a hold
+    /// whose cancel was refused.
+    CancelHeldSend,
+    NewDraft,
+    Approve,
+    /// Batch variant for `Action::Approve`: the indexed `id:` of every draft
+    /// in the selection (#0052). Draft ids rather than [`MessageRef`]s
+    /// because approving is a write to a draft file, and a draft has no
+    /// `messages` row to name it by.
+    BatchApprove(Vec<String>),
+    /// Demote a single approved draft back to `draft` status (#0021).
+    MarkDraft,
+    /// Batch variant for `Action::MarkDraft` -- run mark_as_draft over
+    /// the current selection, by indexed draft id (see [`Action::BatchApprove`]).
+    BatchMarkDraft(Vec<String>),
+    Archive,
+    Delete,
+    BatchArchive(Vec<MessageRef>),
+    BatchDelete(Vec<MessageRef>),
+    /// Delete every draft in the selection by indexed `id:` (#0073). Draft ids
+    /// rather than [`MessageRef`]s because a draft has no `messages` row, the
+    /// same reason [`Action::BatchApprove`] takes ids: deleting a draft is a
+    /// local file removal, not a store mutation.
+    BatchDeleteDrafts(Vec<String>),
+    /// Quick-move emails to another mailbox (#0018). `msgs` is the
+    /// selection (or the cursor email); `dest_idx` indexes
+    /// `App::mailboxes`.
+    MoveToMailbox {
+        msgs: Vec<MessageRef>,
+        dest_idx: usize,
+    },
+    ToggleRead,
+    /// Mark one message read on an explicit open (#0110). Carries the
+    /// [`MessageRef`] the open resolved rather than re-reading the cursor at
+    /// drain time: under the #0108 event coalescing a `Tab` and a `J` land in
+    /// the same batch, and a cursor-resolved mark would write the row the
+    /// cursor ended on instead of the one that was opened.
+    MarkAsRead(MessageRef),
+    BatchToggleRead(Vec<MessageRef>),
+    /// Toggle the `\Flagged` star on the cursor message (#0007).
+    ToggleFlag,
+    /// Toggle the `\Flagged` star on the whole selection (#0007). Flagging
+    /// wins when any is unflagged, mirroring the read toggle's rule.
+    BatchToggleFlag(Vec<MessageRef>),
+    /// Copy the canonical `mp://` selector of the selected entry to the system
+    /// clipboard (#0050 scope item 7).
+    ///
+    /// It replaced `CopyPath`, which copied the `.md` file the store stopped
+    /// writing with #0038. A selector is the better thing to hold anyway: it
+    /// survives a restart, a re-sync and a draft rename, and it pastes
+    /// straight into `mp archive`, `mp reply` or `mp send`.
+    CopyMessageRef,
+    /// Open the newest log file from `logs_dir()` in `$EDITOR` (#0025).
+    OpenLogFile,
+    /// Open the global config file (`config_path()`) in `$EDITOR`. Changes
+    /// apply on restart (theme is `OnceLock`; no hot-reload).
+    OpenConfigFile,
+    OpenAttachment(PathBuf),
+    SaveAttachments {
+        sources: Vec<PathBuf>,
+        dest_dir: PathBuf,
+    },
+    Fetch,
+    /// Load one mailbox of the active account off the UI thread (P1
+    /// step 2). Queued by `App::request_mailbox_load` on
+    /// every cache-miss switch/reload; the result arrives as
+    /// `BgResult::MailboxLoaded` carrying the same `generation`.
+    LoadMailbox {
+        mailbox_idx: usize,
+        generation: u64,
+    },
+    /// Quick-sync a specific account by index. Used for the per-account
+    /// startup auto-fetch (#0001).
+    FetchAccount(usize),
+    Sync,
+    ServerSearch {
+        /// The already-parsed AST the form (or the overlay's raw line) built,
+        /// so the lowering path renders it without re-parsing (#0086b).
+        query: mp_core::search::Query,
+        targets: Vec<SearchTarget>,
+        /// Scope for the immediate local FTS pass (#0105): a `messages.mailbox`
+        /// key to restrict to, or `None` for the whole account.
+        local_mailbox: Option<String>,
+    },
+    SearchResultOpen,
+    /// Close the overlay and put the list cursor on the hit (#0104).
+    SearchResultJump,
+    /// Copy the path of the hit's read-only Markdown rendition (#0104).
+    SearchResultYankPath,
+    /// Ingest a server-only hit into the local store (#0104).
+    SearchResultFetch,
+    SearchResultReply(bool),
+    SearchResultForward,
+    SearchResultArchive,
+    SearchResultOpenInBrowser,
+    OpenHtmlInBrowser(PathBuf),
+    /// Open the compose wizard overlay (new or forward).
+    OpenComposeWizard(ComposeMode),
+    /// Commit the wizard: write the draft file and launch $EDITOR.
+    ComposeWizardSubmit,
+    /// Close the wizard without writing anything.
+    ComposeWizardCancel,
+    /// Edit the compose wizard's selected signature in `$EDITOR` (#0106): a
+    /// `path` signature is edited in place, an inline `text` one on a temp copy
+    /// applied to this draft only.
+    ComposeEditSignature,
+    /// RSVP to a received invite (#0029): send a METHOD:REPLY to the
+    /// organizer on a background thread and flip local `event.rsvp`.
+    Rsvp {
+        msg: MessageRef,
+        choice: RsvpChoice,
+    },
+    /// Compose a new draft to a contact (#0033). Opens the compose wizard
+    /// (Overlay) seeded with `to`; the overlay floats above whatever view is
+    /// active, so the user stays in Contacts and returns to it on cancel.
+    ComposeToContact {
+        to: String,
+    },
+    /// Export a contact to a `.vcf` and attach it to a new draft (#0033).
+    SendContactVcard {
+        contact: mp_core::contacts::Contact,
+    },
+    /// Copy a contact's bare email address to the system clipboard. Carries the
+    /// address so the clipboard side effect stays in `actions.rs` while the
+    /// selection is resolved in the key executor (like `SendContactVcard`).
+    CopyContactEmail {
+        address: String,
+    },
+    /// Rebuild the active account's contact index (#0033's `r` key), as the
+    /// `contact.rebuild` operation it is since #0126.
+    ///
+    /// An action rather than a call from the key executor, because a rebuild
+    /// walks every row of every mailbox: the daemon reports it as a durable
+    /// operation and the settle arrives as
+    /// [`BgResult::ContactsRebuilt`], where the pre-daemon path ran the walk
+    /// on the UI thread and rendered its verdict in place.
+    RefreshContacts,
+    /// Open the invite email an agenda row was derived from in `$EDITOR`
+    /// (#0034). Carries its own message reference: the event may live in any
+    /// mailbox of the active account, not just the one the mail list shows.
+    OpenEventSource {
+        msg: MessageRef,
+    },
+    /// Open one app-managed signature file in `$EDITOR` (#0107).
+    ///
+    /// Queued by the signatures overlay (`e`, and after `n` creates a file) so
+    /// the suspend / restore-terminal dance stays in `actions.rs` with every
+    /// other editor launch. The overlay stays open underneath and refreshes
+    /// itself when the editor returns.
+    EditSignatureFile {
+        name: String,
+    },
+    /// Append a file path to the cursor draft's `attachments:` frontmatter
+    /// (#0098). Carries the raw path the user typed at the attach prompt; the
+    /// handler resolves the cursor draft, appends the entry, and refreshes the
+    /// drafts index. The path's existence was already checked at the prompt,
+    /// so what reaches here is a path that was on disk when Enter was pressed.
+    AttachFileToDraft {
+        path: String,
+    },
+}
+
+impl Action {
+    /// Does handling this action hand the terminal to a child process?
+    ///
+    /// True for every action whose handler reaches `helpers::edit_file`, which
+    /// is always preceded by `helpers::suspend_terminal`: the alternate screen
+    /// is left, raw mode is disabled, and `$EDITOR` inherits stdin. Whatever
+    /// the user types from that moment is the editor's, not ours.
+    ///
+    /// The event drain in `run_loop` (#0108) stops as soon as one of these is
+    /// queued, because an event that has left the kernel tty buffer cannot be
+    /// put back: draining past the action would swallow the first keystrokes
+    /// of the editing session.
+    ///
+    /// The match is exhaustive on purpose, with no wildcard arm. A new action
+    /// must be classified here rather than defaulting to "safe to batch", and
+    /// a new `edit_file` call site must flip its action to `true`. The
+    /// tripwire for the second half is
+    /// `actions::tests::edit_file_call_sites_are_accounted_for`, which fails
+    /// when the number of call sites changes.
+    pub fn suspends_terminal(&self) -> bool {
+        match self {
+            // Reaches `edit_file`. The comment names the path through
+            // `actions::handle_action`.
+            //
+            // `open_readonly_view`, or `edit_new_draft` for a parse-skipped
+            // or drafts row.
+            Action::EditCurrent => true,
+            // `write_draft_and_edit` -> `edit_new_draft`.
+            Action::Reply(_) => true,
+            // Writes the skeleton, then edits it in place.
+            Action::NewDraft => true,
+            Action::OpenLogFile => true,
+            Action::OpenConfigFile => true,
+            // Opens the invite email an agenda row came from.
+            Action::OpenEventSource { .. } => true,
+            // `send_contact_as_vcard` edits the draft it just wrote.
+            Action::SendContactVcard { .. } => true,
+            // `edit_compose_signature` / `edit_signature_file`.
+            Action::ComposeEditSignature => true,
+            Action::EditSignatureFile { .. } => true,
+            // `submit_compose_wizard` edits the new or forwarded draft.
+            Action::ComposeWizardSubmit => true,
+            // `handle_search_result_action` -> `open_readonly_view`.
+            Action::SearchResultOpen => true,
+            // `handle_search_result_action` -> `search_result_draft` ->
+            // `write_draft_and_edit`.
+            Action::SearchResultReply(_) | Action::SearchResultForward => true,
+
+            // Everything else stays inside the alternate screen. Browser and
+            // attachment opens go through `parse::open_file_with_system`,
+            // which detaches a GUI process and does not take our stdin.
+            Action::Send
+            | Action::SendApproved
+            | Action::CancelHeldSend
+            | Action::Approve
+            | Action::BatchApprove(_)
+            | Action::MarkDraft
+            | Action::BatchMarkDraft(_)
+            | Action::Archive
+            | Action::Delete
+            | Action::BatchArchive(_)
+            | Action::BatchDelete(_)
+            | Action::BatchDeleteDrafts(_)
+            | Action::MoveToMailbox { .. }
+            | Action::ToggleRead
+            | Action::MarkAsRead(_)
+            | Action::BatchToggleRead(_)
+            | Action::ToggleFlag
+            | Action::BatchToggleFlag(_)
+            | Action::CopyMessageRef
+            | Action::OpenAttachment(_)
+            | Action::SaveAttachments { .. }
+            | Action::Fetch
+            | Action::LoadMailbox { .. }
+            | Action::FetchAccount(_)
+            | Action::Sync
+            | Action::ServerSearch { .. }
+            | Action::SearchResultJump
+            | Action::SearchResultYankPath
+            | Action::SearchResultFetch
+            | Action::SearchResultArchive
+            | Action::SearchResultOpenInBrowser
+            | Action::OpenHtmlInBrowser(_)
+            | Action::OpenComposeWizard(_)
+            | Action::ComposeWizardCancel
+            | Action::Rsvp { .. }
+            | Action::ComposeToContact { .. }
+            | Action::CopyContactEmail { .. }
+            | Action::RefreshContacts
+            | Action::AttachFileToDraft { .. } => false,
+        }
+    }
+}
+
+/// Which destructive action a confirmation dialog is guarding.
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    Approve,
+    MarkDraft,
+    Archive,
+    Delete,
+    Send,
+    SendApproved,
+    /// Delete the signature under the cursor of the signatures overlay
+    /// (#0107). It carries the overlay itself because the confirm dialog
+    /// replaces it on screen (one overlay at a time): both answers hand the
+    /// list back, refreshed on a yes, untouched on a no.
+    DeleteSignature(SignaturesOverlay),
+}
+
+/// Background RSVP send result (#0029).
+#[derive(Debug)]
+pub struct RsvpDone {
+    pub account_index: usize,
+    pub result: Result<String, String>,
+}
+
+/// A choice in the three-option RSVP overlay (#0029).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RsvpChoice {
+    Accept,
+    Tentative,
+    Decline,
+}
+
+impl RsvpChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            RsvpChoice::Accept => "Accept",
+            RsvpChoice::Tentative => "Tentative",
+            RsvpChoice::Decline => "Decline",
+        }
+    }
+
+    /// Map to the library RSVP status enum.
+    pub fn to_rsvp(self) -> mp_core::invite::Rsvp {
+        match self {
+            RsvpChoice::Accept => mp_core::invite::Rsvp::Accepted,
+            RsvpChoice::Tentative => mp_core::invite::Rsvp::Tentative,
+            RsvpChoice::Decline => mp_core::invite::Rsvp::Declined,
+        }
+    }
+}
+
+/// State for the small RSVP overlay opened with `V` on a received invite.
+/// Three choices (Accept / Tentative / Decline) plus Esc to cancel.
+pub struct RsvpOverlay {
+    /// The invite email being answered.
+    pub msg: MessageRef,
+    /// Event summary, shown in the overlay title.
+    pub summary: String,
+    /// Cursor over the three choices.
+    pub selected: usize,
+}
+
+/// One message of the conversation shown in the thread overlay (#0008).
+///
+/// A flat row of display data plus the [`MessageRef`] the Enter key opens.
+/// `mailbox` is the store key (`messages.mailbox`), carried so the jump can
+/// resolve the sidebar index without a second store read; the overlay renders
+/// its sidebar label. `current` marks the message the overlay was opened from,
+/// so the reader keeps their place in the conversation.
+#[derive(Debug, Clone)]
+pub struct ThreadEntry {
+    pub msg: MessageRef,
+    pub mailbox: String,
+    pub from: String,
+    pub date_display: String,
+    pub read: bool,
+    pub answered: bool,
+    pub forwarded: bool,
+    pub flagged: bool,
+    /// True for the message the overlay was opened from.
+    pub current: bool,
+}
+
+/// State for the conversation (threading) overlay opened with `T` (#0008).
+///
+/// Read-only list of every message ingest put in the same `thread_id`, oldest
+/// first, across every mailbox of the active account. It is the "list the
+/// related emails" half of [#TKT-0051]: grouping a conversation, derived from
+/// the `In-Reply-To` / `References` chain ingest already resolved. Enter opens
+/// the highlighted message (switching mailbox when it lives in another), Esc
+/// closes.
+pub struct ThreadOverlay {
+    /// Subject of the message the overlay was opened from, shown in the title.
+    pub subject: String,
+    /// The conversation, oldest first.
+    pub messages: Vec<ThreadEntry>,
+    /// Cursor into `messages`.
+    pub selected: usize,
+}
+
+/// Data for rendering the confirmation dialog overlay.
+#[derive(Debug, Clone)]
+pub struct ConfirmDialog {
+    pub title: String,
+    pub detail: String,
+    pub action: ConfirmAction,
+}
+
+/// One selectable row of the command palette (#0100): a runnable action and
+/// the label the fuzzy filter matches against and the list renders.
+#[derive(Debug, Clone, Copy)]
+pub struct PaletteEntry {
+    pub action: super::KeyAction,
+    pub label: &'static str,
+}
+
+/// Scratch state for the command palette overlay (`:` / `Ctrl+p`, #0100).
+///
+/// A text-input fuzzy finder over the runnable `KeyAction` catalogue
+/// ([`super::palette_actions`]): the user types part of an action name and runs
+/// it with Enter, without recalling its chord. It is the recall path the
+/// mnemonic families' fast path complements, not a second action list — the
+/// entries derive from the same `KEYMAP` the help/hint surfaces read.
+///
+/// Modelled on [`MailboxPicker`]: `entries` is the full catalogue captured when
+/// the overlay opens, `filtered` holds the indices that match `query` (in
+/// catalogue order), and `selected` is the cursor into `filtered`.
+pub struct CommandPalette {
+    /// The full runnable catalogue, snapshotted on open.
+    pub entries: Vec<PaletteEntry>,
+    /// Type-to-filter query (family leaders typed here are literal).
+    pub query: String,
+    /// Indices into `entries` whose label fuzzy-matches `query`.
+    pub filtered: Vec<usize>,
+    /// Cursor into `filtered`.
+    pub selected: usize,
+}
+
+impl CommandPalette {
+    /// Build the palette from the current [`super::palette_actions`] catalogue,
+    /// with an empty query (so every entry is visible) and the cursor at the
+    /// top.
+    pub fn new() -> Self {
+        let entries = super::palette_actions()
+            .into_iter()
+            .map(|(action, label)| PaletteEntry { action, label })
+            .collect::<Vec<_>>();
+        let filtered = (0..entries.len()).collect();
+        Self {
+            entries,
+            query: String::new(),
+            filtered,
+            selected: 0,
+        }
+    }
+
+    /// The action under the cursor, if any.
+    pub fn selected_action(&self) -> Option<super::KeyAction> {
+        self.filtered
+            .get(self.selected)
+            .map(|&i| self.entries[i].action)
+    }
+}
+
+impl Default for CommandPalette {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The single active modal overlay, if any (#0032).
+///
+/// Replaces the former set of independent `Option`/`bool` overlay fields on
+/// `App` (`confirm_dialog`, `show_help`, `show_activity_overlay`,
+/// `show_search_overlay`, `compose_wizard`, `attachment_picker`, `dir_picker`,
+/// `mailbox_picker`, `rsvp_overlay`, `persistent_error`). Exactly one overlay
+/// is renderable at a time by construction: `view` matches on this and
+/// `handle_key` dispatches on it.
+///
+/// Variants that carry per-overlay data own their struct payload. The three
+/// former bare-`bool` overlays (`Help`, `Activity`, `Search`) are unit
+/// variants — their scratch state (scroll offsets, filter strings, server
+/// search buffers) still lives in sibling `App` fields, since those buffers
+/// outlive a single open/close only as reset-on-open scratch space.
+#[derive(Default)]
+pub enum Overlay {
+    /// No overlay: the normal three-pane mail view has full focus.
+    #[default]
+    None,
+    /// Destructive-action confirmation (`y`/`n`).
+    Confirm(ConfirmDialog),
+    /// Help overlay (`?`). Scroll/filter state in `App::help_*`.
+    Help,
+    /// Activity-log overlay (`L`). Scroll/filter state in `App::activity_*`.
+    Activity,
+    /// Server (IMAP) search overlay (`f`). State in `App::server_search_*`.
+    Search,
+    /// Compose wizard (new / forward / edit-recipients).
+    Compose(ComposeWizard),
+    /// Attachment picker (`o` open / `O` save).
+    Attachment(AttachmentPicker),
+    /// Directory picker for saving attachments.
+    Dir(DirPicker),
+    /// Fuzzy mailbox picker for quick-move (`M`).
+    Mailbox(MailboxPicker),
+    /// Signature management (`cs`, #0107): the account's signature files, the
+    /// default marked, with create / rename / edit / delete.
+    Signatures(SignaturesOverlay),
+    /// RSVP overlay for a received invite (`V`, #0029).
+    Rsvp(RsvpOverlay),
+    /// Conversation / threading overlay (`T`, #0008).
+    Thread(ThreadOverlay),
+    /// Command palette (`:` / `Ctrl+p`, #0100): a fuzzy finder over the
+    /// runnable `KeyAction` catalogue.
+    Palette(CommandPalette),
+    /// Persistent error requiring explicit dismissal.
+    Error(PersistentError),
+}
+
+impl Overlay {
+    /// Whether any overlay is currently active.
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Overlay::None)
+    }
+}
+
+/// Persistent error notification (requires user action to dismiss).
+pub struct PersistentError {
+    pub message: String,
+}
+
+/// Whether the attachment picker is opening or saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentPickerMode {
+    Open,
+    Save,
+}
+
+/// Overlay state for choosing among multiple attachments.
+pub struct AttachmentPicker {
+    pub files: Vec<PathBuf>,
+    pub selected: usize,
+    pub mode: AttachmentPickerMode,
+    /// Set of selected indices (used in Save mode for multi-select).
+    pub selected_set: HashSet<usize>,
+}
+
+/// Overlay state for the quick-move mailbox picker (#0018): a fuzzy
+/// type-to-filter list of destination mailboxes, opened with `M` from
+/// the email list.
+pub struct MailboxPicker {
+    /// Type-to-filter query.
+    pub query: String,
+    /// Candidate destinations: `(mailbox index into App::mailboxes,
+    /// label)`. Excludes the active mailbox and any mailbox without a
+    /// server-side folder.
+    pub candidates: Vec<(usize, String)>,
+    /// Indices into `candidates` matching the current query.
+    pub filtered: Vec<usize>,
+    /// Cursor position in `filtered`.
+    pub selected: usize,
+    /// Emails to move (current selection, or the cursor email).
+    pub msgs: Vec<MessageRef>,
+}
+
+/// What the signatures overlay is doing right now (#0107).
+///
+/// The overlay is a list that sometimes needs one line of text from the user
+/// (a name to create, a name to rename to). There is no reusable single-line
+/// input widget in this codebase, so the overlay carries its own buffer and
+/// this mode says which prompt (if any) owns the keyboard, the same shape
+/// [`DirPickerMode`] uses for its two list sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignaturesMode {
+    /// Browsing the list; every key is a command.
+    Browse,
+    /// Typing the name of a signature to create.
+    New,
+    /// Typing the new name of the selected signature.
+    Rename,
+}
+
+/// Overlay state for signature management (`cs`, #0107).
+///
+/// The filesystem is the index ([`mp_core::signatures`]), so this holds a
+/// snapshot of it plus the cursor: `names` is what the directory listed when
+/// the overlay last refreshed, `default` the account's recorded default (only
+/// when its file still exists). Every mutation goes through the signatures
+/// module and then calls [`SignaturesOverlay::refresh`], so the list can never
+/// claim a file that is no longer there.
+///
+/// `Clone` because a delete hands the whole overlay to the confirm dialog and
+/// takes it back on either answer (see `ConfirmAction::DeleteSignature`).
+#[derive(Debug, Clone)]
+pub struct SignaturesOverlay {
+    /// The account whose default the overlay edits.
+    pub account: String,
+    /// Signature names, sorted, as of the last refresh.
+    pub names: Vec<String>,
+    /// The account's default signature, if it has one on disk.
+    pub default: Option<String>,
+    /// Cursor into `names`.
+    pub selected: usize,
+    /// Browsing, or which prompt owns the keyboard.
+    pub mode: SignaturesMode,
+    /// The prompt's text buffer (unused in [`SignaturesMode::Browse`]).
+    pub input: String,
+}
+
+impl SignaturesOverlay {
+    /// Open on `account`, reading the signatures directory and the recorded
+    /// default.
+    pub fn for_account(account: &str) -> Self {
+        let mut overlay = Self {
+            account: account.to_string(),
+            names: Vec::new(),
+            default: None,
+            selected: 0,
+            mode: SignaturesMode::Browse,
+            input: String::new(),
+        };
+        overlay.refresh();
+        overlay
+    }
+
+    /// Re-read the directory and the recorded default, keeping the cursor in
+    /// range. Called after every mutation, including the ones that happen
+    /// outside the overlay (an `$EDITOR` round trip, a delete that cleared the
+    /// account default).
+    pub fn refresh(&mut self) {
+        self.names = mp_core::signatures::list();
+        self.default = mp_core::signatures::default_signature_name(&self.account);
+        if self.selected >= self.names.len() {
+            self.selected = self.names.len().saturating_sub(1);
+        }
+    }
+
+    /// Put the cursor on `name` if the list still holds it.
+    pub fn select(&mut self, name: &str) {
+        if let Some(idx) = self.names.iter().position(|n| n == name) {
+            self.selected = idx;
+        }
+    }
+
+    /// The name under the cursor, or `None` when there are no signatures yet.
+    pub fn selected_name(&self) -> Option<&str> {
+        self.names.get(self.selected).map(String::as_str)
+    }
+
+    /// Whether the cursor sits on the account's default.
+    pub fn selected_is_default(&self) -> bool {
+        match (self.selected_name(), self.default.as_deref()) {
+            (Some(name), Some(default)) => name == default,
+            _ => false,
+        }
+    }
+}
+
+/// Whether the directory picker is in zoxide or browser mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirPickerMode {
+    Zoxide,
+    Browser,
+}
+
+/// Overlay for picking a target directory (for saving attachments).
+pub struct DirPicker {
+    pub mode: DirPickerMode,
+    /// Text input for zoxide query.
+    pub query: String,
+    /// Results from `zoxide query --list`.
+    pub zoxide_results: Vec<PathBuf>,
+    /// Whether zoxide is available on this system.
+    pub zoxide_available: bool,
+    /// Current directory in browser mode.
+    pub current_dir: PathBuf,
+    /// Subdirectories of `current_dir` (browser mode listing).
+    pub dir_entries: Vec<PathBuf>,
+    /// Cursor position in the result/entry list.
+    pub selected: usize,
+    /// The attachment files to save (carried from the attachment picker).
+    pub sources: Vec<PathBuf>,
+}
+
+pub const STATUS_LOG_CAPACITY: usize = 100;
+
+#[derive(Debug, Clone)]
+pub enum StatusLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+    Progress,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusEntry {
+    pub timestamp: chrono::DateTime<chrono::Local>,
+    pub message: String,
+    pub level: StatusLevel,
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox helpers (free functions)
+// ---------------------------------------------------------------------------
+
+pub fn build_mailboxes(config: &mp_core::config::AccountConfig) -> Vec<MailboxInfo> {
+    let mut result = Vec::new();
+
+    result.push(MailboxInfo {
+        label: "Inbox".to_string(),
+        icon: "\u{f0172}",
+        id: MailboxRole::Inbox.as_str().to_string(),
+        kind: MailboxKind::Inbox,
+        server_name: config.mailboxes.inbox.as_ref().map(|m| m.server.clone()),
+    });
+
+    result.push(MailboxInfo {
+        label: "Drafts".to_string(),
+        icon: "\u{f03eb}",
+        id: mp_core::selector::DRAFTS_MAILBOX.to_string(),
+        kind: MailboxKind::Drafts,
+        server_name: None,
+    });
+
+    result.push(MailboxInfo {
+        label: "Sent".to_string(),
+        icon: "\u{f046b}",
+        id: MailboxRole::Sent.as_str().to_string(),
+        kind: MailboxKind::Sent,
+        server_name: config.mailboxes.sent.as_ref().map(|m| m.server.clone()),
+    });
+
+    result.push(MailboxInfo {
+        label: "Archive".to_string(),
+        icon: "\u{f013c}",
+        id: MailboxRole::Archive.as_str().to_string(),
+        kind: MailboxKind::Archive,
+        server_name: config.mailboxes.archive.as_ref().map(|m| m.server.clone()),
+    });
+
+    if let Some(ref extras) = config.mailboxes.extra {
+        for m in extras {
+            result.push(MailboxInfo {
+                label: m.server.clone(),
+                icon: "\u{f0247}",
+                id: MailboxRole::Other(m.server.clone()).as_str().to_string(),
+                kind: MailboxKind::Extra,
+                server_name: Some(m.server.clone()),
+            });
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // -----------------------------------------------------------------------
+    // Action::suspends_terminal (#0108)
+    // -----------------------------------------------------------------------
+
+    /// The full set of actions whose handler reaches `helpers::edit_file`,
+    /// derived by reading `src/tui/actions.rs`. `EditCurrent` and
+    /// `SearchResultOpen` go through `open_readonly_view`; `Reply`,
+    /// `SearchResultReply` and `SearchResultForward` through
+    /// `write_draft_and_edit`; `NewDraft`, `OpenLogFile`, `OpenConfigFile` and
+    /// `OpenEventSource` edit inline in their own arm; `SendContactVcard`,
+    /// `ComposeEditSignature`, `EditSignatureFile` and `ComposeWizardSubmit`
+    /// through their named helpers.
+    ///
+    /// `actions::tests::edit_file_call_sites_are_accounted_for` is the
+    /// tripwire for the other direction: it fails when the call sites change.
+    #[test]
+    fn suspending_actions_are_all_flagged() {
+        let suspending = vec![
+            Action::EditCurrent,
+            Action::Reply(false),
+            Action::Reply(true),
+            Action::NewDraft,
+            Action::OpenLogFile,
+            Action::OpenConfigFile,
+            Action::OpenEventSource {
+                msg: MessageRef::new(1),
+            },
+            Action::SendContactVcard {
+                contact: mp_core::contacts::Contact {
+                    address: "a@example.com".to_string(),
+                    display_name: "A".to_string(),
+                    sent_to: 0,
+                    sent_cc: 0,
+                    received: 0,
+                    first_seen: String::new(),
+                    last_seen: String::new(),
+                    source: Default::default(),
+                },
+            },
+            Action::ComposeEditSignature,
+            Action::EditSignatureFile {
+                name: "work".to_string(),
+            },
+            Action::ComposeWizardSubmit,
+            Action::SearchResultOpen,
+            Action::SearchResultReply(false),
+            Action::SearchResultForward,
+        ];
+        for action in suspending {
+            assert!(
+                action.suspends_terminal(),
+                "{action:?} reaches edit_file and must stop the event drain"
+            );
+        }
+    }
+
+    /// The navigation and mutation actions a held key actually produces are
+    /// the ones the drain exists to batch, so a false positive here would
+    /// defeat the whole coalescing.
+    #[test]
+    fn ordinary_actions_do_not_suspend_the_terminal() {
+        let safe = vec![
+            Action::Fetch,
+            Action::Sync,
+            Action::ToggleRead,
+            Action::MarkAsRead(MessageRef::new(1)),
+            Action::ToggleFlag,
+            Action::Archive,
+            Action::Delete,
+            Action::CopyMessageRef,
+            Action::OpenAttachment(std::path::PathBuf::from("/tmp/a.pdf")),
+            Action::OpenHtmlInBrowser(std::path::PathBuf::from("/tmp/a.html")),
+            Action::OpenComposeWizard(ComposeMode::New),
+            Action::ComposeWizardCancel,
+            Action::SearchResultJump,
+            Action::SearchResultYankPath,
+            Action::SearchResultFetch,
+            Action::SearchResultArchive,
+            Action::SearchResultOpenInBrowser,
+            Action::LoadMailbox {
+                mailbox_idx: 0,
+                generation: 0,
+            },
+            Action::AttachFileToDraft {
+                path: "/tmp/a.pdf".to_string(),
+            },
+        ];
+        for action in safe {
+            assert!(
+                !action.suspends_terminal(),
+                "{action:?} stays inside the alternate screen and must not break the drain"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ComposeField navigation order (#0106)
+    // -----------------------------------------------------------------------
+
+    /// The Signature field sits between Subject and Body, and the cycle wraps
+    /// Body -> To, so its Enter/Ctrl+g behaviour on Body is unchanged.
+    #[test]
+    fn compose_field_order_puts_signature_before_body() {
+        use ComposeField::*;
+        let forward: Vec<ComposeField> = {
+            let mut v = vec![To];
+            let mut f = To;
+            for _ in 0..5 {
+                f = f.next();
+                v.push(f);
+            }
+            v
+        };
+        assert_eq!(forward, vec![To, Cc, Bcc, Subject, Signature, Body]);
+        assert_eq!(Body.next(), To, "the cycle wraps back to To");
+        // prev is the exact inverse.
+        assert_eq!(Signature.prev(), Subject);
+        assert_eq!(Body.prev(), Signature);
+        assert_eq!(To.prev(), Body);
+        // Signature is not an address field, so autocomplete never runs on it.
+        assert!(!Signature.is_address());
+        assert_eq!(Signature.label(), "Signature");
+    }
+
+    /// With no inline body field (Forward / EditDraft), navigation skips Body
+    /// but never Signature: Subject -> Signature -> To.
+    #[test]
+    fn signature_participates_even_without_a_body_field() {
+        let wizard = ComposeWizard {
+            mode: ComposeMode::EditDraft { id: "x".to_string() },
+            to: String::new(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: String::new(),
+            body: String::new(),
+            focus: ComposeField::Signature,
+            signature_name: None,
+            signature_initial: None,
+            signature_edited: false,
+            available_signatures: Vec::new(),
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
+            contacts: None,
+        };
+        assert!(!wizard.has_body_field());
+        assert_eq!(wizard.next_field(), ComposeField::To, "Body is skipped");
+        let mut at_subject = ComposeWizard {
+            focus: ComposeField::Subject,
+            ..wizard
+        };
+        assert_eq!(at_subject.next_field(), ComposeField::Signature);
+        at_subject.focus = ComposeField::To;
+        assert_eq!(at_subject.prev_field(), ComposeField::Signature);
+    }
+
+    // -----------------------------------------------------------------------
+    // PreviewBody content stamp (#0093)
+    // -----------------------------------------------------------------------
+
+    /// The wrapped-line memo keys on this stamp, so it must move exactly when
+    /// the shown content moves and hold still on an unchanged refill (the
+    /// skip-draft and primed paths refill the same text every frame).
+    #[test]
+    fn preview_body_epoch_bumps_on_change_and_holds_on_refill() {
+        let mut pb = PreviewBody::default();
+        let start = pb.epoch();
+
+        // A new body bumps the stamp.
+        pb.fill(None, "hello".to_string());
+        let after_first = pb.epoch();
+        assert_ne!(after_first, start, "first fill must bump");
+
+        // Refilling the identical (key, text) must not bump: this is the
+        // every-frame skip-draft/primed case.
+        pb.fill(None, "hello".to_string());
+        assert_eq!(pb.epoch(), after_first, "unchanged refill holds the stamp");
+
+        // Different text bumps.
+        pb.fill(None, "world".to_string());
+        assert_ne!(pb.epoch(), after_first, "changed text bumps");
+    }
+
+    // -----------------------------------------------------------------------
+    // Search form -> AST (#0086b)
+    // -----------------------------------------------------------------------
+
+    use mp_core::search::{Clause, Term};
+
+    #[test]
+    fn search_form_empty_is_noop() {
+        // A blank form builds nothing: Enter must not dispatch a search.
+        let form = SearchForm::default();
+        assert!(form.is_blank());
+        assert_eq!(form.build_query().unwrap(), None);
+    }
+
+    #[test]
+    fn search_form_default_scope_is_current_account() {
+        assert_eq!(
+            SearchForm::default().scope.0,
+            SearchScope::CurrentAccount
+        );
+    }
+
+    #[test]
+    fn search_form_builds_every_structured_field() {
+        let form = SearchForm {
+            from: "boss@corp.com".to_string(),
+            to: "me@corp.com".to_string(),
+            subject: "budget".to_string(),
+            keywords: "invoice OR receipt".to_string(),
+            after: "2026-01-01".to_string(),
+            before: "2026-07-01".to_string(),
+            attachment: true,
+            ..Default::default()
+        };
+        let q = form.build_query().unwrap().expect("non-blank form");
+        // No string concatenation: each field is its own AST clause. `keywords`
+        // parses as the positional grammar, so `a OR b` is an Or clause.
+        assert!(q
+            .clauses
+            .contains(&Clause::Single(Term::From("boss@corp.com".into()))));
+        assert!(q
+            .clauses
+            .contains(&Clause::Single(Term::To("me@corp.com".into()))));
+        assert!(q
+            .clauses
+            .contains(&Clause::Single(Term::Subject("budget".into()))));
+        assert!(q.clauses.contains(&Clause::Or(vec![
+            Term::Text("invoice".into()),
+            Term::Text("receipt".into()),
+        ])));
+        assert!(q
+            .clauses
+            .contains(&Clause::Single(Term::After("2026-01-01".into()))));
+        assert!(q
+            .clauses
+            .contains(&Clause::Single(Term::Before("2026-07-01".into()))));
+        assert!(q.clauses.contains(&Clause::Single(Term::HasAttachment)));
+    }
+
+    #[test]
+    fn search_form_attachment_toggle_only() {
+        // The attachment toggle alone is a real (non-blank) query.
+        let form = SearchForm {
+            attachment: true,
+            ..Default::default()
+        };
+        assert!(!form.is_blank());
+        let q = form.build_query().unwrap().unwrap();
+        assert_eq!(q.clauses, vec![Clause::Single(Term::HasAttachment)]);
+    }
+
+    #[test]
+    fn search_form_rejects_bad_date() {
+        let form = SearchForm {
+            after: "not-a-date".to_string(),
+            ..Default::default()
+        };
+        let err = form.build_query().unwrap_err();
+        assert!(err.contains("after"), "date error surfaced: {err}");
+    }
+
+    #[test]
+    fn search_form_advanced_overrides_structured_fields() {
+        // Rule: a non-blank Advanced line takes over; the structured fields are
+        // ignored (greyed in the UI). Here `from`/`subject` are set but the
+        // built query is exactly what Advanced parses to.
+        let form = SearchForm {
+            from: "ignored@corp.com".to_string(),
+            subject: "ignored".to_string(),
+            advanced: "has:attachment".to_string(),
+            ..Default::default()
+        };
+        assert!(form.advanced_active());
+        let q = form.build_query().unwrap().unwrap();
+        assert_eq!(q.clauses, vec![Clause::Single(Term::HasAttachment)]);
+    }
+
+    #[test]
+    fn search_form_advanced_parse_error_surfaces() {
+        // A malformed Advanced grammar returns the ParseError Display verbatim
+        // (its three-line caret message), for the overlay to show.
+        let form = SearchForm {
+            advanced: "from:x (invoice OR".to_string(),
+            ..Default::default()
+        };
+        let err = form.build_query().unwrap_err();
+        assert!(
+            err.contains("invalid search query"),
+            "ParseError Display surfaced: {err}"
+        );
+        assert!(err.contains('^'), "caret present: {err}");
+    }
+
+    #[test]
+    fn search_field_focus_cycles_through_all_nine() {
+        // Tab forward from the first field visits every field once and wraps.
+        let mut f = SearchField::Scope;
+        let mut seen = vec![f];
+        for _ in 0..8 {
+            f = f.next();
+            seen.push(f);
+        }
+        assert_eq!(seen.len(), 9);
+        assert_eq!(f.next(), SearchField::Scope, "wraps to the start");
+        // Shift-Tab is the exact inverse.
+        assert_eq!(SearchField::Scope.prev(), SearchField::Advanced);
+        assert_eq!(SearchField::From.prev(), SearchField::Scope);
+        // Every field is distinct in the cycle.
+        let mut uniq = seen.clone();
+        uniq.sort_by_key(|f| f.label());
+        uniq.dedup_by_key(|f| f.label());
+        assert_eq!(uniq.len(), 9);
+    }
+
+    #[test]
+    fn search_field_toggles_are_not_text() {
+        assert!(!SearchField::Scope.is_text());
+        assert!(!SearchField::Attachment.is_text());
+        assert!(SearchField::From.is_text());
+        assert!(SearchField::Advanced.is_text());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_display_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_display_name_full_address() {
+        assert_eq!(extract_display_name("John Doe <john@x.com>"), "John Doe");
+    }
+
+    #[test]
+    fn test_extract_display_name_bare_email() {
+        assert_eq!(extract_display_name("john@x.com"), "john@x.com");
+    }
+
+    #[test]
+    fn test_extract_display_name_no_name() {
+        assert_eq!(extract_display_name("<john@x.com>"), "john@x.com");
+    }
+
+    #[test]
+    fn test_extract_display_name_quoted() {
+        assert_eq!(
+            extract_display_name("\"John Doe\" <john@x.com>"),
+            "John Doe"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_empty() {
+        assert_eq!(extract_display_name(""), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_date
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_date_rfc2822() {
+        let date = Some("Mon, 01 Jan 2024 12:00:00 +0000".to_string());
+        let (display, sort) = resolve_date(&date, &None, Path::new("test.md"));
+        assert_eq!(display, "2024-01-01");
+        assert_eq!(sort, "2024-01-01T12:00:00");
+    }
+
+    #[test]
+    fn test_resolve_date_rfc3339_sent_at() {
+        let sent = Some("2024-06-15T14:30:00+02:00".to_string());
+        let (display, sort) = resolve_date(&None, &sent, Path::new("test.md"));
+        // Display is in sender-local time, sort key is normalised to UTC.
+        assert_eq!(display, "2024-06-15");
+        assert_eq!(sort, "2024-06-15T12:30:00");
+    }
+
+    /// Two emails on the same day from different timezones must sort by the
+    /// actual instant, not by sender-local wallclock. Regression test for
+    /// ticket #0024.
+    #[test]
+    fn test_resolve_date_sort_normalises_timezone() {
+        // 10:00 +0200 == 08:00 UTC (earlier instant)
+        let early = Some("Mon, 06 May 2024 10:00:00 +0200".to_string());
+        // 09:30 +0000 == 09:30 UTC (later instant)
+        let late = Some("Mon, 06 May 2024 09:30:00 +0000".to_string());
+        let (_, sort_early) = resolve_date(&early, &None, Path::new("a.md"));
+        let (_, sort_late) = resolve_date(&late, &None, Path::new("b.md"));
+        assert!(
+            sort_late > sort_early,
+            "expected later UTC instant to sort higher: late={sort_late} early={sort_early}"
+        );
+
+        // Same check for the RFC3339 sent_at branch.
+        let early_rfc3339 = Some("2024-05-06T10:00:00+02:00".to_string());
+        let late_rfc3339 = Some("2024-05-06T09:30:00+00:00".to_string());
+        let (_, sort_early) = resolve_date(&None, &early_rfc3339, Path::new("a.md"));
+        let (_, sort_late) = resolve_date(&None, &late_rfc3339, Path::new("b.md"));
+        assert!(
+            sort_late > sort_early,
+            "expected later UTC instant to sort higher: late={sort_late} early={sort_early}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_date_naive_sent_at() {
+        let sent = Some("2024-06-15T14:30:00Z".to_string());
+        let (display, sort) = resolve_date(&None, &sent, Path::new("test.md"));
+        assert_eq!(display, "2024-06-15");
+        assert_eq!(sort, "2024-06-15T14:30:00");
+    }
+
+    #[test]
+    fn test_resolve_date_filename_fallback() {
+        let path = Path::new("2024-03-15-1430_sender_subject.md");
+        let (display, sort) = resolve_date(&None, &None, path);
+        assert_eq!(display, "2024-03-15");
+        assert_eq!(sort, "2024-03-15T14:30:00");
+    }
+
+    #[test]
+    fn test_resolve_date_filename_date_only() {
+        let path = Path::new("2024-03-15_sender_subject.md");
+        let (display, sort) = resolve_date(&None, &None, path);
+        assert_eq!(display, "2024-03-15");
+        assert_eq!(sort, "2024-03-15T00:00:00");
+    }
+
+    #[test]
+    fn test_resolve_date_all_missing() {
+        let path = Path::new("random-name.md");
+        let (display, sort) = resolve_date(&None, &None, path);
+        assert_eq!(display, "");
+        assert_eq!(sort, "");
+    }
+
+    /// The key the sidebar queries the store with is the key the sync path
+    /// hands to ingest, for every mailbox including the unmapped ones.
+    ///
+    /// It used to be the leaf of a directory path, and for an unmapped mailbox
+    /// that leaf was a *slug*: an extra mailbox called `INBOX.Archive` listed
+    /// under `inbox-archive` while ingest filed its rows under
+    /// `INBOX.Archive`, so it showed empty and counted zero (#0064).
+    #[test]
+    fn the_sidebar_key_is_the_key_ingest_writes() {
+        let mapping = |server: &str| mp_core::config::MailboxMapping {
+            server: server.to_string(),
+        };
+        let config = mp_core::config::AccountConfig {
+            name: "tum".to_string(),
+            mailboxes: mp_core::config::MailboxesConfig {
+                inbox: Some(mapping("INBOX")),
+                archive: Some(mapping("Archive")),
+                sent: Some(mapping("Sent")),
+                extra: Some(vec![mapping("INBOX.Archive")]),
+            },
+            ..Default::default()
+        };
+
+        let keys: Vec<String> = build_mailboxes(&config).iter().map(mailbox_key).collect();
+        assert_eq!(keys, ["inbox", "drafts", "sent", "archive", "INBOX.Archive"]);
+
+        for (role, _) in mp_core::config::all_configured_mailboxes(&config) {
+            assert!(
+                keys.contains(&role.as_str().to_string()),
+                "the sidebar has no slot for the rows ingest files under '{role}'"
+            );
+        }
+    }
+
+    /// The `status` string the headers pane shows is derived from the mailbox,
+    /// and that derivation lives in exactly one place now that `EmailStatus`
+    /// no longer carries the file-era placement states (#0064).
+    #[test]
+    fn status_is_derived_from_the_mailbox() {
+        assert_eq!(status_for_mailbox("inbox"), "inbox");
+        assert_eq!(status_for_mailbox("archive"), "archived");
+        assert_eq!(status_for_mailbox("sent"), "sent");
+        assert_eq!(status_for_mailbox("drafts"), "draft");
+        assert_eq!(status_for_mailbox("some-folder"), "inbox");
+        // The role reading is case-insensitive, so a mailbox synced as
+        // `--mailbox INBOX` shows the inbox status, not the extra one.
+        assert_eq!(status_for_mailbox("INBOX"), "inbox");
+        assert_eq!(status_for_mailbox("Archive"), "archived");
+    }
+}

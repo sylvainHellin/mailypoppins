@@ -1,0 +1,49 @@
+---
+source: crates/mp-tui/src/ui/golden_frames.rs
+expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
+---
+== text 120x40 (trailing spaces trimmed) ==
+00 |╭ Inbox ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│   DATE       CONTACT         SUBJECT                                                                                 │
+02 |│  2026-07-28 Planung Muller… 󰃭  Einladung: Baustellenübergabe — 会 議  ✓                                              │
+03 |│   2026-07-27 Anna Weber <an… Re: Statusbericht KW31                                                                  │
+04 |│  2026-07-26 scanner@exampl…  Scan 2026-07-26 (3 Seiten)                                                            │
+05 |│   2026-07-24 TUM Newsletter… Wochenrückblick: sehr langer Betreff der garantiert abgeschnitten wird                  │
+06 |│   2026-07-21 buchhaltung@ex…  Rechnung 2026-0714                                                                    │
+07 |│                                                                                                                      │
+08 |│                                                                                                                      │
+09 |│                                                                                                                      │
+10 |│                                                                                                                      │
+11 |│                                                                                                                      │
+12 |│                                                                                                                      │
+13 |│                                                                                                                      │
+14 |│                                                                                                                      │
+15 |│                                                                                                                      │
+16 |│                                                                                                                      │
+17 |│                                                                                                                      │
+18 |│                                                                                                                      │
+19 |│                                                                                                                      │
+20 |│                                                                                                                      │
+21 |│                                                                                                                      │
+22 |│                                                                                                                      │
+23 |│                                                                                                                      │
+24 |│                                                                                                                      │
+25 |│                                                                                                                      │
+26 |│                                                                                                                      │
+27 |│                                                                                                                      │
+28 |│                                                                                                                      │
+29 |│                                                                                                                      │
+30 |│                                                                                                                      │
+31 |│                                                                                                                      │
+32 |│                                                                                                                      │
+33 |│                                                                                                                      │
+34 |│                                                                                                                      │
+35 |│                                                                                                                      │
+36 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+37 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+38 |│ MAIL ZOOM   j/k Navigate  v Select  J / K Next/prev  Enter / e Open (read-only)  r Reply  a Archive  d Delete …      │
+39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+== style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
+02 |bg:surface+fg:selection+bold@1..68 bg:surface+fg:selection+bold@69..70 bg:surface+fg:selection+bold@71..119
+04 |bold@1..119
+38 |bold@1..12 bold@14..17 bold@28..29 bold@38..43 bold@55..64 bold@83..84 bold@92..93 bold@103..104

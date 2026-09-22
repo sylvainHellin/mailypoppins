@@ -52,7 +52,7 @@
 //! `src/tui_tests/golden_frames_daemon.rs` lives inside the library, so its
 //! tests are not reachable from here as tests. What is reachable is what they
 //! leave on disk: the module source, its own `src/tui_tests/snapshots/` and the
-//! reviewed `src/tui/ui/snapshots/` it is compared against. The two families
+//! reviewed `crates/mp-tui/src/ui/snapshots/` it is compared against. The two families
 //! sit in two directories since #0126 (P5-U10e), because the daemon-backed half
 //! builds its `App` from a dispatcher `crates/mp-tui` may not link and moved to
 //! the root crate's own tests; the fixtures both families render are still the
@@ -357,7 +357,7 @@ fn daemon_frames_source() -> String {
 }
 
 fn store_frames_source() -> String {
-    let path = repo().join("src/tui/ui/golden_frames.rs");
+    let path = repo().join("crates/mp-tui/src/ui/golden_frames.rs");
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -386,8 +386,8 @@ fn test_names(source: &str) -> Vec<String> {
 
 /// Where each family's reviewed snapshots live, and the module path insta
 /// names them after.
-const STORE_SNAPSHOT_DIR: &str = "src/tui/ui/snapshots";
-const STORE_SNAPSHOT_MODULE: &str = "mailypoppins__tui__ui__golden_frames";
+const STORE_SNAPSHOT_DIR: &str = "crates/mp-tui/src/ui/snapshots";
+const STORE_SNAPSHOT_MODULE: &str = "mp_tui__ui__golden_frames";
 const DAEMON_SNAPSHOT_DIR: &str = "src/tui_tests/snapshots";
 const DAEMON_SNAPSHOT_MODULE: &str = "mailypoppins__tui_tests__golden_frames_daemon";
 

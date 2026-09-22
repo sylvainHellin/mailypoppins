@@ -815,7 +815,10 @@ fn a_preview_walk_leaves_no_handle_behind() {
 const TUI_APP_STORE_RESIDUE: [(&str, &str, &str); 0] = [];
 
 /// The two files this unit is accountable for.
-const QUERY_LAYER_SOURCES: [&str; 2] = ["src/tui/app/mod.rs", "src/tui/app/types.rs"];
+const QUERY_LAYER_SOURCES: [&str; 2] = [
+    "crates/mp-tui/src/app/mod.rs",
+    "crates/mp-tui/src/app/types.rs",
+];
 
 /// P5-U3's gate, at zero: the TUI's app module opens no store at all, and
 /// every read it makes goes through [`crate::tui::queries`](crate::tui::queries)

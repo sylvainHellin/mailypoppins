@@ -2006,6 +2006,7 @@ dependencies = [
  "mp-client",
  "mp-core",
  "mp-protocol",
+ "mp-tui",
  "nucleo-matcher",
  "openssl",
  "percent-encoding",
@@ -2170,6 +2171,29 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "mp-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64",
+ "chrono",
+ "crossterm",
+ "insta",
+ "log",
+ "mailparse",
+ "mp-client",
+ "mp-core",
+ "mp-protocol",
+ "ratatui",
+ "serde_json",
+ "shellexpand",
+ "tempfile",
+ "tokio",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

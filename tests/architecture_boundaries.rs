@@ -2,18 +2,18 @@
 //!
 //! Two boundaries, two halves.
 //!
-//! **The TUI's imports.** The TUI calls the library directly today: it opens
-//! the store, drives the IMAP client, reads secrets and queues server ops
-//! itself. The daemon migration has to drive that set to zero, and the only way
-//! to know it is shrinking is to have written down what it is. The first half
-//! walks `src/tui/`, collects every `use` of an engine module, and compares the
-//! result against `tests/fixtures/tui-engine-imports.txt`. A new engine import
-//! in the TUI fails the test naming the file and the module; a removed one
-//! fails it too, because the allow-list is a record, not a ceiling, and the
-//! number in it is the migration's progress bar. **The TUI is out of scope of
-//! the CLI allow-list below until Phase 5** (ticket #0124), which is the unit
-//! that takes it off the direct path; until then its residue is this fixture's
-//! business and nothing else's.
+//! **The TUI's imports.** The TUI called the library directly: it opened the
+//! store, drove the IMAP client, read secrets and queued server ops itself. The
+//! daemon migration had to drive that set to zero, and the only way to know it
+//! was shrinking was to have written down what it was. The first half walks the
+//! TUI's sources, collects every `use` of an engine module, and compares the
+//! result against `tests/fixtures/tui-engine-imports.txt`. **The fixture is
+//! empty since #0126 (P5-U10e)**, and the scan roots at `crates/mp-tui/src`
+//! since P5-U10f, where the answer is structural: that crate's manifest names
+//! `mp-core`, `mp-client` and `mp-protocol` and no `mailypoppins`, so an engine
+//! import does not compile. The scan stays as the belt to that braces: it fails
+//! the day someone adds the dependency back, naming the file and the module,
+//! which a resolver error a hundred lines long would not.
 //!
 //! **The CLI's engine touches.** Phase 4's exit gate reads "no command that
 //! touches domain state opens a store, a secret backend, a network backend, or
@@ -37,8 +37,9 @@
 //! row that goes away is struck in the commit that removes the call.
 //!
 //! Nothing here is feature-gated: it passes on the pre-daemon tree, which is
-//! the point. `engine_imports` takes the client source root as an argument so
-//! that Phase 5 can re-point it at `crates/mp-tui/` without a rewrite.
+//! the point. `engine_imports` takes the client source root as an argument,
+//! which is what let P5-U10f re-point it at `crates/mp-tui/src` without a
+//! rewrite.
 //!
 //! To re-record the TUI allow-lists after a deliberate change, run
 //! `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`
@@ -50,25 +51,49 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The library modules that make up the engine: everything the TUI must stop
-/// touching directly once it talks to the daemon instead. Modules that stay
-/// shared between client and engine (`types`, `config`, `parse`, `search`,
-/// `selector`, ...) are deliberately absent.
-pub const ENGINE_MODULES: [&str; 11] = [
+/// The library modules that make up the engine: everything the TUI had to stop
+/// touching directly when it started talking to the daemon instead. Modules
+/// that stay shared between client and engine (`types`, `config`, `parse`,
+/// `search`, `selector`, ...) are deliberately absent.
+///
+/// Nine names, not eleven: `secrets` and `oauth2` left for `mp-core` in
+/// P5-U10a and were carried on this list unchanged for four units, because no
+/// file under `src/tui/` imported either and striking them was never the unit's
+/// brief. P5-U10f is the unit where keeping them would have been wrong rather
+/// than merely untidy: `crates/mp-tui` depends on `mp-core`, so a `use
+/// mp_core::secrets::…` in the TUI would be a real engine reach that this
+/// scan - which looks for `crate::` and `mailypoppins::` - could not see, and a
+/// list naming two modules the scan cannot reach reads as coverage it does not
+/// have. The two are covered instead by [`MP_CORE_ENGINE_PATHS`], which scans
+/// for the paths they are actually spelled with now.
+pub const ENGINE_MODULES: [&str; 9] = [
     "graph",
     "imap_client",
     "ingest",
-    "oauth2",
     "ops",
     "outbox",
     "pending_ops",
-    "secrets",
     "send",
     "store",
     "sync",
 ];
 
-const CLIENT_ROOT: &str = "src/tui";
+/// The two `mp-core` modules a client crate may link and must not use:
+/// the secret backend and the OAuth2 device flow.
+///
+/// They are the engine's half of the shared crate (#0126, P5-U10a moved them
+/// there), and the daemon is what opens a keyring or runs a device-code flow.
+/// The import scan above cannot see them, because they are `mp_core::` paths
+/// rather than `crate::` ones, so they are scanned for as text in both spellings
+/// over the whole TUI crate, tests included.
+pub const MP_CORE_ENGINE_PATHS: [&str; 4] = [
+    "mp_core::secrets",
+    "mp_core::oauth2",
+    "use mp_core::{secrets",
+    "use mp_core::{oauth2",
+];
+
+const CLIENT_ROOT: &str = "crates/mp-tui/src";
 const ALLOW_LIST: &str = "tests/fixtures/tui-engine-imports.txt";
 const PATH_ALLOW_LIST: &str = "tests/fixtures/tui-engine-paths.txt";
 
@@ -355,18 +380,28 @@ fn engine_imports_reads_every_use_form_and_ignores_shared_modules() {
 ///
 /// Three groups:
 ///
-/// - **the engine modules**, the same eleven [`ENGINE_MODULES`] names, reached
-///   through a path instead of an import;
+/// - **the engine modules**, the same [`ENGINE_MODULES`] names reached through
+///   a path instead of an import, plus the two that left for `mp-core` and are
+///   spelled `crate::secrets::` / `crate::oauth2::` no longer;
 /// - **the root crate's own halves of the shared modules**, which live beside
 ///   the engine because they need a store, a row or an index: the agenda
 ///   loader and the five `draft` operations. `crate::draft::` on its own would
 ///   be wrong, because most of that module is `mp_core`'s and a client may
 ///   reach it, so the five are named as the symbols they are spelled by. They
-///   are symbols rather than paths for a second reason too: `src/tui/` imports
-///   them and calls them bare, so there is no `crate::` path to look for;
-/// - **`crate::daemon::`**, which is the daemon crate itself. The TUI reaches
-///   it for one thing, the connect helper, and a client crate that linked the
-///   daemon would have no boundary at all.
+///   are symbols rather than paths for a second reason too: the TUI imported
+///   them and called them bare, so there was no `crate::` path to look for;
+/// - **`crate::daemon::`**, which is the daemon itself. The TUI reached it for
+///   one thing, the connect helper, and a client crate that linked the daemon
+///   would have no boundary at all. Since P5-U10f it reaches it for nothing:
+///   the binary hands `mp_tui::run` a `session::Connector` of two function
+///   pointers, so the exit-4 diagnostic stays in the process that owns the
+///   terminal and the fixture is empty.
+///
+/// The whole list is a belt over the braces the manifest now provides. It is
+/// kept because a list that went to zero and was deleted would have to be
+/// rewritten from memory the day someone reaches for the engine again, and
+/// because `crate::` here means `mp_tui` since the move: a row appearing is a
+/// module of the TUI crate that has grown an engine of its own.
 const TUI_ENGINE_PATHS: [&str; 18] = [
     "crate::agenda::",
     "crate::daemon::",
@@ -392,7 +427,7 @@ const TUI_ENGINE_PATHS: [&str; 18] = [
 /// `(path relative to root, path prefix)` pairs.
 ///
 /// Production only, which is the difference from [`engine_imports`]: a test
-/// module under `src/tui/` moves with the code it tests, and a file that is
+/// module under the TUI moves with the code it tests, and a file that is
 /// nothing but a test module (declared `#[cfg(test)] mod x;`) moves whole. What
 /// blocks the crate move is the paths a *frame* takes.
 pub fn engine_paths(root: &Path) -> BTreeSet<(String, String)> {
@@ -422,7 +457,7 @@ pub fn engine_paths(root: &Path) -> BTreeSet<(String, String)> {
 
 /// Every file under `root` that a parent module declares `#[cfg(test)]`.
 ///
-/// Derived rather than listed by name: `src/tui/` carries ten such files and a
+/// Derived rather than listed by name: the TUI carries several such files and a
 /// suffix convention would be a second rule to keep in step with the `mod`
 /// lines that decide it.
 fn test_only_files(root: &Path) -> BTreeSet<PathBuf> {
@@ -524,6 +559,42 @@ fn tui_engine_paths_match_the_allow_list() {
          `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`.",
         actual.len(),
         expected.len(),
+    );
+}
+
+/// The two `mp-core` modules a client may not use, scanned over the whole TUI
+/// crate, tests included.
+///
+/// The crate boundary is the proof for the eleven engine modules: `mp-tui`'s
+/// manifest names no `mailypoppins`, so `crate::store::…` does not resolve and
+/// no scan is needed to know it. It is *not* the proof for these two, because
+/// `mp-tui` does depend on `mp-core` and both live there: a client that reached
+/// for a keyring or ran a device-code flow would compile. This is the gate that
+/// says it does not, and it scans test modules as well as production code,
+/// because a test that opened a secret backend would be opening the user's
+/// keyring on the developer's machine.
+#[test]
+fn the_tui_crate_reaches_no_engine_module_of_the_shared_crate() {
+    let root = repo_root().join(CLIENT_ROOT);
+    let files = rust_files(&root);
+    assert!(!files.is_empty(), "no .rs files under {root:?}");
+    let mut found = Vec::new();
+    for file in files {
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        let source = strip_line_comments(&source);
+        for path in MP_CORE_ENGINE_PATHS {
+            if source.contains(path) {
+                found.push(format!("  {} reaches `{path}`", file.display()));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the TUI crate reaches the engine half of `mp-core`:\n{}\n\
+         `secrets` and `oauth2` are the daemon's: it owns the keyring and the device-code flow, \
+         and a client that opened either would be the second engine the boundary exists to \
+         prevent.",
+        found.join("\n")
     );
 }
 

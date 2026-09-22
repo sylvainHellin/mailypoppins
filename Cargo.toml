@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mp-core", "crates/mp-protocol", "crates/mp-client"]
+members = [".", "crates/mp-core", "crates/mp-protocol", "crates/mp-client", "crates/mp-tui"]
 # The Phase 1a spike carries its own `[workspace]` and its own lock file; the
 # desktop shell (Phase 6) will be a separate build system.
 exclude = ["spikes/*", "desktop"]
@@ -85,6 +85,12 @@ mp-client = { path = "crates/mp-client" }
 # The engine-free shared modules (#0126, P5-U10a). Every one of them is
 # re-exported from `src/lib.rs` under the path it had inside this crate.
 mp-core = { path = "crates/mp-core" }
+# The terminal client (#0126, P5-U10f), re-exported from `src/lib.rs` as `tui`
+# so `mailypoppins::tui::…` resolves where it always did. The arrow points this
+# way and only this way: `mp-tui` names no crate of this workspace but
+# `mp-core`, `mp-client` and `mp-protocol`, so the binary can launch the TUI and
+# the TUI cannot reach the engine.
+mp-tui = { path = "crates/mp-tui" }
 
 [features]
 # Statically link OpenSSL (built from source). Required for the
@@ -100,3 +106,7 @@ insta = "1.39"
 # `cargo build`, so `mp` ships without them exactly as it did when the seams
 # were `#[cfg(test)]` in this crate.
 mp-core = { path = "crates/mp-core", features = ["test-support"] }
+# The same seam over the TUI: `src/tui_tests/` builds sessionless `App`s, primes
+# previews and renders the golden-frame fixtures, all of which were
+# `#[cfg(test)]` while the TUI was a module of this crate.
+mp-tui = { path = "crates/mp-tui", features = ["test-support"] }

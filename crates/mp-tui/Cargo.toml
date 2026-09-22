@@ -1,0 +1,52 @@
+[package]
+name = "mp-tui"
+version = "0.1.0"
+edition = "2021"
+description = "The mailypoppins terminal client: a daemon client that links no engine"
+authors = ["Sylvain Hellin"]
+
+[lib]
+name = "mp_tui"
+path = "src/lib.rs"
+
+[features]
+# The test seams the root crate's own TUI tests need, the `mp-core` precedent
+# applied a second time (#0126, P5-U10f). `#[cfg(test)]` does not cross a crate
+# boundary, so the sessionless `App` constructor, the two preview primers, the
+# preview-span counter and the golden-frame fixtures would all vanish the
+# moment these modules stopped being part of the root crate; the daemon-backed
+# frames and every equality suite in `src/tui_tests/` build on them. The root
+# crate turns the feature on through its `[dev-dependencies]` entry, which
+# resolver v2 keeps out of a plain `cargo build` / `cargo install`, so the
+# shipped binary compiles exactly the code `#[cfg(test)]` used to leave out.
+test-support = []
+
+[dependencies]
+# Versions are the root crate's, unchanged: the workspace resolves one copy of
+# each and the lock file does not move.
+anyhow = "1.0"
+arboard = "3"
+base64 = "0.22"
+chrono = "0.4"
+crossterm = "0.28"
+log = "0.4"
+mailparse = "0.15"
+ratatui = "0.29"
+serde_json = "1"
+shellexpand = "3.1"
+tokio = { version = "1", features = ["full"] }
+unicode-width = "0.2"
+# The three crates a client may link, and the whole of what this one links
+# besides its UI stack: the shared engine-free modules, the wire types and the
+# socket transport. There is deliberately no `mailypoppins` entry, in
+# `[dependencies]` or in `[dev-dependencies]`: the root crate holds the engine
+# and the daemon, and a client that could reach either would be back where
+# #0118 started. `cargo tree -p mp-tui -e normal` is the proof.
+mp-client = { path = "../mp-client" }
+mp-core = { path = "../mp-core" }
+mp-protocol = { path = "../mp-protocol" }
+
+[dev-dependencies]
+insta = "1.39"
+tempfile = "3"
+mp-core = { path = "../mp-core", features = ["test-support"] }

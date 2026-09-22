@@ -31,7 +31,10 @@ pub mod pending_ops;
 pub mod send;
 pub mod store;
 pub mod sync;
-pub mod tui;
+/// The terminal client, a crate of its own since #0126 (P5-U10f) and
+/// re-exported here under the path it had as a module, so `crate::tui::…` and
+/// `mailypoppins::tui::…` resolve unchanged in the binary and in the tests.
+pub use mp_tui as tui;
 pub mod daemon;
 
 /// The TUI tests that are the root crate's own: the sessionless store-backed

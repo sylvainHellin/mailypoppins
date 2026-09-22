@@ -84,13 +84,6 @@ fn account_name_of(store: &crate::store::Store) -> String {
         .unwrap_or_default()
 }
 
-/// Which draft a [`SourceMessage`] is turned into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DraftFromSource {
-    Reply { all: bool },
-    Forward,
-}
-
 /// Write the draft `source` produces into the account's drafts directory,
 /// mint its `id:`, refresh the index, and hand back the file and the selector
 /// that names it.

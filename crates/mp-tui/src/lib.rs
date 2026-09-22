@@ -1,0 +1,350 @@
+pub mod app;
+pub mod actions;
+pub mod bg;
+pub mod commands;
+#[cfg(test)]
+mod diagnostics_tests;
+mod event;
+pub mod events;
+#[cfg(test)]
+mod events_resync_tests;
+pub(crate) mod helpers;
+pub mod queries;
+pub mod session;
+pub mod theme;
+pub mod ui;
+
+use std::io;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use mp_protocol::state::Bootstrap;
+use ratatui::{backend::CrosstermBackend, Terminal};
+
+use app::{App, BgResult};
+use helpers::{init_terminal, install_panic_hook, restore_terminal};
+use session::QueryHandle;
+
+/// How many terminal events one iteration folds into a single paint (#0108).
+///
+/// Sized for a held key: at a fast 40/s repeat rate against a ~50 ms frame,
+/// a batch is a handful of events, so 64 is far above the normal case and
+/// only bites on a flood (a bracketed paste, a stuck key). Past that the loop
+/// paints and comes straight back for the rest, which keeps the screen
+/// responsive instead of frozen behind an unbounded drain.
+pub const MAX_COALESCED_EVENTS: usize = 64;
+
+/// Wall-clock ceiling on one drain (#0108), the second half of the bound.
+///
+/// The batch cap alone is not enough: `app.update` on a cursor move does real
+/// work (mailbox reload, selection recompute), so 64 slow events could hold
+/// the paint for a noticeable time. 50 ms is about three frames at 60 Hz and
+/// well under the ~100 ms at which input stops feeling immediate.
+pub const COALESCE_BUDGET: Duration = Duration::from_millis(50);
+
+/// Machine-readable dump of the TUI keymap (`mp dump-keys`), used to
+/// regenerate the website key table from the single `KEYMAP` source.
+pub fn dump_keys() -> String {
+    app::dump_markdown()
+}
+
+/// JSON dump of the TUI keymap grouped by section (`mp dump-keys --json`), for
+/// regenerating the website data file.
+pub fn dump_keys_json() -> String {
+    app::dump_json()
+}
+
+/// Entry point for the TUI. Call this when `mp` is invoked with no arguments.
+///
+/// `connector` is how this crate reaches a daemon: it links neither the daemon
+/// nor the lifecycle that starts one, so the binary hands it the two routines
+/// (#0126, P5-U10f). `mailypoppins::daemon::client::tui_connector` is the one
+/// caller.
+pub fn run(connector: session::Connector) -> Result<()> {
+    // The daemon session comes up before the terminal does (P5-U2). Two
+    // reasons: `client_session` may start a daemon and may end the run with the
+    // exit-4 diagnostic, and neither reads well through a terminal already in
+    // raw mode on the alternate screen. A session that cannot be built is a
+    // wedged session thread rather than an unreachable daemon -- an
+    // unreachable one has already exited by here -- so the TUI starts without
+    // one and the run's own `MAILYPOPPINS_DAEMON_REQUIRE` check fails on the
+    // way out, which is where a parity test looks.
+    let session = match session::Session::connect(connector) {
+        Ok(session) => Some(session),
+        Err(e) => {
+            eprintln!("\u{26a0} the daemon session could not be opened: {e:#}");
+            None
+        }
+    };
+    install_panic_hook();
+    let mut terminal = init_terminal()?;
+    let result = run_loop(&mut terminal, session);
+    restore_terminal()?;
+    result
+}
+
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    session: Option<session::Session>,
+) -> Result<()> {
+    let mut app = App::new();
+    app.session = session;
+
+    let size = terminal.size()?;
+    app.terminal_width = size.width;
+    app.terminal_height = size.height;
+
+    // The daemon's event stream, which is where the two watcher threads per
+    // account went (P5-U8): the daemon holds the IDLE connection and the Graph
+    // poller now, beside the engine that ingests what they find, and this
+    // client is told about a tick rather than running one.
+    //
+    // `watcher_active` keeps its name and changes its meaning with them: it is
+    // the session's health, which is the honest answer to "is anything telling
+    // me about new mail", and the sidebar renders it unchanged.
+    let events = app.session.as_mut().and_then(session::Session::events);
+    let watching = events.is_some();
+    for acct in app.accounts.iter_mut() {
+        acct.watcher_active = watching;
+    }
+    app.watcher_active = watching;
+
+    // Background task results channel
+    let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();
+
+    // The daemon's whole state, asked for now and applied whenever it lands
+    // (P5-U2). Off the first-paint path on purpose: the shell `App::new` built
+    // is already complete -- accounts, sidebar, zeroed counts, the #0003
+    // loading marker -- so the first frame owes the daemon nothing, and the
+    // snapshot is a refinement rather than a prerequisite. A channel of its own
+    // rather than a `BgResult` variant because the bootstrap is a session
+    // event, not a background job of the app's, and P5-U4 rewrites this seam.
+    let (boot_tx, boot_rx) = mpsc::channel::<Result<Bootstrap, String>>();
+    if let Some(session) = app.session.as_ref() {
+        session.dispatch_bootstrap(move |result| {
+            let _ = boot_tx.send(result);
+        });
+    }
+
+    // Two-phase startup (#0003). `App::new` built every `AccountState` cheaply
+    // -- config only, no store opened -- so the shell above painted with
+    // zeroed counts and an empty list. Now, after the first frame is on its
+    // way, open each account's store off the UI thread. The first open of a
+    // store file runs `PRAGMA integrity_check` (~240 ms on a 44 MB store) and,
+    // on failure, the drop-and-rebuild path (#0066); summed serially across
+    // accounts inside `App::new` that was ~1.2 s of blank terminal. Here the
+    // opens overlap and none of them gate the paint.
+    //
+    // Each thread reads the grouped mailbox counts and reports
+    // `BgResult::AccountOpened`. Its handler (in `tui/bg.rs`) fills them in,
+    // clears `AccountState::opening`, loads the active account's open mailbox
+    // against the now-validated store, and kicks the startup auto-fetch
+    // (#0001) for that account. Deferring the fetch until the store is known
+    // good is deliberate: it avoids a sync racing the very first open of the
+    // same file and a redundant second integrity check.
+    //
+    // `bg_count` is bumped per account so the existing spinner shows "working"
+    // until every store is open; the message-ID index scan that used to run
+    // here is gone outright (#0038).
+    for (i, acct) in app.accounts.iter().enumerate() {
+        let account_name = acct.account_config.name.clone();
+        let mailboxes = acct.mailboxes.clone();
+        let tx = bg_tx.clone();
+        let queries = app.session.as_ref().map(|session| session.handle());
+        app.bg_count += 1;
+        std::thread::spawn(move || {
+            // One `mailbox.list` per account, on a thread of its own (P5-U4).
+            // The daemon does the store open, the integrity check and the
+            // grouped query behind it, so the shape of this phase is unchanged:
+            // the opens overlap, none of them gates the paint, and the account
+            // reports `AccountOpened` when its counts land.
+            let counts = match &queries {
+                Some(queries) => {
+                    queries::mailbox_counts(queries, &account_name, &mailboxes).unwrap_or_else(|e| {
+                        log::warn!("[queries] counting the mailboxes of {account_name}: {e:#}");
+                        vec![0; mailboxes.len()]
+                    })
+                }
+                None => {
+                    log::warn!(
+                        "[queries] no daemon session: the counts of {account_name} stay zero"
+                    );
+                    vec![0; mailboxes.len()]
+                }
+            };
+            let _ = tx.send(BgResult::AccountOpened {
+                account_index: i,
+                counts,
+            });
+        });
+    }
+
+    // Redraw only when something changed (#0093 §b.7). The loop used to call
+    // `terminal.draw` unconditionally every iteration -- ~4x/s at the 250 ms
+    // idle poll -- rebuilding every widget's content each tick. `dirty` starts
+    // true so the first frame always paints; every branch below that mutates
+    // visible state sets it again. Background updates (watcher events, bg
+    // results, drafts changes) set it too, so an async body arrival or a sync
+    // completion is never swallowed. The spinner keeps a slow tick of its own
+    // while `bg_count > 0`.
+    let mut dirty = true;
+    while app.running {
+        if dirty {
+            // One paint is one `[TIMING] tui_draw` start/done pair in the log
+            // file (#0108). That is the instrument the preview-latency plan
+            // measures against: `rg '\[TIMING\] tui_draw'` over
+            // `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log` gives both the
+            // keypress-to-frame cost and the number of frames a held `j`
+            // painted. Cheap enough to leave in: two `info!` lines per paint,
+            // and the loop only paints when something changed.
+            let _draw_span = mp_core::timing::TimingSpan::new("tui_draw");
+            terminal.draw(|frame| ui::view(&mut app, frame))?;
+            dirty = false;
+        }
+
+        if let Some(msg) = event::poll_event()? {
+            // Drain whatever else is already queued before painting (#0108).
+            //
+            // A held `j` repeats faster than one loop iteration costs, so the
+            // old one-event-per-paint contract made the cursor lag the key by
+            // the whole backlog, each frame paying a full preview rebuild. The
+            // backlog is now folded into the model first and painted once.
+            //
+            // The drain is incremental rather than a bulk read, and that is
+            // load-bearing: whether a key yields a terminal-suspending action
+            // is a property of `pending_actions` *after* `app.update`, since it
+            // depends on `pending_prefix`, focus, the active overlay and the
+            // per-action guards. Once an event has left the kernel tty buffer
+            // it cannot be put back, and `suspend_terminal` hands stdin
+            // straight to `$EDITOR`, so draining past such an action would eat
+            // the first keystrokes of the editing session instead of
+            // delivering them.
+            //
+            // Bounded twice so a flooded queue (a paste, a stuck key, a mouse
+            // reporting terminal) cannot starve the paint: the screen is never
+            // more than one batch stale.
+            let drain_started = Instant::now();
+            let mut batched = 0usize;
+            let mut next = Some(msg);
+            while let Some(msg) = next.take() {
+                let mut current_msg = Some(msg);
+                while let Some(m) = current_msg {
+                    current_msg = app.update(m);
+                }
+                batched += 1;
+                // A quit ends the drain too: whatever is still queued
+                // belongs to the shell, and a queued `e` after `q` would
+                // otherwise dispatch an editor on the way out.
+                if !app.running
+                    || batched >= MAX_COALESCED_EVENTS
+                    || drain_started.elapsed() >= COALESCE_BUDGET
+                    || app
+                        .pending_actions
+                        .iter()
+                        .any(app::Action::suspends_terminal)
+                {
+                    break;
+                }
+                next = event::poll_pending_event()?;
+            }
+            // Any input -- keypress or resize -- can change what is shown.
+            dirty = true;
+        } else {
+            let status_ticks_before = app.status_ticks;
+            app.tick_status();
+            if app.status_ticks != status_ticks_before {
+                // A status message expired and cleared itself.
+                dirty = true;
+            }
+            if app.bg_count > 0 {
+                app.bg_spin_tick = app.bg_spin_tick.wrapping_add(1);
+                dirty = true;
+            }
+        }
+
+        // The daemon's events, drained in the same pre-draw pass and under the
+        // same two bounds as the terminal batch above (P5-U8): a first sync of
+        // a large mailbox publishing a row per message may not starve the
+        // paint. The door is a handle rather than `app.session`, because the
+        // drain takes `&mut App` and a borrow of the session inside it would
+        // collide.
+        if let Some(events) = events.as_ref() {
+            let door = app
+                .session
+                .as_ref()
+                .map(session::Session::handle)
+                .unwrap_or_else(QueryHandle::closed);
+            if events::drain(&mut app, &door, events) > 0 {
+                dirty = true;
+            }
+        }
+
+        // The daemon's `state.bootstrap` (P5-U2): which accounts there are,
+        // their mailboxes and their counts, landed on the shell that is
+        // already on screen. `apply_bootstrap` skips any account whose
+        // store-backed open (#0003) has already answered, so the two startup
+        // paths cannot fight over the counts. A snapshot that arrives after a
+        // gap in the event stream is the other entry,
+        // `apply_resync_bootstrap` (`src/tui/events.rs`), which skips nothing.
+        while let Ok(result) = boot_rx.try_recv() {
+            match result {
+                Ok(bootstrap) => {
+                    log::info!(
+                        "[tui] bootstrap at revision {} ({} account(s))",
+                        bootstrap.revision,
+                        bootstrap.snapshot.accounts.len()
+                    );
+                    app.apply_bootstrap(&bootstrap);
+                    dirty = true;
+                }
+                Err(e) => log::warn!("[tui] the daemon bootstrap failed: {e}"),
+            }
+        }
+
+        // Check background task results (drain all available). These carry the
+        // async work the UI parked -- sync completion, a body/invite/image
+        // arrival -- so every drained result forces a redraw (#0093).
+        let mut got_bg_result = false;
+        while let Ok(result) = bg_rx.try_recv() {
+            bg::handle_bg_result(&mut app, result);
+            got_bg_result = true;
+        }
+        if got_bg_result {
+            dirty = true;
+        }
+
+        // Auto-execute the parked action once the condition it parked on has
+        // cleared. It must be the same condition the action re-enters (see
+        // `actions::sync_is_blocked`): releasing on a mutation counter while the
+        // gate read `bg_count` meant a running sync released the parked fetch
+        // straight back into its own refusal, four times a second (the counter
+        // itself is gone with the background mutation jobs, #0039/#0076).
+        if actions::queued_action_is_releasable(&app) {
+            if let Some(action) = app.queued_action.take() {
+                app.pending_actions.push_back(action);
+            }
+        }
+
+        // Process pending actions (drain queue so user actions are never lost).
+        // Handling one mutates state or spawns background work, both of which
+        // need a repaint.
+        let had_actions = !app.pending_actions.is_empty();
+        while let Some(action) = app.pending_actions.pop_front() {
+            actions::handle_action(&mut app, terminal, action, &bg_tx)?;
+        }
+        if had_actions {
+            dirty = true;
+        }
+    }
+
+    // Close the session before the process leaves, so the daemon sees the
+    // client go rather than finding a dead socket later. `Drop` would do it
+    // too; doing it here waits for the thread, which keeps the shutdown
+    // ordered against the terminal restore in `run`.
+    if let Some(session) = app.session.as_mut() {
+        session.close();
+    }
+
+    Ok(())
+}
