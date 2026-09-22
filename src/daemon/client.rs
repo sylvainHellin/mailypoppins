@@ -261,7 +261,17 @@ pub async fn client_session() -> Connection {
 /// on the alternate screen may not be ended by a diagnostic printed into a
 /// terminal in raw mode. `None` means "still nothing there", which is a state
 /// the client shows and retries out of.
-/// The two halves above, as the TUI takes them (#0126, P5-U10f).
+pub async fn reopen_session() -> Option<(Connection, String)> {
+    match open_session().await {
+        Ok(open) => Some(open),
+        Err(why) => {
+            info!("[client] no daemon to reconnect to: {why}");
+            None
+        }
+    }
+}
+
+/// The two routines above, as the TUI takes them (#0126, P5-U10f).
 ///
 /// `crates/mp-tui` links neither this module nor the lifecycle it calls: the
 /// socket path comes from the data directory, the on-demand start spawns
@@ -274,16 +284,6 @@ pub fn tui_connector() -> mp_tui::session::Connector {
     mp_tui::session::Connector {
         open: || Box::pin(client_session()),
         reopen: || Box::pin(reopen_session()),
-    }
-}
-
-pub async fn reopen_session() -> Option<(Connection, String)> {
-    match open_session().await {
-        Ok(open) => Some(open),
-        Err(why) => {
-            info!("[client] no daemon to reconnect to: {why}");
-            None
-        }
     }
 }
 
