@@ -275,6 +275,12 @@ async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Ar
 /// see this message", and a copy filed in Archive answers it as well as one in
 /// the Inbox. The answer names the mailbox the row is actually in, because
 /// that is the row the client is being handed.
+///
+/// [`Store::open`] is right here and wrong in [`Stream::land`]: this method's
+/// gate is [`super::account::ready_account`], so the store existed and probed
+/// clean before the operation was ever started, and the same holds for
+/// [`ingest`] below. Nothing on this path can create a store for an account
+/// that has never synced.
 fn held_row(account: &str, message_id: &str) -> Result<Option<Value>, RpcError> {
     let store = Store::open(crate::config::store_path(account))
         .map_err(|e| internal(format!("opening the store of {account}: {e:#}")))?;
@@ -716,6 +722,16 @@ impl<'a> Stream<'a> {
     ///
     /// The store is opened and dropped inside this call and never held across
     /// an `.await`, which is what keeps the search future `Send`.
+    ///
+    /// [`crate::store::open_store`] and never [`Store::open`]: this method's
+    /// gate is [`super::sync::syncable_account`], which admits an account that
+    /// has never synced, and `Store::open` *creates* the file it is handed. A
+    /// search against such an account would therefore hand it an empty store,
+    /// after which [`super::account::state_of_path`] reports it `ready` and
+    /// every read method answers an empty listing where `-32006` is owed. The
+    /// resolution is optional for exactly that reason: `to_hit` and the
+    /// attachment post-filter both already take a `None` store as "the local
+    /// store knows nothing about this hit", which is the truth here.
     fn land(&mut self, label: &str, emails: Vec<FetchedEmail>) {
         log::info!(
             "[search_server] '{label}' returned {} result(s)",
@@ -723,7 +739,7 @@ impl<'a> Stream<'a> {
         );
         self.spent += emails.len();
         let account = self.request.account.name.clone();
-        let store = Store::open(crate::config::store_path(&account)).ok();
+        let store = crate::store::open_store(&account);
         let with_attachments = self
             .attachment_postfilter
             .then(|| {

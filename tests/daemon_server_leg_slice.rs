@@ -112,6 +112,7 @@
 
 mod support;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -177,6 +178,26 @@ impl Slice {
         Slice { daemon, tmp }
     }
 
+    /// The same fixture with [`fixture::SERVER_ACCOUNT`]'s store taken back
+    /// off disk, which is what an account that has a server configured and has
+    /// never synced looks like.
+    ///
+    /// The removal happens before the daemon starts, so the daemon never saw
+    /// the file: `fixture::seed` creates it for the engine-lock rows, and this
+    /// slice's one filesystem assertion needs it gone.
+    fn start_without_the_server_account_store() -> Slice {
+        let tmp = TempDir::new().expect("a temporary server-leg root");
+        fixture::seed(tmp.path());
+        for path in server_account_store_files(tmp.path()) {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .unwrap_or_else(|e| panic!("remove {}: {e}", path.display()));
+            }
+        }
+        let daemon = DaemonFixture::start(tmp.path());
+        Slice { daemon, tmp }
+    }
+
     fn root(&self) -> &std::path::Path {
         self.tmp.path()
     }
@@ -207,6 +228,16 @@ impl Slice {
         .expect("a compatible handshake succeeds");
         conn
     }
+}
+
+/// The three files a sqlite store of [`fixture::SERVER_ACCOUNT`] occupies.
+fn server_account_store_files(root: &std::path::Path) -> [PathBuf; 3] {
+    let dir = fixture::account_dir(root, fixture::SERVER_ACCOUNT);
+    [
+        dir.join("store.sqlite3"),
+        dir.join("store.sqlite3-wal"),
+        dir.join("store.sqlite3-shm"),
+    ]
 }
 
 async fn within<F, T>(what: &str, future: F) -> T
@@ -617,6 +648,94 @@ async fn a_server_search_over_an_unreachable_account_settles_as_a_failed_operati
             .as_str()
             .is_some_and(|m| m.contains(fixture::SERVER_ACCOUNT)),
         "the failure names the account: {status}"
+    );
+}
+
+/// A server search may not give an account a store.
+///
+/// The search leg's gate is `syncable_account`, which deliberately admits an
+/// account that has never synced: a sync is what creates a store, so requiring
+/// one would refuse every first search. That makes every store the method
+/// touches an optional one, and `Store::open` is the wrong call for it, because
+/// opening *creates*. A search that materialised an empty database would leave
+/// `account.list` reporting the account `ready` and every read method answering
+/// an empty listing where `-32006` is owed, which is a silent wrong answer
+/// rather than a refusal a client can act on.
+///
+/// What this row can reach offline is the filesystem and the gate, not the
+/// resolution itself: `gamma` has no credentials, so the operation settles
+/// `failed` before any mailbox answers and `Stream::land` never runs. The
+/// assertion is therefore that nothing on the whole path - the dispatch, the
+/// validation, the operation, the settle - left a store behind, and that the
+/// account still refuses a read afterwards.
+#[tokio::test]
+async fn a_server_search_never_gives_a_storeless_account_a_store() {
+    let slice = Slice::start_without_the_server_account_store();
+    let mut conn = slice.connect().await;
+
+    for path in server_account_store_files(slice.root()) {
+        assert!(
+            !path.exists(),
+            "this row starts with no store for {}: {}",
+            fixture::SERVER_ACCOUNT,
+            path.display()
+        );
+    }
+
+    // The account is storeless before the search, and the read family says so.
+    let before = call_err(
+        &mut conn,
+        "message.list",
+        json!({"account": fixture::SERVER_ACCOUNT, "mailbox": fixture::INBOX}),
+    )
+    .await;
+    assert_eq!(
+        before.code,
+        ErrorCode::AccountNotReady.code(),
+        "a never-synced account has nothing to read: {before:?}"
+    );
+
+    let started = call(
+        &mut conn,
+        SEARCH_SERVER,
+        json!({
+            "account": fixture::SERVER_ACCOUNT,
+            "query": "ledger",
+            "mailboxes": [fixture::INBOX, fixture::EXTRA_MAILBOX],
+        }),
+    )
+    .await;
+    let id = operation_id(&started);
+    let status = settle(&mut conn, &id).await;
+    assert!(
+        matches!(status["state"].as_str(), Some("succeeded" | "failed")),
+        "the search settles either way; what matters is what it left behind: {status}"
+    );
+
+    for path in server_account_store_files(slice.root()) {
+        assert!(
+            !path.exists(),
+            "a server search may not create a store for an account that has never \
+             synced, and it created {}",
+            path.display()
+        );
+    }
+
+    let after = call_err(
+        &mut conn,
+        "message.list",
+        json!({"account": fixture::SERVER_ACCOUNT, "mailbox": fixture::INBOX}),
+    )
+    .await;
+    assert_eq!(
+        after.code,
+        ErrorCode::AccountNotReady.code(),
+        "the read family still refuses after the search: {after:?}"
+    );
+    assert_eq!(
+        after.data,
+        Some(json!({"account": fixture::SERVER_ACCOUNT, "state": "blocked"})),
+        "and it refuses with the state account.list reports, not `ready`: {after:?}"
     );
 }
 
