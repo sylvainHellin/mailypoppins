@@ -236,7 +236,7 @@ pub enum DraftKind {
 /// `mp_core::draft::source_from_fetched` reads, under the hit's own field
 /// names, so a client that holds a hit fills this in without renaming
 /// anything. The fields a `SourceMessage` has no use for - `row_id`,
-/// `selector`, `mailbox`, `reply_to`, `bcc`, the flags, `has_attachments`,
+/// `selector`, `mailbox`, `bcc`, the flags, `has_attachments`,
 /// `is_invite` - are absent: a draft is built from the headers it quotes back
 /// and the body it quotes.
 ///
