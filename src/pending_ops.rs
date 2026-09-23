@@ -520,9 +520,13 @@ pub(crate) async fn drain<E: OpExecutor>(
             result.still_open += 1;
             continue;
         }
+        // One row's bookkeeping error is logged and the drain moves on: a `?`
+        // here would stop every later row from ever being drained.
         match exec.execute(&row.op).await {
             Ok(()) => {
-                retire(store, row.id)?;
+                if let Err(e) = retire(store, row.id) {
+                    warn!("[pending_ops] could not retire op {}: {e:#}", row.id);
+                }
                 result.completed += 1;
             }
             Err(e) if crate::ops::NotFoundOnServer::is_in(&e) => {
@@ -533,16 +537,22 @@ pub(crate) async fn drain<E: OpExecutor>(
                     "[pending_ops] op {} ({}) target already gone on server; converged",
                     row.id, row.kind
                 );
-                retire(store, row.id)?;
+                if let Err(e) = retire(store, row.id) {
+                    warn!("[pending_ops] could not retire op {}: {e:#}", row.id);
+                }
                 result.completed += 1;
             }
             Err(e) => {
                 let err = format!("{e:#}");
                 if row.attempts + 1 >= MAX_ATTEMPTS {
-                    fail_and_roll_back(store, blobs, &row, &err)?;
+                    if let Err(e) = fail_and_roll_back(store, blobs, &row, &err) {
+                        warn!("[pending_ops] could not settle failed op {}: {e:#}", row.id);
+                    }
                     result.failed += 1;
                 } else {
-                    bump_attempt(store, row.id, &err)?;
+                    if let Err(e) = bump_attempt(store, row.id, &err) {
+                        warn!("[pending_ops] could not record a failed attempt on op {}: {e:#}", row.id);
+                    }
                     result.still_open += 1;
                 }
             }
@@ -681,8 +691,17 @@ fn bump_attempt(store: &Store, id: i64, err: &str) -> Result<()> {
 }
 
 /// Park a row as `failed` and roll its local state back to the server's.
+///
+/// The op is parked even when the rollback errors: a rollback that fails the
+/// same way every tick would otherwise keep the op `queued` for good.
 fn fail_and_roll_back(store: &Store, blobs: &BlobStore, row: &PendingOp, err: &str) -> Result<()> {
-    apply_rollback(store, blobs, &row.rollback)?;
+    let err = match apply_rollback(store, blobs, &row.rollback) {
+        Ok(()) => err.to_string(),
+        Err(e) => {
+            warn!("[pending_ops] op {} ({}) could not be rolled back: {e:#}", row.id, row.kind);
+            format!("{err} (rollback failed: {e:#})")
+        }
+    };
     store
         .conn()
         .execute(
@@ -699,17 +718,9 @@ fn fail_and_roll_back(store: &Store, blobs: &BlobStore, row: &PendingOp, err: &s
 }
 
 /// Undo a mutation's local half.
-fn apply_rollback(store: &Store, _blobs: &BlobStore, rollback: &Rollback) -> Result<()> {
+fn apply_rollback(store: &Store, blobs: &BlobStore, rollback: &Rollback) -> Result<()> {
     match rollback {
-        Rollback::Move(previous) => {
-            store
-                .conn()
-                .execute(
-                    "UPDATE messages SET mailbox = ?2, uid = ?3 WHERE id = ?1",
-                    rusqlite::params![previous.id, previous.mailbox, previous.uid],
-                )
-                .context("rolling a moved row back")?;
-        }
+        Rollback::Move(previous) => roll_move_back(store, blobs, previous)?,
         Rollback::Flags { id, flags } => {
             store
                 .conn()
@@ -723,6 +734,57 @@ fn apply_rollback(store: &Store, _blobs: &BlobStore, rollback: &Rollback) -> Res
         // on the server, so convergence is the next sync refetching the UID.
         Rollback::None => {}
     }
+    Ok(())
+}
+
+/// Put a moved row back on its old `(mailbox, uid)`, or drop it when a sync has
+/// meanwhile refetched the message onto that slot.
+///
+/// While a move is queued the source mailbox keeps syncing, and the sync no
+/// longer sees the UID in its skip list, so it downloads the message again
+/// into a row of its own. Moving the placeholder back would then collide on
+/// `UNIQUE (account, mailbox, uid)`; the refetched row already stands for the
+/// message, so the placeholder is the duplicate and goes.
+fn roll_move_back(store: &Store, blobs: &BlobStore, previous: &MutatedRow) -> Result<()> {
+    let tx = store
+        .immediate_transaction()
+        .context("opening the move rollback transaction")?;
+    let holder: Option<i64> = tx
+        .query_row(
+            "SELECT other.id FROM messages AS other
+             JOIN messages AS moved ON moved.id = ?1
+             WHERE other.account = moved.account AND other.mailbox = ?2 AND other.uid = ?3
+               AND other.id != ?1",
+            rusqlite::params![previous.id, previous.mailbox, previous.uid],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("checking whether the old slot was refetched")?;
+    match holder {
+        None => {
+            tx.execute(
+                "UPDATE messages SET mailbox = ?2, uid = ?3 WHERE id = ?1",
+                rusqlite::params![previous.id, previous.mailbox, previous.uid],
+            )
+            .context("rolling a moved row back")?;
+        }
+        Some(holder) => {
+            let hashes = blob_refs_in(&tx, previous.id)?;
+            tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", [previous.id])
+                .context("removing the placeholder's FTS entry")?;
+            tx.execute("DELETE FROM messages WHERE id = ?1", [previous.id])
+                .context("deleting the moved placeholder row")?;
+            for hash in &hashes {
+                blobs.release(&tx, hash)?;
+            }
+            info!(
+                "[pending_ops] row {} was refetched as row {holder} while its move was queued; \
+                 dropped the placeholder instead of moving it back",
+                previous.id
+            );
+        }
+    }
+    tx.commit().context("committing the move rollback")?;
     Ok(())
 }
 
@@ -988,6 +1050,83 @@ mod tests {
         let failed_rows = failed_ops(&fx.store, "alice").unwrap();
         assert_eq!(failed_rows.len(), 1);
         assert!(failed_rows[0].last_error.as_deref().unwrap().contains("refused"));
+    }
+
+    /// A move that keeps failing while the source mailbox still syncs: the sync
+    /// refetches the message onto its old `(mailbox, uid)`, so the rollback
+    /// cannot move the placeholder back without colliding on the unique slot.
+    /// It drops the placeholder instead, the op parks as failed, and the
+    /// message keeps exactly one row.
+    #[tokio::test]
+    async fn a_refused_move_whose_slot_was_refetched_drops_the_placeholder() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        // The sync re-downloads the UID the moved row no longer claims.
+        let refetched = fx.ingest_plain("inbox", 1, "Receipt");
+        assert_ne!(refetched, id, "the refetch is a row of its own");
+
+        let base = unix_now();
+        for tick in 0..MAX_ATTEMPTS {
+            let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO no such mailbox"))]);
+            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
+                .await
+                .unwrap();
+        }
+
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        assert_eq!(failed_ops(&fx.store, "alice").unwrap().len(), 1);
+        let rows: i64 = fx
+            .store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE message_id = '<inbox-1@example.com>'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "one message, one row");
+        assert!(read::find_by_id(&fx.store, id).unwrap().is_none(), "the placeholder is gone");
+        assert_eq!(read::find_by_id(&fx.store, refetched).unwrap().unwrap().mailbox, "inbox");
+    }
+
+    /// One row whose settlement errors must not stall the queue: the drain
+    /// logs it, parks the op as failed, and still drains the rows after it.
+    #[tokio::test]
+    async fn a_rollback_error_does_not_stall_the_rest_of_the_queue() {
+        let fx = fixture();
+        let stuck = fx.ingest_plain("inbox", 1, "Stuck");
+        let next = fx.ingest_plain("inbox", 2, "Next");
+        apply_move(&fx.store, "alice", stuck, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        // Any rollback of `stuck` errors.
+        fx.store
+            .conn()
+            .execute_batch(&format!(
+                "CREATE TRIGGER refuse_rollback BEFORE UPDATE ON messages WHEN OLD.id = {stuck}
+                 BEGIN SELECT RAISE(ABORT, 'rollback refused'); END;"
+            ))
+            .unwrap();
+
+        let base = unix_now();
+        for tick in 0..MAX_ATTEMPTS - 1 {
+            let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO refused"))]);
+            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
+                .await
+                .unwrap();
+        }
+        // The second op is queued behind the one about to exhaust its budget.
+        apply_move(&fx.store, "alice", next, "archive", move_op("<inbox-2@example.com>")).unwrap();
+        let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO refused")), Ok(())]);
+        let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, base + 100_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!((r.failed, r.completed), (1, 1));
+        assert_eq!(exec.seen.len(), 2, "the later op was still drained");
+        let failed = failed_ops(&fx.store, "alice").unwrap();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].last_error.as_deref().unwrap().contains("rollback failed"));
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 
     /// A read toggle stores the old flag string, so a refused op restores it
