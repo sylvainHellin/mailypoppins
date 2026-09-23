@@ -652,7 +652,8 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 
 **`draft.create_from_message` is the one draft built from a message rather than from a row.**
 A server-search hit that resolved to no local row has no `messages.id`, no uid and no selector, and its content is the fetch the client is already rendering; `draft.reply` and `draft.forward` cannot build that draft, because every form of their `source` is an address into the store.
-So this method takes the message itself: `kind` is `"reply"`, `"reply_all"` or `"forward"`, and `message` is `mp_protocol::draft::DraftMessage` `{from, to, cc, subject, message_id, date_display, body_text, html_body}`, the subset of a `ServerSearchHit` the builder reads, under the hit's own field names.
+So this method takes the message itself: `kind` is `"reply"`, `"reply_all"` or `"forward"`, and `message` is `mp_protocol::draft::DraftMessage` `{from, to, cc, reply_to?, subject, message_id, date_display, body_text, html_body}`, the subset of a `ServerSearchHit` the builder reads, under the hit's own field names.
+A reply goes to `reply_to` when it is present and to `from` otherwise, as a reply to a stored message does.
 The result is `DraftCreated` with `source: null`: there is no stored message to name.
 
 It is a method of its own rather than a fourth form of `source` because the two are different questions.

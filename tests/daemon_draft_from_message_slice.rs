@@ -318,6 +318,22 @@ async fn a_reply_quotes_the_message_the_client_holds() {
     );
 }
 
+/// A reply to a message that names a `Reply-To:` goes there rather than to
+/// `From:`, as a reply to a stored message does.
+#[tokio::test]
+async fn a_reply_goes_to_the_reply_to_the_payload_names() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    let mut with_reply_to = message();
+    with_reply_to["reply_to"] = json!("Sekretariat <office@example.com>");
+    let created = create(&mut conn, fixture::ACCOUNT, "reply", with_reply_to).await;
+    let draft = parse_email_draft(Path::new(&created.path)).expect("the written draft parses");
+    let to = draft.frontmatter.to.clone().unwrap_or_default();
+    assert!(to.contains("office@example.com"), "a reply goes to Reply-To, got {to:?}");
+    assert!(!to.contains("ivana@example.com"), "and not to From, got {to:?}");
+}
+
 /// A reply-all keeps every other recipient, which is the difference the `kind`
 /// carries.
 ///

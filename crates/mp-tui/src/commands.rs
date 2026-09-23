@@ -1104,6 +1104,7 @@ pub(super) fn draft_from_message(
             "from": fetched.from,
             "to": fetched.to,
             "cc": fetched.cc,
+            "reply_to": fetched.reply_to,
             "subject": fetched.subject,
             "message_id": fetched.message_id,
             "date_display": fetched.date,

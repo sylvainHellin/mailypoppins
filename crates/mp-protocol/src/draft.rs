@@ -256,6 +256,11 @@ pub struct DraftMessage {
     /// The `Cc:` header, `null` when the message carried none.
     #[serde(default)]
     pub cc: Option<String>,
+    /// The `Reply-To:` header, which a reply addresses instead of `From:`;
+    /// `null` or absent when the message carried none, so a client that
+    /// predates the field still builds a reply to `From:`.
+    #[serde(default)]
+    pub reply_to: Option<String>,
     /// The `Subject:` header, which the builder prefixes with `Re:` or `Fwd:`.
     #[serde(default)]
     pub subject: String,
