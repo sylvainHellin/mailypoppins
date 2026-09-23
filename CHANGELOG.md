@@ -32,6 +32,7 @@ All notable changes to this project are documented in this file.
 - **Search shows local hits instantly and merges the server's behind them (#0105).** The `ff` overlay used to answer only after the IMAP round trip. Submitting now runs the same query against the local FTS index first, so hits from synced mail render in milliseconds with the footer saying `N local hits; searching server...`, and the server pass keeps running in the background. When it lands, its hits merge into the visible list (deduplicated by Message-ID, sorted by date) without moving the cursor off the entry it was on, and the footer flips to the final count, the same immediate-then-refined flow Apple Mail and Outlook use. A term the local index cannot answer (`to:`, `cc:`, `filename:`, mixed OR groups) skips the local pass silently and is covered by the server pass; a search re-submitted while an older one is still in flight drops the stale result instead of merging it.
 
 ### Performance
+- **Opening a conversation is served by a `messages_thread` index.** No full account scan and no temp B-tree; an existing store gains the index on its next open.
 - **A limited `message.list` is paged in SQL, with the mailbox counted separately.** A listing capped at N rows no longer reads the whole mailbox first.
 - **Every mailbox listing reads its invite set through a partial index on `message_blobs`.** An existing store gains the index on its next open.
 - **The daemon builds a reply by moving the result in.** `result_value` no longer deep-copies it through `to_value`.
@@ -56,6 +57,7 @@ All notable changes to this project are documented in this file.
 - **An invite time in a DST fold or gap keeps its zone.** `TZID=Europe/Berlin` at 02:30 on the October change-over resolves to the earlier instant, and a spring-gap time moves forward per RFC 5545, rather than falling back to an offset-less wall clock the agenda then read in the viewer's zone.
 - **Contact sightings are compared as instants.** `first_seen`/`last_seen` are stored in UTC, so a `-08:00` message no longer loses to an earlier `+00:00` one, and the display name follows the newest message.
 - **Diagnostics refreshes are serialised.** Two account tasks refreshing at once could publish `diagnostic.check_changed` out of order and leave the ledger stale for a sweep.
+- **Two held sends no longer share one undo slot, and a daemon restart no longer leaves a dead hold behind.** `u` cancels the newest hold and the others keep counting; after a reconnect to a new daemon instance the holds are taken from `send.hold_status` rather than kept from the old one.
 - **A reply to a server-only search hit honours `Reply-To:` too.** The TUI now carries the header on `draft.create_from_message`.
 - **A refetched move placeholder is dropped when its mutation rolls back, and the drain keeps going past a bad row.** The rollback no longer leaves a ghost row, and one row that fails no longer stalls the rest of `pending_ops`.
 - **A row whose UID a UIDVALIDITY reset handed to another message is unbound, not overwritten.** Each message keeps its own row and identity.
