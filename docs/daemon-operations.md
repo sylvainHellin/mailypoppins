@@ -332,7 +332,7 @@ While it lives it pins the blobs it read, and the retention sweep skips them, so
 Every handle call first drops the entries that expired since the last one and unlinks their directories; there is no periodic tick.
 The pin is already false the instant a handle expires - the table answers "is this blob spoken for *now*", not "was the last tick recent enough" - so a reaper would buy nothing a sweep needs, and its interval would be one more thing to get wrong.
 What that costs is a daemon nobody calls keeping expired scratch on disk until the next call; it sits inside the 0700 runtime directory, and the next materialisation clears it.
-A daemon that exits leaves `handles/` behind, which is why the directory is under `runtime/`: it is scratch, and removing the whole tree is safe with no daemon running.
+A daemon that exits, cleanly with handles live or by a crash, leaves `handles/` behind, and the next daemon removes the whole directory as it starts, once the start lock is held and the socket probe has found no live daemon; it is scratch under `runtime/`, and removing the whole tree is safe with no daemon running.
 
 Since P5-U6 the TUI's attachment key and browser key mint handles too, and neither releases: what the key just launched is a file opener or a browser, and releasing under it would unlink the file it is reading (the rule `ATT-01` already stated for `mp open`).
 That changes one thing the TUI never had: a lifetime. A materialised attachment used to sit in `parse::materialisation_dir(<row id>)` until the temp directory was swept; it now vanishes ten minutes after the key was pressed.

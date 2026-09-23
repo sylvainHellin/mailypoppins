@@ -341,6 +341,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
         SocketProbe::Unsafe { reason } => bail!("refusing to bind {}: {reason}", socket.display()),
         SocketProbe::Absent => {}
     }
+    // No daemon answers and the start lock is ours, so whatever a previous
+    // daemon materialised is nobody's any more.
+    super::handles::remove_leftover_handles();
 
     let listener = bind_socket(&socket)?;
     echo(&format!("listening on {}", socket.display()));

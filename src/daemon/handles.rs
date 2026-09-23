@@ -34,7 +34,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use log::warn;
+use log::{info, warn};
 
 /// How long a materialised handle lives without being released: long enough to
 /// look at what was opened, short enough that a crashed client's scratch is gone
@@ -259,6 +259,23 @@ pub fn remove_handle_dir(id: &HandleId) {
     let dir = handle_dir(id);
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("[daemon] could not remove {}: {e}", dir.display()),
+    }
+}
+
+/// Remove every handle directory a previous daemon left behind.
+///
+/// [`reap`] only unlinks the handles in this process's table, and a daemon that
+/// crashed, or stopped cleanly with handles live, leaves its directories with
+/// nobody to reap them: the TUI never releases what its attachment and browser
+/// keys materialise. Called once at startup, while the start lock is held and
+/// after the socket probe has ruled out a live daemon, so no handle this
+/// removes can still belong to anyone.
+pub fn remove_leftover_handles() {
+    let dir = super::runtime::runtime_dir().join(HANDLES_DIR);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => info!("[daemon] removed the handles a previous daemon left in {}", dir.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => warn!("[daemon] could not remove {}: {e}", dir.display()),
     }

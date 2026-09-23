@@ -2000,3 +2000,21 @@ async fn a_message_with_no_markup_has_no_rendition_to_materialise() {
         error.message
     );
 }
+
+/// A previous daemon's handles, left by a crash or by a stop with handles
+/// live, are gone once the next daemon is up: nothing else would ever reap
+/// them.
+#[tokio::test]
+async fn a_starting_daemon_removes_the_handles_a_previous_one_left() {
+    let sandbox = Sandbox::with_account("alpha");
+    let leftover = sandbox.handle_dir("h-left-by-a-crash");
+    fs::create_dir_all(&leftover).expect("a leftover handle directory");
+    fs::write(leftover.join("f"), b"stale").expect("a leftover file");
+
+    let _daemon = sandbox.start_daemon().await;
+    assert!(
+        !leftover.exists(),
+        "the leftover handle {} survived the start",
+        leftover.display()
+    );
+}
