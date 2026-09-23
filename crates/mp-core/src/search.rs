@@ -780,11 +780,18 @@ fn graph_term(term: &Term) -> GraphKind {
         Term::HasAttachment => GraphKind::Filter("hasAttachments eq true".to_string()),
         Term::Before(d) => GraphKind::Filter(format!("receivedDateTime lt {d}")),
         Term::After(d) => GraphKind::Filter(format!("receivedDateTime ge {d}")),
-        Term::Subject(s) => GraphKind::Search(format!("subject:{s}")),
-        Term::Body(s) => GraphKind::Search(format!("body:{s}")),
-        Term::Filename(s) => GraphKind::Search(format!("attachmentnames:{s}")),
-        Term::Text(s) => GraphKind::Search(s.clone()),
+        Term::Subject(s) => GraphKind::Search(format!("subject:{}", kql_escape(s))),
+        Term::Body(s) => GraphKind::Search(format!("body:{}", kql_escape(s))),
+        Term::Filename(s) => GraphKind::Search(format!("attachmentnames:{}", kql_escape(s))),
+        Term::Text(s) => GraphKind::Search(kql_escape(s)),
     }
+}
+
+/// A free-text value made safe inside the double-quoted Graph `$search`
+/// string: a backslash and a double quote are backslash-escaped, so a quote
+/// in a subject cannot close the string early.
+fn kql_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Lower a [`Query`] to Graph `($search, $filter)`. An `OR` group is allowed
@@ -1240,6 +1247,13 @@ mod tests {
     }
 
     // -- to_graph -----------------------------------------------------------
+
+    /// A double quote or a backslash in a free-text value cannot close the
+    /// quoted `$search` string early.
+    #[test]
+    fn graph_search_values_escape_quotes_and_backslashes() {
+        assert_eq!(kql_escape(r#"say "hi" \ now"#), r#"say \"hi\" \\ now"#);
+    }
 
     #[test]
     fn graph_splits_search_and_filter() {

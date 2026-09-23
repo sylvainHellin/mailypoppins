@@ -2304,6 +2304,56 @@ pub async fn mark_read_graph(
 // Phase 7: Search via Graph
 // ---------------------------------------------------------------------------
 
+/// What a Graph query value keeps literal: the RFC 3986 unreserved set. A
+/// space goes out as `%20` rather than the form encoding's `+`, which OData
+/// does not promise to read as a space.
+const QUERY_VALUE_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// The message-search URL under `base`, with every query value
+/// percent-encoded: a raw `+` in a plus-address would otherwise read as a
+/// space, and a `&` or `#` in a subject would end the parameter or the query.
+/// `search` is wrapped in the double quotes Graph's `$search` expects; the
+/// quotes and backslashes inside it are already escaped by `to_graph`.
+fn search_url(
+    base: &str,
+    limit: usize,
+    search: Option<&str>,
+    filter: Option<&str>,
+) -> Result<reqwest::Url> {
+    let search = search.map(|search| format!("\"{search}\""));
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    let top = limit.to_string();
+    pairs.push(("$top", &top));
+    pairs.push(("$orderby", "receivedDateTime desc"));
+    pairs.push((
+        "$select",
+        "id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead",
+    ));
+    if let Some(search) = search.as_deref() {
+        pairs.push(("$search", search));
+    }
+    if let Some(filter) = filter {
+        pairs.push(("$filter", filter));
+    }
+    let query = pairs
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{name}={}",
+                percent_encoding::utf8_percent_encode(value, QUERY_VALUE_ENCODE_SET)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    let mut url = reqwest::Url::parse(base).with_context(|| format!("parsing {base}"))?;
+    url.set_query(Some(&query));
+    Ok(url)
+}
+
 impl GraphClient {
     /// Search messages using Graph $search and $filter.
     pub async fn search_messages(
@@ -2322,23 +2372,12 @@ impl GraphClient {
             format!("{}/me/messages", GRAPH_BASE)
         };
 
-        let mut url = format!(
-            "{}?$top={}&$orderby=receivedDateTime desc&$select=id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead",
-            base, limit
-        );
-
-        if let Some(ref search) = search_param {
-            url.push_str(&format!("&$search=\"{}\"", search));
-        }
-        if let Some(ref filter) = filter_param {
-            url.push_str(&format!("&$filter={}", filter));
-        }
-
+        let url = search_url(&base, limit, search_param.as_deref(), filter_param.as_deref())?;
         debug!("Graph search URL: {}", url);
 
         let resp = self
             .client
-            .get(&url)
+            .get(url)
             .bearer_auth(self.bearer())
             .header("ConsistencyLevel", "eventual") // Required for $search
             .send()
@@ -2401,18 +2440,11 @@ impl GraphClient {
             format!("{}/me/messages", GRAPH_BASE)
         };
 
-        let mut url = format!(
-            "{}?$top={}&$orderby=receivedDateTime desc&$select=id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead",
-            base, limit
-        );
-
-        if let Some(ref filter) = filter_param {
-            url.push_str(&format!("&$filter={}", filter));
-        }
+        let url = search_url(&base, limit, None, filter_param.as_deref())?;
 
         let resp = self
             .client
-            .get(&url)
+            .get(url)
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -2930,6 +2962,35 @@ mod tests {
     // The Graph rendering now goes through the shared grammar (#0086a):
     // `crate::search::parse` -> `to_graph`. These pin the same wiring the
     // search command uses, over the unified AST.
+    /// A plus-address, an ampersand and a hash all reach Graph as the values
+    /// they were: percent-encoded in the URL, and `$filter` still its own
+    /// parameter.
+    #[test]
+    fn search_url_encodes_every_value() {
+        let query = crate::search::parse(r#"from:a+b@x.com subject:"R&D #1""#).unwrap();
+        let (search, filter) = crate::search::to_graph(&query).unwrap();
+        let url = search_url(
+            "https://graph.microsoft.com/v1.0/me/messages",
+            10,
+            search.as_deref(),
+            filter.as_deref(),
+        )
+        .unwrap();
+        let raw = url.as_str();
+        assert!(raw.contains("%2B"), "{raw}");
+        assert!(raw.contains("%26"), "{raw}");
+        assert!(raw.contains("%23"), "{raw}");
+        assert!(url.fragment().is_none(), "{raw}");
+        let pairs: std::collections::HashMap<String, String> =
+            url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs["$filter"],
+            "from/emailAddress/address eq 'a+b@x.com'"
+        );
+        assert!(pairs["$search"].contains("subject:R&D #1"), "{}", pairs["$search"]);
+        assert_eq!(pairs["$top"], "10");
+    }
+
     #[test]
     fn graph_params_text_only() {
         let query = crate::search::parse("hello world").unwrap();
