@@ -145,6 +145,7 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 > TUI multi-view roadmap: [docs/plans/tui-restructure-views.md](docs/plans/tui-restructure-views.md). All three views have shipped: foundation (#0032), view switcher + Contacts (#0033), local calendar (#0034).
 
 - [#0081 QRESYNC, UIDPLUS, and advancing the modseq on a capped pass](docs/tickets/0081-qresync-uidplus.md) -- perf _(the split-out half of #0041, which shipped the session pool and the CONDSTORE delta)_
+- `message.list` with `limit: null` (the TUI's LoadMailbox) builds a 17-key `serde_json::Value` per row and re-parses `date_display` in `resolve_date`; at 50k rows that is ~150-250 ms on a Tokio worker and ~15-20 MB of JSON. Serialise a borrowing struct, format `date_sort` instead of re-parsing, page from the TUI, and run the read in `spawn_blocking` (`src/daemon/methods/message.rs` `list_rows`/`to_json`). -- perf
 - [#0085 On-open re-fetch of an evicted body](docs/tickets/0085-on-open-body-refetch.md) -- feature _(the missing half of #0060, whose eviction sweep shipped; required before lowering a cap below the working set)_
 - [#0101 Conversation-view collapse and inline navigation on top of the thread view](docs/tickets/0101-conversation-view-collapse-inline-nav.md) -- feature _(cross-ref #0008)_
 - [#0084 iMIP send-side updates and cancellations](docs/tickets/0084-imip-send-cancel-and-update.md) -- feature _(the split-out send half of #0031, whose receive half shipped)_
