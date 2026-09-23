@@ -224,8 +224,13 @@ enum Resolved {
     MessageId(String),
 }
 
+/// A strict calendar `YYYY-MM-DD`: `abcd-01-01` or `2024-02-31` is an error
+/// here rather than garbage sent to the server.
 fn valid_date(s: &str) -> bool {
-    parse_date_to_imap(s).is_some() && s.len() == 10 && s.as_bytes()[4] == b'-'
+    s.len() == 10
+        && s.as_bytes()[4] == b'-'
+        && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+        && parse_date_to_imap(s).is_some()
 }
 
 /// Interpret one word token into a [`Term`] or a directive.
@@ -1067,6 +1072,14 @@ mod tests {
         assert_eq!(e.pos, 0);
         let e2 = parse("from:x before:2026-13-01").unwrap_err();
         assert_eq!(e2.pos, 7);
+    }
+
+    #[test]
+    fn non_calendar_dates_are_rejected() {
+        assert!(parse("after:abcd-01-01").is_err());
+        assert!(parse("before:2024-02-31").is_err());
+        assert!(parse("before:2023-02-29").is_err());
+        assert!(parse("after:2024-02-29").is_ok());
     }
 
     #[test]
