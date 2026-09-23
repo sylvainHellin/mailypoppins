@@ -163,28 +163,117 @@ pub fn inject_csp_meta(html: &str) -> String {
 
 /// Remove every `<meta http-equiv="refresh" ...>` tag, case-insensitively and
 /// whatever the attribute order or quoting. Attribute values are matched as
-/// quoted units, so a `>` inside one does not end the tag early. Applied until
-/// nothing changes, so a tag split around another one
+/// quoted units, so a `>` inside one does not end the tag early. The
+/// `http-equiv` value is compared after decoding character references, as a
+/// browser does, so `&#114;efresh` or `&#x52;efresh` is caught too. Applied
+/// until nothing changes, so a tag split around another one
 /// (`<me<meta http-equiv=refresh>ta ...>`) cannot reassemble after a pass.
 fn strip_meta_refresh(html: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
 
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(
-            r#"(?i)<meta\b(?:[^>"']|"[^"]*"|'[^']*')*?\bhttp-equiv\s*=\s*(?:"\s*refresh\s*"|'\s*refresh\s*'|refresh\b)(?:[^>"']|"[^"]*"|'[^']*')*>"#,
-        )
-        .expect("static meta-refresh regex")
+    static TAG: OnceLock<Regex> = OnceLock::new();
+    static EQUIV: OnceLock<Regex> = OnceLock::new();
+    let tag = TAG.get_or_init(|| {
+        Regex::new(r#"(?i)<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>"#).expect("static meta regex")
     });
+    let equiv = EQUIV.get_or_init(|| {
+        Regex::new(r#"(?i)\bhttp-equiv\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#)
+            .expect("static http-equiv regex")
+    });
+    let is_refresh = |meta: &str| {
+        equiv.captures_iter(meta).any(|caps| {
+            let raw = caps.get(1).or(caps.get(2)).or(caps.get(3)).map_or("", |m| m.as_str());
+            decode_char_refs(raw).trim().eq_ignore_ascii_case("refresh")
+        })
+    };
     let mut out = html.to_string();
     loop {
-        let next = re.replace_all(&out, "").into_owned();
+        let next = tag
+            .replace_all(&out, |caps: &regex::Captures| {
+                let meta = &caps[0];
+                if is_refresh(meta) { String::new() } else { meta.to_string() }
+            })
+            .into_owned();
         if next == out {
             return out;
         }
         out = next;
     }
+}
+
+/// Decode the character references an HTML attribute value may carry: numeric
+/// ones (`&#114;`, `&#x72;`, with or without the closing `;`, as a browser
+/// accepts in an attribute) and the named ones that matter for a keyword
+/// compare (the XML five plus the whitespace names). An unknown or malformed
+/// reference is kept verbatim.
+fn decode_char_refs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let (decoded, used) = decode_one_ref(rest);
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[used..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Decode the reference `s` starts with (`s[0] == '&'`), returning the char
+/// and the bytes consumed, or `None` when it is not a reference this knows.
+fn decode_one_ref(s: &str) -> (Option<char>, usize) {
+    let body = &s[1..];
+    if let Some(num) = body.strip_prefix('#') {
+        let (hex, digits) = match num.strip_prefix(['x', 'X']) {
+            Some(h) => (true, h),
+            None => (false, num),
+        };
+        let len = digits
+            .bytes()
+            .take_while(|b| if hex { b.is_ascii_hexdigit() } else { b.is_ascii_digit() })
+            .count();
+        if len == 0 {
+            return (None, 0);
+        }
+        let radix = if hex { 16 } else { 10 };
+        // An out-of-range or overlong value decodes to U+FFFD, as a browser does.
+        let c = u32::from_str_radix(&digits[..len], radix)
+            .ok()
+            .and_then(char::from_u32)
+            .filter(|&c| c != '\0')
+            .unwrap_or('\u{FFFD}');
+        let mut used = 1 + 1 + usize::from(hex) + len;
+        if s[used..].starts_with(';') {
+            used += 1;
+        }
+        return (Some(c), used);
+    }
+    const NAMED: &[(&str, char)] = &[
+        ("amp;", '&'),
+        ("lt;", '<'),
+        ("gt;", '>'),
+        ("quot;", '"'),
+        ("apos;", '\''),
+        ("Tab;", '\t'),
+        ("NewLine;", '\n'),
+        ("nbsp;", '\u{A0}'),
+    ];
+    for (name, c) in NAMED {
+        if body.starts_with(name) {
+            return (Some(*c), 1 + name.len());
+        }
+    }
+    (None, 0)
 }
 
 /// Filename of the iMIP calendar sidecar saved in each invite's attachments
@@ -1979,6 +2068,17 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         // Reassembly after one pass is caught by the fixpoint loop.
         let nested = r#"<me<meta http-equiv=refresh>ta http-equiv=refresh content="0;url=https://evil.tld/">"#;
         assert!(!inject_csp_meta(nested).contains("evil.tld"));
+        // A browser decodes character references before comparing the value.
+        let encoded = [
+            r#"<meta http-equiv="&#114;efresh" content="0;url=https://evil.tld/">"#,
+            r#"<meta http-equiv='&#x52;efresh' content="0;url=https://evil.tld/">"#,
+            r#"<meta http-equiv=&#82;efresh content="0;url=https://evil.tld/">"#,
+            r#"<meta http-equiv="&#0000114efresh" content="0;url=https://evil.tld/">"#,
+            r#"<meta http-equiv="&Tab;r&#101;fresh&NewLine;" content="0;url=https://evil.tld/">"#,
+        ];
+        for tag in encoded {
+            assert!(!inject_csp_meta(tag).contains("evil.tld"), "{tag}");
+        }
         // Other meta tags, and the word in body text, are left alone.
         let benign = r#"<meta charset="utf-8"><meta name="x" content="refresh"><p>refresh me</p>"#;
         assert!(inject_csp_meta(benign).ends_with(benign));
