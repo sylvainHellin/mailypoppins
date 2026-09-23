@@ -413,6 +413,10 @@ impl App {
     /// A hold another client armed is applied here too: either window may
     /// cancel it, so a client that ignored one would show an empty status line
     /// beside a `u` that stops something invisible.
+    ///
+    /// Two holds can be armed at once (a second send inside the first one's
+    /// window), so each event updates or removes only its own entry of
+    /// [`App::holds`], and [`App::hold`] is the newest one still armed.
     fn apply_hold(&mut self, event: &EventEnvelope) -> Applied {
         let status: HoldStatus = match serde_json::from_value(event.payload.clone()) {
             Ok(status) => status,
@@ -422,20 +426,49 @@ impl App {
             }
         };
         let operation = status.operation_id.clone();
+        let known = self
+            .holds
+            .iter()
+            .position(|hold| hold.operation_id == operation);
         match event.kind.as_str() {
             KIND_SEND_HOLD_STARTED | KIND_SEND_HOLD_TICK => {
-                self.set_status_level(
-                    format!("Sending in {}s (press u to undo)", status.remaining_secs),
-                    StatusLevel::Progress,
-                );
-                self.hold = Some(status);
+                let remaining = status.remaining_secs;
+                match known {
+                    Some(index) => self.holds[index] = status,
+                    // A start is the newest hold by definition.
+                    None if event.kind == KIND_SEND_HOLD_STARTED => self.holds.push(status),
+                    // A tick for a hold this client never saw start (it
+                    // bootstrapped mid-window) goes where its deadline puts
+                    // it, so it does not jump ahead of a hold armed later.
+                    None => {
+                        let index = self
+                            .holds
+                            .iter()
+                            .position(|hold| hold.fires_at > status.fires_at)
+                            .unwrap_or(self.holds.len());
+                        self.holds.insert(index, status);
+                    }
+                }
+                // The line shows the hold `u` would cancel; another hold's
+                // tick must not put its countdown beside that key.
+                let current = self.holds.last().map(|hold| hold.operation_id.as_str());
+                if current == Some(operation.as_str()) {
+                    self.set_status_level(
+                        format!("Sending in {remaining}s (press u to undo)"),
+                        StatusLevel::Progress,
+                    );
+                }
             }
             KIND_SEND_HOLD_FIRED => {
-                self.hold = None;
+                if let Some(index) = known {
+                    self.holds.remove(index);
+                }
                 self.set_status_level("Sending...".to_string(), StatusLevel::Progress);
             }
             _ => {
-                self.hold = None;
+                if let Some(index) = known {
+                    self.holds.remove(index);
+                }
                 // The operation the send answered with is settled as cancelled
                 // and its `operation.finished` is on its way. This client is
                 // done with it here: landing that finish too would follow the
@@ -450,6 +483,7 @@ impl App {
                 );
             }
         }
+        self.hold = self.holds.last().cloned();
         Applied::Hold(operation)
     }
 

@@ -175,7 +175,16 @@ pub struct App {
     /// and the decision to fire are the daemon's, so a hold another window
     /// armed shows here too and `u` cancels it from either. `None` between
     /// holds, and the moment one fires or is cancelled.
+    ///
+    /// Derived from [`App::holds`]: the most recently armed hold still
+    /// counting down, which is the one `u` cancels and the status line shows.
     pub hold: Option<mp_protocol::send::HoldStatus>,
+    /// Every hold still counting down, in arm order.
+    ///
+    /// Nothing refuses a second send inside the first one's window, so two
+    /// holds can be armed at once; each `send.hold_*` event updates or removes
+    /// only its own entry, and [`App::hold`] is re-derived from the last one.
+    pub holds: Vec<mp_protocol::send::HoldStatus>,
     pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
@@ -366,6 +375,7 @@ impl App {
             pending_select: None,
             queued_action: None,
             hold: None,
+            holds: Vec::new(),
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
@@ -448,6 +458,7 @@ impl App {
             pending_select: None,
             queued_action: None,
             hold: None,
+            holds: Vec::new(),
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,

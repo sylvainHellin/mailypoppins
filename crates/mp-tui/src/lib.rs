@@ -9,6 +9,8 @@ pub mod events;
 #[cfg(test)]
 mod events_resync_tests;
 pub(crate) mod helpers;
+#[cfg(test)]
+mod hold_tests;
 pub mod queries;
 pub mod session;
 pub mod theme;
