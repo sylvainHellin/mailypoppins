@@ -222,6 +222,10 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Find the largest byte index <= `max` that is a char boundary in `s`.
+///
+/// When no char fits in `max` bytes (a 3-byte CJK char in a 2-byte slot),
+/// the end of the first char is returned instead, so a caller slicing
+/// `s[..boundary]` always gets a non-empty, valid prefix and makes progress.
 fn floor_char_boundary(s: &str, max: usize) -> usize {
     if max >= s.len() {
         return s.len();
@@ -230,5 +234,27 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
     }
-    if i == 0 { max.min(s.len()) } else { i }
+    if i == 0 {
+        s.chars().next().map_or(0, char::len_utf8)
+    } else {
+        i
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_wrap_narrower_than_one_char_does_not_panic() {
+        assert_eq!(
+            word_wrap("\u{65e5}\u{672c}\u{8a9e}", 2),
+            ["\u{65e5}", "\u{672c}", "\u{8a9e}"]
+        );
+        assert_eq!(
+            word_wrap("ok \u{65e5}\u{672c}", 2),
+            ["ok", "\u{65e5}", "\u{672c}"]
+        );
+        assert_eq!(floor_char_boundary("\u{65e5}", 0), 3);
+    }
 }
