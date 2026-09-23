@@ -308,7 +308,7 @@ fn open_validated(path: &Path) -> Result<Connection> {
     // slower, not wrong, and the next open tries again.
     if let Err(e) = schema::ensure_additive_indexes(&conn) {
         warn!(
-            "[store] could not add the invite index to {}: {e:#}",
+            "[store] could not add an additive index to {}: {e:#}",
             path.display()
         );
     }
