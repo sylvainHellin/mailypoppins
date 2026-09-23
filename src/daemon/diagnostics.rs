@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, TimeZone};
+use chrono::{DateTime, FixedOffset, Local, NaiveDateTime, Offset, TimeZone, Utc};
 use log::Level;
 use serde_json::{json, Value};
 
@@ -733,13 +733,34 @@ fn parse_line(line: &str) -> LogLine {
     }
 }
 
-/// `2026-09-21 19:05:20.081 `, as an instant at the daemon's current local
-/// offset.
+/// `2026-09-21 19:05:20.081 `, as an instant in the daemon's local zone.
 fn split_stamp(line: &str) -> Option<(DateTime<FixedOffset>, &str)> {
+    split_stamp_in(line, &Local)
+}
+
+/// [`split_stamp`] in `zone`, which a test pins rather than mutating `TZ`.
+///
+/// The writer stamps local wall time with no offset, so the offset is the one
+/// `zone` had *at that wall time*, not the one it has now: a line written in
+/// winter and read in summer is otherwise an hour off in `diagnostic.logs`, a
+/// support bundle and the `since` filter. The repeated hour of the autumn
+/// change resolves to its earlier instant. The spring-forward gap names no
+/// instant at all, and gets the zone's current offset rather than losing the
+/// line.
+fn split_stamp_in<'a, Tz: TimeZone>(
+    line: &'a str,
+    zone: &Tz,
+) -> Option<(DateTime<FixedOffset>, &'a str)> {
     let (head, rest) = line.split_at_checked(23)?;
     let naive = NaiveDateTime::parse_from_str(head, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
-    let offset = *Local::now().offset();
-    let stamp = offset.from_local_datetime(&naive).single()?;
+    let stamp = match zone.from_local_datetime(&naive).earliest() {
+        Some(local) => local.fixed_offset(),
+        None => zone
+            .offset_from_utc_datetime(&Utc::now().naive_utc())
+            .fix()
+            .from_local_datetime(&naive)
+            .single()?,
+    };
     Some((stamp, rest.strip_prefix(' ')?))
 }
 
@@ -990,6 +1011,28 @@ mod tests {
         assert_eq!(parsed.message, "Watching mailbox 'INBOX'");
         assert!(parsed.stamp.is_some());
         assert_eq!(parsed.to_json()["level"], json!("info"));
+    }
+
+    /// A stamp takes the offset its own wall time had, not today's: winter
+    /// and summer lines read in the same process are an hour apart in offset,
+    /// and the spring-forward gap still yields a line.
+    #[test]
+    fn a_stamp_takes_the_offset_of_its_own_date() {
+        let paris = chrono_tz::Europe::Paris;
+        let offset = |line: &str| {
+            split_stamp_in(line, &paris)
+                .map(|(stamp, _)| stamp.offset().local_minus_utc())
+                .expect("a stamped line")
+        };
+        assert_eq!(offset("2026-01-15 10:00:00.000 [INFO] winter"), 3600);
+        assert_eq!(offset("2026-07-15 10:00:00.000 [INFO] summer"), 7200);
+        // The autumn hour that happens twice resolves to its first pass.
+        assert_eq!(offset("2026-10-25 02:30:00.000 [INFO] twice"), 7200);
+        // 02:30 on the spring-forward night never happened in Paris.
+        let (gap, rest) = split_stamp_in("2026-03-29 02:30:00.000 [INFO] gap", &paris)
+            .expect("a line in the gap is kept");
+        assert_eq!(rest, "[INFO] gap");
+        assert!([3600, 7200].contains(&gap.offset().local_minus_utc()));
     }
 
     /// At `DEBUG` the writer adds the thread id and the module path, and both
