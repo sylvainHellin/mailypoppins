@@ -142,9 +142,19 @@ impl App {
         // revision are the daemon's word about the state this snapshot
         // describes, so every event above it is comparable and everything at or
         // below it is already here.
+        let restarted = self.events.is_new_instance(&bootstrap.instance_id);
         let orphaned = self
             .events
             .watermark(&bootstrap.instance_id, bootstrap.revision);
+        if restarted {
+            // A hold is a timer in the daemon that armed it, so the holds the
+            // previous one announced died with it. Kept, `u` would still be
+            // caught as a cancel for an operation the new daemon never saw and
+            // the Message-context `u` would be dead for the session. The
+            // resync path asks the new daemon for its own holds afterwards.
+            self.holds.clear();
+            self.hold = None;
+        }
         if orphaned > 0 {
             // The daemon that was running them is gone, so the spinner they
             // are holding up would never come down.

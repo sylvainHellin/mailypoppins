@@ -50,7 +50,7 @@ use mp_protocol::events::{
     KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
     KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
-use mp_protocol::send::HoldStatus;
+use mp_protocol::send::{HoldListing, HoldStatus};
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
@@ -226,6 +226,12 @@ impl EventState {
     /// client was waiting for died with it: the table is emptied and its
     /// entries are reported as background work that ended, or the spinner would
     /// run for the rest of the session.
+    /// Whether a bootstrap from `instance_id` is a daemon this client has not
+    /// adopted, which after the first bootstrap means one that restarted.
+    pub(super) fn is_new_instance(&self, instance_id: &str) -> bool {
+        self.instance.as_deref() != Some(instance_id)
+    }
+
     pub(super) fn watermark(&mut self, instance_id: &str, revision: u64) -> usize {
         let restarted = self.instance.as_deref() != Some(instance_id);
         self.instance = Some(instance_id.to_string());
@@ -707,10 +713,38 @@ fn rebootstrap(app: &mut App, door: &dyn Queries) {
                     bootstrap.revision,
                     bootstrap.instance_id
                 );
+                // Only a client that was showing holds asks: one that had
+                // none has nothing stale to replace, keeps a reconnect to the
+                // single bootstrap call, and sees any new hold on its tick.
+                let stale_holds = !app.holds.is_empty()
+                    && app.events.is_new_instance(&bootstrap.instance_id);
                 app.apply_resync_bootstrap(&bootstrap);
+                if stale_holds {
+                    refresh_holds(app, door);
+                }
             }
             Err(e) => log::warn!("[events] the bootstrap did not decode: {e}"),
         },
         Err(e) => log::warn!("[events] the bootstrap failed: {e:#}"),
+    }
+}
+
+/// Take the undo-send holds a restarted daemon is carrying.
+///
+/// The bootstrap already dropped the ones the previous daemon armed, since
+/// their timers died with it; this asks the new one what it holds, so a hold
+/// another window armed since the restart is cancellable before its next tick
+/// arrives. A failure leaves the list empty, and a tick restores any live hold
+/// within a second.
+fn refresh_holds(app: &mut App, door: &dyn Queries) {
+    let listing = door
+        .call("send.hold_status", json!({}))
+        .and_then(|answer| Ok(serde_json::from_value::<HoldListing>(answer)?));
+    match listing {
+        Ok(listing) => {
+            app.holds = listing.holds;
+            app.hold = app.holds.last().cloned();
+        }
+        Err(e) => log::warn!("[events] reading the holds after a restart: {e:#}"),
     }
 }

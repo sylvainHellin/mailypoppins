@@ -165,3 +165,150 @@ fn a_resync_replaces_the_counts_of_an_account_that_had_already_opened() {
         "the open mailbox reloads off the UI thread, as a mailbox switch does"
     );
 }
+
+/// One armed hold under `instance_id`, as the daemon frames its start.
+fn hold_started(instance_id: &str, revision: u64) -> mp_protocol::EventEnvelope {
+    let status = mp_protocol::send::HoldStatus {
+        operation_id: "op-old-daemon".to_string(),
+        account: ACCOUNT.to_string(),
+        draft_id: "d".to_string(),
+        subject: "s".to_string(),
+        hold_secs: 20,
+        remaining_secs: 20,
+        fires_at: "2026-09-11T08:00:20Z".to_string(),
+        origin: "tui".to_string(),
+    };
+    mp_protocol::EventEnvelope {
+        instance_id: instance_id.to_string(),
+        revision,
+        kind: mp_protocol::events::KIND_SEND_HOLD_STARTED.to_string(),
+        payload: serde_json::to_value(status).expect("a HoldStatus serialises"),
+    }
+}
+
+/// A snapshot of [`snapshot`]'s shape from another daemon instance.
+fn restarted_snapshot(revision: u64) -> Bootstrap {
+    Bootstrap {
+        instance_id: "restarted".to_string(),
+        ..snapshot(revision, 5)
+    }
+}
+
+/// A resync against a daemon that restarted drops the holds the old one
+/// announced, so `u` is the Message-context toggle-read again.
+///
+/// Before the fix `app.hold` outlived the daemon whose timer it described:
+/// every `u` was caught as `CancelHeldSend` for an operation the new daemon
+/// never saw, and toggle-read was dead for the rest of the session.
+#[test]
+fn a_restart_resync_drops_the_old_daemons_hold_and_frees_u() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = App::from_bootstrap(config(), &snapshot(1, 5));
+    app.apply_event(&hold_started("resync", 2));
+    assert!(app.hold.is_some(), "the hold landed");
+
+    app.apply_resync_bootstrap(&restarted_snapshot(1));
+
+    assert!(app.hold.is_none(), "the old daemon's hold died with it");
+    assert!(app.holds.is_empty());
+
+    let entry = crate::app::EmailEntry {
+        msg: Some(crate::app::MessageRef::new(1)),
+        draft_id: None,
+        skip: None,
+        selector: None,
+        from: "a@example.com".to_string(),
+        to: "me@example.com".to_string(),
+        cc: None,
+        reply_to: None,
+        bcc: None,
+        subject: "s".to_string(),
+        status: "inbox".to_string(),
+        date_display: "2026-07-01".to_string(),
+        date_sort: "2026-07-01T00:00:00".to_string(),
+        has_attachments: false,
+        read: false,
+        answered: false,
+        forwarded: false,
+        flagged: false,
+        is_invite: false,
+    };
+    app.emails = Arc::new(vec![entry]);
+    app.visible = vec![0];
+    app.list_index = 0;
+    app.focus = crate::app::Focus::List;
+    app.pending_actions.clear();
+
+    app.handle_key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Char('u'),
+    ));
+
+    assert!(
+        app.pending_actions
+            .iter()
+            .any(|action| matches!(action, Action::ToggleRead)),
+        "`u` toggles read again, got {:?}",
+        app.pending_actions
+    );
+    assert!(!app
+        .pending_actions
+        .iter()
+        .any(|action| matches!(action, Action::CancelHeldSend)));
+}
+
+/// A door for a restarted daemon: its bootstrap, and one hold it armed for
+/// another window since the restart.
+struct RestartDoor {
+    calls: RefCell<Vec<String>>,
+}
+
+impl Queries for RestartDoor {
+    fn call(&self, method: &str, _params: Value) -> anyhow::Result<Value> {
+        self.calls.borrow_mut().push(method.to_string());
+        match method {
+            "state.bootstrap" => Ok(serde_json::to_value(restarted_snapshot(3))?),
+            "send.hold_status" => Ok(serde_json::json!({"holds": [{
+                "operation_id": "op-new-daemon",
+                "account": ACCOUNT,
+                "draft_id": "d2",
+                "subject": "s2",
+                "hold_secs": 20,
+                "remaining_secs": 12,
+                "fires_at": "2026-09-11T08:01:00Z",
+                "origin": "gui",
+            }]})),
+            other => anyhow::bail!("the restart door answers no {other}"),
+        }
+    }
+}
+
+/// Reconnecting to a restarted daemon takes that daemon's holds in place of
+/// the old one's, through `send.hold_status`.
+#[test]
+fn a_reconnect_to_a_restarted_daemon_takes_its_holds() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = App::from_bootstrap(config(), &snapshot(1, 5));
+    app.apply_event(&hold_started("resync", 2));
+
+    let door = RestartDoor {
+        calls: RefCell::new(Vec::new()),
+    };
+    let (sender, events) = mpsc::channel();
+    sender
+        .send(Incoming::Reconnected {
+            instance_id: "restarted".to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    drain(&mut app, &door, &events);
+
+    assert_eq!(
+        door.calls.borrow().as_slice(),
+        ["state.bootstrap".to_string(), "send.hold_status".to_string()]
+    );
+    assert_eq!(
+        app.hold.as_ref().map(|hold| hold.operation_id.as_str()),
+        Some("op-new-daemon"),
+        "the new daemon's hold replaced the old one's"
+    );
+    assert_eq!(app.holds.len(), 1);
+}
