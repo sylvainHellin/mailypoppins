@@ -622,7 +622,11 @@ async fn serve_connection(
     // repeated `daemon.stop` while it waits: the report does not exist until
     // the grace is over, and a connection that stopped answering in the
     // meantime would be a `mp daemon stop` with nothing to watch.
-    let mut owes_report = false;
+    //
+    // Owned as a guard rather than a flag: whichever way this task ends - the
+    // report written, the peer gone, a write failed - the drop releases the
+    // shutdown driver, once.
+    let mut report_owed: Option<super::shutdown::ReportOwed> = None;
     let mut settled = state.shutdown.settled();
 
     loop {
@@ -651,7 +655,7 @@ async fn serve_connection(
                                 .context("writing the shutdown report")?;
                             writer.flush().await.context("flushing the report")?;
                         }
-                        state.shutdown.reported();
+                        drop(report_owed.take());
                         return Ok(());
                     }
                     Some(AfterFlush::Close) => return Ok(()),
@@ -702,7 +706,7 @@ async fn serve_connection(
                 // closed channel means the daemon is gone from under us, which
                 // ends the connection the same way.
                 if changed.is_err() || *settled.borrow() {
-                    after_flush = Some(if owes_report {
+                    after_flush = Some(if report_owed.is_some() {
                         AfterFlush::Report
                     } else {
                         AfterFlush::Drain
@@ -732,16 +736,21 @@ async fn serve_connection(
                         .get("method")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    let owes_report = report_owed.is_some();
                     let (reply, stop) =
                         dispatch_request(value, state, &mut session, &shutdown, owes_report)
                             .await;
+                    // Taken before anything below can fail: the dispatch just
+                    // registered this connection as a reporter.
+                    if stop && !owes_report {
+                        report_owed = Some(state.shutdown.report_owed());
+                    }
                     if let Some(reply) = reply {
                         if method.as_deref() == Some("state.bootstrap") {
                             rebootstrap(&mut outbound, &mut queue, &reply);
                         }
                         replies.push_back(encode_capped(&reply, MAX_RESPONSE_BYTES)?);
                     }
-                    owes_report |= stop;
                 }
             }
         }

@@ -1142,3 +1142,45 @@ fn a_client_that_bootstraps_mid_hold_finds_the_hold_in_its_snapshot() {
 
     daemon.stop();
 }
+
+/// A client that asks the daemon to stop and hangs up at once - a Ctrl-C on
+/// `mp daemon stop`, a call that timed out - owes nothing any more: the daemon
+/// does not sit out the report ceiling waiting for a frame nobody will read,
+/// and does not warn about a client that never took its report.
+#[test]
+fn a_stop_whose_client_hangs_up_at_once_does_not_wait_for_its_report() {
+    use std::io::Write;
+
+    let tmp = bare_root();
+    let root = tmp.path();
+    let daemon = DaemonFixture::start(root);
+
+    let started = Instant::now();
+    {
+        let mut stream = std::os::unix::net::UnixStream::connect(socket_path(root))
+            .expect("connecting to the daemon socket");
+        stream
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"daemon.stop\",\"params\":{}}\n")
+            .expect("writing the stop frame");
+    }
+    wait_until_stopped(root);
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(1500),
+        "a stop whose asker hung up waited {took:?}, which is the report ceiling"
+    );
+
+    let logs: String = fs::read_dir(root.join("logs"))
+        .map(|dir| {
+            dir.flatten()
+                .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !logs.contains("never took its report"),
+        "the daemon warned about a report its hung-up client could not take:\n{logs}"
+    );
+
+    daemon.stop();
+}

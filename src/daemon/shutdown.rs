@@ -66,13 +66,19 @@ pub const DEFAULT_GRACE_SECS: u64 = 10;
 /// How often step 5 re-checks whether the registry has emptied.
 const POLL: Duration = Duration::from_millis(25);
 
-/// How long the driver waits for the asking connection to write its report
-/// before exiting without it.
+/// The ceiling on how long step 7 waits for the connection that asked to stop
+/// to take its `daemon.stopped` report, before the daemon exits without it.
 ///
-/// A ceiling on step 7 and nothing more: the frame is one small write into a
-/// socket buffer the peer can still drain after this process is gone, so a
-/// reporter that has not taken it by now is a client that stopped reading.
-const REPORT_DEADLINE: Duration = Duration::from_secs(2);
+/// Only a connection still alive and not reading is ever waited on this long:
+/// one that went away, by EOF or by a failed write, releases the driver as its
+/// [`ReportOwed`] drops. The frame is one small write into a socket buffer the
+/// peer can still drain after this process is gone, so a live reporter that
+/// has not taken it by now is a client that stopped reading.
+const REPORT_TAKE_CEILING: Duration = Duration::from_secs(2);
+
+/// The ceiling on how long step 7 waits for the other connections to write
+/// out what they were queued and close, before the daemon exits under them.
+const CONNECTIONS_CLOSE_CEILING: Duration = Duration::from_secs(2);
 
 /// What the daemon reports about its own shutdown, on the connection that asked
 /// for it.
@@ -193,10 +199,36 @@ impl Shutdown {
         frame::encode(&notification).ok()
     }
 
-    /// Say that one reporter has written its frame, releasing the driver.
-    pub fn reported(&self) {
+    /// Say that one reporter is done with its frame, releasing the driver.
+    ///
+    /// Only [`ReportOwed`]'s drop calls it, which is what makes it exactly
+    /// once per registered reporter whichever way the connection ended.
+    fn reported(&self) {
         self.reporters.fetch_sub(1, Ordering::SeqCst);
         self.reported.notify_waiters();
+    }
+
+    /// The debt a connection took on when its `daemon.stop` registered it as a
+    /// reporter ([`request`] with `reporter: true`), owned by that connection
+    /// from then on.
+    pub fn report_owed(self: &Arc<Self>) -> ReportOwed {
+        ReportOwed(Arc::clone(self))
+    }
+}
+
+/// One connection's `daemon.stopped` report, still owed.
+///
+/// Dropping it releases the driver, once: after the report was written, and
+/// equally when the peer hung up first (a Ctrl-C on `mp daemon stop`, a call
+/// timeout) or a write failed. Without it, only the path that wrote the report
+/// released the driver, and every other one cost the shutdown its whole
+/// [`REPORT_TAKE_CEILING`] and a warning about a client that never took it.
+#[must_use = "dropping the debt at once releases the driver before the report is written"]
+pub struct ReportOwed(Arc<Shutdown>);
+
+impl Drop for ReportOwed {
+    fn drop(&mut self) {
+        self.0.reported();
     }
 }
 
@@ -361,7 +393,7 @@ async fn stop_runtimes(state: &Arc<DaemonState>) {
 
 /// Wait, bounded, for every connection that asked to stop to write its report.
 async fn await_reporters(shutdown: &Shutdown) {
-    let deadline = Instant::now() + REPORT_DEADLINE;
+    let deadline = Instant::now() + REPORT_TAKE_CEILING;
     while shutdown.reporters.load(Ordering::SeqCst) > 0 {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -383,11 +415,12 @@ async fn await_reporters(shutdown: &Shutdown) {
 /// released when a connection task ends, so the subscriber count is what says
 /// they are gone.
 async fn await_connections(state: &Arc<DaemonState>) {
-    let deadline = Instant::now() + REPORT_DEADLINE;
+    let deadline = Instant::now() + CONNECTIONS_CLOSE_CEILING;
     while state.canonical.subscriber_count() > 0 {
         if Instant::now() >= deadline {
             warn!(
-                "[daemon] {} connection(s) had not closed after {REPORT_DEADLINE:?}; exiting \
+                "[daemon] {} connection(s) had not closed after {CONNECTIONS_CLOSE_CEILING:?}; \
+                 exiting \
                  under them",
                 state.canonical.subscriber_count()
             );
@@ -462,11 +495,12 @@ mod tests {
         await_reporters(&shutdown).await;
 
         shutdown.expect_report();
+        let owed = shutdown.report_owed();
         let waiter = Arc::clone(&shutdown);
         let handle = tokio::spawn(async move { await_reporters(&waiter).await });
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(!handle.is_finished(), "it is still waiting for the report");
-        shutdown.reported();
+        drop(owed);
         tokio::time::timeout(Duration::from_secs(1), handle)
             .await
             .expect("the reporter released the driver")
