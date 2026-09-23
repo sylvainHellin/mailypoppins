@@ -15,7 +15,7 @@ The startup order is load-bearing: logging is already up from `main`, then the s
 `--foreground-logs` echoes the lifecycle lines to stderr as well as to the log directory.
 A missing `config.toml` is not a startup failure: the daemon serves zero accounts and reports `config_status.state` as `absent` in the handshake until one is written, and an unparseable one reports `invalid` and the first problem.
 
-`mp daemon start` spawns a detached `mp daemon run` and returns once it answers.
+`mp daemon start` spawns a detached `mp daemon run`, returns once it answers, and prints `✓ daemon started (pid N)`; against a daemon that already answers it spawns nothing and prints `✓ daemon already running (pid N)`.
 It takes the start lock and holds it across both the spawn and the readiness wait, because releasing it at spawn time would let a second starter see a socket inode that no daemon has bound yet and spawn a second daemon.
 The child is told the lock is already held through `MAILYPOPPINS_DAEMON_START_LOCK_HELD=1` and skips the acquisition.
 A starter that finds a daemon already answering returns 0 without spawning; one that loses the lock race waits for the winner's daemon instead of starting its own.
@@ -48,8 +48,7 @@ With nothing running it exits 0, and it sweeps a stale socket on the way out, be
 
 `mp daemon restart` stops whatever runs, waits for the old pid to disappear (up to 10 s), and then starts this executable's daemon.
 The wait is not decoration: a new daemon binding before the old one's cleanup runs would have its own socket unlinked by its predecessor.
-It prints the stop's line and nothing of its own about the start, so a successful restart reads as a stop and `mp daemon status` is what confirms the replacement; it also takes no `--grace-secs`, so a restart always stops under the daemon's default grace.
-Both are `BACKLOG.md` items.
+It takes `stop`'s `--grace-secs <N>` for its stop, and prints the stop's line followed by the start's `✓ daemon started (pid N)`, so a successful restart reads as one.
 
 ## On-demand start, and the no-daemon list
 

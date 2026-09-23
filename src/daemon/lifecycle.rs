@@ -190,7 +190,11 @@ pub enum DaemonAction {
         grace_secs: Option<u64>,
     },
     /// Stop the running daemon and start this executable's daemon
-    Restart,
+    Restart {
+        /// Seconds the daemon may spend settling work in flight (0 waits none)
+        #[arg(long)]
+        grace_secs: Option<u64>,
+    },
     /// Install the login-start service for this user and enable it
     InstallService {
         /// Replace a service file whose content differs from this version's
@@ -234,13 +238,15 @@ pub enum DaemonAction {
 pub async fn dispatch(action: DaemonAction) -> i32 {
     let outcome = match action {
         DaemonAction::Run { foreground_logs } => run(foreground_logs).await.map(|()| EXIT_OK),
-        DaemonAction::Start { timeout_secs } => start(Duration::from_secs(timeout_secs)).await,
+        DaemonAction::Start { timeout_secs } => {
+            start_command(Duration::from_secs(timeout_secs)).await
+        }
         DaemonAction::Status { json } => status(json).await,
         DaemonAction::Stop {
             timeout_secs,
             grace_secs,
         } => stop(Duration::from_secs(timeout_secs), grace_secs).await,
-        DaemonAction::Restart => restart().await,
+        DaemonAction::Restart { grace_secs } => restart(grace_secs).await,
         DaemonAction::InstallService { force, check } => super::service::install(force, check),
         DaemonAction::UninstallService => super::service::uninstall(),
         DaemonAction::Health { json } => health(json).await,
@@ -865,9 +871,12 @@ fn print_stop_outcome(outcome: &StopOutcome) {
 }
 
 /// Stop whatever runs and start this executable's daemon.
-async fn restart() -> Result<i32> {
+///
+/// Prints the stop's line and then the start's, so a restart that worked reads
+/// as one.
+async fn restart(grace_secs: Option<u64>) -> Result<i32> {
     let previous = read_instance_meta().map(|meta| meta.pid);
-    let code = stop(Duration::from_secs(10), None).await?;
+    let code = stop(Duration::from_secs(10), grace_secs).await?;
     if code != EXIT_OK {
         return Ok(code);
     }
@@ -879,7 +888,40 @@ async fn restart() -> Result<i32> {
             tokio::time::sleep(POLL).await;
         }
     }
-    start(Duration::from_secs(10)).await
+    let code = start(Duration::from_secs(10)).await?;
+    if code == EXIT_OK {
+        print_started();
+    }
+    Ok(code)
+}
+
+/// `mp daemon start`: [`start`], and one line saying what it found or did.
+///
+/// The line is this command's and not [`start`]'s, because on-demand start
+/// runs the same routine inside every other command and may not print into
+/// their output.
+async fn start_command(timeout: Duration) -> Result<i32> {
+    if let Ok(status) = query_status().await {
+        println!(
+            "{} daemon already running (pid {})",
+            "\u{2713}".green(),
+            status["pid"]
+        );
+        return Ok(EXIT_OK);
+    }
+    let code = start(timeout).await?;
+    if code == EXIT_OK {
+        print_started();
+    }
+    Ok(code)
+}
+
+/// The start's line, in the voice of the stop's.
+fn print_started() {
+    match read_instance_meta() {
+        Some(meta) => println!("{} daemon started (pid {})", "\u{2713}".green(), meta.pid),
+        None => println!("{} daemon started", "\u{2713}".green()),
+    }
 }
 
 /// Whether `pid` still exists (signal 0 probes without delivering).

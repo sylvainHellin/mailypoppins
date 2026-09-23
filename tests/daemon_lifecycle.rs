@@ -847,6 +847,58 @@ fn restart_yields_a_new_instance_id() {
         wait_until(|| unsafe { libc::kill(before_pid, 0) } != 0),
         "the pre-restart daemon {before_pid} exited"
     );
+
+    // Each command says what it did: a start its one line, a restart the
+    // stop's line and then the start's, so a restart that worked reads as one.
+    let lines = |out: &std::process::Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+    };
+    assert_eq!(
+        lines(&start),
+        [format!("\u{2713} daemon started (pid {before_pid})")]
+    );
+    assert_eq!(
+        lines(&restart),
+        [
+            "\u{2713} daemon stopped".to_string(),
+            format!("\u{2713} daemon started (pid {after_pid})"),
+        ]
+    );
+
+    // A start against the running daemon says so, and spawns nothing.
+    let again = sandbox
+        .cmd()
+        .args(["daemon", "start"])
+        .output()
+        .expect("run mp daemon start");
+    assert_eq!(code(&again.status), 0);
+    assert_eq!(
+        lines(&again),
+        [format!("\u{2713} daemon already running (pid {after_pid})")]
+    );
+
+    // `--grace-secs` is `stop`'s flag, taken by the restart's stop.
+    let graced = sandbox
+        .cmd()
+        .args(["daemon", "restart", "--grace-secs", "0"])
+        .output()
+        .expect("run mp daemon restart --grace-secs 0");
+    assert_eq!(
+        code(&graced.status),
+        0,
+        "restart --grace-secs 0 exits 0; stderr: {}",
+        String::from_utf8_lossy(&graced.stderr)
+    );
+    sandbox.wait_socket_live();
+    let graced_pid = sandbox.recorded_pid();
+    assert_ne!(graced_pid, after_pid, "and replaces the process");
+    assert_eq!(
+        lines(&graced),
+        [
+            "\u{2713} daemon stopped".to_string(),
+            format!("\u{2713} daemon started (pid {graced_pid})"),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
