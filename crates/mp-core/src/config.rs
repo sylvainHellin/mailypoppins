@@ -43,20 +43,15 @@ pub struct GlobalConfig {
 }
 
 /// Authentication method for an account.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMethod {
+    #[default]
     Password,
     #[serde(rename = "oauth2")]
     OAuth2,
     #[serde(rename = "graph")]
     Graph,
-}
-
-impl Default for AuthMethod {
-    fn default() -> Self {
-        AuthMethod::Password
-    }
 }
 
 /// OAuth2 settings stored in config (client_id + tenant_id for Azure Entra ID).
@@ -2645,7 +2640,7 @@ fn to_hard_breaks(markdown: &str) -> String {
     for (i, line) in lines.iter().enumerate() {
         out.push_str(line);
         let this_nonblank = !line.trim().is_empty();
-        let next_nonblank = lines.get(i + 1).map_or(false, |n| !n.trim().is_empty());
+        let next_nonblank = lines.get(i + 1).is_some_and(|n| !n.trim().is_empty());
         if this_nonblank && next_nonblank && !line.ends_with(' ') {
             out.push_str("  ");
         }

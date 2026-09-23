@@ -1334,9 +1334,9 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
     // Check that at least one recipient exists across to/cc/bcc
-    let to_empty = draft.frontmatter.to.as_deref().map_or(true, |s| s.trim().is_empty());
-    let cc_empty = draft.frontmatter.cc.as_deref().map_or(true, |s| s.trim().is_empty());
-    let bcc_empty = draft.frontmatter.bcc.as_deref().map_or(true, |s| s.trim().is_empty());
+    let to_empty = draft.frontmatter.to.as_deref().is_none_or(|s| s.trim().is_empty());
+    let cc_empty = draft.frontmatter.cc.as_deref().is_none_or(|s| s.trim().is_empty());
+    let bcc_empty = draft.frontmatter.bcc.as_deref().is_none_or(|s| s.trim().is_empty());
     if to_empty && cc_empty && bcc_empty {
         return Err(anyhow!("No recipients (to, cc, and bcc are all empty)"));
     }

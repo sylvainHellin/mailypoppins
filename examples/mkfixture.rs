@@ -205,16 +205,16 @@ fn message(rng: &mut Lcg, plan: &Plan, n: usize) -> FetchedEmail {
         }
         body.push_str("\n\n");
     }
-    if plan.mailbox == "Bulk" && seq % 250 == 0 {
+    if plan.mailbox == "Bulk" && seq.is_multiple_of(250) {
         body.push_str(NEEDLE);
         body.push('\n');
     }
 
-    let attach = seq % 17 == 0;
+    let attach = seq.is_multiple_of(17);
     FetchedEmail {
         from: format!("Sender {seq} <sender{seq}@fixture.invalid>"),
         to: format!("{}@fixture.invalid", plan.account),
-        cc: (seq % 11 == 0).then(|| "cc@fixture.invalid".to_string()),
+        cc: seq.is_multiple_of(11).then(|| "cc@fixture.invalid".to_string()),
         reply_to: None,
         bcc: None,
         subject,
@@ -236,7 +236,7 @@ fn message(rng: &mut Lcg, plan: &Plan, n: usize) -> FetchedEmail {
         } else {
             Vec::new()
         },
-        flags: MessageFlags::seen(seq % 3 == 0),
+        flags: MessageFlags::seen(seq.is_multiple_of(3)),
         calendar_ics: None,
         event: None,
     }

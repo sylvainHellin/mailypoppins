@@ -680,7 +680,7 @@ mod tests {
         let (kept, collisions) = dedupe_by_id(vec![row("c.md", 5), row("b.md", 10), row("a.md", 20)]);
         assert_eq!(kept.len(), 1);
         assert_eq!(collisions.len(), 2);
-        assert!(collisions.iter().all(|c| c.kept == PathBuf::from("a.md")));
+        assert!(collisions.iter().all(|c| c.kept == std::path::Path::new("a.md")));
     }
 
     #[test]

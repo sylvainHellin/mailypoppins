@@ -146,12 +146,13 @@
 //! 4. **A poll settles nothing before the debounce has elapsed.** A file whose
 //!    observation differs from its settled one becomes *pending* and records
 //!    `now`; a pending file whose observation moves again re-records `now`; a
-//!    pending file whose observation has not moved and whose `now - dirty_since
-//!    >= debounce` **settles** and yields exactly one event carrying the state
-//!    the file is in at that moment. Emitting on the first sight of a change
-//!    and suppressing the rest would be the other plausible reading of
-//!    "debounce", and it is the wrong one here: it publishes the *first* state
-//!    of a burst, and the plan asks for "a reparse of the final file state".
+//!    pending file whose observation has not moved and whose
+//!    `now - dirty_since >= debounce` **settles** and yields exactly one event
+//!    carrying the state the file is in at that moment. Emitting on the first
+//!    sight of a change and suppressing the rest would be the other plausible
+//!    reading of "debounce", and it is the wrong one here: it publishes the
+//!    *first* state of a burst, and the plan asks for "a reparse of the final
+//!    file state".
 //! 5. **A settled present file yields `DraftChanged` when it parses and
 //!    `DraftInvalid` when it does not.** Both carry the same id, so the two are
 //!    one resource and a client that fixes a broken draft sees a replacement
@@ -1926,7 +1927,7 @@ fn snapshot_draft<'a>(bootstrap: &'a Value, account: &str, id: &str) -> &'a Valu
             panic!("the snapshot carries one drafts array per account, got {bootstrap}")
         });
     list.iter()
-        .find(|row| row["id"] == Value::from(id))
+        .find(|row| row["id"] == id)
         .unwrap_or_else(|| panic!("{account} lists a draft {id}, got {list:?}"))
 }
 

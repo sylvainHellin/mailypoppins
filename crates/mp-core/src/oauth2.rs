@@ -183,7 +183,7 @@ pub async fn device_code_flow_reporting(
 
     // Step 1: Request device code
     let resp = client
-        .post(&device_code_url(tenant_id))
+        .post(device_code_url(tenant_id))
         .form(&[("client_id", client_id), ("scope", scopes)])
         .send()
         .await
@@ -211,7 +211,7 @@ pub async fn device_code_flow_reporting(
         }
 
         let resp = client
-            .post(&token_url(tenant_id))
+            .post(token_url(tenant_id))
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("client_id", client_id),
@@ -287,7 +287,7 @@ async fn refresh_token(
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(&token_url(tenant_id))
+        .post(token_url(tenant_id))
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", client_id),

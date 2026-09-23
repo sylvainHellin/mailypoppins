@@ -138,12 +138,16 @@ mod tests {
 
     #[test]
     fn test_build_imap_search_query_single() {
-        let mut criteria = FetchCriteria::default();
-        criteria.from = Some("alice".to_string());
+        let criteria = FetchCriteria {
+            from: Some("alice".to_string()),
+            ..Default::default()
+        };
         assert_eq!(build_imap_search_query(&criteria), "FROM \"alice\"");
 
-        let mut criteria = FetchCriteria::default();
-        criteria.subject = Some("invoice".to_string());
+        let criteria = FetchCriteria {
+            subject: Some("invoice".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             build_imap_search_query(&criteria),
             "SUBJECT \"invoice\""
@@ -152,10 +156,12 @@ mod tests {
 
     #[test]
     fn test_build_imap_search_query_multiple() {
-        let mut criteria = FetchCriteria::default();
-        criteria.from = Some("alice".to_string());
-        criteria.to = Some("bob".to_string());
-        criteria.subject = Some("invoice".to_string());
+        let criteria = FetchCriteria {
+            from: Some("alice".to_string()),
+            to: Some("bob".to_string()),
+            subject: Some("invoice".to_string()),
+            ..Default::default()
+        };
         let query = build_imap_search_query(&criteria);
         assert!(query.contains("FROM \"alice\""));
         assert!(query.contains("TO \"bob\""));
@@ -166,9 +172,11 @@ mod tests {
 
     #[test]
     fn test_build_imap_search_query_date_criteria() {
-        let mut criteria = FetchCriteria::default();
-        criteria.since = Some("2024-12-01".to_string());
-        criteria.before = Some("2024-12-31".to_string());
+        let criteria = FetchCriteria {
+            since: Some("2024-12-01".to_string()),
+            before: Some("2024-12-31".to_string()),
+            ..Default::default()
+        };
         let query = build_imap_search_query(&criteria);
         assert!(query.contains("SINCE 1-Dec-2024"));
         assert!(query.contains("BEFORE 31-Dec-2024"));
@@ -176,8 +184,10 @@ mod tests {
 
     #[test]
     fn test_build_imap_search_query_text() {
-        let mut criteria = FetchCriteria::default();
-        criteria.text = Some("urgent meeting".to_string());
+        let criteria = FetchCriteria {
+            text: Some("urgent meeting".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             build_imap_search_query(&criteria),
             "TEXT \"urgent meeting\""

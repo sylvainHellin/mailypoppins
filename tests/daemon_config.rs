@@ -876,7 +876,7 @@ impl Sandbox {
             .clone();
         accounts
             .iter()
-            .find(|entry| entry["name"] == Value::from(account))
+            .find(|entry| entry["name"] == account)
             .map(|entry| {
                 entry["state"]
                     .as_str()
@@ -1175,7 +1175,7 @@ fn account_of<'a>(get: &'a Value, name: &str) -> &'a Value {
         .as_array()
         .unwrap_or_else(|| panic!("accounts is an array, got {get}"))
         .iter()
-        .find(|account| account["name"] == Value::from(name))
+        .find(|account| account["name"] == name)
         .unwrap_or_else(|| panic!("{name} is configured, got {get}"))
 }
 

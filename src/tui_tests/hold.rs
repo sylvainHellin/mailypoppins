@@ -202,7 +202,7 @@ fn a_hold_status_round_trips_through_the_wire() {
 ///
 /// `send.hold_status` reads a scheduler that is already there, so it is a
 /// [`MethodKind::Query`]. `send.cancel_hold` is one decision committed at once
-/// - the hold is dropped and the draft is left approved - so it is a
+/// (the hold is dropped and the draft is left approved), so it is a
 /// [`MethodKind::Command`] and reports a revision, not an operation that
 /// finishes later. Neither is a second operation: the send's own operation id
 /// is what they address, which is why `send.cancel_hold` takes an

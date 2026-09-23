@@ -614,10 +614,10 @@ fn collect_attachments(
             .headers
             .iter()
             .find(|h| h.get_key().eq_ignore_ascii_case("Content-ID"))
-            .and_then(|h| {
+            .map(|h| {
                 let val = h.get_value();
                 // Strip angle brackets: <id@host> -> id@host
-                Some(val.trim_start_matches('<').trim_end_matches('>').to_string())
+                val.trim_start_matches('<').trim_end_matches('>').to_string()
             });
         if let Ok(content) = parsed.get_body_raw() {
             attachments.push(AttachmentData {

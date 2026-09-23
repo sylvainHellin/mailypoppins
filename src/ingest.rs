@@ -667,7 +667,7 @@ pub fn graph_uid(message_id: &str) -> i64 {
     let digest = Sha256::digest(message_id.as_bytes());
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    (i64::from_be_bytes(bytes) & i64::MAX) as i64
+    i64::from_be_bytes(bytes) & i64::MAX
 }
 
 /// Sortable timestamp for a `Date:` header; `0` when it cannot be parsed, so

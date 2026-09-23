@@ -302,6 +302,10 @@ const UNCONFIGURED_ACCOUNT: &str =
 // The fixture
 // ---------------------------------------------------------------------------
 
+/// The drafts by `<account>/<file>` and the first account's mailbox rows,
+/// as [`Slice::state`] reads them.
+type FixtureState = (BTreeMap<PathBuf, Vec<u8>>, Vec<(String, i64, String)>);
+
 /// A seeded root, a daemon serving it, and the pre-daemon oracle beside it.
 ///
 /// The field order is the drop order: the daemon dies before the directory it
@@ -446,7 +450,7 @@ impl Slice {
     /// Everything a mutation of this fixture can change: the drafts of both
     /// seeded accounts, keyed by `<account>/<file>` because both accounts name
     /// a file `geteilt.md`, and the mailbox contents of the first account.
-    fn state(&self) -> (BTreeMap<PathBuf, Vec<u8>>, Vec<(String, i64, String)>) {
+    fn state(&self) -> FixtureState {
         let mut drafts = BTreeMap::new();
         for account in [fixture::ACCOUNT, fixture::OTHER_ACCOUNT] {
             for (path, bytes) in tree(&fixture::drafts_dir(self.root(), account)) {

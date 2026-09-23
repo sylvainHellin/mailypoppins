@@ -135,7 +135,7 @@ pub fn collect_records(accounts: &[AccountConfig], mailbox_filter: &[String]) ->
             }
         };
         for row in all {
-            if !selected.iter().any(|id| *id == row.mailbox) {
+            if !selected.contains(&row.mailbox) {
                 continue;
             }
             let record = read_record(&store, &account.name, &row);

@@ -183,7 +183,7 @@ fn a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals() {
         )],
     );
 
-    let payload = runtime(&daemon.root().to_path_buf(), |root| async move {
+    let payload = runtime(daemon.root(), |root| async move {
         let mut conn = subscribed(&root).await;
         let deadline = Instant::now() + SETTLE;
         loop {
@@ -362,7 +362,7 @@ async fn subscribed(root: &Path) -> Connection {
 
 /// Run one async body on a runtime of its own, so the file needs no
 /// `#[tokio::test]` on rows that are entirely synchronous.
-fn runtime<T, F, Fut>(root: &std::path::PathBuf, body: F) -> T
+fn runtime<T, F, Fut>(root: &std::path::Path, body: F) -> T
 where
     F: FnOnce(std::path::PathBuf) -> Fut,
     Fut: std::future::Future<Output = T>,
@@ -371,7 +371,7 @@ where
         .enable_all()
         .build()
         .expect("a current-thread runtime")
-        .block_on(body(root.clone()))
+        .block_on(body(root.to_path_buf()))
 }
 
 /// Poll `produce` until it answers, failing the test rather than the suite's

@@ -2112,39 +2112,36 @@ pub struct StatusEntry {
 // ---------------------------------------------------------------------------
 
 pub fn build_mailboxes(config: &mp_core::config::AccountConfig) -> Vec<MailboxInfo> {
-    let mut result = Vec::new();
-
-    result.push(MailboxInfo {
-        label: "Inbox".to_string(),
-        icon: "\u{f0172}",
-        id: MailboxRole::Inbox.as_str().to_string(),
-        kind: MailboxKind::Inbox,
-        server_name: config.mailboxes.inbox.as_ref().map(|m| m.server.clone()),
-    });
-
-    result.push(MailboxInfo {
-        label: "Drafts".to_string(),
-        icon: "\u{f03eb}",
-        id: mp_core::selector::DRAFTS_MAILBOX.to_string(),
-        kind: MailboxKind::Drafts,
-        server_name: None,
-    });
-
-    result.push(MailboxInfo {
-        label: "Sent".to_string(),
-        icon: "\u{f046b}",
-        id: MailboxRole::Sent.as_str().to_string(),
-        kind: MailboxKind::Sent,
-        server_name: config.mailboxes.sent.as_ref().map(|m| m.server.clone()),
-    });
-
-    result.push(MailboxInfo {
-        label: "Archive".to_string(),
-        icon: "\u{f013c}",
-        id: MailboxRole::Archive.as_str().to_string(),
-        kind: MailboxKind::Archive,
-        server_name: config.mailboxes.archive.as_ref().map(|m| m.server.clone()),
-    });
+    let mut result = vec![
+        MailboxInfo {
+            label: "Inbox".to_string(),
+            icon: "\u{f0172}",
+            id: MailboxRole::Inbox.as_str().to_string(),
+            kind: MailboxKind::Inbox,
+            server_name: config.mailboxes.inbox.as_ref().map(|m| m.server.clone()),
+        },
+        MailboxInfo {
+            label: "Drafts".to_string(),
+            icon: "\u{f03eb}",
+            id: mp_core::selector::DRAFTS_MAILBOX.to_string(),
+            kind: MailboxKind::Drafts,
+            server_name: None,
+        },
+        MailboxInfo {
+            label: "Sent".to_string(),
+            icon: "\u{f046b}",
+            id: MailboxRole::Sent.as_str().to_string(),
+            kind: MailboxKind::Sent,
+            server_name: config.mailboxes.sent.as_ref().map(|m| m.server.clone()),
+        },
+        MailboxInfo {
+            label: "Archive".to_string(),
+            icon: "\u{f013c}",
+            id: MailboxRole::Archive.as_str().to_string(),
+            kind: MailboxKind::Archive,
+            server_name: config.mailboxes.archive.as_ref().map(|m| m.server.clone()),
+        },
+    ];
 
     if let Some(ref extras) = config.mailboxes.extra {
         for m in extras {

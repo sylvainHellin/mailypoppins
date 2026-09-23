@@ -1881,10 +1881,7 @@ impl App {
     }
 
     fn handle_dir_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
-        let picker = match self.dir_picker_mut() {
-            Some(p) => p,
-            None => return None,
-        };
+        let picker = self.dir_picker_mut()?;
 
         match picker.mode {
             DirPickerMode::Zoxide => match key.code {
