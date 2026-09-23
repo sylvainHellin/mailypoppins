@@ -307,6 +307,46 @@ fn the_send_family_serves_the_hold() {
 // 2. One countdown, two clients, either may cancel
 // ---------------------------------------------------------------------------
 
+/// `operation.cancel` on a held send stops the send, not only the operation:
+/// before the fix it settled the operation as cancelled and left the hold
+/// armed, so the mail still went out at the deadline.
+#[test]
+fn operation_cancel_on_a_held_send_stops_the_send() {
+    let tmp = tempfile::tempdir().expect("a temporary hold root");
+    let root = tmp.path();
+    seed(root, HOLD_SECS);
+    let log = fixture::transport_log(root);
+    let daemon = DaemonFixture::start_with(
+        root,
+        None,
+        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
+    );
+
+    let kinds = block_on(async {
+        let mut a = tui_client(root).await;
+        let operation = send_held(&mut a, fixture::ACCOUNT, fixture::APPROVED).await;
+        await_kind(&mut a, "send.hold_started").await;
+        a.call("operation.cancel", json!({ "operation_id": operation }))
+            .await
+            .expect("a held send's operation may be cancelled");
+        await_kind(&mut a, "send.hold_cancelled").await;
+        tokio::time::sleep(past_the_window()).await;
+        hold_kinds_so_far(&mut a).await
+    });
+
+    assert!(
+        !kinds.iter().any(|kind| kind == "send.hold_fired"),
+        "a cancelled hold never fires: {kinds:?}"
+    );
+    let events = fixture::transport_events(&log);
+    assert!(
+        draft_submissions(&events).is_empty(),
+        "nothing reached the transport: {events:?}"
+    );
+
+    daemon.stop();
+}
+
 /// A sends with a hold, B sees the countdown and cancels it: nothing is sent
 /// and the draft stays approved.
 ///

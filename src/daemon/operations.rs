@@ -705,6 +705,9 @@ pub struct OperationCancelMethod {
     pub registry: Arc<OperationRegistry>,
     /// The state whose revisions the fan-out stamps events with.
     pub canonical: Arc<CanonicalState>,
+    /// The undo-send holds: a held send is cancelled through its hold, the
+    /// way `send.cancel_hold` does it, or its timer would still fire.
+    pub holds: Arc<super::hold::HoldScheduler>,
 }
 
 impl Method for OperationCancelMethod {
@@ -720,7 +723,11 @@ impl Method for OperationCancelMethod {
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
         Box::pin(async move {
             let id = operation_id(&params)?;
-            self.registry.cancel(&id)?;
+            // A held send: dropping the hold settles the operation as
+            // cancelled too, and nothing is left to fire at the deadline.
+            if !self.holds.cancel(&self.canonical, &self.registry, &id) {
+                self.registry.cancel(&id)?;
+            }
             Ok(Outcome::command(
                 json!({"operation_id": id.as_str(), "state": OperationState::Cancelled.as_str()}),
                 self.canonical.revision().get(),

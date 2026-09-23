@@ -47,6 +47,7 @@ use mp_protocol::events::{
 use mp_protocol::send::{HoldListing, HoldStatus};
 use serde_json::{json, Value};
 
+use super::dispatch::CancelToken;
 use super::operations::{OperationId, OperationRegistry};
 use super::state::events::Event;
 use super::state::CanonicalState;
@@ -206,6 +207,17 @@ impl HoldScheduler {
         true
     }
 
+    /// Drop one hold whose operation was already settled as cancelled some
+    /// other way, publishing its `send.hold_cancelled` so no client keeps
+    /// showing it. `false` when it was already gone.
+    fn withdraw(&self, canonical: &CanonicalState, id: &OperationId) -> bool {
+        let Some(status) = self.take(id).map(ended) else {
+            return false;
+        };
+        publish(canonical, KIND_SEND_HOLD_CANCELLED, &status);
+        true
+    }
+
     /// Cancel every hold, which is the last client leaving.
     ///
     /// Answers how many went, for the log line: a daemon that cancelled a send
@@ -259,11 +271,16 @@ fn ended(hold: Armed) -> HoldStatus {
 /// last tick would disagree with the fire. Every wake re-reads the map, so a
 /// cancelled hold stops the countdown at the next second at the latest and
 /// stops the send always.
+///
+/// `token` is the held operation's own: an operation cancelled through the
+/// registry rather than through the scheduler (a disconnect, a stray
+/// `operation.cancel`) never reaches the fire either.
 pub async fn run_held<F: std::future::Future<Output = ()>>(
     scheduler: Arc<HoldScheduler>,
     canonical: Arc<CanonicalState>,
     id: OperationId,
     hold_secs: u64,
+    token: CancelToken,
     work: F,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(hold_secs);
@@ -276,10 +293,18 @@ pub async fn run_held<F: std::future::Future<Output = ()>>(
         // The instant the remainder becomes `left - 1`, which is when the next
         // tick is due.
         tokio::time::sleep_until(deadline - Duration::from_secs(left - 1)).await;
+        if token.is_cancelled() {
+            scheduler.withdraw(&canonical, &id);
+            return;
+        }
         match scheduler.status(&id) {
             Some(status) => publish(&canonical, KIND_SEND_HOLD_TICK, &status),
             None => return,
         }
+    }
+    if token.is_cancelled() {
+        scheduler.withdraw(&canonical, &id);
+        return;
     }
     if scheduler.fire(&canonical, &id).is_none() {
         return;

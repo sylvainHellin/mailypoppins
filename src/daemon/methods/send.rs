@@ -210,11 +210,13 @@ impl Method for SendMethod {
                     // called the instant after this answer already sees it.
                     self.holds
                         .arm(&self.canonical, &id, &account, ctx.kind.as_str(), &plan);
+                    let token = handle.token.clone();
                     tokio::spawn(super::super::hold::run_held(
                         Arc::clone(&self.holds),
                         Arc::clone(&self.canonical),
                         id.clone(),
                         plan.hold_secs,
+                        token,
                         run(*work, handle),
                     ));
                     Ok(Outcome::query(

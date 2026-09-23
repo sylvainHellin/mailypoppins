@@ -137,7 +137,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&config),
         Arc::clone(&canonical),
         Arc::clone(&operations),
-        holds,
+        Arc::clone(&holds),
     );
     self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
@@ -168,6 +168,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     dispatcher.register(Arc::new(OperationCancelMethod {
         registry: Arc::clone(&operations),
         canonical,
+        holds,
     }));
     if fake_operations() {
         dispatcher.register(Arc::new(TestOperation {
