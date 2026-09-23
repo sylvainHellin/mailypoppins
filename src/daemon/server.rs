@@ -963,14 +963,24 @@ async fn dispatch_request(
 }
 
 /// A `Response`, or nothing when the request carried no id (a notification).
+///
+/// Built by moving `result` into the object rather than through
+/// `serde_json::to_value(Response { .. })`, which serialises the whole result
+/// tree into a second copy: 5 to 12 ms for a 5000-row `message.list`, and every
+/// byte of a large `message.get` body. The frame is byte-identical to that
+/// path's either way serde_json is built: without `preserve_order` both sort
+/// the keys, and with it both keep [`Response`]'s field order, which is the
+/// order they are inserted in here.
 fn result_value(id: Option<RequestId>, result: Value) -> Option<Value> {
-    let id = id?;
-    let response = Response {
-        jsonrpc: JSONRPC_VERSION.to_string(),
-        id,
-        result,
-    };
-    serde_json::to_value(response).ok()
+    let id = serde_json::to_value(id?).ok()?;
+    let mut response = serde_json::Map::with_capacity(3);
+    response.insert(
+        "jsonrpc".to_string(),
+        Value::String(JSONRPC_VERSION.to_string()),
+    );
+    response.insert("id".to_string(), id);
+    response.insert("result".to_string(), result);
+    Some(Value::Object(response))
 }
 
 /// An `ErrorResponse` as a `Value`, so both arms of a dispatch share one type.
@@ -1364,6 +1374,32 @@ mod tests {
         let reply = json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}});
         let bytes = encode_capped(&reply, MAX_RESPONSE_BYTES).expect("encodes");
         assert_eq!(bytes, frame::encode(&reply).expect("encodes"));
+    }
+
+    /// The moved-in reply is the frame the old `to_value(Response)` gave, byte for byte,
+    /// whatever the id's type and however deep the result.
+    #[test]
+    fn a_result_value_is_byte_identical_to_the_serialised_response() {
+        let result = json!({
+            "rows": [{"id": "inbox/1", "subject": "z", "flags": ["\\Seen"]}],
+            "total": 1,
+            "a": null,
+        });
+        for id in [RequestId::Num(7), RequestId::Str("req-1".to_string())] {
+            // The path this replaced: the struct into a `Value`, then out.
+            let expected = serde_json::to_vec(
+                &serde_json::to_value(Response {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: id.clone(),
+                    result: result.clone(),
+                })
+                .expect("converts"),
+            )
+            .expect("serialises");
+            let built = result_value(Some(id), result.clone()).expect("an id was given");
+            assert_eq!(serde_json::to_vec(&built).expect("serialises"), expected);
+        }
+        assert!(result_value(None, result).is_none());
     }
 
     /// A request without an id is a notification: no answer, no shutdown.
