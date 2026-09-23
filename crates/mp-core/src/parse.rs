@@ -730,15 +730,36 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))
 }
 
-/// Open a file with the system default application (macOS `open`).
-pub fn open_file_with_system(path: &Path) -> Result<()> {
-    let status = std::process::Command::new("open")
-        .arg(path)
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run 'open': {e}"))?;
-    if !status.success() {
-        anyhow::bail!("'open' exited with status {}", status);
+/// The desktop's "open with the default application" command: `open` on
+/// macOS, `xdg-open` everywhere else (Linux, the BSDs).
+fn system_opener() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
     }
+}
+
+/// Open a file with the system default application.
+///
+/// The opener is spawned, never waited on in the caller: the TUI calls this
+/// from its draw loop, which must not block on a viewer, and every stdio is
+/// null so nothing the opener or the viewer prints lands on a raw-mode
+/// screen. A detached thread reaps the child so it does not linger as a
+/// zombie. Only a failure to start the opener is reported.
+pub fn open_file_with_system(path: &Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let opener = system_opener();
+    let mut child = Command::new(opener)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to run '{opener}': {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -1133,6 +1154,16 @@ fn collect_inline_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_opener_matches_the_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(system_opener(), expected);
+    }
 
     #[test]
     fn extract_email_address_ignores_a_gt_in_the_display_name() {

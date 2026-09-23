@@ -119,9 +119,10 @@
 //! absolute path is what crosses the socket, not what reaches the user.
 //!
 //! **`mp open` launches the opener in the client.** `parse::open_file_with_system`
-//! runs the bare command `open`, resolved through `PATH`, and that resolution
-//! is the hook this file tests through: [`fixture::opener_env`] puts a
-//! recording `open` first on the client's `PATH`. It needs no new environment
+//! spawns the bare command `open` (macOS) or `xdg-open`, resolved through
+//! `PATH`, and that resolution is the hook this file tests through:
+//! [`fixture::opener_env`] puts a recording script under both names first on
+//! the client's `PATH`, and [`fixture::wait_opened`] waits out the spawn. It needs no new environment
 //! variable, the pre-daemon binary honours it too, and it is what keeps a test
 //! run from launching `xdg-open` on a developer's desktop. P4-U8 must keep the
 //! launch in the client and keep it going through that helper.
@@ -1519,11 +1520,11 @@ fn mp_open_hands_the_same_files_to_the_client_side_opener() {
 
     fixture::clear_opened(slice.root());
     let routed = slice.opening(true, &args);
-    let routed_opened = fixture::opened_paths(slice.root());
+    let routed_opened = fixture::wait_opened(slice.root(), fixture::ATTACHMENT_FILES.len());
 
     fixture::clear_opened(slice.root());
     let direct = slice.opening(false, &args);
-    let direct_opened = fixture::opened_paths(slice.root());
+    let direct_opened = fixture::wait_opened(slice.root(), fixture::ATTACHMENT_FILES.len());
 
     assert_eq!(routed.status.code(), Some(0));
     assert_eq!(

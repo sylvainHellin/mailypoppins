@@ -238,17 +238,21 @@ pub fn opener_log(root: &Path) -> PathBuf {
 pub fn opener_env(root: &Path) -> (String, PathBuf) {
     let dir = opener_dir(root);
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-    let script = dir.join("open");
-    fs::write(
-        &script,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$MP_OPEN_LOG\"\n",
-    )
-    .unwrap_or_else(|e| panic!("write {}: {e}", script.display()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|e| panic!("chmod {}: {e}", script.display()));
+    // Both names: `open` is what a macOS build (and the pre-daemon oracle)
+    // runs, `xdg-open` what any other build runs.
+    for name in ["open", "xdg-open"] {
+        let script = dir.join(name);
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$MP_OPEN_LOG\"\n",
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", script.display()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700))
+                .unwrap_or_else(|e| panic!("chmod {}: {e}", script.display()));
+        }
     }
     let inherited = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{inherited}", dir.display());
@@ -265,6 +269,28 @@ pub fn opened_paths(root: &Path) -> Vec<PathBuf> {
             .collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// Wait for `expected` recorded calls and return them in the message's
+/// attachment order.
+///
+/// The opener is spawned and never waited on, so `mp open` can exit before a
+/// recording script has written its line, and two scripts race each other for
+/// the log. The order `mp open` handed the files over in is what its stdout
+/// shows; the log only says which files arrived.
+pub fn wait_opened(root: &Path, expected: usize) -> Vec<PathBuf> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut paths = opened_paths(root);
+    while paths.len() < expected && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        paths = opened_paths(root);
+    }
+    paths.sort_by_key(|path| {
+        ATTACHMENT_FILES
+            .iter()
+            .position(|(name, _)| path.file_name() == Some(std::ffi::OsStr::new(name)))
+    });
+    paths
 }
 
 /// Forget every recorded call, so one test can make two assertions.
