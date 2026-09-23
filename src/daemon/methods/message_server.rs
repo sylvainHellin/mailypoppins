@@ -604,7 +604,8 @@ async fn search_imap(
         || host.ends_with("googlemail.com");
     let (imap_search, attachment_postfilter) = if gmail {
         (
-            crate::search::to_gmail_search_command(&request.parsed),
+            crate::search::to_gmail_search_command(&request.parsed)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
             false,
         )
     } else {

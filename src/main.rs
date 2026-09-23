@@ -3770,7 +3770,11 @@ async fn main() -> Result<()> {
                     || host_lc.ends_with(".gmail.com")
                     || host_lc.ends_with("googlemail.com");
                 let (imap_search, attachment_postfilter) = if gmail {
-                    (mailypoppins::search::to_gmail_search_command(&query_ast), false)
+                    (
+                        mailypoppins::search::to_gmail_search_command(&query_ast)
+                            .map_err(|e| anyhow!("{e}"))?,
+                        false,
+                    )
                 } else {
                     let r = mailypoppins::search::to_imap(&query_ast)
                         .map_err(|e| anyhow!("{e}"))?;

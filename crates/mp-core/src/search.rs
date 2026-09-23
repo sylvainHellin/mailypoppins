@@ -760,9 +760,10 @@ pub fn to_gmail(q: &Query) -> String {
     parts.join(" ")
 }
 
-/// The full `X-GM-RAW "..."` IMAP search command for a Gmail query.
-pub fn to_gmail_search_command(q: &Query) -> String {
-    format!("X-GM-RAW \"{}\"", imap_quote(&to_gmail(q)))
+/// The full `X-GM-RAW "..."` IMAP search command for a Gmail query, refused
+/// when a value carries a line break or a NUL (the same rule as `to_imap`).
+pub fn to_gmail_search_command(q: &Query) -> Result<String, RenderError> {
+    Ok(format!("X-GM-RAW \"{}\"", imap_quote_checked(&to_gmail(q))?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,7 +1267,7 @@ mod tests {
     #[test]
     fn gmail_search_command_is_wrapped_and_escaped() {
         assert_eq!(
-            to_gmail_search_command(&q("has:attachment")),
+            to_gmail_search_command(&q("has:attachment")).unwrap(),
             "X-GM-RAW \"has:attachment\""
         );
     }
@@ -1284,6 +1285,8 @@ mod tests {
         assert!(to_imap(&with("x\nY")).is_err());
         assert!(to_imap(&with("x\0y")).is_err());
         assert!(to_imap(&with("plain")).is_ok());
+        assert!(to_gmail_search_command(&with("x\r\nA1 DELETE Trash")).is_err());
+        assert!(to_gmail_search_command(&with("plain")).is_ok());
     }
 
     /// Repeated date terms all narrow, as `to_imap` sends them all: the
