@@ -80,7 +80,7 @@ pub fn token_cache_path(account_name: &str) -> PathBuf {
 
 fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
     let dir = crate::config::tokens_dir();
-    fs::create_dir_all(&dir)
+    crate::config::create_private_dir_all(&dir)
         .with_context(|| format!("Failed to create token cache dir: {}", dir.display()))?;
     let path = token_cache_path(account_name);
     let json = serde_json::to_vec(cache).context("Failed to serialize token cache")?;

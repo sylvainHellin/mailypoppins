@@ -608,7 +608,7 @@ pub async fn start(timeout: Duration) -> Result<i32> {
 fn spawn_detached() -> Result<Child> {
     let exe = std::env::current_exe().context("resolving this executable")?;
     let logs = crate::config::logs_dir();
-    fs::create_dir_all(&logs)
+    crate::config::create_private_dir_all(&logs)
         .with_context(|| format!("creating the log directory {}", logs.display()))?;
     let log_path = daemon_log_path();
     let out = File::options()

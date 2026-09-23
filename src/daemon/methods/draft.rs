@@ -451,7 +451,7 @@ fn create(
     };
 
     let dir = crate::config::drafts_dir(&account.name);
-    std::fs::create_dir_all(&dir)
+    crate::config::create_private_dir_all(&dir)
         .map_err(|e| internal(format!("creating {}: {e}", dir.display())))?;
     let path = dir.join(&file_name);
     if path.exists() {

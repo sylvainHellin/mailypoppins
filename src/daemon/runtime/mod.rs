@@ -97,7 +97,8 @@ pub fn instance_path() -> PathBuf {
 /// because the socket and the instance metadata inside it are user-only.
 pub fn ensure_runtime_dir() -> Result<PathBuf> {
     let dir = runtime_dir();
-    fs::create_dir_all(&dir)
+    // The private helper, so a data root this call creates is 0700 as well.
+    crate::config::create_private_dir_all(&dir)
         .with_context(|| format!("creating the daemon runtime directory {}", dir.display()))?;
 
     let mode = fs::metadata(&dir)

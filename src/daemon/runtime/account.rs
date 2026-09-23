@@ -286,7 +286,7 @@ impl AccountRuntime {
     /// environment resolves.
     pub fn start(cfg: AccountConfig, pool_size: usize) -> Result<Self> {
         let dir = crate::config::account_dir(&cfg.name);
-        std::fs::create_dir_all(&dir)
+        crate::config::create_private_dir_all(&dir)
             .with_context(|| format!("creating the account directory {}", dir.display()))?;
         Self::start_at(&dir, cfg, pool_size)
     }

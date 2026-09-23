@@ -370,7 +370,7 @@ fn write_service(target: Target, path: &Path, content: &str) -> Result<()> {
     }
     if target == Target::Darwin {
         let logs = crate::config::logs_dir();
-        fs::create_dir_all(&logs)
+        crate::config::create_private_dir_all(&logs)
             .with_context(|| format!("creating the log directory {}", logs.display()))?;
     }
     fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;

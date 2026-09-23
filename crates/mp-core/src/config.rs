@@ -1137,6 +1137,53 @@ pub fn mailypoppins_data_dir() -> PathBuf {
         })
 }
 
+/// `fs::create_dir_all` for a directory under the data dir, owner-only.
+///
+/// The data dir holds every message, token and log line, so the umask's usual
+/// 0755 would let any other local user read the mail through a 0755 home.
+/// Missing components are created 0700 and an existing `path` found wider than
+/// 0700 is tightened to it, like the daemon's runtime dir. When `path` lies
+/// inside [`mailypoppins_data_dir`], every existing directory between it and
+/// the data dir root (inclusive) is tightened too, best-effort, so an install
+/// created under the old umask-only rule is repaired by its next write rather
+/// than only its newest leaf. Files are left as they are. Off unix this is
+/// plain `create_dir_all`.
+pub fn create_private_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        fn tighten(dir: &Path) -> std::io::Result<()> {
+            let mode = fs::metadata(dir)?.permissions().mode() & 0o7777;
+            if mode & 0o077 != 0 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+                debug!("tightened {} from {mode:04o} to 0700", dir.display());
+            }
+            Ok(())
+        }
+
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+        tighten(path)?;
+        let root = mailypoppins_data_dir();
+        if path != root && path.starts_with(&root) {
+            for dir in path.ancestors().skip(1) {
+                if let Err(e) = tighten(dir) {
+                    debug!("could not tighten {}: {e}", dir.display());
+                }
+                if dir == root {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)
+    }
+}
+
 /// `<data_dir>/accounts/<account_name>/`
 pub fn account_dir(account_name: &str) -> PathBuf {
     mailypoppins_data_dir().join("accounts").join(account_name)
@@ -1375,7 +1422,7 @@ pub fn default_account(config: &GlobalConfig) -> Option<&AccountConfig> {
 /// Non-fatal: prints a warning and continues if setup fails.
 pub fn init_logging() {
     let log_dir = logs_dir();
-    if let Err(e) = fs::create_dir_all(&log_dir) {
+    if let Err(e) = create_private_dir_all(&log_dir) {
         eprintln!(
             "{} Could not create log directory {}: {}",
             "⚠".yellow(),

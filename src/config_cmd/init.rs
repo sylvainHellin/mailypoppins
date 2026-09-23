@@ -26,7 +26,7 @@ use super::helpers::{
 /// each line says so.
 pub(super) fn print_account_data_paths(account_name: &str) {
     let acct_dir = account_dir(account_name);
-    if let Err(e) = fs::create_dir_all(&acct_dir) {
+    if let Err(e) = crate::config::create_private_dir_all(&acct_dir) {
         println!(
             "{} could not create {}: {e}",
             "\u{26a0}".yellow(),

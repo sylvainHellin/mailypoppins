@@ -75,7 +75,7 @@ impl AppState {
     pub fn save(&self) -> Result<()> {
         let path = state_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
+            crate::config::create_private_dir_all(parent)
                 .with_context(|| format!("creating state directory at {}", parent.display()))?;
         }
         let data = serde_json::to_string_pretty(self)?;

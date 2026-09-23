@@ -113,7 +113,7 @@ impl EngineLock {
     /// [`crate::config::account_dir`] creates for every configured account.
     pub fn try_acquire(account: &str) -> Result<Option<Self>> {
         let dir = crate::config::account_dir(account);
-        std::fs::create_dir_all(&dir)
+        crate::config::create_private_dir_all(&dir)
             .with_context(|| format!("creating the account directory for {account}"))?;
         Self::try_acquire_at(&dir.join("store.lock"), account)
     }
@@ -129,7 +129,7 @@ impl EngineLock {
     /// - is anybody running a pass over this account - one pass at a time.
     pub fn take_turn(account: &str) -> Result<Option<Self>> {
         let dir = crate::config::account_dir(account);
-        std::fs::create_dir_all(&dir)
+        crate::config::create_private_dir_all(&dir)
             .with_context(|| format!("creating the account directory for {account}"))?;
         Self::take_turn_at(&dir.join("store.lock"), account)
     }

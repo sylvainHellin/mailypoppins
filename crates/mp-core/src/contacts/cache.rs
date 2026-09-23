@@ -108,7 +108,7 @@ fn cached_count(account_root: &Path) -> usize {
 pub fn save_cache(account_root: &Path, index: &ContactIndex) -> Result<()> {
     let path = cache_path(account_root);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        crate::config::create_private_dir_all(parent)
             .with_context(|| format!("creating cache directory at {}", parent.display()))?;
     }
     let data = serde_json::to_string_pretty(index)?;

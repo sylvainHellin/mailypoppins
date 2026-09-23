@@ -320,7 +320,7 @@ pub fn source_from_fetched(
     let attachments = match (with_attachments, fetched.message_id.as_deref()) {
         (true, Some(message_id)) if !fetched.attachments.is_empty() => {
             let dest = stable_attachments_dir(account_dir, message_id);
-            fs::create_dir_all(&dest)
+            crate::config::create_private_dir_all(&dest)
                 .with_context(|| format!("creating {}", dest.display()))?;
             let mut written = Vec::new();
             for att in &fetched.attachments {
@@ -516,7 +516,9 @@ pub fn create_reply_draft_from(
 
     // Determine output path
     let output_dir = drafts_dir.unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(output_dir)?;
+    if let Some(dir) = drafts_dir {
+        crate::config::create_private_dir_all(dir)?;
+    }
     let date_prefix = Utc::now().format("%Y-%m-%d-%H%M").to_string();
     let sender_slug = slugify_sender(&inbox.from);
     let subject_slug = slugify_subject(&reply_subject);
@@ -645,7 +647,9 @@ pub fn create_forward_draft_from(
 
     // Determine output path
     let output_dir = drafts_dir.unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(output_dir)?;
+    if let Some(dir) = drafts_dir {
+        crate::config::create_private_dir_all(dir)?;
+    }
     let date_prefix = Utc::now().format("%Y-%m-%d-%H%M").to_string();
     let sender_slug = slugify_sender(&inbox.from);
     let subject_slug = slugify_subject(&fwd_subject);

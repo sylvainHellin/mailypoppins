@@ -142,7 +142,7 @@ impl BlobStore {
         let dir = final_path
             .parent()
             .ok_or_else(|| anyhow!("blob path {} has no parent", final_path.display()))?;
-        fs::create_dir_all(dir)
+        crate::config::create_private_dir_all(dir)
             .with_context(|| format!("creating blob directory {}", dir.display()))?;
 
         let tmp = dir.join(format!(

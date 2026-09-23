@@ -92,7 +92,7 @@ impl Store {
         let mut span = TimingSpan::with_context("store_open", path.display().to_string());
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
+            crate::config::create_private_dir_all(parent)
                 .with_context(|| format!("creating store directory {}", parent.display()))?;
         }
 
@@ -392,6 +392,41 @@ mod tests {
             "INSERT INTO messages (account, mailbox, uid, message_id) VALUES (?1, ?2, ?3, ?4)",
             (account, mailbox, uid, message_id),
         )
+    }
+
+    /// Every directory a store and its blobs create under the data dir is
+    /// owner-only, and a data root left 0755 by an older build is tightened
+    /// by the next open, so another local user cannot read the mail.
+    #[cfg(unix)]
+    #[test]
+    fn the_data_dir_tree_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let _data = crate::config::test_env::DataDirOverride::set(&root);
+
+        let _store = Store::open_account("alpha").unwrap();
+        super::blobs::BlobStore::for_account("alpha").write(b"hello").unwrap();
+        crate::config::create_private_dir_all(crate::config::tokens_dir()).unwrap();
+
+        let mut dirs = vec![root.clone()];
+        let mut seen = 0;
+        while let Some(dir) = dirs.pop() {
+            let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{} is {:04o}", dir.display(), mode & 0o7777);
+            seen += 1;
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                }
+            }
+        }
+        // data, accounts, alpha, blobs, the two fan-out levels, tokens.
+        assert!(seen >= 7, "only {seen} directories were created");
     }
 
     #[test]
