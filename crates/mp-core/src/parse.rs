@@ -904,9 +904,11 @@ pub fn slugify_sender(from: &str) -> String {
 }
 
 pub fn extract_email_address(raw: &str) -> String {
+    // `>` is searched only after the `<`: a display name may carry one of its
+    // own (`"Alerts > Prod" <a@x>`), and slicing to it would run backwards.
     if let Some(start) = raw.find('<') {
-        if let Some(end) = raw.find('>') {
-            return raw[start + 1..end].trim().to_string();
+        if let Some(len) = raw[start + 1..].find('>') {
+            return raw[start + 1..start + 1 + len].trim().to_string();
         }
     }
     raw.trim().to_string()
@@ -1131,6 +1133,17 @@ fn collect_inline_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_email_address_ignores_a_gt_in_the_display_name() {
+        assert_eq!(extract_email_address(r#""A > B" <a@x>"#), "a@x");
+        assert_eq!(
+            extract_email_address(r#""Alerts > Prod" <alerts@x.com>"#),
+            "alerts@x.com"
+        );
+        assert_eq!(extract_email_address("plain@x.com"), "plain@x.com");
+        assert_eq!(extract_email_address("broken <a@x"), "broken <a@x");
+    }
 
     // -----------------------------------------------------------------------
     // looks_like_html / html_to_markdown (signature conversion)
