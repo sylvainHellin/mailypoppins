@@ -1079,6 +1079,13 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 /// That matters because the values are header-derived: mailparse decodes RFC
 /// 2047 encoded-words, so a Subject can carry a real newline, and written raw
 /// it would open new top-level keys (`bcc:`, `attachments:`) in the draft.
+/// YAML 1.2 `c-printable`: the characters a YAML stream may carry raw.
+fn yaml_printable(c: char) -> bool {
+    matches!(c,
+        '\t' | '\n' | '\r' | '\u{20}'..='\u{7e}' | '\u{85}'
+        | '\u{a0}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+}
+
 fn yaml_dq_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -1092,8 +1099,21 @@ fn yaml_dq_escape(s: &str) -> String {
             c if (c as u32) < 0x20 || ('\u{7f}'..='\u{9f}').contains(&c) => {
                 out.push_str(&format!("\\x{:02x}", c as u32));
             }
+            // Line separators and the BOM are printable but a reader may
+            // break or strip on them.
             '\u{2028}' | '\u{2029}' | '\u{feff}' => {
                 out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            // Anything else outside YAML 1.2 `c-printable` (U+FFFE, U+FFFF)
+            // is rejected by the reader, so a raw one would make the whole
+            // draft unreadable.
+            c if !yaml_printable(c) => {
+                let n = c as u32;
+                if n <= 0xffff {
+                    out.push_str(&format!("\\u{n:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{n:08x}"));
+                }
             }
             c => out.push(c),
         }
@@ -2749,6 +2769,37 @@ mod tests {
                 "{reply_to}"
             );
         }
+    }
+
+    #[test]
+    fn non_printable_subject_characters_round_trip() {
+        // `=?utf-8?b?77++?=` decodes to U+FFFE, outside YAML `c-printable`.
+        // `gray_matter`'s reader lets it through raw, a strict one (libyaml,
+        // behind `serde_yaml`) refuses the whole block, so both are checked.
+        let strict = |path: &Path| {
+            let raw = fs::read_to_string(path).unwrap();
+            let block: String =
+                raw.lines().skip(1).take_while(|l| *l != "---").map(|l| format!("{l}\n")).collect();
+            let value: serde_yaml::Value = serde_yaml::from_str(&block).unwrap();
+            value["subject"].as_str().unwrap().to_string()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            from: "a@x.com".into(),
+            subject: "odd \u{fffe} and \u{ffff} end".into(),
+            ..Default::default()
+        };
+        let reply =
+            create_reply_draft_from(&source, false, "me@example.com", Some(tmp.path()), None)
+                .unwrap();
+        let draft = parse_email_draft(&reply).unwrap();
+        assert_eq!(draft.frontmatter.subject, "Re: odd \u{fffe} and \u{ffff} end");
+        assert_eq!(strict(&reply), draft.frontmatter.subject);
+        let forward =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        let draft = parse_email_draft(&forward).unwrap();
+        assert_eq!(draft.frontmatter.subject, "Fwd: odd \u{fffe} and \u{ffff} end");
+        assert_eq!(strict(&forward), draft.frontmatter.subject);
     }
 
     #[test]
