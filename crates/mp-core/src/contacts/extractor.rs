@@ -116,16 +116,17 @@ fn flatten_addr(info: &mailparse::MailAddr) -> Vec<(String, String)> {
     }
 }
 
-/// Convert common email date formats to RFC-3339. Returns `None` if parsing fails.
+/// Convert common email date formats to RFC-3339 in UTC. Returns `None` if
+/// parsing fails.
+///
+/// Normalised to UTC because `first_seen` and `last_seen` are compared as
+/// strings, which orders instants only when they share an offset.
 #[doc(hidden)]
 pub fn parse_date_to_rfc3339(s: &str) -> Option<String> {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Some(dt.to_rfc3339());
-    }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(s) {
-        return Some(dt.to_rfc3339());
-    }
-    None
+    let parsed = chrono::DateTime::parse_from_rfc3339(s)
+        .or_else(|_| chrono::DateTime::parse_from_rfc2822(s))
+        .ok()?;
+    Some(parsed.with_timezone(&Utc).to_rfc3339())
 }
 
 /// Incremental update: merge a batch of address observations into an existing
@@ -182,6 +183,29 @@ mod tests {
             contacts: HashMap::new(),
             built_at: Utc::now().to_rfc3339(),
         }
+    }
+
+    /// Dates from senders in different offsets order by instant: 20:00 at
+    /// -08:00 is later than 01:00 at +00:00 the next day, so it is the last
+    /// sighting and its display name wins.
+    #[test]
+    fn sightings_order_by_instant_across_offsets() {
+        let mut index = empty_index();
+        let pacific = parse_date_to_rfc3339("2026-01-01T20:00:00-08:00").unwrap();
+        let utc = parse_date_to_rfc3339("2026-01-02T01:00:00+00:00").unwrap();
+        for (name, at) in [("Pacific Alice", &pacific), ("Utc Alice", &utc)] {
+            observe(
+                &mut index,
+                "me@example.com",
+                &[(ObservedIn::Inbox, &format!("{name} <alice@example.com>"))],
+                at,
+            )
+            .unwrap();
+        }
+        let alice = &index.contacts["alice@example.com"];
+        assert_eq!(alice.last_seen, pacific);
+        assert_eq!(alice.first_seen, utc);
+        assert_eq!(alice.display_name, "Pacific Alice");
     }
 
     #[test]
