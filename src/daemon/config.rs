@@ -551,17 +551,15 @@ pub async fn start_account(
                     }
                 }
             };
-            runtimes.insert(Arc::new(runtime));
-            // The watch the TUI used to run per client (P5-U8), started after
-            // the table holds the runtime so its first round cannot find
-            // nothing there and stop. A blocked runtime does not watch: the
-            // engine holding the lock is watching the same mailbox.
+            let runtime = Arc::new(runtime);
+            runtimes.insert(Arc::clone(&runtime));
+            // The watch the TUI used to run per client (P5-U8), bound to this
+            // runtime rather than to the account's name, so the swap that
+            // replaces it stops this watcher and leaves the replacement's. A
+            // blocked runtime does not watch: the engine holding the lock is
+            // watching the same mailbox.
             if ready {
-                super::runtime::watcher::spawn(
-                    Arc::clone(runtimes),
-                    Arc::clone(canonical),
-                    cfg_for_watch,
-                );
+                super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);
             }
             change
         }

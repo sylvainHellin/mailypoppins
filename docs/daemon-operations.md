@@ -357,6 +357,7 @@ A ready runtime watches its account's server, which is what the TUI used to do p
 An IMAP account holds a 300-second IDLE round on INBOX and renews it; a Graph account enumerates the inbox every 60 seconds and compares the *set* of ids, because one arrival plus one archive inside a minute leaves the count unchanged.
 A round that sees the mailbox move runs one quick tick, which publishes `sync.completed` with the arrivals it ingested and one count change per mailbox whose totals moved; a round that fails backs off from 30 seconds to 5 minutes and says so in the log.
 A blocked runtime does not watch: the engine holding the lock is watching the same mailbox.
+A watcher belongs to the runtime it was spawned for, never to the account's name, and stops the moment that runtime is retired or dropped, mid-round included, so a swap that changes an account leaves exactly one watcher and one IDLE connection, the replacement's.
 This is a watch and not a scheduler - it reacts to a server saying something changed - and a periodic tick that keeps a store fresh with no client anywhere is **not built**: the plan put it in Phase 5/6 and neither phase built one, so it is a `BACKLOG.md` item rather than a phase's.
 
 ### The engine lock

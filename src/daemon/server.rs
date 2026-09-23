@@ -448,11 +448,23 @@ pub async fn tick_and_commit(
     kind: TickKind,
 ) -> Option<TickOutcome> {
     let runtime = runtimes.get(account)?;
+    Some(commit_tick(&runtime, canonical, kind).await)
+}
+
+/// [`tick_and_commit`] on a runtime the caller already holds.
+///
+/// The account watcher's entry point: it ticks the runtime it was spawned for,
+/// never whichever runtime the account's name resolves to now.
+pub async fn commit_tick(
+    runtime: &AccountRuntime,
+    canonical: &CanonicalState,
+    kind: TickKind,
+) -> TickOutcome {
     let outcome = runtime.tick(kind).await;
     if let Some(sync) = outcome.sync.clone() {
         canonical.apply(Change::SyncCompleted(sync));
     }
-    Some(outcome)
+    outcome
 }
 
 /// Accept connections until `shutdown` fires, then return.

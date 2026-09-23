@@ -25,27 +25,32 @@
 //!
 //! # What ends a watch
 //!
-//! The runtime leaving the table, which is what a configuration swap does to
-//! an account it removed or changed (`config::reconcile`). The check is once
-//! per round rather than a cancellation token, because a round is bounded (an
-//! IDLE round expires, a poll sleeps) and a token would need a second lifetime
-//! to hang on.
+//! The runtime it was spawned for retiring, which is what a configuration swap
+//! does to an account it removed or changed (`config::reconcile`), or being
+//! dropped, which is what a shutdown does. The watcher holds that runtime
+//! weakly and races its retirement signal ([`AccountRuntime::retired`])
+//! against every round and every pause, so a changed account never has two
+//! watchers and an IDLE connection does not outlive the runtime it served. It
+//! never looks its runtime up by name: after a swap the name belongs to the
+//! replacement, which has its own watcher.
 //!
 //! A blocked runtime never watches: it holds no engine lock, so a tick it
 //! started would refuse itself, and the engine that does hold the lock is
 //! watching the same mailbox.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use log::{debug, info, warn};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::config::{AccountConfig, AuthMethod, ImapConfig};
-use crate::daemon::server::{tick_and_commit, RuntimeTable};
+use crate::daemon::server::commit_tick;
 use crate::daemon::state::{CanonicalState, Change};
 
-use super::account::{off_thread, TickKind};
+use super::account::{off_thread, AccountRuntime, TickKind};
 
 /// The mailbox an IDLE round watches, which is the one the TUI watched.
 const WATCHED_MAILBOX: &str = "INBOX";
@@ -74,66 +79,148 @@ const BASE_BACKOFF: Duration = Duration::from_secs(30);
 /// The longest a watcher waits before trying again.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
-/// Start watching `cfg`'s server, if it has one.
+/// Start watching `cfg`'s server for `runtime`, if it has one.
 ///
 /// A local-only account has nothing to watch and gets no task: the whole point
-/// of the loop is a server connection.
-pub fn spawn(runtimes: Arc<RuntimeTable>, canonical: Arc<CanonicalState>, cfg: AccountConfig) {
+/// of the loop is a server connection. The handle is the test's; the daemon
+/// lets the task run until the runtime it was spawned for retires.
+pub fn spawn(
+    runtime: &Arc<AccountRuntime>,
+    canonical: Arc<CanonicalState>,
+    cfg: AccountConfig,
+) -> Option<JoinHandle<()>> {
     if cfg.is_local_only() {
         debug!("[watcher] {} has no server to watch", cfg.name);
-        return;
+        return None;
     }
-    tokio::spawn(watch(runtimes, canonical, cfg));
+    let source = if cfg.auth_method == AuthMethod::Graph {
+        Source::Graph {
+            client: None,
+            known: None,
+        }
+    } else {
+        Source::Imap
+    };
+    Some(tokio::spawn(watch(
+        Arc::downgrade(runtime),
+        runtime.retired(),
+        canonical,
+        cfg,
+        source,
+    )))
 }
 
-/// One account's watch, until its runtime leaves the table.
-async fn watch(runtimes: Arc<RuntimeTable>, canonical: Arc<CanonicalState>, cfg: AccountConfig) {
-    let graph = cfg.auth_method == AuthMethod::Graph;
-    info!(
-        "[watcher] watching {} over {}",
-        cfg.name,
-        if graph { "Graph" } else { "IMAP IDLE" }
-    );
+/// What one round watches.
+enum Source {
+    /// One IMAP IDLE round on [`WATCHED_MAILBOX`].
+    Imap,
+    /// One Graph enumeration of the inbox.
+    Graph {
+        /// Built on the first round, and again after a failed one: the token
+        /// is the likeliest thing to have gone stale and it lives here.
+        client: Option<crate::graph::GraphClient>,
+        /// The *set* of ids, because one arrival plus one archive inside the
+        /// same interval leaves the count untouched.
+        known: Option<HashSet<String>>,
+    },
+    /// A round that never ends, which is what an IDLE round looks like from
+    /// outside for its first five minutes.
+    #[cfg(test)]
+    Never,
+}
+
+impl Source {
+    fn label(&self) -> &'static str {
+        match self {
+            Source::Imap => "IMAP IDLE",
+            Source::Graph { .. } => "Graph",
+            #[cfg(test)]
+            Source::Never => "nothing",
+        }
+    }
+
+    /// `true` when the mailbox moved during the round.
+    async fn round(&mut self, cfg: &AccountConfig) -> anyhow::Result<bool> {
+        match self {
+            Source::Imap => idle_imap(cfg).await,
+            Source::Graph { client, known } => poll_graph(cfg, client, known).await,
+            #[cfg(test)]
+            Source::Never => std::future::pending().await,
+        }
+    }
+
+    /// Forget what a failed round may have left stale.
+    fn failed(&mut self) {
+        if let Source::Graph { client, .. } = self {
+            *client = None;
+        }
+    }
+
+    /// The pause after a round that succeeded: a poll waits, an IDLE round
+    /// already did.
+    fn gap(&self) -> Option<Duration> {
+        matches!(self, Source::Graph { .. }).then_some(GRAPH_POLL)
+    }
+}
+
+/// Resolve once `retired` goes `true` or its runtime is dropped.
+async fn stopped(retired: &mut watch::Receiver<bool>) {
+    let _ = retired.wait_for(|retired| *retired).await;
+}
+
+/// One account's watch, until the runtime it was spawned for retires.
+///
+/// Held weakly and stopped by the runtime's own signal, never by a lookup by
+/// name: a swap that changes the account puts a *new* runtime under the same
+/// name, and a watcher that only checked for the name would carry on with the
+/// old configuration beside the new runtime's watcher. The signal is raced
+/// against every round and every pause, so an IDLE connection does not outlive
+/// its runtime by a round.
+async fn watch(
+    runtime: Weak<AccountRuntime>,
+    mut retired: watch::Receiver<bool>,
+    canonical: Arc<CanonicalState>,
+    cfg: AccountConfig,
+    mut source: Source,
+) {
+    info!("[watcher] watching {} over {}", cfg.name, source.label());
     let mut failures: u32 = 0;
-    // The Graph poller's memory: the *set* of ids, because one arrival plus one
-    // archive inside the same interval leaves the count untouched.
-    let mut known: Option<HashSet<String>> = None;
     let mut counts: HashMap<String, (u64, u64)> = HashMap::new();
-    let mut client: Option<crate::graph::GraphClient> = None;
 
     loop {
-        if runtimes.get(&cfg.name).is_none() {
-            info!("[watcher] {} has no runtime any more; stopping", cfg.name);
-            return;
-        }
-        let round = if graph {
-            poll_graph(&cfg, &mut client, &mut known).await
-        } else {
-            idle_imap(&cfg).await
+        let round = tokio::select! {
+            () = stopped(&mut retired) => break,
+            round = source.round(&cfg) => round,
         };
-        match round {
+        let pause = match round {
             Ok(changed) => {
                 failures = 0;
                 if changed {
-                    tick(&runtimes, &canonical, &cfg, &mut counts).await;
+                    let Some(runtime) = runtime.upgrade() else {
+                        break;
+                    };
+                    tick(&runtime, &canonical, &cfg, &mut counts).await;
                 }
-                if graph {
-                    tokio::time::sleep(GRAPH_POLL).await;
-                }
+                source.gap()
             }
             Err(e) => {
-                // The Graph token is the likeliest thing to have gone stale and
-                // it lives in the client, so the next round builds a new one.
-                client = None;
+                source.failed();
                 failures = failures.saturating_add(1);
                 warn!(
                     "[watcher] watching {} failed ({failures} in a row): {e:#}",
                     cfg.name
                 );
-                tokio::time::sleep(backoff(failures)).await;
+                Some(backoff(failures))
+            }
+        };
+        if let Some(pause) = pause {
+            tokio::select! {
+                () = stopped(&mut retired) => break,
+                () = tokio::time::sleep(pause) => {}
             }
         }
     }
+    info!("[watcher] {}'s runtime retired; stopped watching", cfg.name);
 }
 
 /// The gap after `failures` consecutive failures: the TUI's curve, capped.
@@ -186,18 +273,18 @@ async fn poll_graph(
     Ok(changed)
 }
 
-/// Run one quick tick and publish what moved.
+/// Run one quick tick on this watcher's own runtime and publish what moved.
 async fn tick(
-    runtimes: &Arc<RuntimeTable>,
+    runtime: &AccountRuntime,
     canonical: &Arc<CanonicalState>,
     cfg: &AccountConfig,
     counts: &mut HashMap<String, (u64, u64)>,
 ) {
     info!("[watcher] {} changed; ticking", cfg.name);
-    // `tick_and_commit` publishes the `sync.completed`, arrivals included; a
+    // `commit_tick` publishes the `sync.completed`, arrivals included; a
     // blocked or joined tick carries no outcome and publishes nothing.
-    let outcome = tick_and_commit(runtimes, canonical, &cfg.name, TickKind::Quick).await;
-    if outcome.is_none_or(|outcome| outcome.blocked) {
+    let outcome = commit_tick(runtime, canonical, TickKind::Quick).await;
+    if outcome.blocked {
         return;
     }
     publish_counts(canonical, &cfg.name, counts).await;
@@ -258,5 +345,70 @@ mod tests {
             assert!(pair[1] >= pair[0], "the curve narrowed: {widening:?}");
         }
         assert_eq!(backoff(10), MAX_BACKOFF);
+    }
+
+    fn runtime(dir: &std::path::Path) -> Arc<AccountRuntime> {
+        use super::super::account::{DrainHook, TickHooks};
+        use futures::future::FutureExt;
+        let quiet: DrainHook = Arc::new(|_ctx| async { String::new() }.boxed());
+        let hooks = TickHooks {
+            outbox: Arc::clone(&quiet),
+            mutations: quiet,
+            body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+        };
+        let cfg = AccountConfig {
+            name: "alpha".to_string(),
+            ..Default::default()
+        };
+        Arc::new(AccountRuntime::start_at_with_hooks(dir, cfg, 1, hooks).expect("a start"))
+    }
+
+    /// A swap that changes an account retires the old runtime and starts a new
+    /// one under the same name: the old watcher stops mid-round, and exactly
+    /// one watcher, the replacement's, is left.
+    #[tokio::test]
+    async fn a_replaced_runtime_leaves_exactly_one_watcher() {
+        let canonical = Arc::new(CanonicalState::new(
+            crate::daemon::state::InstanceId::new("test"),
+            Vec::new(),
+        ));
+        let cfg = AccountConfig {
+            name: "alpha".to_string(),
+            ..Default::default()
+        };
+        let (first_dir, second_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+        let old = runtime(first_dir.path());
+        let old_watch = tokio::spawn(watch(
+            Arc::downgrade(&old),
+            old.retired(),
+            Arc::clone(&canonical),
+            cfg.clone(),
+            Source::Never,
+        ));
+        // The swap: retire and drop the old one, start its replacement.
+        let new = runtime(second_dir.path());
+        let new_watch = tokio::spawn(watch(
+            Arc::downgrade(&new),
+            new.retired(),
+            Arc::clone(&canonical),
+            cfg,
+            Source::Never,
+        ));
+        assert!(old.retire(Duration::from_secs(1)).await);
+
+        tokio::time::timeout(Duration::from_secs(5), old_watch)
+            .await
+            .expect("the old watcher stopped inside its round")
+            .expect("the old watcher's task");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!new_watch.is_finished(), "the replacement's watcher is still watching");
+
+        // A runtime dropped without a retire (the shutdown) stops its watcher too.
+        drop(new);
+        tokio::time::timeout(Duration::from_secs(5), new_watch)
+            .await
+            .expect("a dropped runtime stops its watcher")
+            .expect("the new watcher's task");
     }
 }
