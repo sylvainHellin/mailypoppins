@@ -909,9 +909,11 @@ A client compares each event against its watermark and does one of four things: 
 An instance change poisons it the same way: a client that kept applying past either would build a state nothing on the daemon's side corresponds to.
 
 `mp-client`'s `StateTracker` is stricter than that today and treats any jump above `watermark + 1` as a gap, which is exact only on a stream that coalesced nothing.
-The two agree in this build, because Phase 3a registers no method that commits a change and the only producer is the burst hook, whose events name distinct resources on purpose.
-Phase 3b's `sync.completed` does not change that: it is a lifecycle event, it takes its revision from the same counter under the same gate as every committed change, and it merges with nothing, so a run of outcomes reaches a client dense and `StateTracker` applies every one of them.
-Reconciling them, by having the daemon carry the highest revision a merged entry superseded or by dropping the arithmetic in favour of the daemon's own control message, is a Phase 3b item and is in `BACKLOG.md`.
+The two disagree in this build, because coalescing Replace and Invalidate producers exist: `draft.changed`, `draft.invalid`, `account.state_changed`, and the mailbox-count invalidates the watcher emits.
+Each coalesce removes a revision from what one connection receives, so `StateTracker::observe` reports a `Gap` where nothing was lost and the client re-bootstraps for nothing.
+The lifecycle events (`sync.completed` among them) merge with nothing and reach a client dense, so the tracker applies every one of them.
+The TUI keeps its own watermark rather than going through `StateTracker`, and is unaffected.
+Reconciling the two, by having the daemon carry the highest revision a merged entry superseded or by dropping the arithmetic in favour of the daemon's own control message, is tracked under #0121 and in `BACKLOG.md`.
 
 ### Event kinds
 
