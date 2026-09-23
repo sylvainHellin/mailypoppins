@@ -548,12 +548,15 @@ pub fn resolve_date(
         .to_string_lossy()
         .to_string();
 
-    if filename.len() >= 10 {
-        let date_part = &filename[..10];
+    // `get` rather than slicing: a draft named `réponse-à-Hélène.md` has a
+    // multi-byte char across byte 10, and a slice there panics the list build.
+    if let Some(date_part) = filename.get(..10) {
         if NaiveDate::parse_from_str(date_part, "%Y-%m-%d").is_ok() {
-            if filename.len() >= 15 && filename.as_bytes()[10] == b'-' {
-                let time_part = &filename[11..15];
-                if time_part.chars().all(|c| c.is_ascii_digit()) && time_part.len() == 4 {
+            if filename.as_bytes().get(10) == Some(&b'-') {
+                if let Some(time_part) = filename
+                    .get(11..15)
+                    .filter(|t| t.bytes().all(|b| b.is_ascii_digit()))
+                {
                     let sort = format!("{}T{}:{}:00", date_part, &time_part[..2], &time_part[2..4]);
                     return (date_part.to_string(), sort);
                 }
@@ -2162,6 +2165,28 @@ pub fn build_mailboxes(config: &mp_core::config::AccountConfig) -> Vec<MailboxIn
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn resolve_date_survives_multibyte_draft_filenames() {
+        let empty = (String::new(), String::new());
+        assert_eq!(
+            resolve_date(
+                &None,
+                &None,
+                Path::new("r\u{e9}ponse-\u{e0}-H\u{e9}l\u{e8}ne.md")
+            ),
+            empty
+        );
+        // A valid date with a multi-byte char across the time slot keeps the date.
+        assert_eq!(
+            resolve_date(&None, &None, Path::new("2024-01-02-123\u{e9}.md")),
+            ("2024-01-02".to_string(), "2024-01-02T00:00:00".to_string())
+        );
+        assert_eq!(
+            resolve_date(&None, &None, Path::new("2024-01-02-1430_x.md")),
+            ("2024-01-02".to_string(), "2024-01-02T14:30:00".to_string())
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Action::suspends_terminal (#0108)
