@@ -1123,6 +1123,31 @@ mod tests {
         state_from(super::super::config::ConfigState::Ok, &[name])
     }
 
+    /// Two refreshes either side of a status flip publish the two statuses in
+    /// the order they were evaluated. Sequential rather than raced: the
+    /// runtime table cannot be made to flip mid-evaluation from a test, so this
+    /// pins the order the serialised refresh guarantees, not the race itself.
+    #[test]
+    fn refreshes_publish_an_account_check_in_evaluation_order() {
+        let state = state_with_one_account("alpha");
+        let conn = ConnectionId(7);
+        let mut queue = state.canonical.subscribe(conn);
+        let _ = state.canonical.bootstrap(conn);
+
+        state.diagnostics.refresh();
+        state.runtimes.insert_failure("alpha", "boom".to_string());
+        state.diagnostics.refresh();
+
+        let statuses: Vec<String> = queue
+            .drain_all()
+            .into_iter()
+            .map(|(_, event)| event.payload())
+            .filter(|payload| payload["name"] == "account:alpha")
+            .map(|payload| payload["status"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(statuses, ["warn", "fail"]);
+    }
+
     /// A tick whose body fails, so the commit path is exercised without an
     /// IMAP server: the hooks are injected, and the failure is what makes the
     /// committed severity distinguishable from a default.

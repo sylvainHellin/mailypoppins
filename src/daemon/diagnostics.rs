@@ -179,6 +179,12 @@ pub struct Diagnostics {
     holds: Arc<HoldScheduler>,
     canonical: Weak<CanonicalState>,
     ledger: Mutex<BTreeMap<String, Status>>,
+    /// Held across a whole [`Diagnostics::refresh`], from evaluating the
+    /// checks to publishing what flipped. Each account task refreshes on its
+    /// own, and without it two refreshes could evaluate in one order and
+    /// update the ledger or publish in the other, leaving a client told a
+    /// stale status until the next sweep.
+    refresh_lock: Mutex<()>,
 }
 
 impl std::fmt::Debug for Diagnostics {
@@ -209,6 +215,7 @@ impl Diagnostics {
             holds,
             canonical: Arc::downgrade(canonical),
             ledger: Mutex::new(BTreeMap::new()),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -296,7 +303,11 @@ impl Diagnostics {
     /// Called when the daemon has a reason to believe something changed: an
     /// account runtime reported, a configuration reload happened or was
     /// refused, or the periodic sweep came round.
+    ///
+    /// Refreshes are serialised end to end, so the events leave in the order
+    /// the checks were evaluated and the ledger ends on the latest evaluation.
     pub fn refresh(&self) {
+        let _serialised = lock(&self.refresh_lock);
         let checks = self.checks();
         let flipped: Vec<Check> = {
             let mut ledger = lock(&self.ledger);
