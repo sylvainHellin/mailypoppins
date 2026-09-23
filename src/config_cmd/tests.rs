@@ -242,3 +242,71 @@ fn account_data_paths_creates_the_directory_it_prints() {
     assert_eq!(crate::config::blobs_dir("wizard").parent(), Some(acct_dir.as_path()));
     assert_eq!(crate::config::drafts_dir("wizard").parent(), Some(acct_dir.as_path()));
 }
+
+/// A display name with quotes and a comma, and a server mailbox name with a
+/// backslash, are wizard answers like any other: the generated TOML parses and
+/// hands both back unchanged, on the init path and on the add-account path.
+#[test]
+fn wizard_answers_needing_toml_escapes_round_trip() {
+    let from = "\"Doe, Jane\" <j@x>";
+    let odd_box = "Back\\slash";
+    let extra = vec![odd_box.to_string(), "Say \"hi\"".to_string()];
+    let base = build_init_toml(
+        "main", from,
+        "smtp.example.com", 465, from, false,
+        "", 993, "",
+        odd_box,
+        "Archive",
+        "Sent",
+        &extra,
+        None,
+    );
+    let addition = build_add_account_toml(
+        "work", from,
+        "smtp.corp.com", 587, "work@corp.com", false,
+        "imap.corp.com", 993, "work@corp.com",
+        "INBOX",
+        odd_box,
+        "Sent",
+        &extra,
+        Some(("client\"id", "tenant\\id")),
+    );
+    let combined = format!("{base}{addition}");
+    super::init::ensure_config_parses(&combined).expect("the escaped config parses");
+    let config: crate::config::GlobalConfig =
+        toml::from_str(&combined).expect("the escaped config parses");
+
+    assert_eq!(config.accounts.len(), 2);
+    for account in &config.accounts {
+        assert_eq!(account.default_from, from);
+        let extras: Vec<&str> = account
+            .mailboxes
+            .extra
+            .as_ref()
+            .expect("extra mailboxes")
+            .iter()
+            .map(|m| m.server.as_str())
+            .collect();
+        assert_eq!(extras, vec![odd_box, "Say \"hi\""]);
+    }
+    assert_eq!(config.accounts[0].smtp.username, from);
+    assert_eq!(config.accounts[0].mailboxes.inbox.as_ref().unwrap().server, odd_box);
+    assert_eq!(config.accounts[1].mailboxes.archive.as_ref().unwrap().server, odd_box);
+    let oauth2 = config.accounts[1].oauth2.as_ref().expect("oauth2 section");
+    assert_eq!((oauth2.client_id.as_str(), oauth2.tenant_id.as_str()), ("client\"id", "tenant\\id"));
+
+    let graph = super::init::build_graph_account_toml(
+        "g", from, "client", "tenant", odd_box, "Archive", "Sent", &extra,
+    );
+    let config: crate::config::GlobalConfig = toml::from_str(&graph).expect("graph block parses");
+    assert_eq!(config.accounts[0].default_from, from);
+    assert_eq!(config.accounts[0].mailboxes.inbox.as_ref().unwrap().server, odd_box);
+}
+
+/// The backstop before every write: text the loader would reject is refused
+/// with an error that says nothing was written.
+#[test]
+fn a_config_that_does_not_parse_is_refused() {
+    let err = super::init::ensure_config_parses("[[accounts]]\nname = \"a\"b\"\n").unwrap_err();
+    assert!(format!("{err:#}").contains("not written"), "{err:#}");
+}

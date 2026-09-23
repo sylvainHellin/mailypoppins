@@ -434,6 +434,7 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    ensure_config_parses(&toml_content)?;
     fs::write(&path, toml_content)?;
 
     println!();
@@ -762,6 +763,7 @@ pub fn cmd_config_add_account(
     // Read existing config and append
     let mut content = fs::read_to_string(&path)?;
     content.push_str(&block);
+    ensure_config_parses(&content)?;
     fs::write(&path, content)?;
 
     println!();
@@ -944,6 +946,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    ensure_config_parses(&toml_content)?;
     fs::write(path, toml_content)?;
 
     println!();
@@ -1113,6 +1116,7 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
 
     let mut content = fs::read_to_string(path)?;
     content.push_str(&block);
+    ensure_config_parses(&content)?;
     fs::write(path, content)?;
 
     println!();
@@ -1134,6 +1138,27 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
 // ---------------------------------------------------------------------------
 // TOML builders (pure functions, testable)
 // ---------------------------------------------------------------------------
+
+/// `s` as a TOML string literal, quoted and escaped.
+///
+/// Every wizard answer and every server-side mailbox name goes through this:
+/// a display name such as `"Doe, Jane" <jane@x.org>` or a LIST name holding
+/// `\` would otherwise write a file `load_global_config` rejects, and a config
+/// that does not load is one with no accounts at all.
+pub(crate) fn toml_str(s: &str) -> String {
+    toml::Value::String(s.to_owned()).to_string()
+}
+
+/// Refuse to write a config the loader would reject.
+///
+/// The builders escape what they interpolate, so this is the backstop: the
+/// append paths add a block to a working file, and a bad block there costs
+/// every account, not just the new one.
+pub(crate) fn ensure_config_parses(content: &str) -> Result<()> {
+    toml::from_str::<crate::config::GlobalConfig>(content)
+        .map(|_| ())
+        .context("the generated configuration does not parse, so it was not written")
+}
 
 /// Build the full config TOML for `config init`.
 /// `oauth2` is Some((client_id, tenant_id)) for OAuth2 accounts.
@@ -1159,48 +1184,48 @@ pub(crate) fn build_init_toml(
     out.push_str("include_signature = true\n");
 
     out.push_str("\n[[accounts]]\n");
-    out.push_str(&format!("name = \"{}\"\n", account_name));
-    out.push_str(&format!("default_from = \"{}\"\n", default_from));
+    out.push_str(&format!("name = {}\n", toml_str(account_name)));
+    out.push_str(&format!("default_from = {}\n", toml_str(default_from)));
 
     if let Some((client_id, tenant_id)) = oauth2 {
         out.push_str("auth_method = \"oauth2\"\n");
         out.push_str("\n[accounts.oauth2]\n");
-        out.push_str(&format!("client_id = \"{}\"\n", client_id));
-        out.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
+        out.push_str(&format!("client_id = {}\n", toml_str(client_id)));
+        out.push_str(&format!("tenant_id = {}\n", toml_str(tenant_id)));
     }
 
     out.push_str("\n[accounts.smtp]\n");
-    out.push_str(&format!("host = \"{}\"\n", smtp_host));
+    out.push_str(&format!("host = {}\n", toml_str(smtp_host)));
     out.push_str(&format!("port = {}\n", smtp_port));
-    out.push_str(&format!("username = \"{}\"\n", smtp_username));
+    out.push_str(&format!("username = {}\n", toml_str(smtp_username)));
     if accept_invalid_certs {
         out.push_str("accept_invalid_certs = true\n");
     }
 
     out.push_str("\n[accounts.imap]\n");
     if !imap_host_input.is_empty() {
-        out.push_str(&format!("host = \"{}\"\n", imap_host_input));
+        out.push_str(&format!("host = {}\n", toml_str(imap_host_input)));
     }
     out.push_str(&format!("port = {}\n", imap_port));
     if !imap_username_input.is_empty() {
-        out.push_str(&format!("username = \"{}\"\n", imap_username_input));
+        out.push_str(&format!("username = {}\n", toml_str(imap_username_input)));
     }
     if accept_invalid_certs {
         out.push_str("accept_invalid_certs = true\n");
     }
 
     out.push_str("\n[accounts.mailboxes.inbox]\n");
-    out.push_str(&format!("server = \"{}\"\n", inbox_server));
+    out.push_str(&format!("server = {}\n", toml_str(inbox_server)));
 
     out.push_str("\n[accounts.mailboxes.archive]\n");
-    out.push_str(&format!("server = \"{}\"\n", archive_server));
+    out.push_str(&format!("server = {}\n", toml_str(archive_server)));
 
     out.push_str("\n[accounts.mailboxes.sent]\n");
-    out.push_str(&format!("server = \"{}\"\n", sent_server));
+    out.push_str(&format!("server = {}\n", toml_str(sent_server)));
 
     for mb in extra_mailboxes {
         out.push_str("\n[[accounts.mailboxes.extra]]\n");
-        out.push_str(&format!("server = \"{}\"\n", mb));
+        out.push_str(&format!("server = {}\n", toml_str(mb)));
     }
 
     // No signature keys: since #0107 a signature is a Markdown file under
@@ -1225,37 +1250,37 @@ pub(crate) fn build_add_account_toml(
 ) -> String {
     let mut block = String::from("\n");
     block.push_str("[[accounts]]\n");
-    block.push_str(&format!("name = \"{}\"\n", account_name));
-    block.push_str(&format!("default_from = \"{}\"\n", default_from));
+    block.push_str(&format!("name = {}\n", toml_str(account_name)));
+    block.push_str(&format!("default_from = {}\n", toml_str(default_from)));
 
     if let Some((client_id, tenant_id)) = oauth2 {
         block.push_str("auth_method = \"oauth2\"\n");
         block.push_str("\n[accounts.oauth2]\n");
-        block.push_str(&format!("client_id = \"{}\"\n", client_id));
-        block.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
+        block.push_str(&format!("client_id = {}\n", toml_str(client_id)));
+        block.push_str(&format!("tenant_id = {}\n", toml_str(tenant_id)));
     }
 
     block.push_str("\n[accounts.smtp]\n");
-    block.push_str(&format!("host = \"{}\"\n", smtp_host));
+    block.push_str(&format!("host = {}\n", toml_str(smtp_host)));
     block.push_str(&format!("port = {}\n", smtp_port));
-    block.push_str(&format!("username = \"{}\"\n", smtp_username));
+    block.push_str(&format!("username = {}\n", toml_str(smtp_username)));
     if accept_invalid_certs { block.push_str("accept_invalid_certs = true\n"); }
 
     block.push_str("\n[accounts.imap]\n");
-    if !imap_host_input.is_empty() { block.push_str(&format!("host = \"{}\"\n", imap_host_input)); }
+    if !imap_host_input.is_empty() { block.push_str(&format!("host = {}\n", toml_str(imap_host_input))); }
     block.push_str(&format!("port = {}\n", imap_port));
-    if !imap_username_input.is_empty() { block.push_str(&format!("username = \"{}\"\n", imap_username_input)); }
+    if !imap_username_input.is_empty() { block.push_str(&format!("username = {}\n", toml_str(imap_username_input))); }
     if accept_invalid_certs { block.push_str("accept_invalid_certs = true\n"); }
 
     block.push_str("\n[accounts.mailboxes.inbox]\n");
-    block.push_str(&format!("server = \"{}\"\n", inbox_server));
+    block.push_str(&format!("server = {}\n", toml_str(inbox_server)));
     block.push_str("\n[accounts.mailboxes.archive]\n");
-    block.push_str(&format!("server = \"{}\"\n", archive_server));
+    block.push_str(&format!("server = {}\n", toml_str(archive_server)));
     block.push_str("\n[accounts.mailboxes.sent]\n");
-    block.push_str(&format!("server = \"{}\"\n", sent_server));
+    block.push_str(&format!("server = {}\n", toml_str(sent_server)));
     for mb in extra_mailboxes {
         block.push_str("\n[[accounts.mailboxes.extra]]\n");
-        block.push_str(&format!("server = \"{}\"\n", mb));
+        block.push_str(&format!("server = {}\n", toml_str(mb)));
     }
 
     block
@@ -1273,26 +1298,26 @@ pub(crate) fn build_graph_account_toml(
 ) -> String {
     let mut out = String::new();
     out.push_str("[[accounts]]\n");
-    out.push_str(&format!("name = \"{}\"\n", account_name));
-    out.push_str(&format!("default_from = \"{}\"\n", default_from));
+    out.push_str(&format!("name = {}\n", toml_str(account_name)));
+    out.push_str(&format!("default_from = {}\n", toml_str(default_from)));
     out.push_str("auth_method = \"graph\"\n");
 
     out.push_str("\n[accounts.oauth2]\n");
-    out.push_str(&format!("client_id = \"{}\"\n", client_id));
-    out.push_str(&format!("tenant_id = \"{}\"\n", tenant_id));
+    out.push_str(&format!("client_id = {}\n", toml_str(client_id)));
+    out.push_str(&format!("tenant_id = {}\n", toml_str(tenant_id)));
 
     out.push_str("\n[accounts.mailboxes.inbox]\n");
-    out.push_str(&format!("server = \"{}\"\n", inbox_server));
+    out.push_str(&format!("server = {}\n", toml_str(inbox_server)));
 
     out.push_str("\n[accounts.mailboxes.archive]\n");
-    out.push_str(&format!("server = \"{}\"\n", archive_server));
+    out.push_str(&format!("server = {}\n", toml_str(archive_server)));
 
     out.push_str("\n[accounts.mailboxes.sent]\n");
-    out.push_str(&format!("server = \"{}\"\n", sent_server));
+    out.push_str(&format!("server = {}\n", toml_str(sent_server)));
 
     for mb in extra_mailboxes {
         out.push_str("\n[[accounts.mailboxes.extra]]\n");
-        out.push_str(&format!("server = \"{}\"\n", mb));
+        out.push_str(&format!("server = {}\n", toml_str(mb)));
     }
 
     out
