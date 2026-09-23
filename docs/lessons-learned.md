@@ -2100,3 +2100,10 @@ An encoded-word such as `=?UTF-8?Q?a=0Ab?=` decodes to a string with a literal n
 Interpolated into a reply or forward draft's frontmatter, that newline ends the YAML scalar early and lets the sender write frontmatter keys of their own.
 Every header-derived scalar in `crates/mp-core/src/draft.rs` therefore goes through `yaml_dq_escape`, which writes a double-quoted YAML string and escapes the other control characters, U+0085 and the line and paragraph separators as well as `\n`, `\r` and `\t`.
 Treat a decoded header as arbitrary text, never as a line.
+
+## Stopping a watcher does not close its IDLE connection
+
+A config reload that changes an account retires the old runtime, and its watcher task stops at once, mid-round included, so it no longer triggers ticks.
+The IDLE round itself runs through `off_thread` (`src/daemon/runtime/account.rs`) on a plain OS thread driving its own runtime, and dropping the awaiting task does not cancel that thread: the old connection stays open until the round ends, up to `IDLE_ROUND_SECS` (300 s, `src/daemon/runtime/watcher.rs`), and its outcome is discarded.
+For those minutes the server sees two IDLE connections for the account, the old one and the replacement's.
+Cancelling a future that waits on `off_thread` stops the waiting, not the work; say "stops triggering" rather than "closes" unless the thread itself is told to stop.
