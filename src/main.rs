@@ -122,7 +122,7 @@ enum Commands {
     /// Send every approved draft of the account
     SendApproved {
         /// Send the approved drafts of every configured account
-        #[arg(long)]
+        #[arg(long, conflicts_with = "account")]
         all_accounts: bool,
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
@@ -535,7 +535,7 @@ enum StoreAction {
         #[arg(long)]
         force: bool,
         /// Sweep every configured account rather than just the default / `-A`.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "account")]
         all_accounts: bool,
     },
 }
@@ -3053,6 +3053,30 @@ fn invocation(matches: &clap::ArgMatches) -> (Option<&str>, Option<&str>) {
     (command, subcommand)
 }
 
+/// `--all-accounts` beside `-A`, wherever `-A` was written.
+///
+/// The `conflicts_with = "account"` on each `--all-accounts` catches `-A` only
+/// when it follows the subcommand: clap checks a subcommand's conflicts against
+/// its own matches, and a global flag written before the subcommand is
+/// propagated into them after that check. This is the same refusal for the
+/// other spelling, so `mp -A work send-approved --all-accounts` cannot send
+/// every account's drafts.
+fn refuse_all_accounts_with_selector(cli: &Cli) -> std::result::Result<(), clap::Error> {
+    let all_accounts = match &cli.command {
+        Some(Commands::SendApproved { all_accounts, .. }) => *all_accounts,
+        Some(Commands::Sync { all_accounts, .. }) => *all_accounts,
+        Some(Commands::Store { action: StoreAction::Gc { all_accounts, .. } }) => *all_accounts,
+        _ => false,
+    };
+    if all_accounts && cli.account.is_some() {
+        return Err(<Cli as clap::CommandFactory>::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "the argument '--all-accounts' cannot be used with '--account <ACCOUNT>'",
+        ));
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -3062,6 +3086,7 @@ async fn main() -> Result<()> {
     // `parse` does, so the help surface does not move.
     let matches = <Cli as clap::CommandFactory>::command().get_matches();
     let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    refuse_all_accounts_with_selector(&cli).unwrap_or_else(|e| e.exit());
     let (command_name, subcommand_name) = invocation(&matches);
     let command_label = match (command_name, subcommand_name) {
         (Some(command), Some(sub)) => format!("{command} {sub}"),
@@ -4012,5 +4037,30 @@ mod tests {
         assert!(!is_drafts_selector("mp://tum/Archive/msg@example.com", None).unwrap());
         // A bare key with no drafts flag is a received key by default scope.
         assert!(!is_drafts_selector("msg@example.com", None).unwrap());
+    }
+
+    /// `--all-accounts` and `-A` answer the same question, so naming both is
+    /// refused rather than silently widening a send or a sweep to every account.
+    #[test]
+    fn all_accounts_conflicts_with_an_account_selector() {
+        use clap::Parser;
+        for args in [
+            &["mp", "send-approved", "--all-accounts", "-A", "work", "-y"][..],
+            &["mp", "store", "gc", "--all-accounts", "-A", "work"][..],
+            &["mp", "sync", "--all-accounts", "--account", "work"][..],
+            &["mp", "-A", "work", "sync", "--all-accounts"][..],
+            &["mp", "-A", "work", "send-approved", "--all-accounts", "-y"][..],
+            &["mp", "--account", "work", "store", "gc", "--all-accounts"][..],
+        ] {
+            let err = super::Cli::try_parse_from(args)
+                .and_then(|cli| super::refuse_all_accounts_with_selector(&cli))
+                .err();
+            assert_eq!(
+                err.map(|e| e.kind()),
+                Some(clap::error::ErrorKind::ArgumentConflict),
+                "{args:?} must be refused"
+            );
+        }
+        assert!(super::Cli::try_parse_from(["mp", "send-approved", "--all-accounts", "-y"]).is_ok());
     }
 }
