@@ -83,9 +83,11 @@ pub struct ConfigStore {
     /// The file the daemon read, or would have read.
     path: PathBuf,
     inner: RwLock<Snapshot>,
-    /// Held across a whole swap, so two reloads cannot interleave their stops
-    /// and starts. Async, because a swap awaits `spawn_blocking`.
-    swap: tokio::sync::Mutex<()>,
+    /// Held exclusively across a whole swap, so two reloads cannot interleave
+    /// their stops and starts, and shared by the startup starts, which touch
+    /// one account each and so may run side by side but never beside a swap.
+    /// Async, because both hold it across `spawn_blocking`.
+    swap: tokio::sync::RwLock<()>,
     /// Whether this daemon starts account runtimes at all (plan section 3.0).
     pub account_runtimes: bool,
 }
@@ -107,7 +109,7 @@ impl ConfigStore {
                 config: Arc::new(config),
                 accounts,
             }),
-            swap: tokio::sync::Mutex::new(()),
+            swap: tokio::sync::RwLock::new(()),
             account_runtimes,
         }
     }
@@ -182,9 +184,17 @@ impl ConfigStore {
         snapshot.revision
     }
 
-    /// Take the swap lock, so one reload at a time reconciles runtimes.
-    pub async fn lock_swap(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.swap.lock().await
+    /// Take the swap lock, so one reload at a time reconciles runtimes, and
+    /// none while a startup start is in flight.
+    pub async fn lock_swap(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.swap.write().await
+    }
+
+    /// Share the swap lock with the other startup starts: each opens its own
+    /// account's store (a `PRAGMA integrity_check` on first open), so they run
+    /// in parallel, and a swap waits until they are all done.
+    async fn share_swap(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.swap.read().await
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Snapshot> {
@@ -572,7 +582,8 @@ pub async fn start_account(
     canonical.apply(change);
 }
 
-/// The startup start of `account`'s runtime, taken under the swap lock.
+/// The startup start of `account`'s runtime, taken under a shared hold on the
+/// swap lock.
 ///
 /// The daemon is accepting connections while its runtimes start, so a
 /// `config.set` or `config.reload` can land in the window. Unserialised, a
@@ -584,6 +595,14 @@ pub async fn start_account(
 /// configuration as it is now, and not at all when it is gone or a swap has
 /// already started it.
 ///
+/// The hold is shared rather than exclusive so the startup starts, one per
+/// account, still open their stores in parallel. Building the runtime outside
+/// the lock and taking it only to re-check and insert would not do: the
+/// runtime holds the account's engine lock from the moment it is built, so a
+/// swap that changed the account in that window would start its replacement
+/// blocked on the startup's lock, and the startup would then discard its own
+/// runtime, leaving the account blocked until the next reload.
+///
 /// `true` when this call started it.
 pub async fn start_configured(
     store: &ConfigStore,
@@ -591,7 +610,7 @@ pub async fn start_configured(
     canonical: &Arc<CanonicalState>,
     account: &str,
 ) -> bool {
-    let _guard = store.lock_swap().await;
+    let _guard = store.share_swap().await;
     let Some(cfg) = store.accounts().iter().find(|a| a.name == account).cloned() else {
         info!("[daemon] {account} left the configuration before its runtime started");
         return false;
@@ -716,6 +735,36 @@ mod tests {
         assert!(runtimes
             .blocked_reason("zz-startup-kept")
             .is_some_and(|reason| reason.contains("no local store")));
+    }
+
+    /// Startup starts share the swap lock, so one in flight does not hold up
+    /// another account's, while a swap still waits for both.
+    #[tokio::test]
+    async fn startup_starts_run_beside_each_other_but_not_beside_a_swap() {
+        let canonical = Arc::new(CanonicalState::new(
+            super::super::state::InstanceId::new("test"),
+            Vec::new(),
+        ));
+        let runtimes = Arc::new(RuntimeTable::default());
+        let store = ConfigStore::new(
+            PathBuf::from("/c/config.toml"),
+            ConfigState::Ok,
+            parse("[[accounts]]\nname = \"zz-startup-parallel\"\n"),
+            true,
+        );
+        let bound = std::time::Duration::from_secs(5);
+
+        let in_flight = store.share_swap().await;
+        let started = tokio::time::timeout(
+            bound,
+            start_configured(&store, &runtimes, &canonical, "zz-startup-parallel"),
+        )
+        .await;
+        assert_eq!(started, Ok(true), "a second startup start waited on the first");
+        let swap = tokio::time::timeout(std::time::Duration::from_millis(50), store.lock_swap());
+        assert!(swap.await.is_err(), "a swap ran beside a startup start");
+        drop(in_flight);
+        assert!(tokio::time::timeout(bound, store.lock_swap()).await.is_ok());
     }
 
     /// A swap that changes an account while its tick runs: the stop waits for

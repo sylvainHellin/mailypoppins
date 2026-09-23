@@ -503,10 +503,11 @@ fn spawn_signal_watch(state: Arc<DaemonState>, shutdown: watch::Sender<bool>) ->
 /// runtime this phase holds the engine lock, drains nothing on its own and
 /// serves reads.
 ///
-/// Each start runs under the configuration's swap lock
+/// Each start runs under a shared hold on the configuration's swap lock
 /// ([`start_configured`]), because the socket is already open: a `config.set`
 /// that removed or changed an account while its startup start was in flight
-/// would otherwise race it.
+/// would otherwise race it. The hold is shared, so the starts still run in
+/// parallel with one another.
 fn spawn_account_runtimes(state: Arc<DaemonState>) {
     for account_config in state.config.accounts().iter() {
         let state = Arc::clone(&state);
