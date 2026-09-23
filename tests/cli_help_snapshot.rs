@@ -97,3 +97,16 @@ fn cli_help_surface_snapshot() {
     assert!(screens > 20, "the help walk collected {screens} screens");
     insta::assert_snapshot!(out);
 }
+
+/// clap prints an argument's `default_value` itself, so prose repeating it
+/// reads "(default: 20) [default: 20]". The default belongs to clap alone.
+#[test]
+fn no_help_line_repeats_clap_default() {
+    let mut out = String::new();
+    collect(&[], &mut out);
+    let doubled: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("(default: ") && l.contains("[default: "))
+        .collect();
+    assert!(doubled.is_empty(), "help repeats clap's default: {doubled:#?}");
+}

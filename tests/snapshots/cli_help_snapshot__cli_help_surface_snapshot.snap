@@ -301,9 +301,9 @@ Options:
       --body <BODY>            Body contains
       --since <SINCE>          Emails since date (YYYY-MM-DD)
       --before <BEFORE>        Emails before date (YYYY-MM-DD)
-  -n, --limit <LIMIT>          Max results (default: 10) [default: 10]
+  -n, --limit <LIMIT>          Max results [default: 10]
       --full                   Show full body instead of preview
-      --mailbox <MAILBOX>      Mailbox name (default: INBOX) [default: INBOX]
+      --mailbox <MAILBOX>      Mailbox name [default: INBOX]
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use (default: first in config)
@@ -315,7 +315,7 @@ Sync mailboxes from the server into the local store
 Usage: mp sync [OPTIONS]
 
 Options:
-  -n, --limit <LIMIT>          Max messages per mailbox (default: 50) [default: 50]
+  -n, --limit <LIMIT>          Max messages per mailbox [default: 50]
       --mailbox <MAILBOX>      Mailboxes to sync (default: INBOX, Archive, Sent)
       --dry-run                Show what would be ingested without writing anything
       --all-accounts           Sync every configured account (failures are named at the end; exit code 1 if any account failed)
@@ -330,7 +330,7 @@ Watch a mailbox for changes using IMAP IDLE
 Usage: mp watch [OPTIONS]
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to watch (default: INBOX) [default: INBOX]
+      --mailbox <MAILBOX>      Mailbox to watch [default: INBOX]
       --timeout <TIMEOUT>      Timeout in seconds (exits with code 2 on timeout)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
@@ -423,7 +423,7 @@ Usage: mp list-messages [OPTIONS]
 
 Options:
       --mailbox <MAILBOX>      Mailbox to list (role, slug or sidebar label). Default: every mailbox of the account, grouped
-  -n, --limit <LIMIT>          Max messages per mailbox listed (default: 20) [default: 20]
+  -n, --limit <LIMIT>          Max messages per mailbox listed [default: 20]
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use (default: first in config)
@@ -495,7 +495,7 @@ Options:
           Strictly before this date, YYYY-MM-DD (before:)
 
   -n, --limit <LIMIT>
-          Max results (default: 20)
+          Max results
           
           [default: 20]
 

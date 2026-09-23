@@ -223,19 +223,19 @@ enum Commands {
         /// Emails before date (YYYY-MM-DD)
         #[arg(long)]
         before: Option<String>,
-        /// Max results (default: 10)
+        /// Max results
         #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
         /// Show full body instead of preview
         #[arg(long)]
         full: bool,
-        /// Mailbox name (default: INBOX)
+        /// Mailbox name
         #[arg(long, default_value = "INBOX")]
         mailbox: String,
     },
     /// Sync mailboxes from the server into the local store
     Sync {
-        /// Max messages per mailbox (default: 50)
+        /// Max messages per mailbox
         #[arg(short = 'n', long, default_value = "50")]
         limit: usize,
         /// Mailboxes to sync (default: INBOX, Archive, Sent)
@@ -257,7 +257,7 @@ enum Commands {
     },
     /// Watch a mailbox for changes using IMAP IDLE
     Watch {
-        /// Mailbox to watch (default: INBOX)
+        /// Mailbox to watch
         #[arg(long, default_value = "INBOX")]
         mailbox: String,
         /// Timeout in seconds (exits with code 2 on timeout)
@@ -333,7 +333,7 @@ enum Commands {
         /// Default: every mailbox of the account, grouped.
         #[arg(long)]
         mailbox: Option<String>,
-        /// Max messages per mailbox listed (default: 20)
+        /// Max messages per mailbox listed
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
     },
@@ -377,7 +377,7 @@ enum Commands {
         /// Strictly before this date, YYYY-MM-DD (before:)
         #[arg(long)]
         before: Option<String>,
-        /// Max results (default: 20)
+        /// Max results
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
         /// Show full body instead of preview
