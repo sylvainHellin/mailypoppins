@@ -1332,6 +1332,19 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
             "no correlated subquery may run per row, got:\n{plan}"
         );
 
+        // The invite set is read off its partial index, one entry per invite,
+        // rather than by a full scan of message_blobs. (The planner still
+        // indexes the small materialised set for the join; that is over the
+        // invites alone.)
+        let invite_scan = format!(
+            "SCAN message_blobs USING COVERING INDEX {}",
+            crate::store::schema::INVITE_INDEX
+        );
+        assert!(
+            plan.lines().any(|line| line.trim() == invite_scan),
+            "the invite subquery must be `{invite_scan}`, got:\n{plan}"
+        );
+
         // The limited form and its count are served by the same index.
         for (sql, params) in [
             (format!("{sql} LIMIT ?3"), 3),

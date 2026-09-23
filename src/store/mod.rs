@@ -304,6 +304,15 @@ fn open_validated(path: &Path) -> Result<Connection> {
         return Err(anyhow!("schema v{SCHEMA_VERSION} is incomplete"));
     }
 
+    // Not a reason to reject the file either: without the index a listing is
+    // slower, not wrong, and the next open tries again.
+    if let Err(e) = schema::ensure_additive_indexes(&conn) {
+        warn!(
+            "[store] could not add the invite index to {}: {e:#}",
+            path.display()
+        );
+    }
+
     // One-shot, and not a reason to reject the file: a store that cannot be
     // written to here is still perfectly readable, and the sweep is a fix for
     // rows an earlier build wrote, not a validity requirement (#0072).
@@ -413,6 +422,41 @@ mod tests {
             schema::get_meta(store.conn(), schema::META_APP_VERSION).unwrap(),
             Some(env!("CARGO_PKG_VERSION").to_string())
         );
+    }
+
+    /// A store written before the invite index existed gets it on its next
+    /// open, with its version and its rows untouched.
+    #[test]
+    fn an_existing_store_gains_the_invite_index_on_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let has_index = |store: &Store| -> bool {
+            store
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    [schema::INVITE_INDEX],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            assert!(has_index(&store), "a fresh store is created with it");
+            insert_message(&store, "alice", "inbox", 1, "<a@example.com>").unwrap();
+            store
+                .conn()
+                .execute_batch(&format!("DROP INDEX {}", schema::INVITE_INDEX))
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(has_index(&store), "the reopen added it back");
+        assert_eq!(store.schema_version().unwrap(), Some(SCHEMA_VERSION));
+        let rows: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "and the file was not rebuilt");
     }
 
     #[test]

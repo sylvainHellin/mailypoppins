@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use crate::parse::CALENDAR_SIDECAR_NAME;
 
 /// Version stamped into `meta.schema_version`. Bump this whenever any
 /// statement in [`SCHEMA_SQL`] changes; every existing store is then dropped
@@ -346,11 +347,45 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 pub fn create(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!("BEGIN;{SCHEMA_SQL}COMMIT;"))
         .with_context(|| format!("creating store schema v{SCHEMA_VERSION}"))?;
+    ensure_additive_indexes(conn)?;
     set_meta(conn, META_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
     set_meta(conn, META_APP_VERSION, env!("CARGO_PKG_VERSION"))?;
     // Nothing to sweep in a file that starts empty, and stamping it here is
     // what keeps the sweep to the one-shot it is meant to be.
     set_meta(conn, META_ARRIVAL_MARK_SWEPT, "1")?;
+    Ok(())
+}
+
+/// The partial index that answers "which messages carry an iMIP sidecar".
+///
+/// Every mailbox listing joins against that set ([`super::read::list_mailbox`]),
+/// and without an index it is a full scan of `message_blobs` plus an automatic
+/// index built per query. Partial on exactly the listing's predicate, so it
+/// holds one entry per invite and costs ingest nothing for any other blob.
+pub const INVITE_INDEX: &str = "message_blobs_invite";
+
+/// Create the indexes added after [`SCHEMA_VERSION`] was last bumped.
+///
+/// Additive and idempotent, so they need no version bump and no rebuild: a
+/// fresh store gets them from [`create`], an existing one on its next open.
+/// Looked up before it is created, so the open of a store that already has
+/// them writes nothing and takes no write lock.
+pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
+    let present: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+            [INVITE_INDEX],
+            |row| row.get(0),
+        )
+        .context("looking up the invite index")?;
+    if present {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS {INVITE_INDEX} ON message_blobs (message_row) \
+         WHERE kind = 'attachment' AND filename = '{CALENDAR_SIDECAR_NAME}'"
+    ))
+    .context("creating the invite index")?;
     Ok(())
 }
 
