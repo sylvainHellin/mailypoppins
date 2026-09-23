@@ -210,6 +210,29 @@ fn partstat_to_str(part_stat: Option<PartStat>) -> &'static str {
     }
 }
 
+/// A wall-clock time in `tz` as an instant, the way RFC 5545 section 3.3.5
+/// resolves the two DST edge cases: a time that happens twice (the autumn
+/// fold) is its first occurrence, and a time that never happens (the spring
+/// gap) is read with the offset in force before the gap, which lands it the
+/// gap's length later (02:30 in Berlin's spring gap is 03:30+02:00).
+fn resolve_local(
+    tz: &chrono_tz::Tz,
+    local: &chrono::NaiveDateTime,
+) -> Option<chrono::DateTime<chrono_tz::Tz>> {
+    if let Some(zoned) = tz.from_local_datetime(local).earliest() {
+        return Some(zoned);
+    }
+    // In a gap: find the offset of the last wall-clock time before it. No
+    // zone has a gap longer than a day, so probing an hour at a time back
+    // from the gap finds one.
+    let before = (1..=24).find_map(|hours| {
+        tz.from_local_datetime(&(*local - chrono::Duration::hours(hours)))
+            .latest()
+    })?;
+    let utc = *local - chrono::Duration::seconds(i64::from(chrono::Offset::fix(before.offset()).local_minus_utc()));
+    Some(tz.from_utc_datetime(&utc))
+}
+
 /// Render a `DTSTART`/`DTEND` value as an RFC3339 string.
 ///
 /// - UTC times → `...Z`-equivalent offset (`+00:00`).
@@ -229,7 +252,7 @@ fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
         }
         DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { date_time, tzid }) => {
             if let Ok(tz) = tzid.parse::<chrono_tz::Tz>() {
-                if let Some(zoned) = tz.from_local_datetime(&date_time).single() {
+                if let Some(zoned) = resolve_local(&tz, &date_time) {
                     return Some(zoned.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
                 }
             }
@@ -350,6 +373,25 @@ pub fn now_sort_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Berlin wall-clock time in the autumn fold is its first pass (+02:00),
+    /// and one in the spring gap moves forward by the gap (RFC 5545 3.3.5).
+    #[test]
+    fn a_zoned_time_in_a_dst_fold_or_gap_keeps_an_offset() {
+        let berlin = |stamp: &str| {
+            format_date_perhaps_time(DatePerhapsTime::DateTime(
+                icalendar::CalendarDateTime::WithTimezone {
+                    date_time: chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S")
+                        .unwrap(),
+                    tzid: "Europe/Berlin".to_string(),
+                },
+            ))
+            .unwrap()
+        };
+        assert_eq!(berlin("20261025T023000"), "2026-10-25T02:30:00+02:00");
+        assert_eq!(berlin("20260329T023000"), "2026-03-29T03:30:00+02:00");
+        assert_eq!(berlin("20260715T100000"), "2026-07-15T10:00:00+02:00");
+    }
 
     #[test]
     fn strip_mailto_non_ascii_name_does_not_panic() {
