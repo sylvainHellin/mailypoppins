@@ -58,6 +58,11 @@ All notable changes to this project are documented in this file.
 - **Contact sightings are compared as instants.** `first_seen`/`last_seen` are stored in UTC, so a `-08:00` message no longer loses to an earlier `+00:00` one, and the display name follows the newest message.
 - **Diagnostics refreshes are serialised.** Two account tasks refreshing at once could publish `diagnostic.check_changed` out of order and leave the ledger stale for a sweep.
 - **Two held sends no longer share one undo slot, and a daemon restart no longer leaves a dead hold behind.** `u` cancels the newest hold and the others keep counting; after a reconnect to a new daemon instance the holds are taken from `send.hold_status` rather than kept from the old one.
+- **`operation.cancel` on a held send stops the send.** It cancelled the operation record and let the hold fire anyway; now it takes the hold's own cancel path first.
+- **A `config.reload` that flips `secrets_backend` is refused until the daemon restarts.** The backend is fixed at startup, so accepting the change made `set-password` write to the old backend while `config.get` named the new one.
+- **Account names are validated.** Empty names, `/`, `\`, NUL, `.`, `..` and names differing only by case are refused, since a name is a directory.
+- **`config.toml` is rewritten atomically.** A crash or full disk during `config add-account` no longer leaves a truncated file.
+- **The installed service points at the binary the user ran, not its canonical path.** A Homebrew Cellar path would have vanished at the next `brew upgrade`; a relative `XDG_CONFIG_HOME` now falls back to `$HOME/.config`.
 - **A reply to a server-only search hit honours `Reply-To:` too.** The TUI now carries the header on `draft.create_from_message`.
 - **A refetched move placeholder is dropped when its mutation rolls back, and the drain keeps going past a bad row.** The rollback no longer leaves a ghost row, and one row that fails no longer stalls the rest of `pending_ops`.
 - **A row whose UID a UIDVALIDITY reset handed to another message is unbound, not overwritten.** Each message keeps its own row and identity.
