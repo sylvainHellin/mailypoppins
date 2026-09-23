@@ -238,6 +238,10 @@ pub fn validate_document(text: &str, path: &Path) -> Result<GlobalConfig, Diagno
         line: None,
         message: format!("{e:#}"),
     })?;
+    crate::config::validate_account_names(&config).map_err(|e| Diagnostic {
+        line: None,
+        message: format!("{e:#}"),
+    })?;
     check_secrets_backend(&config, crate::secrets::active_backend())?;
     Ok(config)
 }
@@ -699,6 +703,37 @@ mod tests {
         .expect_err("the horizon is out of range");
         assert_eq!(refused.line, None);
         assert!(refused.message.contains("metadata_horizon_days"));
+    }
+
+    /// An account name that cannot be a directory of its own, or that another
+    /// account already has up to case, is refused with a diagnostic naming it.
+    #[test]
+    fn an_account_name_that_cannot_be_a_directory_is_refused() {
+        let doc = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| format!("[[accounts]]\nname = {}\n", toml::Value::from(*name)))
+                .collect::<String>()
+        };
+        for (names, named) in [
+            (vec![""], "empty name"),
+            (vec!["a/b"], "\"a/b\""),
+            (vec!["a\\b"], "\"a\\\\b\""),
+            (vec!["a\0b"], "\"a\\0b\""),
+            (vec!["."], "\".\""),
+            (vec![".."], "\"..\""),
+            (vec!["Work", "work"], "\"work\" duplicates account \"Work\""),
+        ] {
+            let refused = validate_document(&doc(&names), Path::new("/c/config.toml"))
+                .expect_err(&format!("{names:?} is refused"));
+            assert!(
+                refused.message.contains(named),
+                "{names:?}: {:?} does not name {named}",
+                refused.message
+            );
+        }
+        validate_document(&doc(&["work", "home"]), Path::new("/c/config.toml"))
+            .expect("distinct plain names load");
     }
 
     /// An account is updated when its effective JSON changed, and a global

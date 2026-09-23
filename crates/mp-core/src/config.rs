@@ -846,6 +846,8 @@ pub fn load_global_config() -> Result<GlobalConfig> {
         .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
     validate_retention(&config)
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
+    validate_account_names(&config)
+        .with_context(|| format!("Invalid config file: {}", path.display()))?;
     debug!("Loaded global config from {}", path.display());
     Ok(config)
 }
@@ -857,6 +859,35 @@ pub fn validate_retention(config: &GlobalConfig) -> Result<()> {
     RetentionPolicy::resolve(&config.retention, &RetentionConfig::default())?;
     for account in &config.accounts {
         retention_for(config, account)?;
+    }
+    Ok(())
+}
+
+/// Refuse an account name that cannot be a directory of its own: every
+/// account's data lives under a directory named after it, so an empty name,
+/// a path separator, NUL, `.` or `..` would land it on another account's or
+/// outside the data root, and two names that differ only in case share one
+/// directory on a case-insensitive filesystem.
+pub fn validate_account_names(config: &GlobalConfig) -> Result<()> {
+    let mut seen: Vec<(String, &str)> = Vec::new();
+    for account in &config.accounts {
+        let name = account.name.as_str();
+        if name.is_empty() {
+            anyhow::bail!("an account has an empty name");
+        }
+        if name.contains(['/', '\\', '\0']) {
+            anyhow::bail!("account name {name:?} contains a path separator or NUL");
+        }
+        if name == "." || name == ".." {
+            anyhow::bail!("account name {name:?} is not a directory name");
+        }
+        let folded = name.to_lowercase();
+        if let Some((_, first)) = seen.iter().find(|(key, _)| *key == folded) {
+            anyhow::bail!(
+                "account name {name:?} duplicates account {first:?} (names are compared case-insensitively)"
+            );
+        }
+        seen.push((folded, name));
     }
     Ok(())
 }
