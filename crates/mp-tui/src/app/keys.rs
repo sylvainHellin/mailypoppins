@@ -163,6 +163,22 @@ impl App {
         }
     }
 
+    /// Rows one list page spans: what the list pane showed on the last paint,
+    /// or a 20-row stand-in before the first one (the body pane's half-page is
+    /// a fixed 10, so the two agree until a real height is known).
+    fn list_page_rows(&self) -> usize {
+        match self.list_viewport_rows {
+            0 => 20,
+            rows => usize::from(rows),
+        }
+    }
+
+    /// Advance the list cursor by `step`, clamped to the last visible row.
+    fn move_list_cursor_down(&mut self, step: usize) {
+        let last = self.visible.len().saturating_sub(1);
+        self.list_index = self.list_index.saturating_add(step).min(last);
+    }
+
     /// The shared MESSAGE context, live whenever a reading pane (List, Headers,
     /// Body) holds focus in the Mail view (#0092). `None` off Mail or in the
     /// sidebar / input panes, so a message action never fires where there is
@@ -540,13 +556,30 @@ impl App {
                 }
             }
             A::ListTop => {
-                // Reached only with `g` pending (the leader continuation).
+                // `gg` (the leader continuation) or `Home`.
                 self.list_index = 0;
                 self.pending_prefix = None;
             }
             A::ListBottom => {
                 self.pending_prefix = None;
                 self.list_index = self.visible.len().saturating_sub(1);
+            }
+            A::ListHalfDown => {
+                self.pending_prefix = None;
+                self.move_list_cursor_down((self.list_page_rows() / 2).max(1));
+            }
+            A::ListHalfUp => {
+                self.pending_prefix = None;
+                let step = (self.list_page_rows() / 2).max(1);
+                self.list_index = self.list_index.saturating_sub(step);
+            }
+            A::ListPageDown => {
+                self.pending_prefix = None;
+                self.move_list_cursor_down(self.list_page_rows());
+            }
+            A::ListPageUp => {
+                self.pending_prefix = None;
+                self.list_index = self.list_index.saturating_sub(self.list_page_rows());
             }
             A::JumpToDate => {
                 // Reached only with `g` pending (the leader continuation).
@@ -3255,6 +3288,43 @@ mod tests {
         app.consume_pending_select();
         assert_eq!(app.list_index, 1, "the cursor did not move");
         assert_eq!(app.pending_select, Some(absent), "the target is still parked");
+    }
+
+    /// The list paging keys move by the rendered list height (half of it for
+    /// Ctrl+d / Ctrl+u) and clamp at both ends of the list.
+    #[test]
+    fn list_paging_moves_by_the_viewport_height_and_clamps() {
+        let emails = (0..25).map(|i| entry(&format!("Message {i}"), "Alice")).collect();
+        let mut app = app_with_emails(emails);
+        app.list_viewport_rows = 10;
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        app.handle_key(ctrl('d'));
+        assert_eq!(app.list_index, 5, "half a 10-row page");
+        app.handle_key(ctrl('d'));
+        app.handle_key(ctrl('d'));
+        app.handle_key(ctrl('d'));
+        assert_eq!(app.list_index, 20);
+        app.handle_key(ctrl('d'));
+        assert_eq!(app.list_index, 24, "clamped to the last row");
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.list_index, 19);
+        for _ in 0..4 {
+            app.handle_key(ctrl('u'));
+        }
+        assert_eq!(app.list_index, 0, "clamped to the first row");
+
+        app.handle_key(KeyEvent::from(KeyCode::PageDown));
+        assert_eq!(app.list_index, 10, "a whole page");
+        app.handle_key(KeyEvent::from(KeyCode::PageDown));
+        app.handle_key(KeyEvent::from(KeyCode::PageDown));
+        assert_eq!(app.list_index, 24);
+        app.handle_key(KeyEvent::from(KeyCode::PageUp));
+        assert_eq!(app.list_index, 14);
+        app.handle_key(KeyEvent::from(KeyCode::Home));
+        assert_eq!(app.list_index, 0);
+        app.handle_key(KeyEvent::from(KeyCode::End));
+        assert_eq!(app.list_index, 24);
     }
 
     /// A Drafts row: no `messages` row behind it, its indexed `id:` instead

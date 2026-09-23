@@ -10,7 +10,7 @@
 //! |---|---|
 //! | (a) the eight integration suites, rerun through a live daemon and byte-diffed against `pre-daemon` | [`the_eight_legacy_suites_answer_through_a_live_daemon`], [`the_roll_up_names_every_suite_the_phase_four_gate_named`] |
 //! | (b) the daemon-backed golden frames | [`the_daemon_golden_frames_module_carries_at_least_twenty_two_tests`], [`every_store_backed_golden_frame_has_a_daemon_twin_pinned_to_its_snapshot`], [`the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair`] |
-//! | (c) `mp dump-keys --json`, from a binary of this run | [`dump_keys_json_of_this_runs_binary_is_the_phase_zero_capture`] |
+//! | (c) `mp dump-keys --json`, from a binary of this run | [`dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture`] |
 //! | (d) the `KeyAction::Manual` checklist | [`every_manual_key_has_a_row_in_the_pre_daemon_checklist`], [`the_phase_five_manual_checklist_is_complete_and_carries_no_failure`] |
 //!
 //! # (a) Why a roll-up rather than eight new comparisons
@@ -73,6 +73,11 @@
 //! cargo builds it for this test target, from this working tree, before the
 //! test runs. An installed `mp` on `PATH` is whatever the developer last
 //! installed and would let a stale binary pass the gate.
+//!
+//! Once the cutover shipped the key surface was allowed to grow as well, so the
+//! dump now has to keep every Phase 0 binding in its section rather than
+//! reproduce the capture byte for byte, and the byte-identical pin moved to the
+//! living copy, `website/src/data/tui-keys.json`.
 //!
 //! The recursive `mp --help` half of this oracle was retired once the cutover
 //! shipped and the CLI surface was allowed to evolve (the post-cutover
@@ -582,7 +587,7 @@ fn quiet_sandbox(root: &Path) -> Command {
 }
 
 #[test]
-fn dump_keys_json_of_this_runs_binary_is_the_phase_zero_capture() {
+fn dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture() {
     let tmp = tempfile::tempdir().expect("a temporary keys root");
     let out = quiet_sandbox(tmp.path())
         .args(["dump-keys", "--json"])
@@ -595,10 +600,40 @@ fn dump_keys_json_of_this_runs_binary_is_the_phase_zero_capture() {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // Every pre-daemon binding is still there, under the same section title:
+    // the post-cutover surface only adds (docs/baselines/pre-daemon/README.md).
     let baseline = repo().join("docs/baselines/pre-daemon/tui-keys.json");
+    let parse = |bytes: &[u8], what: &Path| -> serde_json::Value {
+        serde_json::from_slice(bytes).unwrap_or_else(|e| panic!("{} is not JSON: {e}", what.display()))
+    };
+    let frozen = parse(
+        &fs::read(&baseline).unwrap_or_else(|e| panic!("read {}: {e}", baseline.display())),
+        &baseline,
+    );
+    let live = parse(&out.stdout, Path::new("`mp dump-keys --json`"));
+    for section in frozen.as_array().expect("a section array") {
+        let title = &section["title"];
+        let bindings = live
+            .as_array()
+            .expect("a section array")
+            .iter()
+            .find(|s| &s["title"] == title)
+            .unwrap_or_else(|| panic!("section {title} is gone from the key dump"))["bindings"]
+            .as_array()
+            .expect("a bindings array");
+        for binding in section["bindings"].as_array().expect("a bindings array") {
+            assert!(
+                bindings.contains(binding),
+                "the pre-daemon binding {binding} is gone from section {title}"
+            );
+        }
+    }
+
+    // The published key reference is this run's dump, byte for byte.
+    let website = repo().join("website/src/data/tui-keys.json");
     let expected =
-        fs::read(&baseline).unwrap_or_else(|e| panic!("read {}: {e}", baseline.display()));
-    assert_bytes_equal(&out.stdout, &expected, &baseline);
+        fs::read(&website).unwrap_or_else(|e| panic!("read {}: {e}", website.display()));
+    assert_bytes_equal(&out.stdout, &expected, &website);
 }
 
 /// Byte comparison with a failure a reader can act on: the first differing

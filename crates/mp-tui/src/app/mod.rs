@@ -58,6 +58,11 @@ pub struct App {
     /// reassignment of `emails` must call `rebuild_visible`.
     pub visible: Vec<usize>,
     pub list_index: usize,
+    /// Message rows the email list pane showed on the last paint (the pane's
+    /// inner height minus the column header), written by the renderer so the
+    /// paging keys (`Ctrl+d`/`Ctrl+u`, `PgDn`/`PgUp`) move by what the user
+    /// actually sees. `0` until the first paint.
+    pub list_viewport_rows: u16,
     /// The armed leader prefix, if any. Two leaders exist (#0033 follow-up):
     /// `' '` (Space) arms the view switcher (`Space m/c/a`), `'g'` arms the
     /// list-scoped `gg`/`G` jumps. `None` when no leader is pending. A pressed
@@ -325,6 +330,7 @@ impl App {
             emails: Arc::new(Vec::new()),
             visible: Vec::new(),
             list_index: 0,
+            list_viewport_rows: 0,
             pending_prefix: None,
             headers_scroll: 0,
             preview_scroll: 0,
@@ -406,6 +412,7 @@ impl App {
             emails: Arc::new(Vec::new()),
             visible: Vec::new(),
             list_index: 0,
+            list_viewport_rows: 0,
             pending_prefix: None,
             headers_scroll: 0,
             preview_scroll: 0,

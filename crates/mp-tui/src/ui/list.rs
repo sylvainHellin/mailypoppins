@@ -150,7 +150,7 @@ fn row_style(is_cursor: bool, is_in_selection: bool, read: bool) -> Style {
     }
 }
 
-pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
+pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let border_style = pane_border_style(app.focus, Focus::List);
     // Two independent narrowings, so the title names whichever are on (#0079).
     let mut narrowings: Vec<&str> = Vec::new();
@@ -193,6 +193,8 @@ pub(super) fn render_email_list(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         (None, inner)
     };
+    // The paging keys read this back; the table's column header takes a row.
+    app.list_viewport_rows = list_area.height.saturating_sub(1);
 
     if let Some(search_rect) = search_area {
         // The attach-file prompt (#0098) and the jump-to-date prompt (#0017)

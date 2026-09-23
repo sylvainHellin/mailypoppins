@@ -41,7 +41,7 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 35 |│     mail  |  contacts  |  calenda│  M           Move to mailbox (fuzzy picker)    │                                  │
 36 |╰──────────────────────────────────│  y           Copy selector (mp://)             │──────────────────────────────────╯
 37 |╭──────────────────────────────────│  Esc         Clear selection / return to list  │──────────────────────────────────╮
-38 |│ HELP                             ╰─────────────────── 1-36/111 ───────────────────╯                                  │
+38 |│ HELP                             ╰─────────────────── 1-36/114 ───────────────────╯                                  │
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 02 |bold@36..44

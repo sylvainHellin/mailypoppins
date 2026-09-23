@@ -172,6 +172,10 @@ pub enum SpecialCode {
     BackTab,
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 impl SpecialCode {
@@ -184,6 +188,10 @@ impl SpecialCode {
                 | (SpecialCode::BackTab, KeyCode::BackTab)
                 | (SpecialCode::Up, KeyCode::Up)
                 | (SpecialCode::Down, KeyCode::Down)
+                | (SpecialCode::PageUp, KeyCode::PageUp)
+                | (SpecialCode::PageDown, KeyCode::PageDown)
+                | (SpecialCode::Home, KeyCode::Home)
+                | (SpecialCode::End, KeyCode::End)
         )
     }
 }
@@ -271,6 +279,13 @@ pub enum KeyAction {
     ListUp,
     ListTop,
     ListBottom,
+    /// `Ctrl+d` / `Ctrl+u`: move the list cursor by half the rows the list
+    /// pane showed on the last paint.
+    ListHalfDown,
+    ListHalfUp,
+    /// `PgDn` / `PgUp`: move the list cursor by a whole visible page.
+    ListPageDown,
+    ListPageUp,
     /// Leader `g d`: arm the jump-to-date prompt on the mail list (#0017).
     JumpToDate,
     ToggleSelect,
@@ -646,6 +661,14 @@ pub static KEYMAP: &[KeyBinding] = &[
     bg("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListUp, "", false),
     row("", Chord::Char('g'), Some('g'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListTop, "", false),
     bg("gg / G", Chord::Char('G'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListBottom, "Jump to top / bottom", false),
+    // Paging by the list pane's visible height. Ctrl+d / Ctrl+u match the body
+    // pane's half-page keys; bare `d`/`u` stay delete / toggle-read (MESSAGE).
+    bg("Ctrl+d / Ctrl+u", Chord::CtrlChar('d'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListHalfDown, "Half-page down / up", false),
+    bg("", Chord::CtrlChar('u'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListHalfUp, "", false),
+    bg("PgDn / PgUp", Chord::Code(SpecialCode::PageDown), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListPageDown, "Page down / up", false),
+    bg("", Chord::Code(SpecialCode::PageUp), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListPageUp, "", false),
+    bg("", Chord::Code(SpecialCode::Home), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListTop, "", false),
+    bg("Home / End", Chord::Code(SpecialCode::End), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListBottom, "Jump to top / bottom", false),
     // `gt` ("go to date") rather than `gd`: `d` is delete in the message
     // context, and `gd` resolving against a mistyped delete is exactly what
     // `no_duplicate_live_dispatch_per_context` refuses.
@@ -1032,6 +1055,10 @@ mod tests {
                 KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
                 KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
                 KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
             ])
             .collect();
         for &ctx in KeyCtx::HELP_ORDER {
@@ -1300,6 +1327,28 @@ mod tests {
         let reply: Vec<_> = actions.iter().filter(|(a, _)| *a == KeyAction::Reply).collect();
         assert_eq!(reply.len(), 1, "Reply must be catalogued once");
         assert_eq!(reply[0].1, "Reply");
+    }
+
+    /// The list paging keys resolve in the List context: Ctrl+d / Ctrl+u
+    /// half-page, PgDn / PgUp a full page, Home / End reuse the gg / G jumps.
+    #[test]
+    fn list_paging_chords_resolve_in_the_list_context() {
+        let code = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        for (ev, want) in [
+            (ctrl('d'), KeyAction::ListHalfDown),
+            (ctrl('u'), KeyAction::ListHalfUp),
+            (code(KeyCode::PageDown), KeyAction::ListPageDown),
+            (code(KeyCode::PageUp), KeyAction::ListPageUp),
+            (code(KeyCode::Home), KeyAction::ListTop),
+            (code(KeyCode::End), KeyAction::ListBottom),
+        ] {
+            assert_eq!(resolve(KeyCtx::List, ev, None, &allow), Some(want), "{ev:?}");
+            // Nothing earlier in the dispatch order shadows them.
+            assert_eq!(resolve(KeyCtx::Global, ev, None, &allow), None, "{ev:?}");
+        }
+        // An empty list leaves them inert like the other cursor keys.
+        let non_empty_denied = |g: Guard| g != Guard::NonEmptyList;
+        assert_eq!(resolve(KeyCtx::List, ctrl('d'), None, &non_empty_denied), None);
     }
 
     /// Guarded rows respect the live guard evaluation.
