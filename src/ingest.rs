@@ -301,6 +301,14 @@ fn ingest_in_tx(
     // come back on a row that holds a different message: that row is unbound
     // to its `-id` sentinel (as `unbind_rows_on_uids` does) and follows its own
     // message when that is refetched, and this message looks up its own row.
+    //
+    // Parked on the sentinel, the row is outside the prune (`vanished_uids`
+    // reads only `uid > 0`): if its message has left the server too, the row
+    // stays in the listing until something rebinds or deletes it. That is the
+    // cost `unbind_rows_on_uids` already accepts for the same sentinel (see its
+    // doc comment, and `a_reset_leaves_a_row_alone_when_the_new_listing_has_no_
+    // uid_for_it` in `sync::engine`), taken here for the same reason: a row on
+    // a UID that holds another message would otherwise be overwritten.
     let existing = match existing {
         Some((id, thread, stored)) if stored.is_empty() || stored == message_id => {
             Some((id, thread))
