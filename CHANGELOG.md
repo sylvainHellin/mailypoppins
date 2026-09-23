@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The email list pages with `Ctrl+d`/`Ctrl+u` (half page), `PgDn`/`PgUp` (full page) and `Home`/`End`.** Sized to the visible list, clamped at both ends; the pre-daemon `tui-keys.json` capture is now a subset check rather than a byte pin.
+- **`mp outbox list --json` and `mp list-mailboxes --json` print the listing as JSON on stdout.**
 - **`mp list --json` prints the listing as JSON.** The same rows the table shows, for a script to read without parsing columns.
 - **`mp daemon restart` takes `--grace-secs` like `mp daemon stop`, and `start` and `restart` say the daemon started.** The grace is how long work already running may settle before the old daemon goes.
 - **The global `-A` reaches every per-account command.** `mp contacts`, `mp calendar rebuild`, `mp cutover` and the `mp config` account commands lost their own `--account` for it; `mp calendar rebuild`, `mp contacts rebuild` and `mp cutover` still cover every account when it is absent.
@@ -79,6 +81,7 @@ All notable changes to this project are documented in this file.
 - **A mail header can no longer write frontmatter keys into a reply or forward draft.** An RFC 2047 encoded-word can decode to a newline; every header-derived scalar is now a double-quoted YAML string with control characters, line separators and characters outside YAML's printable set escaped.
 - **The browser rendition runs under `default-src 'none'` and loses every `<meta http-equiv="refresh">`.** The refresh strip decodes character references first, so `&#114;efresh` is caught too.
 - **The setup wizard writes its answers as escaped TOML strings and refuses to save a config that does not parse.** A quote or a backslash in an answer can no longer inject a key.
+- **The data directory and everything under it is created owner-only (0700).** Accounts, stores, blobs, tokens and logs; an existing wider tree is tightened on the next write, so a 0755 home no longer exposes mail to other local users.
 
 ## [0.9.0] - 2026-08-30
 
