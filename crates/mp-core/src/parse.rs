@@ -109,14 +109,23 @@ pub fn ensure_utf8_charset(html: &str) -> String {
 /// home, or load remote tracking pixels.
 ///
 /// Policy rationale:
-/// - `script-src 'none'` / `connect-src 'none'`: no script execution, no
-///   network requests from script -- neutralizes active content in hostile
-///   emails.
+/// - `default-src 'none'`: everything not named below is blocked, so remote
+///   stylesheets, fonts, iframes, media, scripts and fetches cannot load or
+///   phone home (a CSS `background: url(...)` is as good a tracking pixel as
+///   an `<img>`).
 /// - `img-src data:`: remote (http/https) images -- i.e. tracking pixels --
-///   are blocked by default. `data:` is what [`embed_inline_images`] rewrites
-///   every `cid:` reference to before the file is written; a `cid:` URL that
+///   are blocked. `data:` is what [`embed_inline_images`] rewrites every
+///   `cid:` reference to before the file is written; a `cid:` URL that
 ///   survives (oversized part, Graph row with no RFC822) is unloadable in a
 ///   browser regardless of policy.
+/// - `style-src 'unsafe-inline'`: the inline `<style>`/`style=` markup almost
+///   every HTML email is laid out with; a remote stylesheet stays blocked.
+/// - `font-src data:`: embedded fonts only.
+/// - `form-action 'none'` / `base-uri 'none'`: these do not fall back to
+///   `default-src`, so they are named: no form posts, no `<base>` rebasing.
+///
+/// `<meta http-equiv="refresh">` is outside CSP entirely (it would navigate
+/// the tab to a remote URL), so every such tag is stripped as well.
 ///
 /// Any pre-existing CSP meta tag (e.g. supplied by the sender) is removed and
 /// replaced with ours, so our policy always wins. (Even if a sender CSP
@@ -125,7 +134,9 @@ pub fn ensure_utf8_charset(html: &str) -> String {
 pub fn inject_csp_meta(html: &str) -> String {
     use regex::Regex;
 
-    const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="script-src 'none'; connect-src 'none'; img-src data:">"#;
+    const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'">"#;
+
+    let html = strip_meta_refresh(html);
 
     // Strip any existing CSP meta tags (ours from a previous render, or
     // sender-supplied ones), handling case variations and single/double quotes.
@@ -133,7 +144,7 @@ pub fn inject_csp_meta(html: &str) -> String {
         r#"(?i)<meta\s+http-equiv\s*=\s*["']Content-Security-Policy["']\s+content\s*=\s*(?:"[^"]*"|'[^']*')\s*/?>"#,
     )
     .unwrap();
-    let html = re_csp.replace_all(html, "").into_owned();
+    let html = re_csp.replace_all(&html, "").into_owned();
 
     // Insertion strategy: PREPEND at the very start of the document (after a
     // leading doctype), never search for `<head>`/`<html>`. Searching is
@@ -148,6 +159,32 @@ pub fn inject_csp_meta(html: &str) -> String {
     // any attacker-controlled content is parsed. This also avoids computing
     // byte offsets on a lowercased copy (see `find_ascii_ci`).
     insert_at_document_start(&html, CSP_META)
+}
+
+/// Remove every `<meta http-equiv="refresh" ...>` tag, case-insensitively and
+/// whatever the attribute order or quoting. Attribute values are matched as
+/// quoted units, so a `>` inside one does not end the tag early. Applied until
+/// nothing changes, so a tag split around another one
+/// (`<me<meta http-equiv=refresh>ta ...>`) cannot reassemble after a pass.
+fn strip_meta_refresh(html: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)<meta\b(?:[^>"']|"[^"]*"|'[^']*')*?\bhttp-equiv\s*=\s*(?:"\s*refresh\s*"|'\s*refresh\s*'|refresh\b)(?:[^>"']|"[^"]*"|'[^']*')*>"#,
+        )
+        .expect("static meta-refresh regex")
+    });
+    let mut out = html.to_string();
+    loop {
+        let next = re.replace_all(&out, "").into_owned();
+        if next == out {
+            return out;
+        }
+        out = next;
+    }
 }
 
 /// Filename of the iMIP calendar sidecar saved in each invite's attachments
@@ -1922,7 +1959,30 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
     // inject_csp_meta
     // -----------------------------------------------------------------
 
-    const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="script-src 'none'; connect-src 'none'; img-src data:">"#;
+    const CSP_META: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'">"#;
+
+    #[test]
+    fn test_inject_csp_meta_strips_meta_refresh() {
+        let cases = [
+            r#"<meta http-equiv="refresh" content="0;url=https://evil.tld/">"#,
+            r#"<META CONTENT='0; URL=https://evil.tld/' HTTP-EQUIV='Refresh'>"#,
+            r#"<meta content="1;url=https://evil.tld/?a>b" http-equiv=refresh />"#,
+            r#"<meta/http-equiv = " refresh " content="0">"#,
+        ];
+        for tag in cases {
+            let html = format!("<html><head>{tag}<title>t</title></head><body>hi</body></html>");
+            let result = inject_csp_meta(&html);
+            assert!(!result.to_lowercase().contains("refresh"), "{result}");
+            assert!(!result.contains("evil.tld"), "{result}");
+            assert!(result.contains("<title>t</title>"), "{result}");
+        }
+        // Reassembly after one pass is caught by the fixpoint loop.
+        let nested = r#"<me<meta http-equiv=refresh>ta http-equiv=refresh content="0;url=https://evil.tld/">"#;
+        assert!(!inject_csp_meta(nested).contains("evil.tld"));
+        // Other meta tags, and the word in body text, are left alone.
+        let benign = r#"<meta charset="utf-8"><meta name="x" content="refresh"><p>refresh me</p>"#;
+        assert!(inject_csp_meta(benign).ends_with(benign));
+    }
 
     #[test]
     fn test_inject_csp_meta_normal_html() {
