@@ -201,7 +201,11 @@ enum Commands {
         action: InviteAction,
     },
     /// List available IMAP mailboxes/folders
-    ListMailboxes,
+    ListMailboxes {
+        /// Print the listing as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Fetch emails from IMAP server
     Fetch {
@@ -504,7 +508,11 @@ enum AccountAction {
 #[derive(Subcommand)]
 enum OutboxAction {
     /// List every queued, retrying, failed or partly delivered submission
-    List,
+    List {
+        /// Print the listing as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Send a failed submission again (only after checking it did not arrive)
     Retry {
         /// Outbox row id, as shown by `mp outbox list`
@@ -689,13 +697,17 @@ async fn cmd_outbox(
         serde_json::json!({"account": account}),
     )
     .await?;
+    if let OutboxAction::List { json: true } = action {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        return Ok(());
+    }
     if !listing.ever_used {
         print_lines(&mp_client::format::outbox_cli_lines(&listing));
         return Ok(());
     }
 
     match action {
-        OutboxAction::List => print_lines(&mp_client::format::outbox_cli_lines(&listing)),
+        OutboxAction::List { .. } => print_lines(&mp_client::format::outbox_cli_lines(&listing)),
         OutboxAction::Discard { id } => {
             let result = daemon_try_call(
                 &mut connection,
@@ -2191,7 +2203,7 @@ async fn routed_watch(account: &AccountConfig, mailbox: &str, timeout: Option<u6
 /// The two transports report different things about a mailbox, so `source` says
 /// which answered: Graph carries the item counts this listing prints and IMAP's
 /// `LIST` carries none.
-async fn routed_list_mailboxes(account: &AccountConfig) -> Result<()> {
+async fn routed_list_mailboxes(account: &AccountConfig, json: bool) -> Result<()> {
     let mut connection = daemon_connection().await;
     let result = daemon_try_call_within(
         &mut connection,
@@ -2201,6 +2213,13 @@ async fn routed_list_mailboxes(account: &AccountConfig) -> Result<()> {
     )
     .await
     .map_err(|e| refusal(&account.name, e))?;
+    if json {
+        // The daemon's own result shape: `account`, `source` and the
+        // `mailboxes` rows (`name`, `delimiter`, `attributes`, `total`,
+        // `unread`, `null` where the transport says nothing).
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
 
     let graph = wire_str(&result["source"]) == "graph";
     println!(
@@ -3426,11 +3445,11 @@ async fn main() -> Result<()> {
             .await?;
         }
 
-        Some(Commands::ListMailboxes) => {
+        Some(Commands::ListMailboxes { json }) => {
             // Which transport answers, the credentials it needs and the session
             // it opens are all the daemon's (P4-U10); what stays here is the
             // wording of the listing.
-            routed_list_mailboxes(&account_config).await?;
+            routed_list_mailboxes(&account_config, json).await?;
         }
 
         Some(Commands::Fetch {

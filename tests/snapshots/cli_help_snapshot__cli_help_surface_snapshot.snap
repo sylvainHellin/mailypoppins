@@ -284,6 +284,7 @@ List available IMAP mailboxes/folders
 Usage: mp list-mailboxes [OPTIONS]
 
 Options:
+      --json                   Print the listing as JSON on stdout
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use
@@ -723,6 +724,7 @@ List every queued, retrying, failed or partly delivered submission
 Usage: mp outbox list [OPTIONS]
 
 Options:
+      --json                   Print the listing as JSON on stdout
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use

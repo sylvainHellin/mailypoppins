@@ -1994,6 +1994,33 @@ fn mp_outbox_list_of_an_empty_account_matches_exactly() {
     );
 }
 
+/// `mp outbox list --json` prints the daemon's `OutboxListing` and nothing
+/// else on stdout, for an account that has never queued anything too.
+#[test]
+fn mp_outbox_list_json_prints_the_listing_as_json() {
+    let slice = Slice::start();
+    let out = slice.routed(&["outbox", "list", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let listing: Value = serde_json::from_str(&stdout(&out))
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", stdout(&out)));
+    assert_eq!(listing["account"], fixture::ACCOUNT);
+    assert_eq!(listing["ever_used"], true);
+    assert!(listing["counts"].is_object(), "{listing}");
+    let rows = listing["rows"].as_array().expect("a rows array");
+    let mids: Vec<&str> = rows.iter().filter_map(|r| r["message_id"].as_str()).collect();
+    for mid in [fixture::QUEUED_MID, fixture::FAILED_MID, fixture::PARTIAL_MID] {
+        assert!(mids.contains(&mid), "{mid} missing from {mids:?}");
+    }
+    assert!(rows.iter().all(|r| r["id"].is_i64()), "{listing}");
+
+    let out = slice.routed(&["outbox", "list", "--json", "-A", fixture::STORELESS_ACCOUNT]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let listing: Value = serde_json::from_str(&stdout(&out))
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", stdout(&out)));
+    assert_eq!(listing["ever_used"], false);
+    assert_eq!(listing["rows"], json!([]));
+}
+
 /// A row id nothing holds: the refusal, and no row touched either way.
 #[test]
 fn mp_outbox_of_an_unknown_row_refuses_exactly_as_before() {

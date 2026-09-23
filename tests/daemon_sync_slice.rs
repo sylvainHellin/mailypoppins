@@ -1546,6 +1546,20 @@ fn mp_list_mailboxes_refuses_exactly_as_before() {
     }
 }
 
+/// `mp list-mailboxes --json` refuses the same way and leaves stdout empty, so
+/// a script parsing it never reads a half listing. The success shape (the
+/// daemon's `mailbox.list_server` result verbatim) needs a server this
+/// fixture does not have; see the module notes.
+#[test]
+fn mp_list_mailboxes_json_refuses_with_a_clean_stdout() {
+    let slice = Slice::start();
+    for account in [fixture::ACCOUNT, fixture::SERVER_ACCOUNT] {
+        let out = slice.routed(&["list-mailboxes", "--json", "-A", account]);
+        assert_refused(&out, &fixture::secret_refusal(account));
+        assert!(stdout(&out).is_empty(), "printed a listing it never got:\n{}", stdout(&out));
+    }
+}
+
 /// `mp fetch` refuses the same way, with and without its filters, and writes
 /// nothing either way.
 #[test]
