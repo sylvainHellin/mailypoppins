@@ -2065,6 +2065,45 @@ async fn config_set_password_stores_through_the_existing_backend() {
     assert_eq!(imap["key"], json!(SecretKind::Imap.secret_key("alpha")));
 }
 
+/// Once the daemon opened its secrets backend it keeps it until a restart, so
+/// a reload that names another one is refused rather than reported as live
+/// while every password still went to the old one.
+#[tokio::test]
+async fn a_reload_that_flips_the_secrets_backend_is_refused_until_a_restart() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+    bootstrap(&mut conn).await;
+
+    // The first stored password opens the configured (encrypted-file) backend.
+    call_ok(
+        &mut conn,
+        "config.set_password",
+        json!({"account": "alpha", "kind": "smtp", "value": SECRET}),
+    )
+    .await;
+
+    let original = sandbox.read_config();
+    sandbox.write_config(&format!("secrets_backend = \"keyring\"\n{original}"));
+    let error = call_err(&mut conn, "config.reload", json!({})).await;
+    assert_eq!(error.code, ErrorCode::ConfigInvalid.code(), "{error:?}");
+    let message = error.data.as_ref().expect("a payload")["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        message,
+        "secrets_backend changed from encrypted-file to keyring; restart the daemon to apply"
+    );
+
+    let get = call_ok(&mut conn, "config.get", json!({})).await;
+    assert_eq!(
+        get["config"]["secrets_backend"],
+        json!("encrypted-file"),
+        "config.get keeps reporting the backend passwords actually go to: {get}"
+    );
+}
+
 #[tokio::test]
 async fn a_secret_never_reaches_a_log_line_an_error_payload_or_the_effective_config() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);

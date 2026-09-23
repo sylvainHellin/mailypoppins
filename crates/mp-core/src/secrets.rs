@@ -465,6 +465,17 @@ impl SecretsBackend for KeyringBackend {
 
 static BACKEND: OnceLock<Box<dyn SecretsBackend>> = OnceLock::new();
 
+/// The kind [`BACKEND`] was opened as, set in the same call.
+static ACTIVE_KIND: OnceLock<SecretsBackendKind> = OnceLock::new();
+
+/// The backend this process opened, `None` until the first [`init`].
+///
+/// The first kind wins for the life of the process, so a configuration that
+/// names another one cannot take effect before a restart.
+pub fn active_backend() -> Option<SecretsBackendKind> {
+    ACTIVE_KIND.get().copied()
+}
+
 /// Return the path to the encrypted secrets file:
 /// ~/.config/mailypoppins/secrets.enc
 pub fn secrets_path() -> PathBuf {
@@ -481,7 +492,9 @@ pub fn init(kind: SecretsBackendKind) -> std::result::Result<(), SecretsError> {
         SecretsBackendKind::EncryptedFile => Box::new(EncryptedFileBackend::open(secrets_path())?),
         SecretsBackendKind::Keyring => Box::new(KeyringBackend),
     };
-    let _ = BACKEND.set(backend);
+    if BACKEND.set(backend).is_ok() {
+        let _ = ACTIVE_KIND.set(kind);
+    }
     Ok(())
 }
 

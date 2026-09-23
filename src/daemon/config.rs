@@ -238,7 +238,37 @@ pub fn validate_document(text: &str, path: &Path) -> Result<GlobalConfig, Diagno
         line: None,
         message: format!("{e:#}"),
     })?;
+    check_secrets_backend(&config, crate::secrets::active_backend())?;
     Ok(config)
+}
+
+/// Refuse a candidate that names another secrets backend than the one this
+/// process already opened: the backend is a process-wide singleton, so the
+/// swap would report the new kind while every read and write still went to
+/// the old one. `None` is a daemon that has not opened one yet, which takes
+/// whatever the configuration names on first use.
+fn check_secrets_backend(
+    config: &GlobalConfig,
+    active: Option<SecretsBackendKind>,
+) -> Result<(), Diagnostic> {
+    match active {
+        Some(active) if active != config.secrets_backend => Err(Diagnostic {
+            line: None,
+            message: format!(
+                "secrets_backend changed from {} to {}; restart the daemon to apply",
+                backend_name(active),
+                backend_name(config.secrets_backend)
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn backend_name(kind: SecretsBackendKind) -> &'static str {
+    match kind {
+        SecretsBackendKind::EncryptedFile => "encrypted-file",
+        SecretsBackendKind::Keyring => "keyring",
+    }
 }
 
 /// The 1-based line byte offset `at` falls on.
@@ -257,10 +287,7 @@ pub fn effective_config(config: &GlobalConfig) -> Value {
     json!({
         "theme": config.theme,
         "notifications": config.notifications,
-        "secrets_backend": match config.secrets_backend {
-            SecretsBackendKind::EncryptedFile => "encrypted-file",
-            SecretsBackendKind::Keyring => "keyring",
-        },
+        "secrets_backend": backend_name(config.secrets_backend),
         "email": {
             "font_family": config.email.font_family,
             "font_size": config.email.font_size,

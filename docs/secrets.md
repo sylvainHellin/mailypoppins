@@ -103,6 +103,7 @@ secrets_backend = "keyring"
 This swaps the storage at startup. There is no automatic migration: you
 will need to re-set passwords via `mp config set-password <which>
 --account <name>` after flipping the switch.
+A running daemon that has already opened its backend refuses a `config.reload` that flips `secrets_backend` (`-32007`, "restart the daemon to apply"), so run `mp daemon restart` after the edit.
 
 The keyring service name is `mailypoppins`.
 It was `email-cli` before #0022, so a lookup that misses under `mailypoppins` retries under `email-cli` and nobody who opted in before the rename loses access to a stored password.
