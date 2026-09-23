@@ -598,6 +598,19 @@ fn imap_quote(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// `s` as the body of an IMAP quoted string, refused when it carries a CR, an
+/// LF or a NUL: RFC 3501 allows none of them in a quoted string, and a CRLF
+/// would end the `SEARCH` line and start a command of the value's choosing.
+fn imap_quote_checked(s: &str) -> Result<String, RenderError> {
+    if s.contains(['\r', '\n', '\0']) {
+        return Err(RenderError(format!(
+            "a search value cannot contain a line break or a NUL on IMAP: {:?}",
+            s
+        )));
+    }
+    Ok(imap_quote(s))
+}
+
 // ---------------------------------------------------------------------------
 // Renderer: plain IMAP (RFC 3501)
 // ---------------------------------------------------------------------------
@@ -619,12 +632,12 @@ pub struct ImapRender {
 /// a post-filter cannot resolve half of an alternation.
 fn imap_term(term: &Term) -> Result<String, RenderError> {
     Ok(match term {
-        Term::From(s) => format!("FROM \"{}\"", imap_quote(s)),
-        Term::To(s) => format!("TO \"{}\"", imap_quote(s)),
-        Term::Cc(s) => format!("CC \"{}\"", imap_quote(s)),
-        Term::Subject(s) => format!("SUBJECT \"{}\"", imap_quote(s)),
-        Term::Body(s) => format!("BODY \"{}\"", imap_quote(s)),
-        Term::Text(s) => format!("TEXT \"{}\"", imap_quote(s)),
+        Term::From(s) => format!("FROM \"{}\"", imap_quote_checked(s)?),
+        Term::To(s) => format!("TO \"{}\"", imap_quote_checked(s)?),
+        Term::Cc(s) => format!("CC \"{}\"", imap_quote_checked(s)?),
+        Term::Subject(s) => format!("SUBJECT \"{}\"", imap_quote_checked(s)?),
+        Term::Body(s) => format!("BODY \"{}\"", imap_quote_checked(s)?),
+        Term::Text(s) => format!("TEXT \"{}\"", imap_quote_checked(s)?),
         Term::Before(d) => format!(
             "BEFORE {}",
             parse_date_to_imap(d).ok_or_else(|| RenderError(format!("bad date {d}")))?
@@ -664,7 +677,7 @@ pub fn to_imap(q: &Query) -> Result<ImapRender, RenderError> {
     if let Some(ref mid) = q.message_id {
         parts.push(format!(
             "HEADER \"Message-ID\" \"{}\"",
-            imap_quote(&crate::imap_query::bracketed_message_id(mid))
+            imap_quote_checked(&crate::imap_query::bracketed_message_id(mid))?
         ));
     }
 
@@ -1244,6 +1257,21 @@ mod tests {
             to_gmail_search_command(&q("has:attachment")),
             "X-GM-RAW \"has:attachment\""
         );
+    }
+
+    /// A CRLF in a value would end the `SEARCH` line and smuggle in a
+    /// command of its own, so the render refuses it, and a NUL with it.
+    #[test]
+    fn imap_refuses_line_breaks_and_nul_in_values() {
+        let with = |value: &str| Query {
+            in_mailbox: None,
+            message_id: None,
+            clauses: vec![Clause::Single(Term::Subject(value.to_string()))],
+        };
+        assert!(to_imap(&with("x\r\nA1 DELETE Trash")).is_err());
+        assert!(to_imap(&with("x\nY")).is_err());
+        assert!(to_imap(&with("x\0y")).is_err());
+        assert!(to_imap(&with("plain")).is_ok());
     }
 
     // -- to_graph -----------------------------------------------------------
