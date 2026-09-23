@@ -1102,59 +1102,42 @@ async fn the_daemon_flag_does_not_fall_back_to_the_direct_path() {
 // The help surface
 // ---------------------------------------------------------------------------
 
-/// The whole `mp --help` surface is byte-identical to the pre-daemon baseline:
-/// the `--daemon` flag is `hide = true`, and so is any subcommand the daemon
-/// work added.
+/// Every command of the pre-daemon help surface is still reachable in the
+/// `mp --help` walk, and the daemon-era surfaces stay hidden: the `--daemon`
+/// flag is `hide = true`, and so are `mp daemon` and `mp account`.
+///
+/// Until the cutover shipped this compared the whole walk byte for byte with
+/// `docs/baselines/pre-daemon/cli-help.txt`. The CLI surface may evolve now
+/// (the post-cutover divergences in `docs/baselines/pre-daemon/README.md`), so
+/// the frozen capture is held to a subset relation on its `$ mp … --help`
+/// screen headers, and `tests/cli_help_snapshot.rs` pins the current wording.
 #[test]
-fn the_help_surface_still_matches_the_pre_daemon_baseline() {
+fn the_help_surface_still_offers_every_pre_daemon_command() {
     let sandbox = Sandbox::new();
 
     let mut walked = String::new();
     collect_help(&sandbox, &[], &mut walked);
-    let screens = walked.lines().filter(|l| l.starts_with("$ mp")).count();
-    assert!(screens > 20, "the help walk collected {screens} screens");
+    let screens = |text: &str| -> std::collections::BTreeSet<String> {
+        text.lines()
+            .filter(|l| l.starts_with("$ mp"))
+            .map(str::to_string)
+            .collect()
+    };
+    let ours = screens(&walked);
+    assert!(ours.len() > 20, "the help walk collected {} screens", ours.len());
 
     let baseline_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/baselines/pre-daemon/cli-help.txt");
     let baseline = fs::read_to_string(&baseline_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", baseline_path.display()));
+    let theirs = screens(&baseline);
+    let missing: Vec<&String> = theirs.difference(&ours).collect();
+    assert!(
+        missing.is_empty(),
+        "the help walk lost pre-daemon commands recorded in {}: {missing:?}",
+        baseline_path.display()
+    );
 
-    // Only the trailing newline count is normalised, which is the one
-    // difference `docs/baselines/pre-daemon/README.md` records between the
-    // captured artifact and the walk that produced it.
-    let walked_body = walked.trim_end_matches('\n');
-    let baseline_body = baseline.trim_end_matches('\n');
-    if walked_body != baseline_body {
-        let first = walked_body
-            .lines()
-            .zip(baseline_body.lines())
-            .position(|(a, b)| a != b);
-        let detail = match first {
-            Some(index) => {
-                let mine: Vec<&str> = walked_body.lines().collect();
-                let theirs: Vec<&str> = baseline_body.lines().collect();
-                format!(
-                    "first difference at line {}:\n  built:    {:?}\n  baseline: {:?}",
-                    index + 1,
-                    mine.get(index),
-                    theirs.get(index)
-                )
-            }
-            None => format!(
-                "the texts share a prefix; built has {} lines, the baseline {}",
-                walked_body.lines().count(),
-                baseline_body.lines().count()
-            ),
-        };
-        panic!(
-            "the help surface moved away from {}: the daemon flag and any daemon-era subcommand \
-             must be hidden.\n{detail}",
-            baseline_path.display()
-        );
-    }
-
-    // Said directly as well, so the failure names the cause and not only the
-    // symptom.
     let top = sandbox.run_ok(&["--help"]);
     assert!(
         !top.contains("--daemon"),

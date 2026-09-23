@@ -10,7 +10,7 @@
 //! |---|---|
 //! | (a) the eight integration suites, rerun through a live daemon and byte-diffed against `pre-daemon` | [`the_eight_legacy_suites_answer_through_a_live_daemon`], [`the_roll_up_names_every_suite_the_phase_four_gate_named`] |
 //! | (b) the daemon-backed golden frames | [`the_daemon_golden_frames_module_carries_at_least_twenty_two_tests`], [`every_store_backed_golden_frame_has_a_daemon_twin_pinned_to_its_snapshot`], [`the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair`] |
-//! | (c) `mp --help` recursive and `mp dump-keys --json`, from a binary of this run | [`the_help_walk_of_this_runs_binary_is_the_phase_zero_capture`], [`dump_keys_json_of_this_runs_binary_is_the_phase_zero_capture`] |
+//! | (c) `mp dump-keys --json`, from a binary of this run | [`dump_keys_json_of_this_runs_binary_is_the_phase_zero_capture`] |
 //! | (d) the `KeyAction::Manual` checklist | [`every_manual_key_has_a_row_in_the_pre_daemon_checklist`], [`the_phase_five_manual_checklist_is_complete_and_carries_no_failure`] |
 //!
 //! # (a) Why a roll-up rather than eight new comparisons
@@ -74,6 +74,13 @@
 //! test runs. An installed `mp` on `PATH` is whatever the developer last
 //! installed and would let a stale binary pass the gate.
 //!
+//! The recursive `mp --help` half of this oracle was retired once the cutover
+//! shipped and the CLI surface was allowed to evolve (the post-cutover
+//! divergences in `docs/baselines/pre-daemon/README.md`): the living pin on
+//! the help surface is `tests/cli_help_snapshot.rs`, and
+//! `tests/daemon_read_only_methods.rs` holds the pre-daemon command set to a
+//! subset relation.
+//!
 //! # (d) Where the Manual keys come from
 //!
 //! `KeyAction::Manual` rows are catalogued but hand-dispatched: `mp dump-keys`
@@ -93,13 +100,13 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use mailypoppins::tui::app::{KeyAction, KEYMAP};
 
 use support::admin_fixture;
 use support::parity::{
-    assert_byte_identical, mp_command, oracle, oracle_cache_dir, sandbox_env, DaemonFixture,
+    assert_byte_identical, mp_command, oracle, oracle_cache_dir, DaemonFixture,
     ORACLE_BIN_ENV, ORACLE_TAG,
 };
 use support::send_fixture;
@@ -108,10 +115,6 @@ use support::send_fixture;
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
-
-/// The binary cargo built for this test target: the "reinstalled in the same
-/// run" the gate line asks for.
-const MP: &str = env!("CARGO_BIN_EXE_mp");
 
 // ---------------------------------------------------------------------------
 // (a) The eight integration suites, through a live daemon
@@ -160,7 +163,10 @@ fn suites() -> Vec<Suite> {
             &["search", "--local", "ledger", "-n", "10"],
         ),
         parity("outbox_integration", &["outbox", "list"]),
-        parity("imip_integration", &["calendar", "rebuild", "-A", "alpha"]),
+        parity(
+            "imip_integration",
+            &["calendar", "rebuild", "--account", "alpha"],
+        ),
         parity("engine_lock_ingest_cli", &["sync", "-A", "alpha"]),
     ]
 }
@@ -564,7 +570,7 @@ fn the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair() {
 }
 
 // ---------------------------------------------------------------------------
-// (c) The help walk and the key dump, from this run's binary
+// (c) The key dump, from this run's binary
 // ---------------------------------------------------------------------------
 
 /// A sandbox for a `mp` invocation that must reach nothing: an empty root, no
@@ -573,34 +579,6 @@ fn quiet_sandbox(root: &Path) -> Command {
     let mut cmd = mp_command(root);
     cmd.env("MAILYPOPPINS_DAEMON_AUTOSTART", "0");
     cmd
-}
-
-#[test]
-fn the_help_walk_of_this_runs_binary_is_the_phase_zero_capture() {
-    let tmp = tempfile::tempdir().expect("a temporary help root");
-    let script = repo().join("scripts/capture-cli-help.sh");
-    assert!(script.is_file(), "{} is missing", script.display());
-
-    let mut cmd = Command::new(&script);
-    sandbox_env(&mut cmd, tmp.path());
-    let out = cmd
-        .env("MP", MP)
-        .env("MAILYPOPPINS_DAEMON_AUTOSTART", "0")
-        .current_dir(repo())
-        .stdin(Stdio::null())
-        .output()
-        .unwrap_or_else(|e| panic!("run {}: {e}", script.display()));
-    assert!(
-        out.status.success(),
-        "the help walk failed with {}:\n{}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let baseline = repo().join("docs/baselines/pre-daemon/cli-help.txt");
-    let expected =
-        fs::read(&baseline).unwrap_or_else(|e| panic!("read {}: {e}", baseline.display()));
-    assert_bytes_equal(&out.stdout, &expected, &baseline);
 }
 
 #[test]

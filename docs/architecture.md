@@ -96,7 +96,7 @@ From Phase 4 the daemon is required by default, so there is one build, one test 
 cargo test --workspace   # the whole tree, daemon included
 ```
 
-What did not change is the help surface: `mp daemon`, `mp account` and the global `--daemon` flag keep `#[command(hide = true)]` / `hide = true`, so `mp --help` stays byte-identical to `docs/baselines/pre-daemon/cli-help.txt` until a later unit moves it deliberately.
+What did not change is the help surface: `mp daemon`, `mp account` and the global `--daemon` flag keep `#[command(hide = true)]` / `hide = true`, so neither appears in `mp --help`; the rest of the help surface evolves past `docs/baselines/pre-daemon/cli-help.txt` since the cutover shipped (its README lists the post-cutover divergences), with `tests/cli_help_snapshot.rs` as the living pin.
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
 It counts `#[test]` attributes by scanning `crates/mp-tui/src/**/*.rs`, `src/tui_tests/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
@@ -165,7 +165,7 @@ There is no `UPDATE_` switch for it: an entry is added by hand, with its reason,
 
 ### The hidden CLI surfaces
 
-Three surfaces carry `hide = true`, so `mp --help` is byte-identical to `docs/baselines/pre-daemon/cli-help.txt`.
+Three surfaces carry `hide = true`, so none of them appears in `mp --help`; `tests/daemon_read_only_methods.rs` asserts it.
 
 - `mp daemon run | start | status | stop | restart`, the lifecycle commands, plus `install-service | uninstall-service` (the login units) and `health | logs | support-bundle` (the diagnostics), all added in Phase 6 under the same hidden subtree.
 - `mp --daemon`, a global flag that routes a command through the daemon instead of answering it in process. It never falls back; a routed command that cannot reach a daemon exits 4.

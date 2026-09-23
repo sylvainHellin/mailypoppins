@@ -1487,18 +1487,41 @@ fn all_accounts_and_a_named_account_conflict_with_identical_usage_bytes() {
     assert!(err.contains("Usage: mp sync"), "and prints a usage:\n{err}");
 }
 
-/// The four subcommand helps, byte for byte.
+/// The four subcommand helps still offer every flag the pre-daemon binary did.
 ///
 /// This is where `--timeout`, `--all-accounts`, `-n` and `--dry-run` are
-/// pinned as a flag set: `tests/cli_help_snapshot.rs` covers `mp --help`,
-/// which never shows a subcommand's arguments, and three of this slice's
-/// commands cannot be run to completion offline.
+/// pinned as a flag set: three of this slice's commands cannot be run to
+/// completion offline. The help prose is no longer frozen (the post-cutover
+/// divergences in `docs/baselines/pre-daemon/README.md`), and the living pin
+/// on the wording is `tests/cli_help_snapshot.rs`, so this compares only the
+/// flag spellings: the oracle's set must be a subset of this binary's.
 #[test]
-fn the_subcommand_helps_are_byte_identical() {
+fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
+    /// The `-n, --limit <LIMIT>` part of each option line, before the
+    /// two-space gap that starts its description.
+    fn flags(help: &str) -> std::collections::BTreeSet<String> {
+        help.lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with('-'))
+            .map(|line| line.split("  ").next().unwrap_or(line).to_string())
+            .collect()
+    }
+
     let slice = Slice::start();
     for command in ["sync", "fetch", "list-mailboxes", "watch"] {
-        let out = slice.both(&[command, "--help"]);
-        assert_eq!(out.status.code(), Some(0), "`mp {command} --help`");
+        let routed = slice.routed(&[command, "--help"]);
+        let direct = slice.oracle(&[command, "--help"]);
+        assert_eq!(routed.status.code(), Some(0), "`mp {command} --help`");
+        assert_eq!(direct.status.code(), Some(0), "oracle `mp {command} --help`");
+        let ours = flags(&stdout(&routed));
+        let theirs = flags(&stdout(&direct));
+        assert!(theirs.len() > 2, "the oracle's `mp {command} --help` lists its flags");
+        let missing: Vec<&String> = theirs.difference(&ours).collect();
+        assert!(
+            missing.is_empty(),
+            "`mp {command} --help` lost pre-daemon flags {missing:?}\n{}",
+            stdout(&routed)
+        );
     }
 }
 

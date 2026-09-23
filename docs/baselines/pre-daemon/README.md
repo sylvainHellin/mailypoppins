@@ -131,6 +131,16 @@ That is exactly what step 3 runs, each command under `timeout(1)` and the whole 
 
 `--locked` matters here for the same reason it matters above. The build takes about 75 s on a warm registry (measured on the host in the provenance table) and produces `mailypoppins 0.9.0`, the same version string the working tree carries, which is what lets `mp --version` be one of the parity commands rather than a normalised-away exception.
 
+## Post-cutover divergences
+
+Recorded 2026-09-23.
+Every cutover phase has shipped and the freeze did its job, so the CLI surface may now evolve; `cli-help.txt` stays the pre-daemon record and is not regenerated.
+`tests/cli_help_snapshot.rs` is the living pin on the help text, and `tests/daemon_read_only_methods.rs` only checks that every `$ mp … --help` screen of this capture is still in the walk.
+
+- The per-command `--account` fields of `mp contacts search|rebuild|stats`, `mp calendar rebuild`, `mp cutover` and the `mp config` account commands are gone in favour of the global `-A, --account` (`fbd8434`); the pre-daemon binary rejected `mp calendar rebuild -A alpha` with exit 2, which is why the `imip_integration` parity row in `tests/phase5_parity_gate.rs` now spells it `--account alpha`.
+- Help lines no longer repeat clap's own default as `(default: N)` prose before `[default: N]` (`36aabb4`).
+- `mp list` gained `--json` (`96ce770`).
+
 ## What is deliberately absent
 
 No interactive TUI numbers: preview latency, cold first paint, mutation propagation and the frame
