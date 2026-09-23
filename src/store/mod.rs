@@ -408,8 +408,11 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let _data = crate::config::test_env::DataDirOverride::set(&root);
 
-        let _store = Store::open_account("alpha").unwrap();
-        super::blobs::BlobStore::for_account("alpha").write(b"hello").unwrap();
+        let store = Store::open_account("alpha").unwrap();
+        let blobs = super::blobs::BlobStore::for_account("alpha");
+        blobs.write(b"hello").unwrap();
+        let attachments = crate::config::account_dir("alpha").join("attachments").join("1");
+        super::read::materialise_attachments(&store, &blobs, 1, &attachments).unwrap();
         crate::config::create_private_dir_all(crate::config::tokens_dir()).unwrap();
 
         let mut dirs = vec![root.clone()];
@@ -425,8 +428,9 @@ mod tests {
                 }
             }
         }
-        // data, accounts, alpha, blobs, the two fan-out levels, tokens.
-        assert!(seen >= 7, "only {seen} directories were created");
+        // data, accounts, alpha, blobs, the two fan-out levels, attachments,
+        // its row directory, tokens.
+        assert!(seen >= 9, "only {seen} directories were created");
     }
 
     #[test]

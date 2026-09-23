@@ -654,7 +654,7 @@ pub fn materialise_attachments(
     dest: &Path,
 ) -> Result<Vec<PathBuf>> {
     let attachments = attachments_for(store, row_id)?;
-    std::fs::create_dir_all(dest)
+    crate::config::create_private_dir_all(dest)
         .with_context(|| format!("creating {}", dest.display()))?;
     let mut written = Vec::new();
     let mut used: Vec<String> = Vec::new();
