@@ -419,11 +419,9 @@ enum Commands {
     /// file-era draft becomes addressable by selector, then names the
     /// file-era mailbox directories nothing reads any more and prints the
     /// command that removes them. It deletes nothing itself. `--dry-run`
-    /// writes not even the `id:` field.
+    /// writes not even the `id:` field. Covers every configured account
+    /// unless `-A` names one.
     Cutover {
-        /// Account name (default: all configured accounts)
-        #[arg(long)]
-        account: Option<String>,
         /// Report only; write nothing at all
         #[arg(long)]
         dry_run: bool,
@@ -546,12 +544,9 @@ enum CalendarAction {
     /// Report what the stored attendee REPLY emails resolve on the stored
     /// invitations. Writes nothing: attendee statuses are derived from the
     /// `invite.ics` payloads wherever they are displayed, so there is no
-    /// cached copy to rebuild.
-    Rebuild {
-        /// Account name (default: all configured accounts)
-        #[arg(long)]
-        account: Option<String>,
-    },
+    /// cached copy to rebuild. Covers every configured account unless `-A`
+    /// names one.
+    Rebuild,
 }
 
 /// RSVP actions for `mp invite <accept|tentative|decline> <selector>`.
@@ -600,22 +595,12 @@ enum ContactsAction {
         /// Max number of results
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
-        /// Account name (default: first configured account)
-        #[arg(long)]
-        account: Option<String>,
     },
-    /// Rebuild the contact index from the local message store
-    Rebuild {
-        /// Account name (default: all configured accounts)
-        #[arg(long)]
-        account: Option<String>,
-    },
+    /// Rebuild the contact index from the local message store (every
+    /// configured account unless `-A` names one)
+    Rebuild,
     /// Show index statistics
-    Stats {
-        /// Account name (default: first configured account)
-        #[arg(long)]
-        account: Option<String>,
-    },
+    Stats,
 }
 
 #[derive(Subcommand)]
@@ -624,13 +609,11 @@ enum ConfigAction {
     Init,
     /// Show current configuration
     Show,
-    /// Store a password in the active secrets backend
+    /// Store a password in the active secrets backend (for the first account
+    /// unless `-A` names one)
     SetPassword {
         /// Which password to set: "smtp" or "imap"
         which: String,
-        /// Account name (required if multiple accounts)
-        #[arg(long)]
-        account: Option<String>,
     },
     /// Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt
     /// for credentials. Use this after a Time Machine restore to a new
@@ -638,12 +621,9 @@ enum ConfigAction {
     ResetSecrets,
     /// Add a new account to the existing config
     AddAccount,
-    /// Run OAuth2 device code flow to acquire and cache a token
-    Oauth2Login {
-        /// Account name (default: first OAuth2 account)
-        #[arg(long)]
-        account: Option<String>,
-    },
+    /// Run OAuth2 device code flow to acquire and cache a token (for the
+    /// first OAuth2 account unless `-A` names one)
+    Oauth2Login,
     /// Print config file path
     Path,
 }
@@ -3847,20 +3827,20 @@ async fn main() -> Result<()> {
         // all-accounts loop stay here.
         Some(Commands::Contacts { action }) => {
             match action {
-                ContactsAction::Search { query, parsable, limit, account } => {
-                    let acct = account.or_else(|| cli.account.clone());
+                ContactsAction::Search { query, parsable, limit } => {
+                    let acct = cli.account.clone();
                     let name = pick_account_named(&global_config, acct.as_deref())?
                         .name
                         .clone();
                     routed_contacts_search(&name, query.as_deref(), parsable, limit).await?;
                 }
-                ContactsAction::Rebuild { account } => {
-                    let acct = account.or_else(|| cli.account.clone());
+                ContactsAction::Rebuild => {
+                    let acct = cli.account.clone();
                     routed_contacts_rebuild(&accounts_for(&global_config, acct.as_deref())?)
                         .await?;
                 }
-                ContactsAction::Stats { account } => {
-                    let acct = account.or_else(|| cli.account.clone());
+                ContactsAction::Stats => {
+                    let acct = cli.account.clone();
                     let name = pick_account_named(&global_config, acct.as_deref())?
                         .name
                         .clone();
@@ -3870,8 +3850,8 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Calendar { action }) => match action {
-            CalendarAction::Rebuild { account } => {
-                let acct = account.or_else(|| cli.account.clone());
+            CalendarAction::Rebuild => {
+                let acct = cli.account.clone();
                 routed_calendar_rebuild(&accounts_for(&global_config, acct.as_deref())?).await?;
             }
         },
@@ -3902,8 +3882,8 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Cutover { account, dry_run }) => {
-            let acct = account.or_else(|| cli.account.clone());
+        Some(Commands::Cutover { dry_run }) => {
+            let acct = cli.account.clone();
             routed_cutover(&accounts_for(&global_config, acct.as_deref())?, dry_run).await?;
         }
 
@@ -3949,9 +3929,10 @@ async fn main() -> Result<()> {
                     reload_config_quietly().await;
                 }
                 ConfigAction::Show => routed_config_show().await?,
-                ConfigAction::SetPassword { which, account } => {
-                    let acct_name = account
-                        .or_else(|| cli.account.clone())
+                ConfigAction::SetPassword { which } => {
+                    let acct_name = cli
+                        .account
+                        .clone()
                         .or_else(|| global_config.accounts.first().map(|a| a.name.clone()))
                         .unwrap_or_else(|| "main".to_string());
                     routed_set_password(&which, &acct_name).await?;
@@ -3963,8 +3944,8 @@ async fn main() -> Result<()> {
                     cmd_config_add_account(&path, exists, &names)?;
                     reload_config_quietly().await;
                 }
-                ConfigAction::Oauth2Login { account } => {
-                    let acct_name = account.or_else(|| cli.account.clone());
+                ConfigAction::Oauth2Login => {
+                    let acct_name = cli.account.clone();
                     routed_oauth2_login(&global_config, acct_name.as_deref()).await?;
                 }
 
@@ -4062,5 +4043,25 @@ mod tests {
             );
         }
         assert!(super::Cli::try_parse_from(["mp", "send-approved", "--all-accounts", "-y"]).is_ok());
+    }
+
+    /// The global `-A` / `--account` reaches every subcommand, including the
+    /// ones that used to declare a local `--account` and so rejected `-A`.
+    #[test]
+    fn the_global_account_selector_works_on_every_per_account_subcommand() {
+        use clap::Parser;
+        for args in [
+            &["mp", "contacts", "stats", "-A", "x"][..],
+            &["mp", "contacts", "search", "ada", "-A", "x"][..],
+            &["mp", "contacts", "rebuild", "--account", "x"][..],
+            &["mp", "calendar", "rebuild", "-A", "x"][..],
+            &["mp", "cutover", "--dry-run", "-A", "x"][..],
+            &["mp", "config", "set-password", "smtp", "-A", "x"][..],
+            &["mp", "config", "oauth2-login", "--account", "x"][..],
+        ] {
+            let cli = super::Cli::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("{args:?} must parse: {e}"));
+            assert_eq!(cli.account.as_deref(), Some("x"), "{args:?}");
+        }
     }
 }

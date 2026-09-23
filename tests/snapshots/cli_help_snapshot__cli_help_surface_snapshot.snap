@@ -525,10 +525,10 @@ Usage: mp config [OPTIONS] <COMMAND>
 Commands:
   init           Interactive setup wizard
   show           Show current configuration
-  set-password   Store a password in the active secrets backend
+  set-password   Store a password in the active secrets backend (for the first account unless `-A` names one)
   reset-secrets  Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
   add-account    Add a new account to the existing config
-  oauth2-login   Run OAuth2 device code flow to acquire and cache a token
+  oauth2-login   Run OAuth2 device code flow to acquire and cache a token (for the first OAuth2 account unless `-A` names one)
   path           Print config file path
   help           Print this message or the help of the given subcommand(s)
 
@@ -561,7 +561,7 @@ Options:
   -h, --help                   Print help
 
 $ mp config set-password --help
-Store a password in the active secrets backend
+Store a password in the active secrets backend (for the first account unless `-A` names one)
 
 Usage: mp config set-password [OPTIONS] <WHICH>
 
@@ -569,9 +569,9 @@ Arguments:
   <WHICH>  Which password to set: "smtp" or "imap"
 
 Options:
-      --account <ACCOUNT>      Account name (required if multiple accounts)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use (default: first in config)
   -h, --help                   Print help
 
 $ mp config reset-secrets --help
@@ -597,14 +597,14 @@ Options:
   -h, --help                   Print help
 
 $ mp config oauth2-login --help
-Run OAuth2 device code flow to acquire and cache a token
+Run OAuth2 device code flow to acquire and cache a token (for the first OAuth2 account unless `-A` names one)
 
 Usage: mp config oauth2-login [OPTIONS]
 
 Options:
-      --account <ACCOUNT>      Account name (default: first OAuth2 account)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use (default: first in config)
   -h, --help                   Print help
 
 $ mp config path --help
@@ -625,7 +625,7 @@ Usage: mp contacts [OPTIONS] <COMMAND>
 
 Commands:
   search   Search the contact index
-  rebuild  Rebuild the contact index from the local message store
+  rebuild  Rebuild the contact index from the local message store (every configured account unless `-A` names one)
   stats    Show index statistics
   help     Print this message or the help of the given subcommand(s)
 
@@ -646,20 +646,20 @@ Arguments:
 Options:
       --parsable               Emit tab-delimited `email\tname` lines (for mutt/aerc/vim integration)
   -n, --limit <LIMIT>          Max number of results [default: 20]
-      --account <ACCOUNT>      Account name (default: first configured account)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use (default: first in config)
   -h, --help                   Print help
 
 $ mp contacts rebuild --help
-Rebuild the contact index from the local message store
+Rebuild the contact index from the local message store (every configured account unless `-A` names one)
 
 Usage: mp contacts rebuild [OPTIONS]
 
 Options:
-      --account <ACCOUNT>      Account name (default: all configured accounts)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use (default: first in config)
   -h, --help                   Print help
 
 $ mp contacts stats --help
@@ -668,9 +668,9 @@ Show index statistics
 Usage: mp contacts stats [OPTIONS]
 
 Options:
-      --account <ACCOUNT>      Account name (default: first configured account)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use (default: first in config)
   -h, --help                   Print help
 
 $ mp calendar --help
@@ -679,7 +679,7 @@ Calendar / iMIP invite operations
 Usage: mp calendar [OPTIONS] <COMMAND>
 
 Commands:
-  rebuild  Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild
+  rebuild  Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -689,14 +689,14 @@ Options:
   -h, --help                   Print help
 
 $ mp calendar rebuild --help
-Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild
+Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
 
 Usage: mp calendar rebuild [OPTIONS]
 
 Options:
-      --account <ACCOUNT>      Account name (default: all configured accounts)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use (default: first in config)
   -h, --help                   Print help
 
 $ mp outbox --help
@@ -802,14 +802,11 @@ Options:
 $ mp cutover --help
 Report what is left of the file-era `.md` tree, and import its drafts.
 
-Assigns an `id:` frontmatter field to any draft that has none, so a file-era draft becomes addressable by selector, then names the file-era mailbox directories nothing reads any more and prints the command that removes them. It deletes nothing itself. `--dry-run` writes not even the `id:` field.
+Assigns an `id:` frontmatter field to any draft that has none, so a file-era draft becomes addressable by selector, then names the file-era mailbox directories nothing reads any more and prints the command that removes them. It deletes nothing itself. `--dry-run` writes not even the `id:` field. Covers every configured account unless `-A` names one.
 
 Usage: mp cutover [OPTIONS]
 
 Options:
-      --account <ACCOUNT>
-          Account name (default: all configured accounts)
-
       --dry-run
           Report only; write nothing at all
 
@@ -818,6 +815,9 @@ Options:
 
       --no-signature
           Skip signature entirely
+
+  -A, --account <ACCOUNT>
+          Account to use (default: first in config)
 
   -h, --help
           Print help (see a summary with '-h')
