@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use serde_json::{json, Value};
 
 use crate::config::{
@@ -572,6 +572,38 @@ pub async fn start_account(
     canonical.apply(change);
 }
 
+/// The startup start of `account`'s runtime, taken under the swap lock.
+///
+/// The daemon is accepting connections while its runtimes start, so a
+/// `config.set` or `config.reload` can land in the window. Unserialised, a
+/// startup start that came back after a swap removed its account would leave a
+/// runtime, and its engine lock, for an account the configuration no longer
+/// names; one that came back after a swap changed the account would replace
+/// the swap's own runtime with a stale one, blocked on the lock the swap's
+/// runtime holds. Under the lock, the account is started with the
+/// configuration as it is now, and not at all when it is gone or a swap has
+/// already started it.
+///
+/// `true` when this call started it.
+pub async fn start_configured(
+    store: &ConfigStore,
+    runtimes: &Arc<RuntimeTable>,
+    canonical: &Arc<CanonicalState>,
+    account: &str,
+) -> bool {
+    let _guard = store.lock_swap().await;
+    let Some(cfg) = store.accounts().iter().find(|a| a.name == account).cloned() else {
+        info!("[daemon] {account} left the configuration before its runtime started");
+        return false;
+    };
+    if runtimes.state_of(account).is_some() {
+        debug!("[daemon] a configuration swap already started {account}");
+        return false;
+    }
+    start_account(runtimes, canonical, cfg, store.account_runtimes).await;
+    true
+}
+
 /// Record a start that never produced a runtime and build the change that says
 /// so.
 fn blocked_by_failure(runtimes: &RuntimeTable, account: &str, reason: String) -> Change {
@@ -644,6 +676,46 @@ mod tests {
         let previous = parse("[[accounts]]\nname = \"alpha\"\n");
         let next = parse("# a comment\n\n[[accounts]]\n\nname = \"alpha\"\n\n");
         assert_eq!(Reconcile::between(&previous, &next), Reconcile::default());
+    }
+
+    /// A startup start that lost the race to a swap does nothing: not for an
+    /// account the swap removed, not over the runtime the swap started, and it
+    /// starts the account that is still configured and still unstarted.
+    #[tokio::test]
+    async fn a_startup_start_defers_to_a_swap_that_got_there_first() {
+        let canonical = Arc::new(CanonicalState::new(
+            super::super::state::InstanceId::new("test"),
+            Vec::new(),
+        ));
+        let runtimes = Arc::new(RuntimeTable::default());
+        let store = ConfigStore::new(
+            PathBuf::from("/c/config.toml"),
+            ConfigState::Ok,
+            parse(
+                "[[accounts]]\nname = \"zz-startup-kept\"\n\n\
+                 [[accounts]]\nname = \"zz-startup-swapped\"\n",
+            ),
+            true,
+        );
+
+        // Removed by a swap before its start ran.
+        assert!(!start_configured(&store, &runtimes, &canonical, "zz-startup-gone").await);
+        assert_eq!(runtimes.state_of("zz-startup-gone"), None);
+
+        // Started by a swap already: its entry is left as the swap made it.
+        runtimes.insert_failure("zz-startup-swapped", "the swap's own start".to_string());
+        assert!(!start_configured(&store, &runtimes, &canonical, "zz-startup-swapped").await);
+        assert_eq!(
+            runtimes.blocked_reason("zz-startup-swapped").as_deref(),
+            Some("the swap's own start")
+        );
+
+        // Still configured and unstarted: started, which for an account with
+        // no local store is the `blocked` entry that says so.
+        assert!(start_configured(&store, &runtimes, &canonical, "zz-startup-kept").await);
+        assert!(runtimes
+            .blocked_reason("zz-startup-kept")
+            .is_some_and(|reason| reason.contains("no local store")));
     }
 
     /// A swap that changes an account while its tick runs: the stop waits for

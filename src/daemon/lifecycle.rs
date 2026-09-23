@@ -75,7 +75,7 @@ use tokio::sync::watch;
 use mp_client::{ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
-use super::config::{start_account, ConfigState, ConfigStore};
+use super::config::{start_configured, ConfigState, ConfigStore};
 use super::runtime::{
     self, acquire_start_lock, ensure_runtime_dir, instance_path, pid_path, probe_socket,
     remove_stale_socket, socket_path, InstanceMeta, SocketProbe,
@@ -493,17 +493,20 @@ fn spawn_signal_watch(state: Arc<DaemonState>, shutdown: watch::Sender<bool>) ->
 /// No tick is scheduled here. A periodic tick is the Phase 5/6 scheduler's; a
 /// runtime this phase holds the engine lock, drains nothing on its own and
 /// serves reads.
+///
+/// Each start runs under the configuration's swap lock
+/// ([`start_configured`]), because the socket is already open: a `config.set`
+/// that removed or changed an account while its startup start was in flight
+/// would otherwise race it.
 fn spawn_account_runtimes(state: Arc<DaemonState>) {
-    for account_config in state.config.accounts().iter().cloned() {
+    for account_config in state.config.accounts().iter() {
         let state = Arc::clone(&state);
+        let account = account_config.name.clone();
         tokio::spawn(async move {
-            start_account(
-                &state.runtimes,
-                &state.canonical,
-                account_config,
-                state.config.account_runtimes,
-            )
-            .await;
+            if !start_configured(&state.config, &state.runtimes, &state.canonical, &account).await
+            {
+                return;
+            }
             // The runtime that just reported is half of `account:<name>`'s
             // verdict and all of `store_open`'s, so this is where a check flips
             // and where the event that announces it belongs.
