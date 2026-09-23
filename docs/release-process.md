@@ -174,12 +174,9 @@ re-enables it.
 Installing from source keeps `~/.cargo/bin/mp` and never moves, so nothing has
 to be done there. A Homebrew upgrade moves the real binary into a new
 version-stamped Cellar directory while `bin/mp` stays a symlink at a stable
-path; the service carries whatever `std::env::current_exe()` resolved to, and
-whether that is the symlink or the Cellar path is **an open question on macOS**
-that no test on the development host can answer. The live launchd check listed
-in [tickets/0125](tickets/0125-daemon-hardening.md) answers it; until it is
-taken, a Homebrew user who upgrades should re-run
-`mp daemon install-service --force` and `mp daemon restart`.
+path.
+The service bakes `std::env::current_exe()` without canonicalising it, and when the first `mp` on `PATH` is the same file (same device and inode), it bakes that `PATH` entry instead, so a Homebrew install gets the stable `bin/mp` even when the OS reports the Cellar path.
+An install whose `mp` is not on `PATH` keeps whatever `current_exe()` returned; a user in that case who upgrades should re-run `mp daemon install-service --force` and `mp daemon restart`.
 
 ## Unsigned macOS binaries (until #0012)
 

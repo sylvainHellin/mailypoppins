@@ -12,8 +12,8 @@
 //! | linux | `$XDG_CONFIG_HOME/systemd/user/mailypoppins.service` | [`UNIT_TEMPLATE`] |
 //! | darwin | `$HOME/Library/LaunchAgents/dev.mailypoppins.daemon.plist` | [`PLIST_TEMPLATE`] |
 //!
-//! `$XDG_CONFIG_HOME` falls back to `$HOME/.config`, which is XDG's own rule
-//! and systemd's. Both files are written 0644 with their parent directories
+//! `$XDG_CONFIG_HOME` falls back to `$HOME/.config` when unset, empty or
+//! relative, which is XDG's own rule and systemd's. Both files are written 0644 with their parent directories
 //! created as needed, and neither holds a secret.
 //!
 //! All three substituted values are paths a user chose, so the templates quote
@@ -25,7 +25,8 @@
 //!
 //! The two templates are byte-for-byte copies of the fixtures
 //! `tests/daemon_service.rs` pins, `src/daemon/templates/`, with three
-//! placeholders: `{{MP}}` is [`std::env::current_exe`], `{{DATA_DIR}}` and
+//! placeholders: `{{MP}}` is [`std::env::current_exe`] as it is, or the `mp`
+//! on `PATH` when that is the same file (see [`service_exe`]), `{{DATA_DIR}}` and
 //! `{{CONFIG_DIR}}` the two directories the installing `mp` resolved,
 //! canonicalised, i.e. exactly the strings `mp daemon status --json` reports.
 //! Baking those two in is the point of installing the service at all: a
@@ -283,9 +284,16 @@ fn service_path(target: Target) -> PathBuf {
 
 /// `$XDG_CONFIG_HOME`, falling back to `$HOME/.config`.
 fn xdg_config_home() -> PathBuf {
-    match std::env::var("XDG_CONFIG_HOME") {
-        Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
-        _ => home_dir().join(".config"),
+    xdg_config_home_from(std::env::var_os("XDG_CONFIG_HOME"), home_dir())
+}
+
+/// The rule itself: the XDG spec says a relative value is invalid and is to
+/// be ignored, and systemd ignores it too, so honouring one would write the
+/// unit where the user manager never looks.
+fn xdg_config_home_from(value: Option<std::ffi::OsString>, home: PathBuf) -> PathBuf {
+    match value.map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        _ => home.join(".config"),
     }
 }
 
@@ -298,9 +306,10 @@ fn home_dir() -> PathBuf {
 /// This target's template with the three paths substituted.
 fn render(target: Target) -> Result<String> {
     let exe = std::env::current_exe().context("resolving this executable")?;
+    let exe = service_exe(exe, std::env::var_os("PATH"));
     Ok(render_template(
         target,
-        &canonical(&exe),
+        &exe.display().to_string(),
         &canonical(&crate::config::mailypoppins_data_dir()),
         &canonical(&crate::config::config_dir()),
     ))
@@ -352,6 +361,58 @@ fn template(target: Target) -> &'static str {
 
 /// An absolute, symlink-resolved path as a string, which is what the daemon's
 /// own runtime metadata carries and therefore what the service file must.
+/// The binary the service runs: this executable as the OS named it, never
+/// canonicalised, because a Homebrew install's canonical path is a
+/// version-stamped Cellar directory that the next `brew upgrade` deletes.
+/// When the first `mp` on `PATH` is this very file (its `bin/mp` symlink,
+/// say), that stable entry is baked instead.
+fn service_exe(exe: PathBuf, path_var: Option<std::ffi::OsString>) -> PathBuf {
+    let on_path = path_var.as_deref().and_then(|dirs| {
+        std::env::split_paths(dirs)
+            .map(|dir| dir.join("mp"))
+            .find(|candidate| is_executable(candidate))
+    });
+    match on_path {
+        Some(candidate) if candidate.is_absolute() && same_file(&candidate, &exe) => candidate,
+        _ => exe,
+    }
+}
+
+/// A regular file (after symlinks) this user may run.
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// Whether two paths reach one file, symlinks followed.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            (fs::canonicalize(a), fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+    }
+}
+
 fn canonical(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -507,6 +568,64 @@ mod tests {
     use super::*;
 
     use crate::daemon::shutdown::DEFAULT_GRACE_SECS;
+
+    /// The executable is baked as the OS named it: a symlink is kept rather
+    /// than resolved into the directory it points at, and a `PATH` entry that
+    /// is the same file wins over the real path.
+    #[cfg(unix)]
+    #[test]
+    fn the_service_exe_keeps_a_symlink_and_prefers_the_same_file_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cellar = tmp.path().join("Cellar").join("1.0").join("bin");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&cellar).expect("cellar");
+        fs::create_dir_all(&bin).expect("bin");
+        let real = cellar.join("mp");
+        fs::write(&real, b"#!/bin/sh\n").expect("real mp");
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let link = bin.join("mp");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert_eq!(service_exe(link.clone(), None), link, "the symlink is kept");
+        assert_eq!(
+            service_exe(real.clone(), Some(bin.clone().into_os_string())),
+            link,
+            "the PATH entry that is the same file is baked"
+        );
+        let other = tmp.path().join("other");
+        fs::create_dir_all(&other).expect("other");
+        fs::write(other.join("mp"), b"#!/bin/sh\n").expect("other mp");
+        fs::set_permissions(other.join("mp"), fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        assert_eq!(
+            service_exe(real.clone(), Some(other.into_os_string())),
+            real,
+            "another file on PATH is not this one"
+        );
+    }
+
+    /// A relative `XDG_CONFIG_HOME` is invalid by the spec and falls back.
+    #[test]
+    fn a_relative_xdg_config_home_falls_back_to_home() {
+        let home = PathBuf::from("/home/u");
+        assert_eq!(
+            xdg_config_home_from(Some("rel".into()), home.clone()),
+            home.join(".config")
+        );
+        assert_eq!(
+            xdg_config_home_from(Some("".into()), home.clone()),
+            home.join(".config")
+        );
+        assert_eq!(
+            xdg_config_home_from(None, home.clone()),
+            home.join(".config")
+        );
+        assert_eq!(
+            xdg_config_home_from(Some("/x/cfg".into()), home),
+            PathBuf::from("/x/cfg")
+        );
+    }
 
     fn fixture(name: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
