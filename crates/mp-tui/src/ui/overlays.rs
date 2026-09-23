@@ -163,11 +163,9 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
-        let display = if name.len() > name_width {
-            format!("{}...", &name[..name_width.saturating_sub(3)])
-        } else {
-            name
-        };
+        // Cut on display cells, never on bytes: a byte cut lands mid-char on
+        // any non-ASCII filename and panics the draw.
+        let display = truncate(&name, name_width);
         let cursor_style = if i == picker.selected {
             Style::default().fg(theme::active().heading).bg(theme::active().surface)
         } else {
@@ -983,4 +981,35 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
 
     let help = Paragraph::new(lines).scroll((app.help_scroll, 0));
     frame.render_widget(help, content_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    #[test]
+    fn attachment_picker_truncates_multibyte_names_without_panicking() {
+        let name = "Relev\u{e9} de compte \u{2013} d\u{e9}cembre 2024 soci\u{e9}t\u{e9} g\u{e9}n\u{e9}rale \u{e9}\u{e9}\u{e9}\u{e9}\u{e9}.pdf";
+        for mode in [AttachmentPickerMode::Open, AttachmentPickerMode::Save] {
+            let picker = AttachmentPicker {
+                files: vec![
+                    PathBuf::from(format!("/tmp/{name}")),
+                    PathBuf::from("/tmp/\u{65e5}\u{672c}\u{8a9e}.txt"),
+                ],
+                selected: 0,
+                mode,
+                selected_set: HashSet::from([0]),
+            };
+            for width in 20..=60u16 {
+                let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+                terminal
+                    .draw(|f| render_attachment_picker(&picker, f, f.area()))
+                    .unwrap();
+            }
+        }
+    }
 }
