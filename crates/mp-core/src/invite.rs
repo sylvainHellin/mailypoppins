@@ -364,16 +364,6 @@ pub struct ReplyContext {
     pub duration: Option<Property>,
 }
 
-/// Strip a leading `mailto:` (case-insensitive) from a CAL-ADDRESS.
-fn strip_mailto(addr: &str) -> &str {
-    let trimmed = addr.trim();
-    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("mailto:") {
-        trimmed[7..].trim()
-    } else {
-        trimmed
-    }
-}
-
 /// Read a received invite's sidecar `.ics` bytes and pull out the fields needed
 /// to build (and route) a REPLY: `UID`, `SEQUENCE`, `SUMMARY`, `ORGANIZER`.
 ///
@@ -423,7 +413,7 @@ pub fn reply_context_from_ics(bytes: &[u8]) -> Result<ReplyContext> {
     let summary = event.get_summary().map(|s| s.to_string());
     let organizer = event
         .property_value("ORGANIZER")
-        .map(strip_mailto)
+        .map(crate::calendar::strip_mailto)
         .map(|s| s.to_string())
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow!("Invite has no ORGANIZER; cannot address the REPLY"))?;

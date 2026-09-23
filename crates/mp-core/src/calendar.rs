@@ -183,9 +183,16 @@ pub fn event_frontmatter(parsed: &ParsedEvent) -> EventFrontmatter {
 }
 
 /// Strip a leading `mailto:` (case-insensitive) from a CAL-ADDRESS.
-fn strip_mailto(addr: &str) -> &str {
+///
+/// Shared with [`crate::invite`]. The prefix is read with `get(..7)` so a
+/// bare non-ASCII name (`ATTENDEE:José Ñu`) whose byte 7 is not a char
+/// boundary is returned as-is instead of panicking.
+pub(crate) fn strip_mailto(addr: &str) -> &str {
     let trimmed = addr.trim();
-    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("mailto:") {
+    if trimmed
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("mailto:"))
+    {
         trimmed[7..].trim()
     } else {
         trimmed
@@ -343,6 +350,31 @@ pub fn now_sort_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_mailto_non_ascii_name_does_not_panic() {
+        assert_eq!(strip_mailto("José Ñu"), "José Ñu");
+        assert_eq!(strip_mailto(" MAILTO:a@x.com "), "a@x.com");
+        let ics = "\
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+METHOD:REQUEST\r
+BEGIN:VEVENT\r
+UID:u1@example.com\r
+SUMMARY:Planning\r
+DTSTART:20260720T120000Z\r
+ORGANIZER:mailto:host@example.com\r
+ATTENDEE:José Ñu\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+        let ev = parse_ics(ics.as_bytes()).expect("parses");
+        assert!(
+            ev.attendees.iter().any(|a| a.address == "José Ñu"),
+            "attendees: {:?}",
+            ev.attendees
+        );
+    }
 
     const OUTLOOK_REQUEST: &str = "\
 BEGIN:VCALENDAR\r
