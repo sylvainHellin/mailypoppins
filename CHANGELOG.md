@@ -50,6 +50,13 @@ All notable changes to this project are documented in this file.
 - **Non-ASCII text no longer panics a slice.** `strip_mailto` on a non-ASCII `CAL-ADDRESS`, a draft filename's date, attachment picker names (now truncated by display width) and `floor_char_boundary` when no character fits the width.
 - **`extract_email_address` looks for `>` only after `<`.** A `>` in the display name no longer cuts the address short.
 - **`search before:` and `after:` refuse a date that is not on the calendar.** `2024-02-31` is an error rather than garbage sent to the server.
+- **Repeated `after:`/`before:` terms narrow the local search the way they narrow the server's.** The latest `after` and the earliest `before` win instead of the last one written.
+- **A search value with a line break or a NUL is refused before it reaches IMAP.** On a plain server and on Gmail's `X-GM-RAW` alike; a CRLF would have ended the `SEARCH` line and started a command of its own.
+- **Exchange search values are percent-encoded.** `from:a+b@x.com` no longer turns into `a b@x.com`, and `&`, `#` and `"` no longer break `$filter` and `$search`.
+- **An invite time in a DST fold or gap keeps its zone.** `TZID=Europe/Berlin` at 02:30 on the October change-over resolves to the earlier instant, and a spring-gap time moves forward per RFC 5545, rather than falling back to an offset-less wall clock the agenda then read in the viewer's zone.
+- **Contact sightings are compared as instants.** `first_seen`/`last_seen` are stored in UTC, so a `-08:00` message no longer loses to an earlier `+00:00` one, and the display name follows the newest message.
+- **Diagnostics refreshes are serialised.** Two account tasks refreshing at once could publish `diagnostic.check_changed` out of order and leave the ledger stale for a sweep.
+- **A reply to a server-only search hit honours `Reply-To:` too.** The TUI now carries the header on `draft.create_from_message`.
 - **A refetched move placeholder is dropped when its mutation rolls back, and the drain keeps going past a bad row.** The rollback no longer leaves a ghost row, and one row that fails no longer stalls the rest of `pending_ops`.
 - **A row whose UID a UIDVALIDITY reset handed to another message is unbound, not overwritten.** Each message keeps its own row and identity.
 - **A config reload retires the old runtime before starting its replacement.** The replacement takes the engine lock instead of coming up blocked behind a tick in flight.
