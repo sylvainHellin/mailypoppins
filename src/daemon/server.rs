@@ -35,7 +35,7 @@ use tokio::sync::watch;
 
 use mp_protocol::frame::{self, Decoder, FrameError};
 use mp_protocol::{
-    ErrorCode, ErrorResponse, EventEnvelope, Notification, Request, RequestId, Response, RpcError,
+    ErrorCode, ErrorResponse, EventEnvelope, Notification, Request, RequestId, RpcError,
     JSONRPC_VERSION, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, METHOD_STATE_EVENT,
     METHOD_STATE_RESYNC_REQUIRED,
 };
@@ -1388,7 +1388,7 @@ mod tests {
         for id in [RequestId::Num(7), RequestId::Str("req-1".to_string())] {
             // The path this replaced: the struct into a `Value`, then out.
             let expected = serde_json::to_vec(
-                &serde_json::to_value(Response {
+                &serde_json::to_value(mp_protocol::Response {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: id.clone(),
                     result: result.clone(),
