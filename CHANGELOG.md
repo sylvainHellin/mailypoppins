@@ -31,7 +31,7 @@ All notable changes to this project are documented in this file.
 
 ### Performance
 - **A limited `message.list` is paged in SQL, with the mailbox counted separately.** A listing capped at N rows no longer reads the whole mailbox first.
-- **Every mailbox listing joins the invite set through a partial index on `message_blobs`.** The join no longer scans the blob table.
+- **Every mailbox listing reads its invite set through a partial index on `message_blobs`.** An existing store gains the index on its next open.
 - **The daemon builds a reply by moving the result in.** `result_value` no longer deep-copies it through `to_value`.
 - **The TUI decodes listed rows from a borrowed `Value`.** Its queries no longer clone the whole response before deserialising it.
 - **Startup runtimes open their stores in parallel again.** They share the configuration swap lock rather than taking it in turn, so each store's first-open `PRAGMA integrity_check` no longer waits for the previous account's; a swap still waits for all of them.
@@ -55,9 +55,9 @@ All notable changes to this project are documented in this file.
 - **A startup runtime defers to a configuration swap that got there first.** A reload during startup no longer leaves a runtime for a removed account or a stale one over the swap's.
 - **A stopping client that hangs up no longer holds the shutdown driver.** A report guard releases it.
 - **Events still queued when a shutdown settles reach the client before the connection closes.** `daemon.shutting_down` no longer loses the race against the close.
-- **A daemon log line carries the UTC offset of its own date.** A line stamped across a DST change no longer takes today's offset.
+- **A daemon log line is read with the UTC offset of its own date, not today's.** A line written before a DST change keeps its real instant.
 - **A previous daemon's leftover handle directories are removed at startup.**
-- **Files open with `xdg-open` off macOS, with null stdio.** The viewer's output no longer lands in the terminal.
+- **Files open with `xdg-open` off macOS, spawned with null stdio.** The opener was macOS `open` everywhere, and nothing the viewer prints lands on the TUI screen now.
 - **The search overlay keeps a hit whose archive failed and says so.** It no longer vanishes from the list as though archived.
 - **`--all-accounts` beside `-A` is refused on `mp send-approved` and `mp store gc`.** Whichever order the two are written in.
 - **The per-call daemon timeout follows the client's connect timeout.** `DAEMON_TIMEOUT` and `CONNECT_TIMEOUT` can no longer drift apart.
