@@ -201,6 +201,42 @@ pub fn list_mailbox(store: &Store, account: &str, mailbox: &str) -> Result<Vec<M
     Ok(out)
 }
 
+/// The first `limit` rows of [`list_mailbox`]'s order, and how many rows the
+/// mailbox has in all.
+///
+/// What `message.list` with a `limit` wants, without materialising the whole
+/// mailbox to keep a page of it: the same statement with a `LIMIT`, and the
+/// total from a `COUNT(*)` the `messages_list` index answers on its own. The
+/// rows are the prefix [`list_mailbox`] would have returned and the total is
+/// its length, because the invite join never multiplies a row. Both statements
+/// read one snapshot, so a concurrent ingest cannot make the total disagree
+/// with the page.
+pub fn list_mailbox_page(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    limit: usize,
+) -> Result<(Vec<MessageRow>, usize)> {
+    let tx = store.conn().unchecked_transaction()?;
+    let total: i64 = tx.query_row(MAILBOX_TOTAL_SQL, (account, mailbox), |row| row.get(0))?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let sql = format!("{} LIMIT ?3", list_mailbox_sql());
+    let mut out = Vec::new();
+    {
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map((account, mailbox, limit), row_from_sql)?;
+        for row in rows {
+            out.push(row.context("reading a message row")?);
+        }
+    }
+    tx.finish()?;
+    Ok((out, usize::try_from(total).unwrap_or(0)))
+}
+
+/// How many rows one mailbox holds, as [`list_mailbox_page`] counts them.
+const MAILBOX_TOTAL_SQL: &str =
+    "SELECT COUNT(*) FROM messages WHERE account = ?1 AND mailbox = ?2";
+
 /// The SQL [`list_mailbox`] runs, factored out so the query-plan regression
 /// test (`the_listing_is_served_by_the_messages_list_index`) checks the exact
 /// statement rather than a copy that could drift from it.
@@ -1295,6 +1331,56 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
             !plan.to_uppercase().contains("CORRELATED"),
             "no correlated subquery may run per row, got:\n{plan}"
         );
+
+        // The limited form and its count are served by the same index.
+        for (sql, params) in [
+            (format!("{sql} LIMIT ?3"), 3),
+            (super::MAILBOX_TOTAL_SQL.to_string(), 2),
+        ] {
+            let mut stmt = fx.store.conn().prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let query = |row: &rusqlite::Row<'_>| row.get::<_, String>(3);
+            let plan: Vec<String> = if params == 3 {
+                stmt.query_map(("alice", "inbox", 10), query).unwrap().map(|r| r.unwrap()).collect()
+            } else {
+                stmt.query_map(("alice", "inbox"), query).unwrap().map(|r| r.unwrap()).collect()
+            };
+            let plan = plan.join("\n");
+            assert!(plan.contains("messages_list"), "{sql} must use messages_list, got:\n{plan}");
+            assert!(
+                !plan.to_uppercase().contains("TEMP B-TREE"),
+                "{sql} must not sort in a temp B-tree, got:\n{plan}"
+            );
+        }
+    }
+
+    /// A page is the prefix of the full listing and its total is the full
+    /// listing's length, for every limit from none of it to more than all of it.
+    #[test]
+    fn a_page_is_the_prefix_of_the_listing_and_counts_all_of_it() {
+        let fx = fixture();
+        for uid in 1..=5 {
+            // Two share a date, so the id tiebreak is part of the order.
+            let day = if uid == 3 { 2 } else { uid };
+            let date = format!("Mon, 0{day} Jan 2024 09:00:00 +0000");
+            let mut e = email(&format!("m{uid}"), &date);
+            if uid == 4 {
+                e.calendar_ics = Some("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into());
+            }
+            ingest(&fx, "inbox", uid, &e);
+        }
+        ingest(&fx, "sent", 9, &email("elsewhere", "Mon, 01 Jan 2024 09:00:00 +0000"));
+
+        let all = list_mailbox(&fx.store, "alice", "inbox").unwrap();
+        assert_eq!(all.len(), 5);
+        let ids = |rows: &[MessageRow]| rows.iter().map(|r| (r.id, r.is_invite)).collect::<Vec<_>>();
+        for limit in [0, 1, 3, 5, 6, usize::MAX] {
+            let (page, total) = list_mailbox_page(&fx.store, "alice", "inbox", limit).unwrap();
+            assert_eq!(total, all.len(), "limit {limit}");
+            assert_eq!(ids(&page), ids(&all[..limit.min(all.len())]), "limit {limit}");
+        }
+        let (page, total) = list_mailbox_page(&fx.store, "alice", "never", 10).unwrap();
+        assert!(page.is_empty());
+        assert_eq!(total, 0);
     }
 
     /// The invite flag rides on the listing itself, so the badge costs no

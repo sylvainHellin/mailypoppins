@@ -161,15 +161,18 @@ fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
     let path = crate::config::store_path(&name);
     let store =
         Store::open(&path).map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
-    let rows = read::list_mailbox(&store, &name, &mailbox)
-        .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?;
+    // A `limit` pages in SQL and counts separately; `null`, which is what the
+    // TUI sends, is the whole mailbox, whose length is the total.
+    let (rows, total) = match limit {
+        Some(limit) => read::list_mailbox_page(&store, &name, &mailbox, limit),
+        None => read::list_mailbox(&store, &name, &mailbox).map(|rows| {
+            let total = rows.len();
+            (rows, total)
+        }),
+    }
+    .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?;
 
-    let total = rows.len();
-    let messages: Vec<Value> = rows
-        .iter()
-        .take(limit.unwrap_or(total))
-        .map(|row| to_json(&name, row))
-        .collect();
+    let messages: Vec<Value> = rows.iter().map(|row| to_json(&name, row)).collect();
     Ok(json!({
         "account": name,
         "mailbox": mailbox,
