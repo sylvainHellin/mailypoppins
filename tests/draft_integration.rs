@@ -23,6 +23,7 @@ fn source(from: &str, to: &str, subject: &str, body: &str) -> SourceMessage {
         body: body.to_string(),
         attachments: Vec::new(),
         html: None,
+        reply_to: None,
     }
 }
 

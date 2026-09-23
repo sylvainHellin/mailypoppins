@@ -298,6 +298,9 @@ pub struct SourceMessage {
     /// Rendered HTML of the source, when one exists, for the draft's companion
     /// `.html` (the quoted block the send path inlines).
     pub html: Option<String>,
+    /// The `Reply-To:` header, when the message carried one: the address a
+    /// reply goes to instead of `from`.
+    pub reply_to: Option<String>,
 }
 
 /// Build the source of a reply or a forward out of a message that was fetched
@@ -340,6 +343,7 @@ pub fn source_from_fetched(
         body: fetched.body_text.trim().to_string(),
         attachments,
         html: fetched.html_body.clone(),
+        reply_to: fetched.reply_to.clone(),
     })
 }
 
@@ -388,27 +392,44 @@ pub fn create_reply_draft_from(
     let inbox = source;
     let original_body = inbox.body.trim();
 
-    // Build reply fields
-    let reply_to = extract_email_address(&inbox.from);
+    // Build reply fields. A `Reply-To:` header names where the sender wants
+    // answers to go (a list, a team alias behind a `noreply@` From), so it is
+    // the primary recipient; `From:` is the fallback.
+    let from_addr = extract_email_address(&inbox.from);
+    let reply_to = inbox
+        .reply_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(extract_email_address)
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| from_addr.clone());
 
     let reply_cc = if reply_all {
+        // `default_from` may be a full `"Name" <addr>` mailbox.
+        let self_addr = extract_email_address(default_from).to_lowercase();
+        let primary = reply_to.to_lowercase();
         let mut all_recipients: Vec<String> = Vec::new();
-        for addr in split_addresses(&inbox.to) {
-            let email = extract_email_address(&addr);
-            if email.to_lowercase() != default_from.to_lowercase() {
-                all_recipients.push(email);
+        let push = |email: String, list: &mut Vec<String>| {
+            let lower = email.to_lowercase();
+            if !email.is_empty()
+                && lower != self_addr
+                && lower != primary
+                && !list.iter().any(|r| r.to_lowercase() == lower)
+            {
+                list.push(email);
             }
+        };
+        // With a Reply-To in charge, the original sender is still part of the
+        // conversation a reply-all keeps; `push` drops it when it is the
+        // Reply-To address itself, so it is never both `to:` and `cc:`.
+        push(from_addr.clone(), &mut all_recipients);
+        for addr in split_addresses(&inbox.to) {
+            push(extract_email_address(&addr), &mut all_recipients);
         }
         if let Some(ref cc) = inbox.cc {
             for addr in split_addresses(cc) {
-                let email = extract_email_address(&addr);
-                if email.to_lowercase() != default_from.to_lowercase()
-                    && !all_recipients
-                        .iter()
-                        .any(|r| r.to_lowercase() == email.to_lowercase())
-                {
-                    all_recipients.push(email);
-                }
+                push(extract_email_address(&addr), &mut all_recipients);
             }
         }
         if all_recipients.is_empty() {
@@ -2579,5 +2600,48 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reply-To routing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reply_goes_to_reply_to_over_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            from: "Robot <noreply@x.com>".into(),
+            reply_to: Some("Team <team@x.com>".into()),
+            to: "me@example.com, dave@x.com".into(),
+            subject: "Status".into(),
+            ..Default::default()
+        };
+        let path =
+            create_reply_draft_from(&source, false, "me@example.com", Some(tmp.path()), None)
+                .unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("team@x.com"));
+        assert_eq!(draft.frontmatter.cc, None);
+
+        // Reply-all: Reply-To leads, the original From joins cc, self is dropped.
+        let path = create_reply_draft_from(&source, true, "me@example.com", Some(tmp.path()), None)
+            .unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("team@x.com"));
+        assert_eq!(
+            draft.frontmatter.cc.as_deref(),
+            Some("noreply@x.com, dave@x.com")
+        );
+
+        // A Reply-To equal to From is not repeated into cc.
+        let same = SourceMessage {
+            reply_to: Some("NOREPLY@x.com".into()),
+            ..source
+        };
+        let path =
+            create_reply_draft_from(&same, true, "me@example.com", Some(tmp.path()), None).unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("NOREPLY@x.com"));
+        assert_eq!(draft.frontmatter.cc.as_deref(), Some("dave@x.com"));
     }
 }

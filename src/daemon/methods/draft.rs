@@ -545,6 +545,8 @@ fn create_from_message(
         body: message.body_text.trim().to_string(),
         attachments: Vec::new(),
         html: message.html_body,
+        // The wire message carries no Reply-To yet, so a hit replies to From.
+        reply_to: None,
     };
 
     let dir = crate::config::drafts_dir(&account.name);

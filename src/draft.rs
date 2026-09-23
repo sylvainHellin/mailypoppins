@@ -70,6 +70,7 @@ pub fn source_from_row(
         // The quoted HTML companion the file build wrote beside the draft:
         // without it a reply quotes plain text where the sender wrote markup.
         html: crate::store::read::load_html(store, blobs, row.id),
+        reply_to: row.reply_to.clone(),
     })
 }
 
