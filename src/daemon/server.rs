@@ -706,6 +706,13 @@ async fn serve_connection(
                 // closed channel means the daemon is gone from under us, which
                 // ends the connection the same way.
                 if changed.is_err() || *settled.borrow() {
+                    // What the fan-out queued before the settle, the
+                    // `daemon.shutting_down` among them, moves to the outbound
+                    // buffer now: the drain below writes only that buffer, and
+                    // this arm can win the race against the queue's own.
+                    for (revision, event) in drain_queue(&mut queue) {
+                        outbound.push(revision, event);
+                    }
                     after_flush = Some(if report_owed.is_some() {
                         AfterFlush::Report
                     } else {
