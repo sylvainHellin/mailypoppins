@@ -158,6 +158,7 @@ mp                              # Launch the interactive TUI
 ### Global options
 
 ```bash
+-A, --account <name>     Account to use (default: first in config)
 -s, --signature <name>   Use a specific signature
     --no-signature       Skip signature entirely
 ```
@@ -165,16 +166,20 @@ mp                              # Launch the interactive TUI
 ### Drafts
 
 ```bash
-mp <file>                       # Preview a draft (dry-run)
-mp new <name>                   # Create a new draft from template
-mp list [dir]                   # List drafts grouped by status
-mp validate <file|dir>          # Validate frontmatter
-mp mark-approved <file>         # Mark draft as approved
-mp send <file> [-y]             # Send a single approved email
-mp send-approved [dir] [-y]     # Send all approved emails in directory
-mp reply [file] [--all]         # Create a reply draft from a received email
-mp forward [file]               # Create a forward draft from a received email
+mp <selector>                   # Preview a draft (dry-run)
+mp new <name>                   # Create a new draft from template, print its selector
+mp list [--status S] [--json]   # List the account's drafts (draft|approved|sent)
+mp validate [<selector>]        # Validate one draft, or every draft of the account
+mp mark-approved <selector>     # Mark draft as approved
+mp send <selector> [-y]         # Send a single approved email
+mp send-approved [--all-accounts] [-y]  # Send every approved draft of the account
+mp reply <selector> [--all]     # Create a reply draft from a received email
+mp forward <selector>           # Create a forward draft from a received email
+mp delete <drafts-selector> [--force]   # Delete a draft (--force for an approved one)
+mp delete --sent                # Clear every sent draft of the account
 ```
+
+A draft selector is `mp://<account>/drafts/<id>`, `drafts/<id>` or `<id>`; a received one is `mp://<account>/<mailbox>/<message-id>`, and `--mailbox <name>` picks the mailbox a short one resolves in.
 
 ### IMAP
 
@@ -183,11 +188,12 @@ mp fetch [filters]              # Fetch emails from server
 mp sync [options]               # Sync local folders with server
 mp watch [options]              # Watch mailbox for changes (IMAP IDLE)
 mp list-mailboxes               # List available server mailboxes
-mp archive <file>               # Archive an inbox email (server + local)
-mp delete <file>                # Delete an inbox email (server + local)
-mp search <query>               # Search emails on the server
-mp open <file>                  # Open an attachment in the default app
-mp save <file> [--output]       # Save attachment(s) to a directory
+mp archive <selector>           # Archive a received email (server + local)
+mp delete <selector>            # Delete a received email (server + local)
+mp search <query>               # Search emails on the server (--local: the store)
+mp open <selector>              # Open an attachment in the default app
+mp save <selector> [--output]   # Save attachment(s) to a directory
+mp show <selector> [--json]     # Print one received message from the local store
 ```
 
 ### Fetch options
@@ -297,16 +303,16 @@ mp
 mp sync
 
 # 4. Create and review drafts
-mp new meeting-followup
-mp list ~/notes/email/drafts/
-mp ~/notes/email/drafts/2026-03-01_meeting-followup.md   # preview
+mp new meeting-followup        # prints mp://<account>/drafts/<id>
+mp list
+mp mp://work/drafts/<id>       # preview
 
 # 5. Approve and send
-mp mark-approved ~/notes/email/drafts/2026-03-01_meeting-followup.md
-mp send ~/notes/email/drafts/2026-03-01_meeting-followup.md
+mp mark-approved mp://work/drafts/<id>
+mp send mp://work/drafts/<id>
 
 # 6. Or batch send all approved
-mp send-approved ~/notes/email/drafts/
+mp send-approved
 ```
 
 ## Troubleshooting
@@ -318,7 +324,7 @@ Run `mp config init` to create the config file.
 Run `mp config set-password` to store your password.
 
 ### "Email not approved for sending"
-Run `mp mark-approved <file>` first.
+Run `mp mark-approved <selector>` first.
 
 ### "SMTP authentication failed"
 Check your credentials with `mp config show` and re-run `mp config set-password smtp` if needed.

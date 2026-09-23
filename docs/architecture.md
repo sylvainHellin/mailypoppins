@@ -357,6 +357,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/selector.rs` + `src/selector.rs` | The `mp://account/mailbox/key` grammar: parse, resolve, format. Namespace fixed by the command, never sniffed. Split at the resolvers: the grammar is in `mp-core`, the two indexed lookups stay beside the store. |
 | `src/dump.rs` | `mp dump-mailbox`: path-free NDJSON envelope dump of the store, the parity harness for the data-layer rewrite |
 | `src/read_cmd.rs` | `mp show`, `mp list-messages` (#0062) and the `mp search --local` listing (#0043): the human read surface over `store::read` and `store::search`, offline, rendering to a `String` so the layout is testable. Not the dump: that is an oracle with a pinned record shape. |
+| `src/draft_cmd.rs` | Rendering for the draft slice (P4-U6): the bytes `mp list`, `mp validate` and the bare-selector dry run print, built from the daemon's `mp_protocol::draft` answers, listings to stdout and skip/collision warnings to stderr |
 | `src/cutover.rs` | `mp cutover` (#0040): the end of the file-era transition. Mints an `id:` into any draft that has none (the one-time draft "import"; the drafts directory never moved) and reports the dead file-era mailbox directories. Deletes nothing, by design. |
 | `mp-core/reconcile.rs` + `src/reconcile.rs` | iMIP invite reconciliation, folded over the rows at display time and never persisted: attendee `PARTSTAT`s (#0030) and, since #0031, the `(UID, RECURRENCE-ID)` cancellation/version fold (`fold_status`) that marks an event cancelled, superseded, or missing individual occurrences. Split at the readers: the fold is in `mp-core`, the three functions that open a store and read blobs stay. |
 | `src/agenda.rs` | The local agenda (#0034): one row per `(UID, RECURRENCE-ID)` over the account's invite rows, deduped by `(sequence, dtstamp, is_organizer, mailbox, uid)`, sorted by start with undated last, answered as `mp_protocol::calendar::AgendaEvent`. It is what `calendar.events` serves and what the TUI decodes; it was `tui::app::calendar_view` until #0126 (P5-U10c-I2). |
@@ -376,9 +377,11 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/notify.rs` | Desktop notifications for new mail, shelling out to `osascript` / `notify-send` |
 | `mp-core/sync_health.rs` | `SyncHealth`, the per-account outcome of the last sync, plus the `mp sync` failure summary and exit code (#0071) |
 | `mp-core/timing.rs` | `TimingSpan`, which emits `[TIMING]` log lines with millisecond precision. Filter logs with `rg '\[TIMING\]'`. |
+| `src/tui_tests/actions_store.rs` | The store-backed TUI action flows (#0052 A, B, C) over a real ingested store: drafting, the send/approve/mark-draft mutations and the file flows; root-crate tests since #0126 because they reach the ingest API |
 | **`src/sync/`** | |
 | `mod.rs` | The transport-independent sync types and the `SyncBackend` trait (#0059) |
 | `engine.rs` | `run_sync`: the orchestration every backend is driven through, plus `run_sync_guarded`/`run_sync_guarded_at` (the engine lock on the ingest path, #0122), `mark_below_unmet` (#0074) and the fake-backend engine tests |
+| `tick.rs` | The sequencing of one sync tick, drain, sync, drain (#0114): the body's result is carried past the sync so the tail drain still runs on a failing tick |
 | **`src/store/`** | |
 | `mod.rs` | `Store`: the file, the pragmas, the drop-and-rebuild contract |
 | `schema.rs` | Schema v6 SQL, version stamping, required-table validation, and the identity notes |
@@ -398,6 +401,11 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `ops.rs` | Single-message server ops: move, delete, read flags |
 | `batch.rs` | `batch_move_on_server`, `batch_delete_on_server` |
 | `sent.rs` | `ImapSentMailbox`: the APPEND seam the outbox drives, faked in tests |
+| **`src/daemon/`** (the files the daemon section above does not name) | |
+| `sync_outcome.rs` | `from_sync_result`: an engine `SyncResult` to the wire's `SyncCompleted` (P3b-U6), plus the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` fake the sync-slice tests arm |
+| `fake_transport.rs` | The daemon-side transport fake (P4-U12): `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` serves the SMTP submission and the Sent APPEND in process and logs each event, so the success half of the send slice is pinned without TLS |
+| `methods/message_server.rs` | `message.search_server` and `message.fetch` (P5-U10c): the TUI search overlay's server leg and its `f` ingest, moved off the client's own thread |
+| `state/revision.rs` | The newtypes the canonical state is addressed by: `Revision` (dense, monotonic per instance), `InstanceId`, `ConnectionId` |
 | **`crates/mp-tui/src/`** | |
 | `lib.rs` | Event loop (`run_loop`), the session and event-stream drain, background result drain. One iteration drains the queued terminal events and the queued daemon events into the model and then paints once (#0108), both bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
 | `session.rs` | The one daemon connection: a thread with a current-thread runtime on it, `call` / `dispatch` / `events`, `handle()` (the weak-sender door a worker thread owns), and `Connector`, the two function pointers the binary hands in |
@@ -409,6 +417,8 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `helpers.rs` | Terminal suspend and resume, editor, clipboard, `resolve_send_account`, and the server search leg (`LST-08`) that is still client-side |
 | `event.rs` | Crossterm event polling: `poll_event` waits up to the 250 ms tick, `poll_pending_event` takes an already-queued event without waiting (the drain step, #0108). Both return `None` for an event we do not model. |
 | `theme.rs` | Named themes, semantic colour slots |
+| `diagnostics_tests.rs` | The activity overlay's half of the daemon diagnostics contract (P6-U7); the socket half is `tests/daemon_diagnostics.rs` |
+| `events_resync_tests.rs` | What an `Incoming::Resync` costs an account that had already opened (Phase 5 review): the bootstrap must still correct its mailboxes, counts and cached listings |
 | **`crates/mp-tui/src/app/`** | |
 | `mod.rs` | `App` struct, `new()`, `update()`, account sync, core state helpers |
 | `bootstrap.rs` | `App::shell`, `App::from_bootstrap` and the two `apply_bootstrap` entries (startup, which skips an account that already opened, and resync, which does not) |
@@ -616,12 +626,12 @@ Override the root via the `MAILYPOPPINS_DATA_DIR` env var, which tests use and w
 
 `retention` is parsed and validated in config but not enforced yet: the blob store grows without bound until #0060 lands.
 
-The OS keyring service name (when the keyring backend is opted into) is `mailypoppins` (constant `KEYRING_SERVICE` in `src/secrets.rs`).
+The OS keyring service name (when the keyring backend is opted into) is `mailypoppins` (constant `KEYRING_SERVICE` in `crates/mp-core/src/secrets.rs`).
 It was `email-cli` before #0022, and `get` falls back to that name so a user who opted in before the rename is not locked out of stored credentials; `set` and `delete` touch the new service only, so the next `mp config set-password` migrates the credential and leaves a harmless stale entry behind.
 
 ## Testing
 
-- **2343 tests**, run by `cargo test --workspace`, the parity harness, the six daemon slice suites and the soak file included.
+- **2446 tests**, run by `cargo test --workspace`, the parity harness, the six daemon slice suites and the soak file included.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`crates/mp-tui/src/ui/golden_frames.rs`).
