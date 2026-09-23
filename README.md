@@ -158,7 +158,8 @@ mp                              # Launch the interactive TUI
 ### Global options
 
 ```bash
--A, --account <name>     Account to use (default: first in config)
+-A, --account <name>     Account to use (default: first in config; every account for
+                         calendar rebuild, contacts rebuild and cutover)
 -s, --signature <name>   Use a specific signature
     --no-signature       Skip signature entirely
 ```

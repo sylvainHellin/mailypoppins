@@ -34,7 +34,7 @@ struct Cli {
     #[arg(long, global = true)]
     no_signature: bool,
 
-    /// Account to use (default: first in config)
+    /// Account to use
     #[arg(short = 'A', long, global = true)]
     account: Option<String>,
 

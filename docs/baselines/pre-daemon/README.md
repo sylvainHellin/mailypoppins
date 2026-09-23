@@ -136,10 +136,12 @@ That is exactly what step 3 runs, each command under `timeout(1)` and the whole 
 Recorded 2026-09-23.
 Every cutover phase has shipped and the freeze did its job, so the CLI surface may now evolve; `cli-help.txt` stays the pre-daemon record and is not regenerated.
 `tests/cli_help_snapshot.rs` is the living pin on the help text, and `tests/daemon_read_only_methods.rs` only checks that every `$ mp … --help` screen of this capture is still in the walk.
+The sync and send slices (`tests/daemon_sync_slice.rs`, `tests/daemon_send_slice.rs`) check only that each subcommand help still offers the oracle's flags.
 
 - The per-command `--account` fields of `mp contacts search|rebuild|stats`, `mp calendar rebuild`, `mp cutover` and the `mp config` account commands are gone in favour of the global `-A, --account` (`fbd8434`); the pre-daemon binary rejected `mp calendar rebuild -A alpha` with exit 2, which is why the `imip_integration` parity row in `tests/phase5_parity_gate.rs` now spells it `--account alpha`.
 - Help lines no longer repeat clap's own default as `(default: N)` prose before `[default: N]` (`36aabb4`).
 - `mp list` gained `--json` (`96ce770`).
+- The global `-A, --account` help reads `Account to use`, without `(default: first in config)`, which was wrong for `mp calendar rebuild`, `mp contacts rebuild` and `mp cutover` (every account by default).
 
 ## What is deliberately absent
 

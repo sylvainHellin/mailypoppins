@@ -47,7 +47,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
   -V, --version                Print version
 
@@ -72,7 +72,7 @@ Options:
       --description <DESCRIPTION>  Optional event description / body (invite mode)
   -s, --signature <SIGNATURE>      Signature to use (overrides config default)
       --no-signature               Skip signature entirely
-  -A, --account <ACCOUNT>          Account to use (default: first in config)
+  -A, --account <ACCOUNT>          Account to use
   -h, --help                       Print help
 
 $ mp send-approved --help
@@ -85,7 +85,7 @@ Options:
   -y, --yes                    Skip confirmation prompt
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp list --help
@@ -98,7 +98,7 @@ Options:
       --json                   Print the listing as JSON on stdout (warnings stay on stderr)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp validate --help
@@ -112,7 +112,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp mark-approved --help
@@ -126,7 +126,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp mark-draft --help
@@ -140,7 +140,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp new --help
@@ -154,7 +154,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp path --help
@@ -168,7 +168,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp edit --help
@@ -182,7 +182,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp reply --help
@@ -198,7 +198,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp forward --help
@@ -213,7 +213,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp invite --help
@@ -230,7 +230,7 @@ Commands:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp invite accept --help
@@ -245,7 +245,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp invite tentative --help
@@ -260,7 +260,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp invite decline --help
@@ -275,7 +275,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp list-mailboxes --help
@@ -286,7 +286,7 @@ Usage: mp list-mailboxes [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp fetch --help
@@ -307,7 +307,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox name [default: INBOX]
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp sync --help
@@ -322,7 +322,7 @@ Options:
       --all-accounts           Sync every configured account (failures are named at the end; exit code 1 if any account failed)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp watch --help
@@ -335,7 +335,7 @@ Options:
       --timeout <TIMEOUT>      Timeout in seconds (exits with code 2 on timeout)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp archive --help
@@ -350,7 +350,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp delete --help
@@ -367,7 +367,7 @@ Options:
       --sent                   Clear every sent draft of the account (takes no selector)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp open --help
@@ -382,7 +382,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp save --help
@@ -398,7 +398,7 @@ Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp show --help
@@ -414,7 +414,7 @@ Options:
       --json                   Emit one JSON object (headers, attachments and body) instead
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp list-messages --help
@@ -427,7 +427,7 @@ Options:
   -n, --limit <LIMIT>          Max messages per mailbox listed [default: 20]
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp search --help
@@ -513,7 +513,7 @@ Options:
           Skip signature entirely
 
   -A, --account <ACCOUNT>
-          Account to use (default: first in config)
+          Account to use
 
   -h, --help
           Print help (see a summary with '-h')
@@ -536,7 +536,7 @@ Commands:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config init --help
@@ -547,7 +547,7 @@ Usage: mp config init [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config show --help
@@ -558,7 +558,7 @@ Usage: mp config show [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config set-password --help
@@ -572,7 +572,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config reset-secrets --help
@@ -583,7 +583,7 @@ Usage: mp config reset-secrets [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config add-account --help
@@ -594,7 +594,7 @@ Usage: mp config add-account [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config oauth2-login --help
@@ -605,7 +605,7 @@ Usage: mp config oauth2-login [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp config path --help
@@ -616,7 +616,7 @@ Usage: mp config path [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp contacts --help
@@ -633,7 +633,7 @@ Commands:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp contacts search --help
@@ -649,7 +649,7 @@ Options:
   -n, --limit <LIMIT>          Max number of results [default: 20]
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp contacts rebuild --help
@@ -660,7 +660,7 @@ Usage: mp contacts rebuild [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp contacts stats --help
@@ -671,7 +671,7 @@ Usage: mp contacts stats [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp calendar --help
@@ -686,7 +686,7 @@ Commands:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp calendar rebuild --help
@@ -697,7 +697,7 @@ Usage: mp calendar rebuild [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp outbox --help
@@ -714,7 +714,7 @@ Commands:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp outbox list --help
@@ -725,7 +725,7 @@ Usage: mp outbox list [OPTIONS]
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp outbox retry --help
@@ -739,7 +739,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp outbox discard --help
@@ -753,7 +753,7 @@ Arguments:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp store --help
@@ -768,7 +768,7 @@ Commands:
 Options:
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use (default: first in config)
+  -A, --account <ACCOUNT>      Account to use
   -h, --help                   Print help
 
 $ mp store gc --help
@@ -795,7 +795,7 @@ Options:
           Skip signature entirely
 
   -A, --account <ACCOUNT>
-          Account to use (default: first in config)
+          Account to use
 
   -h, --help
           Print help (see a summary with '-h')
@@ -818,7 +818,7 @@ Options:
           Skip signature entirely
 
   -A, --account <ACCOUNT>
-          Account to use (default: first in config)
+          Account to use
 
   -h, --help
           Print help (see a summary with '-h')
@@ -841,7 +841,7 @@ Options:
           Skip signature entirely
 
   -A, --account <ACCOUNT>
-          Account to use (default: first in config)
+          Account to use
 
   -h, --help
           Print help (see a summary with '-h')
@@ -871,7 +871,7 @@ Options:
           Skip signature entirely
 
   -A, --account <ACCOUNT>
-          Account to use (default: first in config)
+          Account to use
 
   -h, --help
           Print help (see a summary with '-h')
