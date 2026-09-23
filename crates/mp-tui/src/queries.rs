@@ -159,7 +159,8 @@ fn decode_drafts(answer: &Value) -> Result<Vec<EmailEntry>> {
 /// a field it would have rendered as empty would turn an additive protocol
 /// change into a list that will not paint.
 fn row_from_wire(row: &Value) -> MessageListRow {
-    serde_json::from_value(row.clone()).unwrap_or_else(|e| {
+    // `&Value` is a `Deserializer`: no per-row clone of the whole object.
+    <MessageListRow as serde::Deserialize>::deserialize(row).unwrap_or_else(|e| {
         log::warn!("[queries] a listed row did not decode: {e}");
         MessageListRow::default()
     })

@@ -2189,6 +2189,7 @@ dependencies = [
  "mp-core",
  "mp-protocol",
  "ratatui",
+ "serde",
  "serde_json",
  "shellexpand",
  "tempfile",
