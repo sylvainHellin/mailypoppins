@@ -39,7 +39,7 @@
 //! first sync of a large mailbox publishing a row per message may not starve
 //! the paint any more than a bracketed paste may.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
 
@@ -50,7 +50,7 @@ use mp_protocol::events::{
     KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
     KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
-use mp_protocol::send::{HoldListing, HoldStatus};
+use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
@@ -146,6 +146,33 @@ pub struct EventState {
     revision: u64,
     /// The operations this client started and has not seen finish, by id.
     started: HashMap<String, Awaited>,
+    /// The holds this session saw fire or be cancelled, newest last and at
+    /// most [`ENDED_HOLDS_CAP`], so a late tick for one cannot re-arm it.
+    ended_holds: VecDeque<String>,
+}
+
+/// How many ended hold ids [`EventState::ended_holds`] remembers: far more
+/// than can be armed inside one window, and a tick trails its end by at most
+/// a second.
+const ENDED_HOLDS_CAP: usize = 32;
+
+impl EventState {
+    /// Remember that the hold `operation` ended, forgetting the oldest one
+    /// past the cap.
+    fn end_hold(&mut self, operation: &str) {
+        if self.ended_holds.iter().any(|id| id == operation) {
+            return;
+        }
+        if self.ended_holds.len() == ENDED_HOLDS_CAP {
+            self.ended_holds.pop_front();
+        }
+        self.ended_holds.push_back(operation.to_string());
+    }
+
+    /// Whether the hold `operation` already fired or was cancelled.
+    fn hold_ended(&self, operation: &str) -> bool {
+        self.ended_holds.iter().any(|id| id == operation)
+    }
 }
 
 /// One operation this client is waiting for, and what its result means.
@@ -220,20 +247,20 @@ enum Admission {
 }
 
 impl EventState {
-    /// Adopt an instance and a revision, which only a bootstrap may do.
-    ///
-    /// A different instance is a daemon that restarted, so everything this
-    /// client was waiting for died with it: the table is emptied and its
-    /// entries are reported as background work that ended, or the spinner would
-    /// run for the rest of the session.
     /// Whether a bootstrap from `instance_id` is a daemon this client has not
     /// adopted, which after the first bootstrap means one that restarted.
     pub(super) fn is_new_instance(&self, instance_id: &str) -> bool {
         self.instance.as_deref() != Some(instance_id)
     }
 
+    /// Adopt an instance and a revision, which only a bootstrap may do.
+    ///
+    /// A different instance is a daemon that restarted, so everything this
+    /// client was waiting for died with it: the table is emptied and its
+    /// entries are reported as background work that ended, or the spinner would
+    /// run for the rest of the session.
     pub(super) fn watermark(&mut self, instance_id: &str, revision: u64) -> usize {
-        let restarted = self.instance.as_deref() != Some(instance_id);
+        let restarted = self.is_new_instance(instance_id);
         self.instance = Some(instance_id.to_string());
         self.revision = revision;
         if !restarted {
@@ -437,6 +464,11 @@ impl App {
             .iter()
             .position(|hold| hold.operation_id == operation);
         match event.kind.as_str() {
+            // A tick that trails the fire or cancel of its own hold (they
+            // are published from two tasks) must not bring it back.
+            KIND_SEND_HOLD_TICK if known.is_none() && self.events.hold_ended(&operation) => {
+                return Applied::Ignored;
+            }
             KIND_SEND_HOLD_STARTED | KIND_SEND_HOLD_TICK => {
                 let remaining = status.remaining_secs;
                 match known {
@@ -466,12 +498,14 @@ impl App {
                 }
             }
             KIND_SEND_HOLD_FIRED => {
+                self.events.end_hold(&operation);
                 if let Some(index) = known {
                     self.holds.remove(index);
                 }
                 self.set_status_level("Sending...".to_string(), StatusLevel::Progress);
             }
             _ => {
+                self.events.end_hold(&operation);
                 if let Some(index) = known {
                     self.holds.remove(index);
                 }
@@ -713,38 +747,12 @@ fn rebootstrap(app: &mut App, door: &dyn Queries) {
                     bootstrap.revision,
                     bootstrap.instance_id
                 );
-                // Only a client that was showing holds asks: one that had
-                // none has nothing stale to replace, keeps a reconnect to the
-                // single bootstrap call, and sees any new hold on its tick.
-                let stale_holds = !app.holds.is_empty()
-                    && app.events.is_new_instance(&bootstrap.instance_id);
+                // The snapshot carries the daemon's holds, so this one call
+                // also replaces any the client kept from before the gap.
                 app.apply_resync_bootstrap(&bootstrap);
-                if stale_holds {
-                    refresh_holds(app, door);
-                }
             }
             Err(e) => log::warn!("[events] the bootstrap did not decode: {e}"),
         },
         Err(e) => log::warn!("[events] the bootstrap failed: {e:#}"),
-    }
-}
-
-/// Take the undo-send holds a restarted daemon is carrying.
-///
-/// The bootstrap already dropped the ones the previous daemon armed, since
-/// their timers died with it; this asks the new one what it holds, so a hold
-/// another window armed since the restart is cancellable before its next tick
-/// arrives. A failure leaves the list empty, and a tick restores any live hold
-/// within a second.
-fn refresh_holds(app: &mut App, door: &dyn Queries) {
-    let listing = door
-        .call("send.hold_status", json!({}))
-        .and_then(|answer| Ok(serde_json::from_value::<HoldListing>(answer)?));
-    match listing {
-        Ok(listing) => {
-            app.holds = listing.holds;
-            app.hold = app.holds.last().cloned();
-        }
-        Err(e) => log::warn!("[events] reading the holds after a restart: {e:#}"),
     }
 }

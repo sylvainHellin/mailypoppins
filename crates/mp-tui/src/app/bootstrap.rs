@@ -142,19 +142,26 @@ impl App {
         // revision are the daemon's word about the state this snapshot
         // describes, so every event above it is comparable and everything at or
         // below it is already here.
-        let restarted = self.events.is_new_instance(&bootstrap.instance_id);
         let orphaned = self
             .events
             .watermark(&bootstrap.instance_id, bootstrap.revision);
-        if restarted {
-            // A hold is a timer in the daemon that armed it, so the holds the
-            // previous one announced died with it. Kept, `u` would still be
-            // caught as a cancel for an operation the new daemon never saw and
-            // the Message-context `u` would be dead for the session. The
-            // resync path asks the new daemon for its own holds afterwards.
-            self.holds.clear();
-            self.hold = None;
-        }
+        // The holds are the daemon's word too, the very listing
+        // `send.hold_status` answers. A restarted daemon's list drops the
+        // timers that died with the previous one, so `u` is not caught as a
+        // cancel for an operation it never saw; a same-instance reconnect's
+        // list drops a hold whose fire or cancel was published while the
+        // socket was down, which no event would ever remove.
+        self.holds = bootstrap
+            .snapshot
+            .holds
+            .iter()
+            .filter_map(|hold| {
+                serde_json::from_value::<mp_protocol::send::HoldStatus>(hold.clone())
+                    .map_err(|e| log::warn!("[events] a snapshot hold did not decode: {e}"))
+                    .ok()
+            })
+            .collect();
+        self.hold = self.holds.last().cloned();
         if orphaned > 0 {
             // The daemon that was running them is gone, so the spinner they
             // are holding up would never come down.

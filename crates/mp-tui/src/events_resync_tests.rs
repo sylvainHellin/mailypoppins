@@ -168,6 +168,15 @@ fn a_resync_replaces_the_counts_of_an_account_that_had_already_opened() {
 
 /// One armed hold under `instance_id`, as the daemon frames its start.
 fn hold_started(instance_id: &str, revision: u64) -> mp_protocol::EventEnvelope {
+    hold_event(
+        instance_id,
+        revision,
+        mp_protocol::events::KIND_SEND_HOLD_STARTED,
+    )
+}
+
+/// One `kind` event for the hold [`hold_started`] arms.
+fn hold_event(instance_id: &str, revision: u64, kind: &str) -> mp_protocol::EventEnvelope {
     let status = mp_protocol::send::HoldStatus {
         operation_id: "op-old-daemon".to_string(),
         account: ACCOUNT.to_string(),
@@ -181,9 +190,61 @@ fn hold_started(instance_id: &str, revision: u64) -> mp_protocol::EventEnvelope 
     mp_protocol::EventEnvelope {
         instance_id: instance_id.to_string(),
         revision,
-        kind: mp_protocol::events::KIND_SEND_HOLD_STARTED.to_string(),
+        kind: kind.to_string(),
         payload: serde_json::to_value(status).expect("a HoldStatus serialises"),
     }
+}
+
+/// A hold whose fire or cancel went out while the socket was down is gone
+/// after a reconnect to the same daemon, because the bootstrap snapshot's
+/// holds replace the client's list.
+#[test]
+fn a_same_instance_reconnect_drops_a_hold_that_ended_during_the_gap() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = App::from_bootstrap(config(), &snapshot(1, 5));
+    app.apply_event(&hold_started("resync", 2));
+    assert_eq!(app.holds.len(), 1, "the hold landed");
+
+    let door = Door {
+        bootstrap: snapshot(4, 5),
+        calls: RefCell::new(Vec::new()),
+    };
+    let (sender, events) = mpsc::channel();
+    sender
+        .send(Incoming::Disconnected {
+            reason: "socket closed".to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    sender
+        .send(Incoming::Reconnected {
+            instance_id: "resync".to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    drain(&mut app, &door, &events);
+
+    assert!(app.holds.is_empty(), "got {:?}", app.holds);
+    assert!(app.hold.is_none());
+}
+
+/// A tick that trails its own hold's cancel does not re-arm it.
+#[test]
+fn a_tick_after_a_cancel_does_not_bring_the_hold_back() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = App::from_bootstrap(config(), &snapshot(1, 5));
+    app.apply_event(&hold_started("resync", 2));
+    app.apply_event(&hold_event(
+        "resync",
+        3,
+        mp_protocol::events::KIND_SEND_HOLD_CANCELLED,
+    ));
+    app.apply_event(&hold_event(
+        "resync",
+        4,
+        mp_protocol::events::KIND_SEND_HOLD_TICK,
+    ));
+
+    assert!(app.holds.is_empty(), "got {:?}", app.holds);
+    assert!(app.hold.is_none());
 }
 
 /// A snapshot of [`snapshot`]'s shape from another daemon instance.
@@ -256,8 +317,8 @@ fn a_restart_resync_drops_the_old_daemons_hold_and_frees_u() {
         .any(|action| matches!(action, Action::CancelHeldSend)));
 }
 
-/// A door for a restarted daemon: its bootstrap, and one hold it armed for
-/// another window since the restart.
+/// A door for a restarted daemon: its bootstrap, whose snapshot carries one
+/// hold it armed for another window since the restart.
 struct RestartDoor {
     calls: RefCell<Vec<String>>,
 }
@@ -266,24 +327,27 @@ impl Queries for RestartDoor {
     fn call(&self, method: &str, _params: Value) -> anyhow::Result<Value> {
         self.calls.borrow_mut().push(method.to_string());
         match method {
-            "state.bootstrap" => Ok(serde_json::to_value(restarted_snapshot(3))?),
-            "send.hold_status" => Ok(serde_json::json!({"holds": [{
-                "operation_id": "op-new-daemon",
-                "account": ACCOUNT,
-                "draft_id": "d2",
-                "subject": "s2",
-                "hold_secs": 20,
-                "remaining_secs": 12,
-                "fires_at": "2026-09-11T08:01:00Z",
-                "origin": "gui",
-            }]})),
+            "state.bootstrap" => {
+                let mut bootstrap = restarted_snapshot(3);
+                bootstrap.snapshot.holds = vec![serde_json::json!({
+                    "operation_id": "op-new-daemon",
+                    "account": ACCOUNT,
+                    "draft_id": "d2",
+                    "subject": "s2",
+                    "hold_secs": 20,
+                    "remaining_secs": 12,
+                    "fires_at": "2026-09-11T08:01:00Z",
+                    "origin": "gui",
+                })];
+                Ok(serde_json::to_value(bootstrap)?)
+            }
             other => anyhow::bail!("the restart door answers no {other}"),
         }
     }
 }
 
 /// Reconnecting to a restarted daemon takes that daemon's holds in place of
-/// the old one's, through `send.hold_status`.
+/// the old one's, from the bootstrap snapshot.
 #[test]
 fn a_reconnect_to_a_restarted_daemon_takes_its_holds() {
     let _data = mp_core::config::test_env::TestDataDir::new();
@@ -303,7 +367,7 @@ fn a_reconnect_to_a_restarted_daemon_takes_its_holds() {
 
     assert_eq!(
         door.calls.borrow().as_slice(),
-        ["state.bootstrap".to_string(), "send.hold_status".to_string()]
+        ["state.bootstrap".to_string()]
     );
     assert_eq!(
         app.hold.as_ref().map(|hold| hold.operation_id.as_str()),
