@@ -372,12 +372,15 @@ pub fn fwd_subject(subject: &str) -> String {
 /// read back mangled and `<a\qb@x>` would fail the whole draft's parse, which
 /// is the silent skip #0064 called out: the reply disappears from the drafts
 /// index with only a log line.
+///
+/// A control character (a newline smuggled in through an RFC 2047 encoded
+/// header) is dropped the same way: no server issues one either.
 fn source_message_id(source: &SourceMessage) -> Option<&str> {
     source
         .message_id
         .as_deref()
         .map(str::trim)
-        .filter(|id| !id.is_empty() && !id.contains(['"', '\\']))
+        .filter(|id| !id.is_empty() && !id.chars().any(|c| c == '"' || c == '\\' || c.is_control()))
 }
 
 /// Reply to a message that is not a file: the #0050 path, used by
@@ -467,15 +470,12 @@ pub fn create_reply_draft_from(
 
     // Build frontmatter
     let mut fm = String::from("---\n");
-    fm.push_str(&format!("from: \"{}\"\n", default_from));
-    fm.push_str(&format!("to: \"{}\"\n", reply_to));
+    fm.push_str(&format!("from: {}\n", yaml_dq_escape(default_from)));
+    fm.push_str(&format!("to: {}\n", yaml_dq_escape(&reply_to)));
     if let Some(ref cc) = reply_cc {
-        fm.push_str(&format!("cc: \"{}\"\n", cc));
+        fm.push_str(&format!("cc: {}\n", yaml_dq_escape(cc)));
     }
-    fm.push_str(&format!(
-        "subject: \"{}\"\n",
-        reply_subject.replace('"', "\\\"")
-    ));
+    fm.push_str(&format!("subject: {}\n", yaml_dq_escape(&reply_subject)));
     fm.push_str("status: draft\n");
     // What the post-send hook flags `\Answered` (#TKT-0051). Written here
     // rather than acted on here: a draft that is never sent has answered
@@ -586,12 +586,9 @@ pub fn create_forward_draft_from(
 
     // Build frontmatter
     let mut fm = String::from("---\n");
-    fm.push_str(&format!("from: \"{}\"\n", default_from));
+    fm.push_str(&format!("from: {}\n", yaml_dq_escape(default_from)));
     fm.push_str("to: \"\"\n");
-    fm.push_str(&format!(
-        "subject: \"{}\"\n",
-        fwd_subject.replace('"', "\\\"")
-    ));
+    fm.push_str(&format!("subject: {}\n", yaml_dq_escape(&fwd_subject)));
     fm.push_str("status: draft\n");
     // The forward half of the same hook: `$Forwarded` on send (#TKT-0051).
     if let Some(message_id) = source_message_id(inbox) {
@@ -600,7 +597,7 @@ pub fn create_forward_draft_from(
     if !attachment_paths.is_empty() {
         fm.push_str("attachments:\n");
         for path in &attachment_paths {
-            fm.push_str(&format!("  - \"{}\"\n", path.replace('"', "\\\"")));
+            fm.push_str(&format!("  - {}\n", yaml_dq_escape(path)));
         }
     }
     fm.push_str("---\n");
@@ -1070,9 +1067,34 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 /// YAML double-quote escape for a scalar string value.
+///
+/// Every value it writes stays on its own line: besides `\\` and `"`, the
+/// control characters are escaped (`\n`, `\r`, `\t`, `\xNN`), as are DEL, the
+/// C1 controls and the Unicode line/paragraph separators YAML would fold.
+/// That matters because the values are header-derived: mailparse decodes RFC
+/// 2047 encoded-words, so a Subject can carry a real newline, and written raw
+/// it would open new top-level keys (`bcc:`, `attachments:`) in the draft.
 fn yaml_dq_escape(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || ('\u{7f}'..='\u{9f}').contains(&c) => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            '\u{2028}' | '\u{2029}' | '\u{feff}' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// What to write for one top-level frontmatter key in
@@ -2603,8 +2625,54 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Reply-To routing
+    // Reply / forward frontmatter escaping and Reply-To routing
     // -----------------------------------------------------------------------
+
+    fn escaping_source() -> SourceMessage {
+        SourceMessage {
+            from: r#""Bob \"B\" Smith" <bob@example.com>"#.into(),
+            to: r#""Me" <me@example.com>, carol@example.com"#.into(),
+            subject: r"Files in C:\Users\x".into(),
+            body: "Original body".into(),
+            attachments: vec![PathBuf::from(r"/tmp/odd\dir/a.pdf")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reply_draft_with_backslash_subject_and_quoted_from_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_from = r#""Me \ Myself" <me@example.com>"#;
+        let path = create_reply_draft_from(
+            &escaping_source(),
+            true,
+            default_from,
+            Some(tmp.path()),
+            None,
+        )
+        .unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.subject, r"Re: Files in C:\Users\x");
+        assert_eq!(draft.frontmatter.from.as_deref(), Some(default_from));
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("bob@example.com"));
+        assert_eq!(draft.frontmatter.cc.as_deref(), Some("carol@example.com"));
+    }
+
+    #[test]
+    fn forward_draft_with_backslash_subject_and_quoted_from_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_from = r#""Me \ Myself" <me@example.com>"#;
+        let path =
+            create_forward_draft_from(&escaping_source(), default_from, Some(tmp.path()), None)
+                .unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.subject, r"Fwd: Files in C:\Users\x");
+        assert_eq!(draft.frontmatter.from.as_deref(), Some(default_from));
+        assert_eq!(
+            draft.frontmatter.attachments,
+            Some(vec![r"/tmp/odd\dir/a.pdf".to_string()])
+        );
+    }
 
     #[test]
     fn reply_goes_to_reply_to_over_from() {
@@ -2643,5 +2711,49 @@ mod tests {
         let draft = parse_email_draft(&path).unwrap();
         assert_eq!(draft.frontmatter.to.as_deref(), Some("NOREPLY@x.com"));
         assert_eq!(draft.frontmatter.cc.as_deref(), Some("dave@x.com"));
+    }
+
+    #[test]
+    fn header_newlines_cannot_open_frontmatter_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            from: "a@b\"\nattachments: [/etc/passwd]".into(),
+            to: "me@example.com\nbcc: to@evil.tld".into(),
+            cc: Some("c@x\r\nbcc: cc@evil.tld\u{2028}\u{7}".into()),
+            subject: "x\\\"\nbcc: a@evil.tld #".into(),
+            message_id: Some("<id@x>\nbcc: mid@evil.tld".into()),
+            ..Default::default()
+        };
+        let reply =
+            create_reply_draft_from(&source, true, "me@example.com", Some(tmp.path()), None)
+                .unwrap();
+        let draft = parse_email_draft(&reply).unwrap();
+        assert_eq!(draft.frontmatter.bcc, None);
+        assert!(draft.frontmatter.attachments.unwrap_or_default().is_empty());
+        assert_eq!(draft.frontmatter.subject, "Re: x\\\"\nbcc: a@evil.tld #");
+        assert_eq!(draft.frontmatter.in_reply_to, None);
+        // The frontmatter is exactly the keys written, one line each.
+        let raw = fs::read_to_string(&reply).unwrap();
+        let fm: Vec<&str> = raw.lines().skip(1).take_while(|l| *l != "---").collect();
+        let keys: Vec<&str> = fm.iter().map(|l| l.split(':').next().unwrap()).collect();
+        assert_eq!(keys, ["from", "to", "cc", "subject", "status"], "{raw}");
+
+        let fwd = create_forward_draft_from(
+            &SourceMessage {
+                attachments: vec![PathBuf::from("/tmp/a\nbcc: x@evil.tld")],
+                ..source
+            },
+            "me@example.com\nbcc: from@evil.tld",
+            Some(tmp.path()),
+            None,
+        )
+        .unwrap();
+        let draft = parse_email_draft(&fwd).unwrap();
+        assert_eq!(draft.frontmatter.bcc, None);
+        assert_eq!(draft.frontmatter.subject, "Fwd: x\\\"\nbcc: a@evil.tld #");
+        assert_eq!(
+            draft.frontmatter.attachments,
+            Some(vec!["/tmp/a\nbcc: x@evil.tld".to_string()])
+        );
     }
 }
