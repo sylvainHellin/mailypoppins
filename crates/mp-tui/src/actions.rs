@@ -1938,26 +1938,7 @@ fn handle_search_result_action(
         }
 
         Action::SearchResultArchive => {
-            let hit = app
-                .server_search_results
-                .get(app.server_search_index)
-                .and_then(|r| r.entry.msg);
-            let Some(msg) = hit else {
-                app.server_search_status = Some(
-                    "Not in the local store; press f to fetch it first".to_string(),
-                );
-                return Ok(());
-            };
-
-            let index = app.server_search_index;
-            app.server_search_results.remove(index);
-            if app.server_search_index >= app.server_search_results.len()
-                && !app.server_search_results.is_empty()
-            {
-                app.server_search_index = app.server_search_results.len() - 1;
-            }
-
-            commands::archive_msgs(app, &daemon_door(app), vec![msg], false);
+            archive_search_hit(app, &daemon_door(app));
         }
 
         _ => {}
@@ -1965,6 +1946,43 @@ fn handle_search_result_action(
     Ok(())
 }
 
+/// Archive the selected server-search hit (`a` in the overlay).
+///
+/// The hit leaves the results only once the archive went through; when it did
+/// not (no Archive mailbox, every `message.archive` refused), it stays, and the
+/// error is shown on the overlay's own status line, which is the one the user
+/// is looking at.
+fn archive_search_hit(app: &mut App, queries: &dyn super::queries::Queries) {
+    let hit = app
+        .server_search_results
+        .get(app.server_search_index)
+        .and_then(|r| r.entry.msg);
+    let Some(msg) = hit else {
+        app.server_search_status =
+            Some("Not in the local store; press f to fetch it first".to_string());
+        return;
+    };
+
+    match commands::archive_msgs(app, queries, vec![msg], false) {
+        Ok(_) => {
+            // Looked up by ref rather than by the index read before the
+            // archive ran, so a refresh in between cannot remove another hit.
+            if let Some(index) = app
+                .server_search_results
+                .iter()
+                .position(|r| r.entry.msg == Some(msg))
+            {
+                app.server_search_results.remove(index);
+            }
+            if app.server_search_index >= app.server_search_results.len()
+                && !app.server_search_results.is_empty()
+            {
+                app.server_search_index = app.server_search_results.len() - 1;
+            }
+        }
+        Err(error) => app.server_search_status = Some(error),
+    }
+}
 
 /// Reply to or forward the selected server-search hit.
 ///
@@ -2053,6 +2071,54 @@ fn fetch_search_hit(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_hit(row_id: i64, subject: &str) -> crate::app::SearchResultEntry {
+        let fetched = mp_core::parse::FetchedEmail {
+            from: "a@example.com".into(),
+            to: "me@example.com".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: subject.into(),
+            date: "Mon, 01 Jan 2024 12:00:00 +0000".into(),
+            body_text: String::new(),
+            html_body: None,
+            has_attachments: false,
+            message_id: Some(format!("<{row_id}@example.com>")),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        };
+        let entry = super::super::helpers::fetched_to_email_entry(
+            Some(MessageRef::new(row_id)),
+            None,
+            &fetched,
+        );
+        crate::app::SearchResultEntry {
+            entry,
+            fetched,
+            source_label: "INBOX".into(),
+        }
+    }
+
+    /// `a` on a hit when the archive cannot happen (here: no Archive mailbox)
+    /// keeps the hit and says why on the overlay's own status line.
+    #[test]
+    fn archiving_a_search_hit_that_fails_keeps_it_and_reports_on_the_overlay() {
+        let mut app = App::default_for_tests();
+        app.server_search_results = vec![search_hit(1, "one"), search_hit(2, "two")];
+        app.server_search_index = 0;
+
+        archive_search_hit(&mut app, &QueryHandle::closed());
+
+        assert_eq!(app.server_search_results.len(), 2);
+        assert_eq!(app.server_search_index, 0);
+        assert_eq!(
+            app.server_search_status.as_deref(),
+            Some("Archive mailbox not configured")
+        );
+    }
 
     /// Every `edit_file` call site in this file must be reachable only from an
     /// action that `Action::suspends_terminal` returns true for (#0108): the

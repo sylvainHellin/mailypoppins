@@ -199,12 +199,13 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
         }
         Action::Archive => {
             if let Some(msg) = app.selected_email_ref() {
-                archive_msgs(app, commands, vec![msg], false);
+                // The status line already carries the outcome.
+                let _ = archive_msgs(app, commands, vec![msg], false);
             }
             true
         }
         Action::BatchArchive(msgs) => {
-            archive_msgs(app, commands, msgs.clone(), true);
+            let _ = archive_msgs(app, commands, msgs.clone(), true);
             true
         }
         Action::Delete => {
@@ -1252,28 +1253,28 @@ fn mutate_each(
 /// the local move is instant and confirmed. `batch` says whether the selection
 /// should be cleared afterwards, the only difference between the single and the
 /// batch arm.
+///
+/// Returns the refs that were archived, or the error it put on the status
+/// line when nothing was: the server-search overlay acts on the outcome and
+/// shows the error on its own line.
 pub(super) fn archive_msgs(
     app: &mut App,
     commands: &dyn Queries,
     msgs: Vec<MessageRef>,
     batch: bool,
-) {
+) -> Result<Vec<MessageRef>, String> {
     let Some(dest_idx) = app.find_mailbox_by_kind(MailboxKind::Archive) else {
-        app.set_status_level(
-            "Archive mailbox not configured".to_string(),
-            StatusLevel::Error,
-        );
-        return;
+        let error = "Archive mailbox not configured".to_string();
+        app.set_status_level(error.clone(), StatusLevel::Error);
+        return Err(error);
     };
     let account = app.account_config.name.clone();
     let touched_invite = any_invite(app, &msgs);
     let archived_refs = mutate_each(commands, "message.archive", &account, &msgs, &[]);
     if archived_refs.is_empty() {
-        app.set_status_level(
-            "Archive failed: nothing to archive".to_string(),
-            StatusLevel::Error,
-        );
-        return;
+        let error = "Archive failed: nothing to archive".to_string();
+        app.set_status_level(error.clone(), StatusLevel::Error);
+        return Err(error);
     }
 
     let archived: HashSet<MessageRef> = archived_refs.iter().copied().collect();
@@ -1292,6 +1293,7 @@ pub(super) fn archive_msgs(
         },
         StatusLevel::Success,
     );
+    Ok(archived_refs)
 }
 
 /// Delete one or many messages (`MSG-02`): the store rows go and the owed
