@@ -6,7 +6,7 @@ import CommandTable from '../components/CommandTable.astro';
 import KeyBindingTable from '../components/KeyBindingTable.astro';
 import { Code } from 'astro:components';
 // TUI key bindings are GENERATED from the single KEYMAP source of truth in
-// src/tui/app/keymap.rs. Do not hand-edit; run scripts/regen-website-keys.sh
+// crates/mp-tui/src/app/keymap.rs. Do not hand-edit; run scripts/regen-website-keys.sh
 // after changing KEYMAP so the site cannot drift from the TUI/help overlay.
 import tuiKeys from '../data/tui-keys.json';
 
@@ -24,13 +24,13 @@ const draftCommands = [
   { command: 'mp send <selector> [-y]', description: 'Send a single approved email' },
   { command: 'mp send --invite ...', description: 'Send a calendar invitation (iMIP REQUEST)' },
   { command: 'mp invite accept|tentative|decline <selector>', description: 'RSVP to a received invitation (iMIP REPLY)' },
-  { command: 'mp calendar rebuild [--account NAME]', description: 'Report the attendee RSVPs resolved against your sent invites' },
+  { command: 'mp calendar rebuild [-A NAME]', description: 'Report the attendee RSVPs resolved against your sent invites (every account unless -A names one)' },
   { command: 'mp send-approved [--all-accounts] [-y]', description: 'Send every approved draft of the account' },
   { command: 'mp outbox list', description: 'Show queued, retrying, failed and partly delivered submissions' },
   { command: 'mp outbox retry <id>', description: 'Send a failed submission again' },
   { command: 'mp outbox discard <id>', description: 'Drop a submission and release its bytes' },
-  { command: 'mp reply <selector> [--all]', description: 'Create a reply draft and print its selector' },
-  { command: 'mp forward <selector>', description: 'Create a forward draft and print its selector' },
+  { command: 'mp reply <selector> [--all] [--mailbox <name>]', description: 'Create a reply draft and print its selector' },
+  { command: 'mp forward <selector> [--mailbox <name>]', description: 'Create a forward draft and print its selector' },
 ];
 
 const imapCommands = [
@@ -38,16 +38,16 @@ const imapCommands = [
   { command: 'mp sync [options]', description: 'Sync local folders with server' },
   { command: 'mp watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
   { command: 'mp list-mailboxes', description: 'List available server mailboxes' },
-  { command: 'mp archive <selector>', description: 'Archive a received email (server + local)' },
-  { command: 'mp delete <selector>', description: 'Delete a received email (server + local), or a local draft with a drafts selector' },
+  { command: 'mp archive <selector> [--mailbox <name>]', description: 'Archive a received email (server + local)' },
+  { command: 'mp delete <selector> [--mailbox <name>]', description: 'Delete a received email (server + local), or a local draft with a drafts selector' },
   { command: 'mp search <query>', description: 'Search emails on the server with one grammar (fields, has:attachment, dates, OR groups); --local searches the store offline' },
-  { command: 'mp open <selector>', description: 'Open attachment in default app' },
-  { command: 'mp save <selector> [--output]', description: 'Save attachment(s) to directory' },
+  { command: 'mp open <selector> [--mailbox <name>]', description: 'Open attachment in default app' },
+  { command: 'mp save <selector> [--output <dir>] [--mailbox <name>]', description: 'Save attachment(s) to directory' },
 ];
 
 const storeCommands = [
   { command: 'mp list-messages [--mailbox <name>] [-n N]', description: 'List received messages from the local store (offline)' },
-  { command: 'mp show <selector> [--json]', description: 'Print one received message -- headers, attachments and body -- from the local store (offline)' },
+  { command: 'mp show <selector> [--mailbox <name>] [--json]', description: 'Print one received message -- headers, attachments and body -- from the local store (offline)' },
   { command: 'mp search --local <query> [--mailbox <name>] [-n N] [--full]', description: 'Ranked full-text search over the local store (offline, every synced mailbox at once)' },
 ];
 
@@ -60,15 +60,23 @@ const storeOptions = [
 
 const maintenanceCommands = [
   { command: 'mp store gc [--dry-run] [--force] [--all-accounts]', description: 'Run the retention sweep now: evict cached blobs over the disk cap. The first over-cap run only warns and records a marker; run it again to evict. --dry-run prints what would go without touching anything; a plan reclaiming more than half the store is refused without --force. The sweep also runs automatically after every sync.' },
-  { command: 'mp cutover [--account NAME] [--dry-run]', description: 'End the pre-1.0 file-era layout: give any draft that has none an id: field, and report the old .md mailbox directories nothing reads any more' },
+  { command: 'mp cutover [-A NAME] [--dry-run]', description: 'End the pre-1.0 file-era layout: give any draft that has none an id: field, and report the old .md mailbox directories nothing reads any more' },
 ];
 
 const configCommands = [
   { command: 'mp config init', description: 'Interactive setup wizard' },
   { command: 'mp config show', description: 'Display config (passwords masked)' },
-  { command: 'mp config set-password', description: 'Store password in OS keyring' },
-  { command: 'mp config oauth2-login', description: 'Run OAuth2 device code flow' },
+  { command: 'mp config set-password', description: 'Store a password in the active secrets backend (first account unless -A names one)' },
+  { command: 'mp config reset-secrets', description: 'Wipe the encrypted secrets file and OAuth2 token caches, then re-prompt for credentials (after a restore to a new machine, or when the secrets file no longer decrypts)' },
+  { command: 'mp config add-account', description: 'Add a new account to the existing config' },
+  { command: 'mp config oauth2-login', description: 'Run OAuth2 device code flow (first OAuth2 account unless -A names one)' },
   { command: 'mp config path', description: 'Print config file path' },
+];
+
+const contactsCommands = [
+  { command: 'mp contacts search [<query>] [--parsable] [-n N]', description: 'Fuzzy-search the contact index by name and email; --parsable emits tab-delimited email/name lines for mutt, aerc or vim (default limit: 20)' },
+  { command: 'mp contacts rebuild', description: 'Rebuild the contact index from the local message store (every account unless -A names one)' },
+  { command: 'mp contacts stats', description: 'Show contact index statistics' },
 ];
 
 const fetchOptions = [
@@ -86,12 +94,13 @@ const fetchOptions = [
 
 const syncOptions = [
   { command: '-n, --limit <N>', description: 'Max messages per mailbox (default: 50)' },
-  { command: '--mailbox <name>...', description: 'Mailboxes to sync (default: all configured)' },
+  { command: '--mailbox <name>...', description: 'Mailboxes to sync (default: INBOX, Archive, Sent)' },
   { command: '--dry-run', description: 'Show what would change without modifying files' },
   { command: '--all-accounts', description: 'Sync every configured account (names the failures, exits 1 if any failed)' },
 ];
 
 const globalOptions = [
+  { command: '-A, --account <name>', description: 'Account to use (default: first in config; mp calendar rebuild, mp cutover and mp contacts rebuild cover every account unless it names one)' },
   { command: '-s, --signature <name>', description: 'Use a specific signature' },
   { command: '--no-signature', description: 'Skip signature entirely' },
 ];
@@ -261,6 +270,11 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
     </section>
 
     <section>
+      <h2 id="contacts-commands">Contacts Commands</h2>
+      <CommandTable commands={contactsCommands} />
+    </section>
+
+    <section>
       <h2 id="fetch-options">Fetch Options</h2>
       <CommandTable commands={fetchOptions} />
     </section>
@@ -335,7 +349,7 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         card are always current with what has arrived.
       </p>
       <p>
-        <code>mp calendar rebuild [--account NAME]</code> reports what those
+        <code>mp calendar rebuild [-A NAME]</code> reports what those
         replies resolve across every stored invitation (defaults to all
         accounts). It writes nothing: there is no cached copy of the statuses to
         rebuild, so it is idempotent by construction, and two machines syncing
@@ -401,7 +415,7 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
       <h2 id="tui-keys">TUI Key Bindings</h2>
       <p>
         Generated from the single <code>KEYMAP</code> source of truth
-        (<code>src/tui/app/keymap.rs</code>) via <code>mp dump-keys --json</code>;
+        (<code>crates/mp-tui/src/app/keymap.rs</code>) via <code>mp dump-keys --json</code>;
         see <code>scripts/regen-website-keys.sh</code>. These match the in-TUI
         help overlay (<kbd>?</kbd>) exactly.
       </p>
