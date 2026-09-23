@@ -2072,3 +2072,31 @@ It is not the proof for `secrets` and `oauth2`, which moved into the shared `mp-
 A textual allow-list that kept naming them read as coverage it did not have, because it scanned for `crate::` and they are spelled `mp_core::` now.
 
 When a shared crate holds both halves of a boundary, say which half is which and gate the engine half by its real spelling, over the whole dependent crate including its tests.
+
+## clap skips a subcommand's `conflicts_with` for a global flag written before the subcommand
+
+`--all-accounts` carries `conflicts_with = "account"`, and `mp sync --all-accounts -A work` is refused as it should be, but `mp -A work sync --all-accounts` was accepted.
+clap checks a subcommand's conflicts against that subcommand's own matches, and a global argument written before the subcommand is propagated into them only after the check has run.
+`refuse_all_accounts_with_selector` in `src/main.rs` therefore repeats the refusal after parsing, in clap's own error shape, for `mp sync`, `mp send-approved` and `mp store gc`.
+A conflict between a local flag and a global one needs a test for each spelling, since the declarative one only covers the order the author happened to type.
+
+## A tick's clone of the runtime keeps the engine lock after the table's clone is dropped
+
+A config reload stopped a changed account by removing its `Arc<AccountRuntime>` from the table and started the replacement straight after, and the replacement came up `blocked` on its own engine lock.
+A tick in flight holds its own clone of the `Arc`, so dropping the table's clone releases nothing: the flock lives until the last clone goes, which is when that tick ends.
+`stop_account` in `src/daemon/config.rs` now retires the runtime first, which refuses any further tick and waits (bounded by `RETIRE_BOUND`) for the one in flight, and only then drops it off the reactor and starts the replacement.
+Where a resource's lifetime is an `Arc`'s, "remove it from the table" is not "release it"; count the clones before promising the caller the lock is free.
+
+## A settled shutdown can beat the event queue in `select!`
+
+In `serve_connection` (`src/daemon/server.rs`) the connection closes once the shutdown has settled, writing out its outbound buffer first, while events reach that buffer through a separate `queue.ready()` arm.
+`tokio::select!` picks among ready arms at random, so the `settled` arm could win while `daemon.shutting_down` was still in the queue, and the client saw the socket close without ever being told why.
+The settled arm now moves everything still queued into the outbound buffer before it starts the drain, so the last frames do not depend on which arm the scheduler happened to pick.
+Any `select!` whose one arm ends the loop has to take over what the other arms would still have delivered.
+
+## RFC 2047 decoding can put a newline into a header value
+
+An encoded-word such as `=?UTF-8?Q?a=0Ab?=` decodes to a string with a literal newline in it, so a decoded `Subject:` or display name is not a single line even though the raw header was.
+Interpolated into a reply or forward draft's frontmatter, that newline ends the YAML scalar early and lets the sender write frontmatter keys of their own.
+Every header-derived scalar in `crates/mp-core/src/draft.rs` therefore goes through `yaml_dq_escape`, which writes a double-quoted YAML string and escapes the other control characters, U+0085 and the line and paragraph separators as well as `\n`, `\r` and `\t`.
+Treat a decoded header as arbitrary text, never as a line.
