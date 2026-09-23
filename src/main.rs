@@ -133,6 +133,9 @@ enum Commands {
         /// Only list drafts with this status
         #[arg(long, value_name = "STATUS")]
         status: Option<DraftStatusFilter>,
+        /// Print the listing as JSON on stdout (warnings stay on stderr)
+        #[arg(long)]
+        json: bool,
     },
     /// Validate a draft's frontmatter (default: every draft of the account)
     Validate {
@@ -3257,7 +3260,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::List { status }) => {
+        Some(Commands::List { status, json }) => {
             let listing: mp_protocol::draft::DraftListing = draft_call(
                 &account_config.name,
                 "draft.list",
@@ -3274,7 +3277,11 @@ async fn main() -> Result<()> {
                 "{}",
                 mailypoppins::draft_cmd::render_collisions(&listing.collisions)
             );
-            print!("{}", mailypoppins::draft_cmd::render_list(&listing));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&listing)?);
+            } else {
+                print!("{}", mailypoppins::draft_cmd::render_list(&listing));
+            }
             eprint!(
                 "{}",
                 mailypoppins::draft_cmd::render_skipped(&listing.skipped)

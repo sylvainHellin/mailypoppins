@@ -95,6 +95,7 @@ Usage: mp list [OPTIONS]
 
 Options:
       --status <STATUS>        Only list drafts with this status [possible values: draft, approved, sent]
+      --json                   Print the listing as JSON on stdout (warnings stay on stderr)
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use (default: first in config)

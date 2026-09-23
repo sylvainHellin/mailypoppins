@@ -1,4 +1,5 @@
-//! Contract for `mp show` and `mp list-messages`, the CLI read surface (#0062).
+//! Contract for `mp show`, `mp list-messages` and `mp list --json`, the CLI
+//! read surface (#0062).
 //!
 //! The rendering is unit-tested in `src/read_cmd.rs`; what this pins is the
 //! wiring the unit tests cannot see -- that the commands resolve a selector
@@ -272,4 +273,31 @@ fn an_empty_mailbox_is_not_an_error() {
     let tmp = fixture_tree();
     let (ok, _, stderr) = run(&tmp, &["list-messages", "-A", "beta", "--mailbox", "sent"]);
     assert!(ok, "an empty mailbox is not an error: {stderr}");
+}
+
+/// `mp list --json` prints the draft listing as JSON and nothing else on
+/// stdout: a file the refresh skips is still reported, on stderr, so a script
+/// can pipe stdout straight into a JSON parser.
+#[test]
+fn list_json_prints_the_draft_listing_as_json_on_a_clean_stdout() {
+    let tmp = fixture_tree();
+    let drafts = tmp.path().join("data/accounts/alpha/drafts");
+    fs::create_dir_all(&drafts).expect("drafts dir");
+    fs::write(
+        drafts.join("one.md"),
+        "---\nto: a@example.com\nsubject: Hello\nstatus: draft\n---\n\nbody\n",
+    )
+    .expect("write draft");
+    fs::write(drafts.join("broken.md"), "---\nto: [unclosed\n---\n").expect("write broken draft");
+
+    let (ok, stdout, stderr) = run(&tmp, &["list", "--json"]);
+    assert!(ok, "mp list --json failed: {stderr}");
+    let listing: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
+    assert_eq!(listing["account"], "alpha");
+    let rows = listing["drafts"].as_array().expect("a drafts array");
+    assert_eq!(rows.len(), 1, "{stdout}");
+    assert_eq!(rows[0]["status"], "draft");
+    assert!(rows[0]["selector"].as_str().unwrap().starts_with("mp://alpha/drafts/"));
+    assert!(stderr.contains("broken.md"), "the skip warning stays on stderr: {stderr}");
 }

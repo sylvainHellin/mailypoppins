@@ -13,7 +13,7 @@ import tuiKeys from '../data/tui-keys.json';
 const draftCommands = [
   { command: 'mp <selector>', description: 'Preview a draft (dry-run)' },
   { command: 'mp new <name>', description: 'Create a new draft from template and print its selector' },
-  { command: 'mp list [--status draft|approved|sent]', description: "List the account's drafts" },
+  { command: 'mp list [--status draft|approved|sent] [--json]', description: "List the account's drafts (--json prints them as JSON on stdout)" },
   { command: 'mp validate [<selector>]', description: 'Validate one draft, or every draft of the account' },
   { command: 'mp path <selector>', description: 'Print the filesystem path of a draft' },
   { command: 'mp edit <selector>', description: 'Open a draft in $EDITOR' },
