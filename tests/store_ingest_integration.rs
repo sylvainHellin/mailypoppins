@@ -657,7 +657,7 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
          In-Reply-To: <reset-root@example.com>\r\n",
         b"reply body\r\n",
     );
-    f.ingest_raw("inbox", 1, &root);
+    let root_row = f.ingest_raw("inbox", 1, &root);
     let before = f.ingest_raw("inbox", 2, &reply);
     let refs_before = f.blob_refs(before.row_id);
     mailypoppins::ingest::record_mailbox_cursor(
@@ -707,7 +707,18 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
     assert_eq!(moved.row_id, before.row_id);
     assert_eq!(moved.thread_id, before.thread_id, "the thread must survive");
     assert_eq!(f.blob_refs(moved.row_id), refs_before, "and so must the blob refs");
-    assert_eq!(f.message_rows(), 2, "a reset must not duplicate the mailbox");
+    // The recycled UID's old row belonged to `root`, a different message: the
+    // stranger gets a row and a thread of its own, and `root`'s row is unbound
+    // onto its `-id` sentinel to follow its own message if it comes back.
+    assert_ne!(recycled.row_id, root_row.row_id, "a recycled UID must not take over another message's row");
+    assert_ne!(recycled.thread_id, root_row.thread_id, "nor file the stranger in its thread");
+    let root_uid: i64 = f
+        .store
+        .conn()
+        .query_row("SELECT uid FROM messages WHERE id = ?1", [root_row.row_id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(root_uid, -root_row.row_id);
+    assert_eq!(f.message_rows(), 3, "one row per message, and the moved reply is not duplicated");
 
     // Once the new cursor is recorded, the next sync skips normally again.
     mailypoppins::ingest::record_mailbox_cursor(
@@ -729,7 +740,11 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
         .unwrap()
         .resolve(Some(2));
     assert!(!reset);
-    assert_eq!(skip, HashSet::from([1, 9]));
+    assert_eq!(
+        skip,
+        HashSet::from([1, 9, -root_row.row_id]),
+        "the unbound sentinel is in the skip list too, and no server UID is negative"
+    );
 
     // A first sync (no stored cursor) and a server that reports no UIDVALIDITY
     // are both "cannot tell", and must not throw the skip list away.
@@ -737,7 +752,7 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
         .unwrap()
         .resolve(None);
     assert!(!reset);
-    assert_eq!(skip.len(), 2);
+    assert_eq!(skip.len(), 3);
     let (skip, reset) = mailypoppins::ingest::KnownUids {
         uids: HashSet::from([7]),
         uidvalidity: None,
@@ -757,7 +772,7 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
     assert!(moved_again.uid_rebound);
     assert!(!moved_again.inserted);
     assert_eq!(moved_again.row_id, before.row_id);
-    assert_eq!(f.message_rows(), 2);
+    assert_eq!(f.message_rows(), 3);
 }
 
 // ---------------------------------------------------------------------------

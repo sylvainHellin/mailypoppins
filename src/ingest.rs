@@ -286,15 +286,40 @@ fn ingest_in_tx(
     //    through the message_id index (UIDVALIDITY reset). Its id and its
     //    thread are all that is carried forward; the old envelope values are
     //    not needed anywhere since the FTS delete became rowid-only.
-    let existing: Option<(i64, Option<String>)> = tx
+    let existing: Option<(i64, Option<String>, String)> = tx
         .query_row(
-            "SELECT id, thread_id
+            "SELECT id, thread_id, message_id
              FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid = ?3",
             (input.account, input.mailbox, input.uid),
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .context("looking up the message by identity")?;
+
+    // The slot is this message's only when the row on it carries the same
+    // Message-ID. A UIDVALIDITY reset renumbers the mailbox, so the UID can
+    // come back on a row that holds a different message: that row is unbound
+    // to its `-id` sentinel (as `unbind_rows_on_uids` does) and follows its own
+    // message when that is refetched, and this message looks up its own row.
+    let existing = match existing {
+        Some((id, thread, stored)) if stored.is_empty() || stored == message_id => {
+            Some((id, thread))
+        }
+        Some((squatter, _, stored)) => {
+            tx.execute(
+                "UPDATE messages SET uid = ?2 WHERE id = ?1",
+                (squatter, -squatter),
+            )
+            .context("unbinding the row that held another message's UID")?;
+            warn!(
+                "UID {} in '{}/{}' now holds {} but row {squatter} on it holds {}; \
+                 unbound that row so it follows its own message",
+                input.uid, input.account, input.mailbox, message_id, stored
+            );
+            None
+        }
+        None => None,
+    };
 
     let mut uid_rebound = false;
     let existing = match existing {

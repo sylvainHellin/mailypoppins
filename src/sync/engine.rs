@@ -1885,6 +1885,51 @@ mod tests {
         );
     }
 
+    /// The collision twin of the resets above: the new numbering hands a UID
+    /// the store already holds to a *different* message. Old UIDs 5 and 6 carry
+    /// `e` and `f`; after the reset `f` sits on 5. Ingesting `f` on 5 must not
+    /// overwrite `e`'s row and inherit its thread: `e`'s row is unbound and `f`
+    /// follows its own row onto 5.
+    #[test]
+    fn a_reset_that_hands_a_held_uid_to_another_message_keeps_each_row_its_own() {
+        let fx = Fixture::new();
+        let targets =
+            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let mut backend = FakeBackend::default();
+
+        let mut renumbered = fetch(vec![(5, raw("f"))]);
+        renumbered.listed = vec![4, 5];
+        renumbered.uidvalidity_reset = true;
+        renumbered.state.uid_validity = Some(8);
+        backend.script(
+            "Sent Items",
+            vec![Ok(fetch(vec![(5, raw("e")), (6, raw("f"))])), Ok(renumbered)],
+        );
+
+        fx.run(&mut backend, &targets);
+        let e_row = fx.rows_for("sent", "<e@example.com>")[0].0;
+        let f_row = fx.rows_for("sent", "<f@example.com>")[0].0;
+        let thread = |id: i64| -> String {
+            fx.store
+                .conn()
+                .query_row("SELECT thread_id FROM messages WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        let e_thread = thread(e_row);
+
+        fx.run_with(&mut backend, &targets, 1, false);
+
+        let f = fx.rows_for("sent", "<f@example.com>");
+        assert_eq!(f, vec![(f_row, 5)], "`f` keeps its own row, now on 5");
+        assert_ne!(f[0].0, e_row, "`f` did not take over `e`'s row");
+        assert_ne!(thread(f_row), e_thread, "`f` is not filed in `e`'s conversation");
+        assert_eq!(
+            fx.rows_for("sent", "<e@example.com>"),
+            vec![(e_row, -e_row)],
+            "`e` keeps its row, unbound until its own message is refetched"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // The arrival-mark arithmetic itself
     // -----------------------------------------------------------------------
