@@ -940,8 +940,20 @@ pub fn to_fts(q: &Query) -> Result<FtsRender, RenderError> {
     for clause in &q.clauses {
         match clause {
             Clause::Single(Term::HasAttachment) => render.has_attachment = true,
-            Clause::Single(Term::Before(d)) => render.before = Some(d.clone()),
-            Clause::Single(Term::After(d)) => render.after = Some(d.clone()),
+            // Every date term narrows, as it does in `to_imap`: the latest
+            // `after` and the earliest `before` win. A date is a strict
+            // `YYYY-MM-DD` by the time it is a term, so the strings order as
+            // the dates do.
+            Clause::Single(Term::Before(d)) => {
+                if render.before.as_ref().is_none_or(|kept| d < kept) {
+                    render.before = Some(d.clone());
+                }
+            }
+            Clause::Single(Term::After(d)) => {
+                if render.after.as_ref().is_none_or(|kept| d > kept) {
+                    render.after = Some(d.clone());
+                }
+            }
             Clause::Single(t) => {
                 if let Some(part) = fts_term(t)? {
                     match_parts.push(part);
@@ -1272,6 +1284,16 @@ mod tests {
         assert!(to_imap(&with("x\nY")).is_err());
         assert!(to_imap(&with("x\0y")).is_err());
         assert!(to_imap(&with("plain")).is_ok());
+    }
+
+    /// Repeated date terms all narrow, as `to_imap` sends them all: the
+    /// latest `after` and the earliest `before` survive, whatever the order.
+    #[test]
+    fn fts_keeps_the_narrowest_of_repeated_date_terms() {
+        let render = to_fts(&q("after:2026-03-01 after:2025-01-01")).unwrap();
+        assert_eq!(render.after.as_deref(), Some("2026-03-01"));
+        let render = to_fts(&q("before:2025-01-01 before:2026-03-01")).unwrap();
+        assert_eq!(render.before.as_deref(), Some("2025-01-01"));
     }
 
     // -- to_graph -----------------------------------------------------------
