@@ -243,8 +243,13 @@ pub struct AccountRuntime {
     /// Resolved by `start` before it returned.
     readiness: Readiness,
     /// Held for the runtime's lifetime, `None` when another engine has it.
-    /// Dropping the runtime releases it.
-    _lock: Option<EngineLock>,
+    /// Dropping the runtime releases it, and so does [`AccountRuntime::retire`],
+    /// which cannot wait for every clone of the runtime to be dropped.
+    engine_lock: Mutex<Option<EngineLock>>,
+    /// `true` once [`AccountRuntime::retire`] has run: no tick starts after
+    /// it, and the account's watcher stops at it. A dropped runtime drops the
+    /// sender, which a watcher reads the same way.
+    retired: watch::Sender<bool>,
     /// The reads this runtime serves, open whether or not the lock was taken.
     pool: ReadPool,
     /// What the tick runs.
@@ -338,7 +343,8 @@ impl AccountRuntime {
         Ok(AccountRuntime {
             account,
             readiness,
-            _lock: held,
+            engine_lock: Mutex::new(held),
+            retired: watch::channel(false).0,
             pool,
             hooks,
             body_deadline: (cfg.imap.body_fetch_deadline_secs > 0)
@@ -356,6 +362,51 @@ impl AccountRuntime {
     /// Whether this runtime can serve, resolved at start and fixed afterwards.
     pub fn readiness(&self) -> Readiness {
         self.readiness.clone()
+    }
+
+    /// A receiver that goes `true`, or closes, once this runtime has left the
+    /// table: what ends the account's watcher.
+    pub fn retired(&self) -> watch::Receiver<bool> {
+        self.retired.subscribe()
+    }
+
+    /// Take this runtime out of service ahead of its drop: refuse every tick
+    /// from here on, wait up to `bound` for the one running to finish, then
+    /// release the engine lock.
+    ///
+    /// A configuration swap that changes an account starts the replacement
+    /// the moment this returns, and the replacement takes the same
+    /// `store.lock`. Dropping the table's clone is not enough for that: a tick
+    /// in flight holds a clone of its own across its whole run, and the lock
+    /// would still be held when the replacement asks, leaving it blocked for
+    /// good (readiness is fixed at start).
+    ///
+    /// `false` when the running tick outlived `bound`; the lock then stays
+    /// with that tick and comes free when its last clone drops.
+    pub async fn retire(&self, bound: Duration) -> bool {
+        // Under the tick's own lock, so no `tick()` can take the run slot
+        // between the flag and the capture of the run in flight.
+        let running = {
+            let running = lock(&self.running);
+            self.retired.send_replace(true);
+            running.clone()
+        };
+        if let Some(mut receiver) = running {
+            // A closed channel is a runner that ended without reporting, which
+            // is over just the same.
+            let finished = tokio::time::timeout(bound, receiver.wait_for(Option::is_some)).await;
+            if finished.is_err() {
+                warn!(
+                    "[daemon] {}'s tick was still running after {}s; its engine lock is \
+                     released when the tick ends",
+                    self.account,
+                    bound.as_secs()
+                );
+                return false;
+            }
+        }
+        drop(lock(&self.engine_lock).take());
+        true
     }
 
     /// Check a read connection out of the pool, waiting until one is free.
@@ -384,6 +435,21 @@ impl AccountRuntime {
         // across the join's await.
         let slot = {
             let mut running = lock(&self.running);
+            if *self.retired.borrow() && running.is_none() {
+                // Retired: the lock is gone or about to go, and the runtime
+                // replacing this one is the engine now.
+                debug!("[daemon] {} refused a {kind:?} tick: retired", self.account);
+                return TickOutcome {
+                    kind,
+                    phases: Vec::new(),
+                    joined: false,
+                    blocked: true,
+                    body_deadline: self.body_deadline,
+                    status: String::new(),
+                    error: None,
+                    sync: None,
+                };
+            }
             match running.as_ref() {
                 Some(receiver) => Slot::Join(receiver.clone()),
                 None => {

@@ -289,6 +289,7 @@ A candidate that does not load leaves the previous snapshot live, its runtimes r
 A candidate that loads is installed, and then the runtimes are reconciled in one order: stop the accounts that went, restart the accounts whose effective configuration changed, start the accounts that appeared, and announce the whole thing with one `config.changed`.
 
 `config.reload` returns only once every runtime it touched has settled, so a removed account's engine lock is free by the time the call answers and an account can be renamed in one edit without the new runtime racing the old one.
+A runtime the swap stops or replaces is retired first: it refuses every tick from then on, and the swap waits up to 60 seconds for the tick already running to finish before it releases the engine lock and starts the replacement, which therefore comes up `ready`; a tick that outlives the 60 seconds keeps the lock until it ends, and the replacement comes up `blocked`.
 A started runtime creates its account directory if it is missing, exactly as `mp config init` does, so an account added by a hand edit comes up the same way as one added through `config.add_account`.
 An account the swap added has no local store yet, so it settles `blocked` rather than `ready` until something syncs it; see [Account runtimes](#account-runtimes).
 

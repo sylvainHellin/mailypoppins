@@ -464,14 +464,28 @@ pub async fn reconcile(
     plan
 }
 
+/// How long a swap waits for a removed runtime's tick to finish before it
+/// starts the replacement anyway.
+///
+/// A ceiling rather than a wait for ever: the reload's caller is waiting on
+/// the answer. A tick that outlives it keeps the engine lock, and the
+/// replacement comes up blocked, which is what every reload did before the
+/// wait existed.
+const RETIRE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Drop one account's runtime, off the reactor: the drop closes SQLite and
 /// releases the engine lock, and the caller's promise is that both have
 /// happened by the time the reload answers.
+///
+/// Retired first, because the table's clone is not the only one: a tick in
+/// flight holds its own, and the replacement [`start_account`] builds next
+/// needs the engine lock that clone would otherwise keep.
 async fn stop_account(runtimes: &Arc<RuntimeTable>, account: &str) {
     let Some(runtime) = runtimes.remove(account) else {
         return;
     };
     info!("[daemon] stopping the runtime for {account}");
+    runtime.retire(RETIRE_BOUND).await;
     if let Err(e) = tokio::task::spawn_blocking(move || drop(runtime)).await {
         warn!("[daemon] the stop task for {account} {e}");
     }
@@ -632,5 +646,97 @@ mod tests {
         let previous = parse("[[accounts]]\nname = \"alpha\"\n");
         let next = parse("# a comment\n\n[[accounts]]\n\nname = \"alpha\"\n\n");
         assert_eq!(Reconcile::between(&previous, &next), Reconcile::default());
+    }
+
+    /// A swap that changes an account while its tick runs: the stop waits for
+    /// the tick, so the replacement takes the engine lock and comes up ready
+    /// rather than blocked for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_mid_tick_leaves_the_replacement_ready() {
+        use crate::daemon::runtime::account::{AccountRuntime, DrainHook, TickHooks, TickKind};
+        use futures::future::FutureExt;
+        use tokio::sync::Notify;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::config::AccountConfig {
+            name: "alpha".to_string(),
+            ..Default::default()
+        };
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let quiet: DrainHook = Arc::new(|_ctx| async { String::new() }.boxed());
+        let (on_entry, gate) = (Arc::clone(&entered), Arc::clone(&release));
+        let hooks = TickHooks {
+            outbox: Arc::clone(&quiet),
+            mutations: quiet,
+            body: Arc::new(move |_ctx| {
+                let (on_entry, gate) = (Arc::clone(&on_entry), Arc::clone(&gate));
+                async move {
+                    on_entry.notify_one();
+                    gate.notified().await;
+                    Ok(())
+                }
+                .boxed()
+            }),
+        };
+        let runtimes = Arc::new(RuntimeTable::default());
+        let old = AccountRuntime::start_at_with_hooks(dir.path(), cfg.clone(), 1, hooks)
+            .expect("a free lock");
+        runtimes.insert(Arc::new(old));
+        assert_eq!(runtimes.state_of("alpha"), Some("ready"));
+
+        // The tick holds its own clone, exactly as `tick_and_commit` does.
+        let ticking = runtimes.get("alpha").expect("the runtime");
+        // Kept past the tick's end, as `tick_and_commit` keeps it past the
+        // commit: the lock must come free without waiting for this clone.
+        let tick = tokio::spawn(async move {
+            let outcome = ticking.tick(TickKind::Quick).await;
+            (outcome, ticking)
+        });
+        entered.notified().await;
+
+        let stopper = Arc::clone(&runtimes);
+        let stop = tokio::spawn(async move { stop_account(&stopper, "alpha").await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!stop.is_finished(), "the stop waits for the tick in flight");
+        release.notify_one();
+        stop.await.expect("the stop task");
+
+        // `start_account`'s own step, against the same lock file.
+        let replacement = AccountRuntime::start_at_with_hooks(
+            dir.path(),
+            cfg,
+            1,
+            TickHooks {
+                outbox: Arc::new(|_ctx| async { String::new() }.boxed()),
+                mutations: Arc::new(|_ctx| async { String::new() }.boxed()),
+                body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+            },
+        )
+        .expect("the start");
+        runtimes.insert(Arc::new(replacement));
+        assert_eq!(
+            runtimes.state_of("alpha"),
+            Some("ready"),
+            "the replacement took the lock the retired runtime gave up"
+        );
+        let (outcome, _clone) = tick.await.expect("the tick task");
+        assert!(!outcome.blocked, "the tick that was running finished normally");
+
+        // And the retired runtime refuses a tick it is asked for afterwards.
+        let other = tempfile::tempdir().expect("tempdir");
+        let retired = AccountRuntime::start_at_with_hooks(
+            other.path(),
+            crate::config::AccountConfig::default(),
+            1,
+            TickHooks {
+                outbox: Arc::new(|_ctx| async { String::new() }.boxed()),
+                mutations: Arc::new(|_ctx| async { String::new() }.boxed()),
+                body: Arc::new(|_ctx| async { panic!("a retired runtime ticks nothing") }.boxed()),
+            },
+        )
+        .expect("a free lock");
+        assert!(retired.retire(std::time::Duration::from_secs(1)).await);
+        assert!(retired.tick(TickKind::Quick).await.blocked);
     }
 }
