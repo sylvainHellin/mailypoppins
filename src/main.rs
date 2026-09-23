@@ -1188,8 +1188,10 @@ fn select_mailboxes(
     }
 }
 
-/// How long a routed command waits for the daemon, per call.
-const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a routed command waits for the daemon, per call; the same budget as
+/// one connect-and-handshake ([`mailypoppins::daemon::client::CONNECT_TIMEOUT`]),
+/// which bounds the session setup rather than a call on it.
+const DAEMON_TIMEOUT: std::time::Duration = mailypoppins::daemon::client::CONNECT_TIMEOUT;
 
 /// How long a routed *mutation* waits for the daemon.
 ///

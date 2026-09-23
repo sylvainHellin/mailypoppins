@@ -73,7 +73,7 @@ pub const REQUIRE_ENV: &str = "MAILYPOPPINS_DAEMON_REQUIRE";
 pub const AUTOSTART_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 /// How long one connect-and-handshake attempt may take.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// First and last gap between connect attempts after a start.
 const RETRY_MIN: Duration = Duration::from_millis(25);
