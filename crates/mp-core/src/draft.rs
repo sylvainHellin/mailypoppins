@@ -397,27 +397,32 @@ pub fn create_reply_draft_from(
 
     // Build reply fields. A `Reply-To:` header names where the sender wants
     // answers to go (a list, a team alias behind a `noreply@` From), so it is
-    // the primary recipient; `From:` is the fallback.
+    // the primary recipient; `From:` is the fallback. The header may name
+    // several mailboxes, and every one of them is a primary recipient.
     let from_addr = extract_email_address(&inbox.from);
-    let reply_to = inbox
-        .reply_to
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .map(extract_email_address)
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| from_addr.clone());
+    let mut primaries: Vec<String> = Vec::new();
+    for addr in inbox.reply_to.as_deref().map(split_addresses).unwrap_or_default() {
+        let email = extract_email_address(&addr);
+        let lower = email.to_lowercase();
+        if !email.is_empty() && !primaries.iter().any(|p| p.to_lowercase() == lower) {
+            primaries.push(email);
+        }
+    }
+    if primaries.is_empty() {
+        primaries.push(from_addr.clone());
+    }
+    let reply_to = primaries.join(", ");
 
     let reply_cc = if reply_all {
         // `default_from` may be a full `"Name" <addr>` mailbox.
         let self_addr = extract_email_address(default_from).to_lowercase();
-        let primary = reply_to.to_lowercase();
+        let primary: Vec<String> = primaries.iter().map(|p| p.to_lowercase()).collect();
         let mut all_recipients: Vec<String> = Vec::new();
         let push = |email: String, list: &mut Vec<String>| {
             let lower = email.to_lowercase();
             if !email.is_empty()
                 && lower != self_addr
-                && lower != primary
+                && !primary.contains(&lower)
                 && !list.iter().any(|r| r.to_lowercase() == lower)
             {
                 list.push(email);
@@ -2711,6 +2716,39 @@ mod tests {
         let draft = parse_email_draft(&path).unwrap();
         assert_eq!(draft.frontmatter.to.as_deref(), Some("NOREPLY@x.com"));
         assert_eq!(draft.frontmatter.cc.as_deref(), Some("dave@x.com"));
+    }
+
+    #[test]
+    fn reply_to_with_several_mailboxes_keeps_them_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        for reply_to in [r#""A, Team" <a@x.com>, "B" <b@x.com>"#, "a@x.com, b@x.com"] {
+            let source = SourceMessage {
+                from: "Robot <noreply@x.com>".into(),
+                reply_to: Some(reply_to.into()),
+                to: "me@example.com, A@x.com".into(),
+                cc: Some("b@x.com, carol@x.com".into()),
+                subject: "Status".into(),
+                ..Default::default()
+            };
+            let path =
+                create_reply_draft_from(&source, false, "me@example.com", Some(tmp.path()), None)
+                    .unwrap();
+            let draft = parse_email_draft(&path).unwrap();
+            assert_eq!(draft.frontmatter.to.as_deref(), Some("a@x.com, b@x.com"), "{reply_to}");
+            assert_eq!(draft.frontmatter.cc, None);
+
+            // Reply-all: no Reply-To mailbox is repeated into cc.
+            let path =
+                create_reply_draft_from(&source, true, "me@example.com", Some(tmp.path()), None)
+                    .unwrap();
+            let draft = parse_email_draft(&path).unwrap();
+            assert_eq!(draft.frontmatter.to.as_deref(), Some("a@x.com, b@x.com"), "{reply_to}");
+            assert_eq!(
+                draft.frontmatter.cc.as_deref(),
+                Some("noreply@x.com, carol@x.com"),
+                "{reply_to}"
+            );
+        }
     }
 
     #[test]
