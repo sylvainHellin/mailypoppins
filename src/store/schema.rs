@@ -364,28 +364,56 @@ pub fn create(conn: &Connection) -> Result<()> {
 /// holds one entry per invite and costs ingest nothing for any other blob.
 pub const INVITE_INDEX: &str = "message_blobs_invite";
 
+/// Name of the index that serves a conversation read.
+///
+/// [`super::read::thread_messages`] filters on `(account, thread_id)` and
+/// orders by `date_sort ASC, id ASC`; with `date_sort` as the third column and
+/// the row id implicitly last, SQLite walks the conversation straight off the
+/// index instead of scanning `messages` and sorting into a temp B-tree.
+pub const THREAD_INDEX: &str = "messages_thread";
+
+/// Every index created after [`SCHEMA_VERSION`] was last bumped, as
+/// `(name, CREATE statement)`, each looked up and created on its own.
+fn additive_indexes() -> [(&'static str, String); 2] {
+    [
+        (
+            INVITE_INDEX,
+            format!(
+                "CREATE INDEX IF NOT EXISTS {INVITE_INDEX} ON message_blobs (message_row) \
+                 WHERE kind = 'attachment' AND filename = '{CALENDAR_SIDECAR_NAME}'"
+            ),
+        ),
+        (
+            THREAD_INDEX,
+            format!(
+                "CREATE INDEX IF NOT EXISTS {THREAD_INDEX} \
+                 ON messages (account, thread_id, date_sort)"
+            ),
+        ),
+    ]
+}
+
 /// Create the indexes added after [`SCHEMA_VERSION`] was last bumped.
 ///
 /// Additive and idempotent, so they need no version bump and no rebuild: a
 /// fresh store gets them from [`create`], an existing one on its next open.
-/// Looked up before it is created, so the open of a store that already has
-/// them writes nothing and takes no write lock.
+/// Each is looked up before it is created, so the open of a store that
+/// already has them all writes nothing and takes no write lock, and a store
+/// that has only the older ones still gains the newer.
 pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
-    let present: bool = conn
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
-            [INVITE_INDEX],
-            |row| row.get(0),
-        )
-        .context("looking up the invite index")?;
-    if present {
-        return Ok(());
+    for (name, sql) in additive_indexes() {
+        let present: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("looking up the {name} index"))?;
+        if !present {
+            conn.execute_batch(&sql)
+                .with_context(|| format!("creating the {name} index"))?;
+        }
     }
-    conn.execute_batch(&format!(
-        "CREATE INDEX IF NOT EXISTS {INVITE_INDEX} ON message_blobs (message_row) \
-         WHERE kind = 'attachment' AND filename = '{CALENDAR_SIDECAR_NAME}'"
-    ))
-    .context("creating the invite index")?;
     Ok(())
 }
 

@@ -366,8 +366,8 @@ fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, R
 /// belongs to, oldest first (`LST-10`, #0126).
 ///
 /// The grouping is [`read::thread_messages`]'s, which is the set of rows ingest
-/// gave the same `thread_id`: decided once at ingest and read back out of the
-/// indexed column rather than recomputed from headers here. A message ingest
+/// gave the same `thread_id`: decided once at ingest and read back off the
+/// `messages_thread` index rather than recomputed from headers here. A message ingest
 /// assigned no thread to is the root of its own, so the id falls back to its
 /// own `Message-ID`, and the answer is that message alone.
 ///

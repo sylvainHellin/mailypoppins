@@ -498,6 +498,37 @@ mod tests {
         assert_eq!(rows, 1, "and the file was not rebuilt");
     }
 
+    /// A store that already has the invite index but predates the thread
+    /// index gains the thread index on open: each additive index is checked
+    /// on its own, so the first one being present does not end the pass.
+    #[test]
+    fn a_store_with_only_the_invite_index_gains_the_thread_index_on_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let has_index = |store: &Store, name: &str| -> bool {
+            store
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    [name],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            assert!(has_index(&store, schema::THREAD_INDEX), "a fresh store is created with it");
+            store
+                .conn()
+                .execute_batch(&format!("DROP INDEX {}", schema::THREAD_INDEX))
+                .unwrap();
+            assert!(has_index(&store, schema::INVITE_INDEX));
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(has_index(&store, schema::THREAD_INDEX), "the reopen added it back");
+        assert!(has_index(&store, schema::INVITE_INDEX));
+    }
+
     #[test]
     fn truncated_file_is_dropped_and_rebuilt() {
         let dir = tempdir().unwrap();

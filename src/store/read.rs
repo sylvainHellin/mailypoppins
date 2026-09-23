@@ -411,13 +411,25 @@ pub fn find_by_message_id(
     Ok(out)
 }
 
+/// The conversation read [`thread_messages`] runs, kept apart so the
+/// query-plan test asserts against the exact SQL.
+fn thread_messages_sql() -> String {
+    let columns = row_columns();
+    format!(
+        "SELECT {columns} FROM messages
+         WHERE account = ?1 AND thread_id = ?2
+         ORDER BY date_sort ASC, id ASC"
+    )
+}
+
 /// Every message of one conversation, oldest first (#0008).
 ///
 /// The thread is the set of rows ingest gave the same `thread_id`, which is
 /// the `Message-ID` of the root the `In-Reply-To` / `References` chain
 /// resolved to (see [`crate::ingest`]). The assignment is done once at ingest
-/// and read straight out of the indexed column here; nothing is recomputed and
-/// no headers are re-parsed on the read path.
+/// and read straight off the `messages_thread` index
+/// ([`crate::store::schema::THREAD_INDEX`]) here; nothing is recomputed and no
+/// headers are re-parsed on the read path.
 ///
 /// The same message can sit in several mailboxes (an inbox copy and its
 /// archived original), so a `Message-ID` that appears more than once is
@@ -433,13 +445,7 @@ pub fn thread_messages(
     account: &str,
     thread_id: &str,
 ) -> Result<Vec<MessageRow>> {
-    let columns = row_columns();
-    let sql = format!(
-        "SELECT {columns} FROM messages
-         WHERE account = ?1 AND thread_id = ?2
-         ORDER BY date_sort ASC, id ASC"
-    );
-    let mut stmt = store.conn().prepare(&sql)?;
+    let mut stmt = store.conn().prepare(&thread_messages_sql())?;
     let rows = stmt.query_map((account, thread_id), row_from_sql)?;
     let mut out: Vec<MessageRow> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1364,6 +1370,32 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
                 "{sql} must not sort in a temp B-tree, got:\n{plan}"
             );
         }
+    }
+
+    /// A conversation read walks the messages_thread index in order rather
+    /// than scanning messages and sorting into a temp B-tree.
+    #[test]
+    fn the_thread_read_is_served_by_the_messages_thread_index() {
+        let fx = fixture();
+        ingest(&fx, "inbox", 1, &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"));
+
+        let sql = super::thread_messages_sql();
+        let mut stmt = fx.store.conn().prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(("alice", "<a@example.com>"), |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let plan = plan.join("\n");
+
+        let expected = format!(
+            "SEARCH messages USING INDEX {} (account=? AND thread_id=?)",
+            crate::store::schema::THREAD_INDEX
+        );
+        // The row columns' per-row invite subquery follows; a thread is a
+        // handful of rows, so only the messages access is pinned here.
+        assert_eq!(plan.lines().next().map(str::trim), Some(expected.as_str()), "got:\n{plan}");
+        assert!(!plan.to_uppercase().contains("TEMP B-TREE"), "got:\n{plan}");
     }
 
     /// A page is the prefix of the full listing and its total is the full
