@@ -1027,7 +1027,7 @@ pub fn append_draft_attachment(path: &Path, entry: &str) -> Result<()> {
 /// change. When the target exists, its mode is copied onto the temp file
 /// *before* the payload is written, so the content is never briefly readable
 /// under wider permissions. A new file keeps default umask behaviour.
-fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
 
     #[cfg(unix)]

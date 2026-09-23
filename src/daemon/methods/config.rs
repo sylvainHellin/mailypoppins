@@ -572,8 +572,10 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
                 DomainError::internal(format!("creating {}: {e}", parent.display()))
             })?;
         }
-        fs::write(&path, text)
-            .map_err(|e| DomainError::internal(format!("writing {}: {e}", path.display())))?;
+        // Atomic and mode-preserving: a crash mid-write leaves the previous
+        // file whole, and a config the user chmod'ed stays that way.
+        crate::draft::write_atomic(&path, text.as_bytes())
+            .map_err(|e| DomainError::internal(format!("writing {}: {e:#}", path.display())))?;
     }
 
     let plan = reconcile(
