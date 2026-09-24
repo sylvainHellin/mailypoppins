@@ -7,10 +7,11 @@
 //! before any command has moved:
 //!
 //! 1. **It agrees where it must.** The agreement rows are *no-daemon-list*
-//!    commands only: `mp --version` and `mp config path` ([`UNMIGRATED`]). Both
-//!    answer identically from the current binary and from the `pre-daemon`
-//!    oracle, with a daemon running beside them, because neither routes - the
-//!    diff is empty by construction, which is exactly the point. A harness that
+//!    commands only: `mp config path` ([`UNMIGRATED`]); `mp --version` was one
+//!    too until 0.10.0 bumped the version past the oracle's 0.9.0. It answers
+//!    identically from the current binary and from the `pre-daemon` oracle,
+//!    with a daemon running beside them, because it never routes - the diff
+//!    is empty by construction, which is exactly the point. A harness that
 //!    could not produce an empty diff here would report a difference for every
 //!    slice and prove nothing about any of them.
 //!
@@ -74,7 +75,7 @@ use support::parity::{
 /// and is now `config path` - which never moves again, because it is on the
 /// no-daemon list for good (`src/daemon/client.rs::needs_daemon`) and is the
 /// only command left in the product that a client answers in process.
-const UNMIGRATED: [&[&str]; 2] = [&["--version"], &["config", "path"]];
+const UNMIGRATED: [&[&str]; 1] = [&["config", "path"]];
 
 fn root() -> TempDir {
     TempDir::new().expect("a temporary parity root")
@@ -85,7 +86,7 @@ fn root() -> TempDir {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_oracle_binary_exists_and_reports_the_same_version_as_the_build_under_test() {
+fn the_oracle_binary_exists_and_reports_the_pre_daemon_version() {
     let path = oracle_bin();
     assert!(
         path.is_file(),
@@ -103,11 +104,9 @@ fn the_oracle_binary_exists_and_reports_the_same_version_as_the_build_under_test
     );
     let rendered = String::from_utf8_lossy(&theirs.stdout).trim().to_string();
     assert_eq!(
-        rendered,
-        format!("mailypoppins {}", env!("CARGO_PKG_VERSION")),
-        "the `pre-daemon` tag and this working tree carry the same package version, which is what \
-         lets `mp --version` be one of the parity commands; if this ever fails, the version was \
-         bumped and `--version` must leave the UNMIGRATED list rather than be normalised away"
+        rendered, "mailypoppins 0.9.0",
+        "the oracle is the `pre-daemon` tag, which is 0.9.0 for good; `--version` left the \
+         UNMIGRATED list when 0.10.0 bumped past it rather than be normalised away"
     );
 }
 
