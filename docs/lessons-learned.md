@@ -2107,3 +2107,8 @@ A config reload that changes an account retires the old runtime, and its watcher
 The IDLE round itself runs through `off_thread` (`src/daemon/runtime/account.rs`) on a plain OS thread driving its own runtime, and dropping the awaiting task does not cancel that thread: the old connection stays open until the round ends, up to `IDLE_ROUND_SECS` (300 s, `src/daemon/runtime/watcher.rs`), and its outcome is discarded.
 For those minutes the server sees two IDLE connections for the account, the old one and the replacement's.
 Cancelling a future that waits on `off_thread` stops the waiting, not the work; say "stops triggering" rather than "closes" unless the thread itself is told to stop.
+
+## The TUI's daemon door flattens an RPC error to a string
+
+`Session::call` and `QueryHandle::call` in `crates/mp-tui/src/session.rs` hand back `anyhow` errors built from `ClientError`'s `Display`, so the JSON-RPC code (`-32602` for an unknown operation id) is only a substring of the message by the time TUI code sees it.
+The #0121 re-query therefore drops an await on any `operation.status` failure rather than matching on the code: an await nothing can settle is a spinner that never stops, which is worse than a lost result line.

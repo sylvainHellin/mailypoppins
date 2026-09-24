@@ -775,18 +775,27 @@ fn the_watcher_threads_are_gone_from_the_tui() {
     );
 }
 
-/// The TUI never asks for an operation's status.
+/// The TUI never polls an operation's status.
 ///
 /// The behavioural half is `a_quick_sync_starts_an_operation_and_polls_nothing`,
 /// which pins the one arm a test can drive; this pins the other three
 /// (`sync.full`, `send.approved`, `calendar.rsvp`) and every arm a later unit
 /// adds, because they all go through one helper and the string appears once.
+///
+/// The one call site allowed is the re-query rule of #0121 in `events.rs`:
+/// after a re-bootstrap, each operation still awaited is asked about once,
+/// because the `operation.finished` published in the gap is never replayed
+/// (`crates/mp-tui/src/events_resync_tests.rs` pins that behaviour).
 #[test]
 fn the_tui_never_asks_for_an_operations_status() {
     assert_eq!(
         needles_under(TUI_CRATE, &["\"operation.status\""]),
-        BTreeSet::new(),
-        "an operation finishes by event now, so nothing polls it"
+        BTreeSet::from([(
+            "crates/mp-tui/src/events.rs".to_string(),
+            "\"operation.status\"".to_string()
+        )]),
+        "an operation finishes by event now, so nothing polls it; only the \
+         re-bootstrap re-query asks"
     );
 }
 
@@ -885,7 +894,9 @@ fn needles_under(relative: &str, needles: &[&str]) -> BTreeSet<(String, String)>
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
-        if name == "src/tui_tests/events.rs" {
+        // A `#[cfg(test)] mod x_tests;` file is test code the way an inline
+        // `mod tests` is, which `strip_test_modules` removes below.
+        if name == "src/tui_tests/events.rs" || name.ends_with("_tests.rs") {
             continue;
         }
         let Ok(source) = std::fs::read_to_string(&path) else {

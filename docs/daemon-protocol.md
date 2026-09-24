@@ -1037,7 +1037,10 @@ A client that stops reading therefore costs the daemon a bounded amount of memor
 When a push would exceed either cap the queue overflows: every queued domain event is discarded, the queue is poisoned, and one `state.resync_required` notification is sent with `params` of `{instance_id, reason}`, where the reason is `event_queue_overflow`.
 A poisoned queue accepts no further domain event until the client calls `state.bootstrap` again, which clears the poison: sending more would build a state nothing on the daemon's side corresponds to.
 Lifecycle events are the exception and survive both the discard and the poison, because no snapshot carries them and a re-bootstrap would not bring them back.
-They do not survive the re-bootstrap itself: a second `state.bootstrap` empties the whole queue, lifecycle events included, so a progress report queued behind a resync is lost where the same report queued behind an overflow is kept. That is an inconsistency of this build rather than a rule, recorded in ticket #0121 and in `BACKLOG.md`.
+They do not survive the re-bootstrap itself: a second `state.bootstrap` empties the whole queue, lifecycle events included, so a progress report queued behind a resync is lost where the same report queued behind an overflow is kept.
+A client therefore re-queries after every re-bootstrap rather than waiting for a replay (#0121): the undo-send holds come back in the snapshot's `holds`, and each operation it still awaits comes back through `operation.status`.
+A terminal answer is settled exactly as the lost `operation.finished` would have been, a live one stays awaited because its finish now arrives above the watermark, and an id the daemon refuses (forgotten past the 256-operation window) is dropped.
+After a daemon restart every awaited id is dropped without asking, since operation ids are only ever the issuing instance's; the TUI does all of this in `requery_operations` (`crates/mp-tui/src/events.rs`).
 If the control notification itself cannot be written, the daemon closes that connection and keeps serving every other one.
 
 A client that receives `state.resync_required` discards its state and calls `state.bootstrap`.

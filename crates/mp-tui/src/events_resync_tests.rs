@@ -376,3 +376,189 @@ fn a_reconnect_to_a_restarted_daemon_takes_its_holds() {
     );
     assert_eq!(app.holds.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The re-query rule for operations (#0121)
+// ---------------------------------------------------------------------------
+
+/// The operation id every row below awaits.
+const AWAITED: &str = "op-awaited";
+
+/// A door that answers `state.bootstrap` with `bootstrap` and
+/// `operation.status` with `status`, recording the methods it was asked.
+struct OpsDoor {
+    bootstrap: Bootstrap,
+    status: Result<Value, String>,
+    calls: RefCell<Vec<String>>,
+}
+
+impl Queries for OpsDoor {
+    fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.calls.borrow_mut().push(method.to_string());
+        match method {
+            "state.bootstrap" => Ok(serde_json::to_value(&self.bootstrap)?),
+            "operation.status" => {
+                assert_eq!(
+                    params["operation_id"], AWAITED,
+                    "asked about the awaited id"
+                );
+                self.status.clone().map_err(|e| anyhow::anyhow!(e))
+            }
+            other => anyhow::bail!("the operations door answers no {other}"),
+        }
+    }
+}
+
+impl OpsDoor {
+    fn new(bootstrap: Bootstrap, status: Result<Value, String>) -> Self {
+        OpsDoor {
+            bootstrap,
+            status,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+}
+
+/// An `operation.status` answer for [`AWAITED`], a `send.approved` in `state`.
+fn status(state: &str) -> Value {
+    let terminal = state == "succeeded";
+    serde_json::json!({
+        "operation_id": AWAITED,
+        "method": "send.approved",
+        "state": state,
+        "scope": "durable",
+        "progress": null,
+        "result": if terminal { serde_json::json!({"sent": 2, "failed": 0}) } else { Value::Null },
+        "error": null,
+    })
+}
+
+/// An app on the `resync` instance awaiting [`AWAITED`], with the spinner
+/// share `start_operation` takes for it.
+fn app_awaiting() -> App {
+    let mut app = App::from_bootstrap(config(), &snapshot(1, 5));
+    app.events.started(
+        AWAITED.to_string(),
+        crate::events::Awaited::SendApproved { account_index: 0 },
+    );
+    app.bg_count += 1;
+    app
+}
+
+/// Drop the socket and reconnect to `instance_id`, draining both notices.
+fn reconnect(app: &mut App, door: &dyn Queries, instance_id: &str) {
+    let (sender, events) = mpsc::channel();
+    sender
+        .send(Incoming::Disconnected {
+            reason: "socket closed".to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    sender
+        .send(Incoming::Reconnected {
+            instance_id: instance_id.to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    drain(app, door, &events);
+}
+
+/// `operation.finished` for [`AWAITED`], as `instance_id` publishes it.
+fn finished(instance_id: &str, revision: u64) -> mp_protocol::EventEnvelope {
+    mp_protocol::EventEnvelope {
+        instance_id: instance_id.to_string(),
+        revision,
+        kind: "operation.finished".to_string(),
+        payload: serde_json::json!({
+            "operation_id": AWAITED,
+            "state": "succeeded",
+            "result": {"sent": 2, "failed": 0},
+        }),
+    }
+}
+
+/// An operation whose `operation.finished` went out while the socket was down
+/// settles from `operation.status` after the reconnect, with the line its
+/// finish would have shown, and a late copy of that finish lands nothing twice.
+#[test]
+fn a_reconnect_settles_an_awaited_operation_that_finished_in_the_gap() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = app_awaiting();
+    let door = OpsDoor::new(snapshot(4, 5), Ok(status("succeeded")));
+
+    reconnect(&mut app, &door, "resync");
+
+    assert_eq!(door.methods(), ["state.bootstrap", "operation.status"]);
+    assert_eq!(app.bg_count, 0, "the spinner came down");
+    assert_eq!(app.status_message.as_deref(), Some("2 sent, 0 failed"));
+    assert_eq!(
+        app.apply_event(&finished("resync", 5)),
+        crate::events::Applied::Ignored,
+        "the operation is settled, so its finish is not landed a second time"
+    );
+}
+
+/// An operation still running after the gap stays awaited, and its finish
+/// lands when it arrives.
+#[test]
+fn a_reconnect_keeps_awaiting_an_operation_that_is_still_running() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = app_awaiting();
+    let door = OpsDoor::new(snapshot(4, 5), Ok(status("running")));
+
+    reconnect(&mut app, &door, "resync");
+
+    assert_eq!(door.methods(), ["state.bootstrap", "operation.status"]);
+    assert_eq!(app.bg_count, 1, "still working");
+    assert_eq!(
+        app.apply_event(&finished("resync", 5)),
+        crate::events::Applied::Operation(AWAITED.to_string())
+    );
+    assert_eq!(app.bg_count, 0);
+    assert_eq!(app.status_message.as_deref(), Some("2 sent, 0 failed"));
+}
+
+/// A daemon that no longer knows the id (it forgot it past its window) drops
+/// the await, so the spinner does not run for the rest of the session.
+#[test]
+fn a_reconnect_drops_an_await_the_daemon_no_longer_knows() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = app_awaiting();
+    let door = OpsDoor::new(
+        snapshot(4, 5),
+        Err(
+            "the daemon refused the call: no operation op-awaited is known to this daemon \
+             (-32602)"
+                .to_string(),
+        ),
+    );
+
+    reconnect(&mut app, &door, "resync");
+
+    assert_eq!(door.methods(), ["state.bootstrap", "operation.status"]);
+    assert_eq!(app.bg_count, 0, "no stuck spinner");
+    assert_eq!(
+        app.apply_event(&finished("resync", 5)),
+        crate::events::Applied::Ignored
+    );
+}
+
+/// A daemon that restarted cannot know the old instance's ids, so the await is
+/// dropped without asking and the spinner comes down.
+#[test]
+fn a_reconnect_to_a_new_instance_drops_the_await_without_asking() {
+    let _data = mp_core::config::test_env::TestDataDir::new();
+    let mut app = app_awaiting();
+    let door = OpsDoor::new(restarted_snapshot(3), Err("never asked".to_string()));
+
+    reconnect(&mut app, &door, "restarted");
+
+    assert_eq!(door.methods(), ["state.bootstrap"]);
+    assert_eq!(app.bg_count, 0, "no stuck spinner");
+    assert_eq!(
+        app.apply_event(&finished("restarted", 4)),
+        crate::events::Applied::Ignored
+    );
+}

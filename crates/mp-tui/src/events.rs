@@ -432,6 +432,36 @@ impl App {
         Applied::Operation(id)
     }
 
+    /// Land one awaited operation from its `operation.status` answer, the way
+    /// its `operation.finished` would have landed (#0121).
+    ///
+    /// The status object carries `state`, `result` and `error` under the
+    /// names the finished event uses, so [`super::commands::settled`] reads
+    /// either. A `queued` or `running` operation stays awaited: this client
+    /// registered for events before the snapshot, so its finish is still on
+    /// its way. A cancelled send answers the line the hold's own cancel shows,
+    /// as [`App::apply_hold`] does, rather than an error about a cancel.
+    fn settle_from_status(&mut self, id: &str, status: &serde_json::Value) {
+        if !matches!(
+            status["state"].as_str(),
+            Some("succeeded" | "failed" | "cancelled")
+        ) {
+            return;
+        }
+        let Some(awaited) = self.events.started.remove(id) else {
+            return;
+        };
+        if matches!(awaited, Awaited::Send { .. }) && status["state"] == json!("cancelled") {
+            self.bg_count = self.bg_count.saturating_sub(1);
+            self.set_status_level(
+                "Send cancelled; the draft is untouched".to_string(),
+                StatusLevel::Info,
+            );
+            return;
+        }
+        super::bg::handle_bg_result(self, super::commands::settled(&awaited, status));
+    }
+
     /// An undo-send hold moved: the countdown, and the two sentences that end
     /// it (`SND-04`, P6-U2).
     ///
@@ -739,7 +769,7 @@ fn watching(app: &mut App, live: bool) {
 /// the snapshot has to land over every account and the open mailbox has to be
 /// reloaded.
 fn rebootstrap(app: &mut App, door: &dyn Queries) {
-    match door.call("state.bootstrap", json!({})) {
+    let landed = match door.call("state.bootstrap", json!({})) {
         Ok(answer) => match serde_json::from_value::<Bootstrap>(answer) {
             Ok(bootstrap) => {
                 log::info!(
@@ -750,9 +780,52 @@ fn rebootstrap(app: &mut App, door: &dyn Queries) {
                 // The snapshot carries the daemon's holds, so this one call
                 // also replaces any the client kept from before the gap.
                 app.apply_resync_bootstrap(&bootstrap);
+                true
             }
-            Err(e) => log::warn!("[events] the bootstrap did not decode: {e}"),
+            Err(e) => {
+                log::warn!("[events] the bootstrap did not decode: {e}");
+                false
+            }
         },
-        Err(e) => log::warn!("[events] the bootstrap failed: {e:#}"),
+        Err(e) => {
+            log::warn!("[events] the bootstrap failed: {e:#}");
+            false
+        }
+    };
+    if landed {
+        requery_operations(app, door);
+    }
+}
+
+/// Ask the daemon about every operation this client still awaits, and settle
+/// the ones that finished while the stream was down (#0121).
+///
+/// The re-query rule: a re-bootstrap empties the connection's queue, so an
+/// `operation.finished` published in the gap is never replayed. The holds come
+/// back through the snapshot; an operation comes back through
+/// `operation.status`. A terminal answer lands exactly as the event would have;
+/// a live one stays awaited, since its finish now arrives above the watermark.
+/// A refusal means the daemon no longer knows the id (it forgot it past its
+/// 256-operation window), so the await is dropped with its spinner share: no
+/// answer will ever come. Any other failure is treated the same way, because
+/// an await nobody can settle is a spinner that never stops.
+///
+/// Nothing is asked when nothing is awaited, which is what keeps a plain
+/// reconnect to exactly one `state.bootstrap`. A daemon that restarted has
+/// already emptied the table in [`EventState::watermark`]: its ids were never
+/// this instance's to answer.
+fn requery_operations(app: &mut App, door: &dyn Queries) {
+    let mut ids: Vec<String> = app.events.started.keys().cloned().collect();
+    ids.sort();
+    for id in ids {
+        match door.call("operation.status", json!({ "operation_id": id })) {
+            Ok(status) => app.settle_from_status(&id, &status),
+            Err(e) => {
+                log::warn!("[events] operation {id} cannot be settled, dropping the wait: {e:#}");
+                if app.events.started.remove(&id).is_some() {
+                    app.bg_count = app.bg_count.saturating_sub(1);
+                }
+            }
+        }
     }
 }
