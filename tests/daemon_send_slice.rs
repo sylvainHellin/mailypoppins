@@ -240,8 +240,8 @@ use mailypoppins::daemon::methods::send::{FAKE_TRANSPORT_ENV, SEND_METHOD_SPECS}
 use mailypoppins::outbox::OutboxState;
 
 use support::parity::{
-    assert_byte_identical, mp_command, mp_no_daemon, oracle_command, socket_path, DaemonFixture,
-    EXIT_UNAVAILABLE, REQUIRE_ENV,
+    assert_byte_identical, mp_command, mp_no_daemon, oracle_command, pin_font_size, socket_path,
+    DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture as fixture;
 
@@ -313,6 +313,7 @@ impl Slice {
     fn start_with(env: &[(&str, &str)]) -> Slice {
         let tmp = TempDir::new().expect("a temporary send-slice root");
         fixture::seed(tmp.path());
+        pin_font_size(tmp.path());
         let owned: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -333,6 +334,7 @@ impl Slice {
     fn with_transport(build: impl Fn(&Path) -> String) -> Slice {
         let tmp = TempDir::new().expect("a temporary send-slice root");
         fixture::seed(tmp.path());
+        pin_font_size(tmp.path());
         let hook = build(&fixture::transport_log(tmp.path()));
         let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_TRANSPORT_ENV, &hook)]);
         Slice {

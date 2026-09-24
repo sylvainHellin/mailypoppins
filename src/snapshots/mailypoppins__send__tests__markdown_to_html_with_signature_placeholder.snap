@@ -1,6 +1,5 @@
 ---
 source: src/send.rs
-assertion_line: 335
 expression: html
 ---
 <!DOCTYPE html>
@@ -8,19 +7,19 @@ expression: html
 <head>
 <meta charset="UTF-8">
 <style>
-body { font-family: Helvetica, Arial, sans-serif; font-size: 12pt; line-height: 1.6; color: #000; }
+body { font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.6; color: #000; }
 a { color: #0066cc; }
 p { margin: 0 0 1em 0; }
 blockquote { margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; white-space: pre-wrap; }
 </style>
 </head>
 <body>
-<div style="font-family: Helvetica, Arial, sans-serif; font-size: 12pt; line-height: 1.6; color: #000;">
-<p>My reply</p>
-<p>-- Best, Alice</p>
+<div style="font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.6; color: #000;">
+<p style="font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.6; color: #000; margin: 0 0 1em 0;">My reply</p>
+<p style="font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.6; color: #000; margin: 0 0 1em 0;">-- Best, Alice</p>
 <div style="padding-top:1em">
 <div style="margin:0;padding:0 0 0 1em;border-left:2px solid #ccc">
-<p>Original message</p>
+<p style="font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.6; color: #000; margin: 0 0 1em 0;">Original message</p>
 </div>
 
 </div>

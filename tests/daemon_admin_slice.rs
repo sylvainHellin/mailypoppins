@@ -312,7 +312,7 @@ use mailypoppins::daemon::methods::diagnostic::DIAGNOSTIC_METHOD_SPECS;
 use support::admin_fixture as fixture;
 use support::parity::{
     assert_byte_identical, daemon_is_listening, mp_command, mp_no_daemon, oracle_command,
-    socket_path, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
+    pin_font_size, socket_path, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
@@ -419,6 +419,7 @@ impl Slice {
     fn start_with(env: &[(&str, &str)]) -> Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
+        pin_font_size(tmp.path());
         let owned: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -439,6 +440,7 @@ impl Slice {
     fn with_fake_transport() -> Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
+        pin_font_size(tmp.path());
         let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
         let daemon =
             DaemonFixture::start_with(tmp.path(), None, &[(fixture::FAKE_TRANSPORT_ENV, &hook)]);

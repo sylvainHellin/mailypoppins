@@ -7,6 +7,7 @@ use lettre::{
 };
 use log::{debug, error, info, warn};
 use pulldown_cmark::{html, Options, Parser as MdParser};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -188,12 +189,24 @@ pub fn markdown_to_html(
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
 
+    // The inline style copy lands in a double-quoted `style="..."` attribute, so
+    // any literal double quote in the font stack (e.g. `"Times New Roman", serif`)
+    // would prematurely close the attribute. Escape it to `&quot;` for that
+    // context; the <style> block is not an attribute and takes the value raw.
+    let font_family_attr = config.font_family.replace('"', "&quot;");
+
     // The `{{SIGNATURE}}` marker (reply/forward drafts) no longer carries the
     // signature; it is purely the boundary where the quoted section begins.
     // Split there and wrap the quoted content in a styled <div> so email clients
     // (Apple Mail, Gmail) do not collapse the reply and signature behind "see
     // more". Replace <blockquote> with styled <div> in the quoted section for
     // the same reason. Regular drafts have no marker and render as-is.
+    //
+    // Each Markdown-derived fragment is then run through `inline_element_styles`
+    // (#0118), which stamps the <style> block's declarations onto the individual
+    // elements. The split happens first so the marker still matches the bare
+    // `<p>{{SIGNATURE}}</p>` pulldown-cmark emits, and so the quoted original
+    // HTML of a reply passes through with its own styling untouched.
     let body = if html_output.contains("{{SIGNATURE}}") {
         // pulldown-cmark wraps the placeholder in <p> tags; match that form first
         let marker = if html_output.contains("<p>{{SIGNATURE}}</p>") {
@@ -202,7 +215,7 @@ pub fn markdown_to_html(
             "{{SIGNATURE}}"
         };
         let parts: Vec<&str> = html_output.splitn(2, marker).collect();
-        let reply_part = parts[0];
+        let reply_part = inline_element_styles(parts[0], &font_family_attr, &config.font_size);
 
         if let Some(original_html) = quoted_html {
             // Use original HTML instead of Markdown-converted blockquotes
@@ -212,11 +225,15 @@ pub fn markdown_to_html(
                 original_html,
             )
         } else {
-            // Fallback: convert Markdown blockquotes to styled divs
+            // Fallback: convert Markdown blockquotes to styled divs. The
+            // replacement runs before the stamping, or the rewritten
+            // `<blockquote style="...">` would no longer match it.
             let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
             let quoted_styled = quoted_part
                 .replace("<blockquote>", "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">")
                 .replace("</blockquote>", "</div>");
+            let quoted_styled =
+                inline_element_styles(&quoted_styled, &font_family_attr, &config.font_size);
             format!(
                 "{}\n<div style=\"padding-top:1em\">\n{}\n</div>",
                 reply_part.trim_end(),
@@ -224,20 +241,16 @@ pub fn markdown_to_html(
             )
         }
     } else {
-        html_output
+        inline_element_styles(&html_output, &font_family_attr, &config.font_size)
     };
 
-    // Wrap in basic HTML structure with styling from config. The font is set
-    // both in the head <style> and as an inline style on the content wrapper:
-    // Gmail and Outlook strip <style> blocks, so without the inline copy the
-    // body would fall back to the client default while any inline-styled
-    // fragment (a pasted quote) kept its own size.
-    //
-    // The inline copy lands in a double-quoted `style="..."` attribute, so any
-    // literal double quote in the font stack (e.g. `"Times New Roman", serif`)
-    // would prematurely close the attribute. Escape it to `&quot;` for that
-    // context; the <style> block is not an attribute and takes the value raw.
-    let font_family_attr = config.font_family.replace('"', "&quot;");
+    // Wrap in basic HTML structure with styling from config. The font is set in
+    // three places: the head <style>, an inline style on the content wrapper,
+    // and an inline style on every element inside it. Gmail and Outlook strip
+    // <style> blocks, and Apple Mail drops the wrapper's inherited font for part
+    // of the content (#0118), so only the per-element copy is load-bearing
+    // everywhere. The other two stay for the clients that honour them and for
+    // anything the stamping does not reach.
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -261,6 +274,128 @@ blockquote {{ margin: 0.5em 0; padding: 0 0 0 1em; border-left: 2px solid #ccc; 
         font_size = config.font_size,
         body = body,
     )
+}
+
+/// Stamp the `<head><style>` declarations onto each element as an inline
+/// `style` attribute (#0118).
+///
+/// A message used to carry its font once, on a wrapper `<div>`, and let it
+/// inherit. Apple Mail's reading pane breaks that: in a message whose body mixed
+/// paragraphs and a bullet list it kept the wrapper's `font-size` for the `<ul>`
+/// and fell back to its own default for every `<p>`, and applied the wrapper's
+/// `line-height` nowhere. The list came out a quarter larger than the prose
+/// around it. Outlook rendered the same bytes uniformly, and so did WebKit given
+/// the message on its own, in quirks mode, or under Mail's own
+/// `MUIWebDocument.css` -- the mangling is not reproducible outside Mail, so the
+/// fix is to stop depending on inheritance rather than to find the rule that
+/// breaks it.
+///
+/// Applied only to the Markdown-derived fragments. The quoted original HTML of a
+/// reply or forward carries the sender's own styling and is passed through
+/// untouched.
+///
+/// Tag scanning is naive: a `>` inside an attribute value ends the tag early.
+/// pulldown-cmark escapes its own output, so this only misfires on raw HTML
+/// written by hand in a draft body, where the surrounding `<blockquote>` string
+/// replacement is already just as naive.
+fn inline_element_styles(html: &str, font_family_attr: &str, font_size: &str) -> String {
+    let mut out = String::with_capacity(html.len() + html.len() / 4);
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let after_lt = &rest[lt..];
+        let Some(gt) = after_lt.find('>') else {
+            out.push_str(after_lt);
+            return out;
+        };
+        out.push_str(&rewrite_start_tag(
+            &after_lt[..=gt],
+            font_family_attr,
+            font_size,
+        ));
+        rest = &after_lt[gt + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Rewrite one `<...>` tag, adding or extending its `style` attribute. Returns
+/// the tag unchanged when it is a close tag, a comment, a doctype, or an element
+/// the style block says nothing about.
+fn rewrite_start_tag<'a>(tag: &'a str, font_family_attr: &str, font_size: &str) -> Cow<'a, str> {
+    let inner = &tag[1..tag.len() - 1];
+    if inner.starts_with('/') || inner.starts_with('!') || inner.starts_with('?') {
+        return Cow::Borrowed(tag);
+    }
+    let name_end = inner
+        .find(|c: char| c.is_whitespace() || c == '/')
+        .unwrap_or(inner.len());
+    let name = inner[..name_end].to_ascii_lowercase();
+    let Some(decls) = element_declarations(&name, font_family_attr, font_size) else {
+        return Cow::Borrowed(tag);
+    };
+    let attrs = &inner[name_end..];
+
+    // pulldown-cmark emits `style="text-align: right"` on aligned table cells.
+    // Prepend into the existing attribute so those declarations stay and, coming
+    // later in the block, still win.
+    if let Some(value_start) = find_style_value_start(attrs) {
+        let mut merged = String::with_capacity(tag.len() + decls.len() + 2);
+        merged.push('<');
+        merged.push_str(&inner[..name_end + value_start]);
+        merged.push_str(&decls);
+        merged.push(' ');
+        merged.push_str(&inner[name_end + value_start..]);
+        merged.push('>');
+        return Cow::Owned(merged);
+    }
+    Cow::Owned(format!(
+        "<{name} style=\"{decls}\"{attrs}>",
+        name = &inner[..name_end],
+        decls = decls,
+        attrs = attrs,
+    ))
+}
+
+/// Byte offset just past the opening quote of a `style="` attribute, if the tag
+/// has one. The attribute must start at a tag boundary so `data-style="..."`
+/// does not match.
+fn find_style_value_start(attrs: &str) -> Option<usize> {
+    let lower = attrs.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("style=\"") {
+        let at = from + rel;
+        let preceded_by_boundary = attrs[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace());
+        if preceded_by_boundary {
+            return Some(at + "style=\"".len());
+        }
+        from = at + "style=\"".len();
+    }
+    None
+}
+
+/// The declarations the `<head><style>` block applies to one element, as they
+/// belong in a `style` attribute. `None` means the block says nothing about it.
+fn element_declarations(name: &str, font_family_attr: &str, font_size: &str) -> Option<String> {
+    let font = format!(
+        "font-family: {font_family_attr}; font-size: {font_size}; line-height: 1.6; color: #000;"
+    );
+    match name {
+        "p" => Some(format!("{font} margin: 0 0 1em 0;")),
+        "blockquote" => Some(format!(
+            "{font} margin: 0.5em 0; padding: 0 0 0 1em; \
+             border-left: 2px solid #ccc; white-space: pre-wrap;"
+        )),
+        "ul" | "ol" | "li" | "dl" | "dt" | "dd" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+        | "table" | "thead" | "tbody" | "tr" | "th" | "td" => Some(font),
+        // Keep the monospace family the client picked; only carry the metrics.
+        "pre" | "code" => Some(format!("font-size: {font_size}; line-height: 1.6;")),
+        "a" => Some("color: #0066cc;".to_string()),
+        _ => None,
+    }
 }
 
 /// Strip the `{{SIGNATURE}}` marker out of a plain-text body (#0102).
@@ -936,7 +1071,7 @@ mod tests {
             "signature not exactly once in HTML part: {html}"
         );
         assert!(
-            html.contains(r#"<a href="mailto:robin@example.com">Robin</a>"#),
+            html.contains(r#"href="mailto:robin@example.com">Robin</a>"#),
             "signature link not rendered as an anchor: {html}"
         );
     }
@@ -1056,18 +1191,89 @@ mod tests {
         let sig = "-- Best, Alice";
         let html = markdown_to_html("Hello world", &default_settings(), Some(sig), None);
         // Without placeholder, signature is appended after the body
-        assert!(html.contains("<p>Hello world</p>"));
+        assert!(html.contains(">Hello world</p>"));
         // The signature is rendered from Markdown (its own <p>), not injected raw.
-        assert!(html.contains("<p>-- Best, Alice</p>"));
+        assert!(html.contains(">-- Best, Alice</p>"));
     }
 
     #[test]
     fn test_markdown_to_html_no_signature() {
         let html = markdown_to_html("Hello", &default_settings(), None, None);
-        assert!(html.contains("<p>Hello</p>"));
+        assert!(html.contains(">Hello</p>"));
         // Should still be valid HTML
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("</html>"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-element inline styles (#0118)
+    // -----------------------------------------------------------------------
+
+    /// The reported bug: Apple Mail kept the wrapper <div>'s font for the <ul>
+    /// and dropped it for every <p>, so the bullets came out a size larger than
+    /// the prose. Every block element has to carry the font itself.
+    #[test]
+    fn a_list_and_the_prose_around_it_carry_the_same_inline_font() {
+        let html = markdown_to_html(
+            "Intro paragraph:\n\n- first\n- second\n\nClosing paragraph.",
+            &default_settings(),
+            None,
+            None,
+        );
+        let font = "font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.6;";
+        for tag in ["<p style=\"", "<ul style=\"", "<li style=\""] {
+            assert!(html.contains(tag), "{tag} not stamped: {html}");
+        }
+        assert_eq!(
+            html.matches(font).count(),
+            // head <style> body rule + wrapper div + 2 paragraphs + ul + 2 li
+            7,
+            "font not on every block element: {html}"
+        );
+    }
+
+    /// pulldown-cmark puts `text-align` on aligned table cells. Stamping must
+    /// extend that attribute, not replace it, and the original declaration has to
+    /// stay last so it still wins.
+    #[test]
+    fn stamping_extends_an_existing_style_attribute_instead_of_dropping_it() {
+        let md = "| A | B |\n|---:|:--|\n| 1 | 2 |";
+        let html = markdown_to_html(md, &default_settings(), None, None);
+        assert!(
+            html.contains(
+                "<th style=\"font-family: Helvetica, Arial, sans-serif; font-size: 16px; \
+                 line-height: 1.6; color: #000; text-align: right\">"
+            ),
+            "alignment lost or reordered: {html}"
+        );
+    }
+
+    /// A code block must keep the client's monospace family; it takes only the
+    /// metrics from the style block.
+    #[test]
+    fn code_keeps_its_monospace_family() {
+        let html = markdown_to_html("```\nfn main() {}\n```", &default_settings(), None, None);
+        assert!(
+            html.contains("<pre style=\"font-size: 16px; line-height: 1.6;\">"),
+            "pre not stamped with metrics only: {html}"
+        );
+        assert!(
+            !html.contains("<pre style=\"font-family"),
+            "pre must not inherit the body font family: {html}"
+        );
+    }
+
+    /// The sender's own styling in a quoted reply is not ours to rewrite.
+    #[test]
+    fn the_quoted_original_is_passed_through_unstamped() {
+        let quoted = "<p style=\"color:#666\">On Mon, someone wrote:</p>\n<p>Their words.</p>";
+        let html = markdown_to_html(
+            "My reply.\n\n{{SIGNATURE}}",
+            &default_settings(),
+            None,
+            Some(quoted),
+        );
+        assert!(html.contains(quoted), "quoted section was rewritten: {html}");
     }
 
     #[test]

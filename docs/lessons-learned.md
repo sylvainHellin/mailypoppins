@@ -2112,3 +2112,49 @@ Cancelling a future that waits on `off_thread` stops the waiting, not the work; 
 
 `Session::call` and `QueryHandle::call` in `crates/mp-tui/src/session.rs` hand back `anyhow` errors built from `ClientError`'s `Display`, so the JSON-RPC code (`-32602` for an unknown operation id) is only a substring of the message by the time TUI code sees it.
 The #0121 re-query therefore drops an await on any `operation.status` failure rather than matching on the code: an await nothing can settle is a spinner that never stops, which is worse than a lost result line.
+
+## An email carries its font on every element or it carries it nowhere
+
+A message used to set its font twice, in a `<head><style>` block and as an inline
+`style` on one wrapper `<div>`, and let it inherit from there. Apple Mail's
+reading pane broke that in a body mixing paragraphs and a bullet list (#0127): it
+kept the wrapper's `font-size` for the `<ul>`, fell back to its own default for
+every `<p>`, and applied the wrapper's `line-height` nowhere, so the bullets came
+out a quarter larger than the prose. Outlook rendered the same bytes uniformly.
+
+Do not go looking for the rule that breaks it. The mangling is not reproducible
+outside Mail: `qlmanage -t -s 1200 msg.html -o .` renders the message through
+WebKit headlessly, and it lays the message out uniformly as-is, with the doctype
+removed (quirks mode), and inside a document carrying Mail's own stylesheet from
+`/System/Library/PrivateFrameworks/MailUI.framework/Versions/A/Resources/MUIWebDocument.css`.
+Mail's own prefs are behind TCC, so the container plist and the `WebKitDeveloperExtras`
+key that would open the Web Inspector are unreadable from a terminal without Full
+Disk Access. What is measurable is the render: band-scanning the screenshot for
+rows of dark pixels gives the line pitch per block, and the pitch ratio gives the
+font ratio without needing the DOM.
+
+The fix is to stop depending on inheritance. `inline_element_styles` (`src/send.rs`)
+stamps the style block's declarations onto each element pulldown-cmark emits.
+Three details it has to get right: an existing `style` attribute is extended, not
+replaced, because pulldown-cmark writes `text-align` on aligned table cells and
+that declaration has to stay last so it still wins; `<pre>` and `<code>` take the
+size and line height only, or a code block loses the client's monospace family;
+and the stamping runs on the Markdown-derived fragments only, after the
+`{{SIGNATURE}}` split, so the marker still matches the bare `<p>{{SIGNATURE}}</p>`
+and the quoted original of a reply keeps the sender's styling byte for byte. In
+the fallback branch the `<blockquote>` string replacement runs before the
+stamping, or the rewritten `<blockquote style="...">` no longer matches it.
+
+Tag scanning is naive: a `>` inside an attribute value ends the tag early. That
+only misfires on raw HTML hand-written in a draft body, where the surrounding
+`<blockquote>` replacement was already just as naive.
+
+Units matter separately: `12pt` and `16px` compute to the same size, but `pt` is
+mangled by more clients, so the default is `px`.
+
+## A default changed after the `pre-daemon` tag has to be named in a parity row
+
+The parity rows compare the build under test byte for byte with the oracle built from `pre-daemon`, and the oracle prints its own defaults.
+Moving `font_size` from `12pt` to `16px` (#0127) therefore broke `mp config show` and every draft preview row, whose settings block prints the font.
+The fix is the one the ports already use in `tests/support/admin_fixture.rs`: write the current default into the fixture's `config.toml`, which leaves the build under test reading the same value and takes the deliberate change out of the comparison.
+`pin_font_size` in `tests/support/parity.rs` does it per slice rather than in `read_fixture::CONFIG`, because several suites prepend their own `[email]` table for `send_hold_secs` and TOML refuses a second one.

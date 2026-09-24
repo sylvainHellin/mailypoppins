@@ -171,7 +171,7 @@ fn default_font_family() -> String {
 }
 
 fn default_font_size() -> String {
-    "12pt".to_string()
+    "16px".to_string()
 }
 
 fn default_true() -> bool {
@@ -1779,7 +1779,7 @@ name = "test"
     fn test_email_settings_defaults() {
         let settings = EmailSettings::default();
         assert_eq!(settings.font_family, "Helvetica, Arial, sans-serif");
-        assert_eq!(settings.font_size, "12pt");
+        assert_eq!(settings.font_size, "16px");
         assert!(settings.include_signature);
         // The undo-send window defaults to the ticket's 20 seconds (#0090).
         assert_eq!(settings.send_hold_secs, 20);

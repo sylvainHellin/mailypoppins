@@ -268,8 +268,8 @@ const INVALID_PARAMS: i32 = -32602;
 use support::draft_fixture as fixture;
 use support::draft_fixture::Stash;
 use support::parity::{
-    assert_byte_identical, mp_command, mp_no_daemon, oracle, oracle_command, socket_path,
-    DaemonFixture, SandboxRoot, EXIT_UNAVAILABLE, REQUIRE_ENV,
+    assert_byte_identical, mp_command, mp_no_daemon, oracle, oracle_command, pin_font_size,
+    socket_path, DaemonFixture, SandboxRoot, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
@@ -379,6 +379,7 @@ impl Slice {
     fn start() -> Slice {
         let root = SandboxRoot::fresh();
         fixture::seed(root.path());
+        pin_font_size(root.path());
         let daemon = DaemonFixture::start(root.path());
         Slice { daemon, root }
     }
@@ -1463,7 +1464,7 @@ async fn draft_preview_carries_the_record_the_dry_run_prints() {
         preview.font_family, "Helvetica, Arial, sans-serif",
         "the settings block prints the configured font, defaulted here"
     );
-    assert_eq!(preview.font_size, "12pt");
+    assert_eq!(preview.font_size, "16px");
     assert_eq!(
         preview.signature, None,
         "the dry run passes no signature, because the body already carries it (#0099)"
