@@ -40,6 +40,8 @@ Commands:
   dump-keys       Dump the TUI key bindings from the single KEYMAP source of truth
   dump-mailbox    Dump message envelopes from the local message store as NDJSON
   completions     Print a shell completion script (eval or save under the shell's completion dir)
+  account         Inspect the configured accounts
+  daemon          Manage the local mailypoppins daemon (run, start, status, stop, restart)
   help            Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -896,3 +898,179 @@ Options:
 Examples:
   mp completions zsh > "${fpath[1]}/_mp"
   eval "$(mp completions bash)"
+
+$ mp account --help
+Inspect the configured accounts
+
+Usage: mp account [OPTIONS] <COMMAND>
+
+Commands:
+  list  List the configured accounts, their backend and their state
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp account list --help
+List the configured accounts, their backend and their state
+
+Usage: mp account list [OPTIONS]
+
+Options:
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon --help
+Manage the local mailypoppins daemon (run, start, status, stop, restart)
+
+Usage: mp daemon [OPTIONS] <COMMAND>
+
+Commands:
+  run                Run the daemon in the foreground; never connects to another daemon
+  start              Start a detached daemon and return once it answers
+  status             Report whether a daemon is running against this data directory
+  stop               Ask the running daemon to shut down
+  restart            Stop the running daemon and start this executable's daemon
+  install-service    Install the login-start service for this user and enable it
+  uninstall-service  Disable the login-start service and remove its file
+  health             Report the running daemon's health, its counters and its checks
+  logs               Print the tail of the daemon's own structured log
+  support-bundle     Write a redacted support bundle and say what went into it
+  help               Print this message or the help of the given subcommand(s)
+
+Options:
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon run --help
+Run the daemon in the foreground; never connects to another daemon
+
+Usage: mp daemon run [OPTIONS]
+
+Options:
+      --foreground-logs        Echo lifecycle logs to stderr as well as to the log directory
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon start --help
+Start a detached daemon and return once it answers
+
+Usage: mp daemon start [OPTIONS]
+
+Options:
+      --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to become ready [default: 10]
+  -s, --signature <SIGNATURE>        Signature to use (overrides config default)
+      --no-signature                 Skip signature entirely
+  -A, --account <ACCOUNT>            Account to use
+  -h, --help                         Print help
+
+$ mp daemon status --help
+Report whether a daemon is running against this data directory
+
+Usage: mp daemon status [OPTIONS]
+
+Options:
+      --json                   Print one JSON object instead of a human-readable summary
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon stop --help
+Ask the running daemon to shut down
+
+Usage: mp daemon stop [OPTIONS]
+
+Options:
+      --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to go away, counted after the grace [default: 10]
+      --grace-secs <GRACE_SECS>      Seconds the daemon may spend settling work in flight (0 waits none)
+  -s, --signature <SIGNATURE>        Signature to use (overrides config default)
+      --no-signature                 Skip signature entirely
+  -A, --account <ACCOUNT>            Account to use
+  -h, --help                         Print help
+
+$ mp daemon restart --help
+Stop the running daemon and start this executable's daemon
+
+Usage: mp daemon restart [OPTIONS]
+
+Options:
+      --grace-secs <GRACE_SECS>  Seconds the daemon may spend settling work in flight (0 waits none)
+  -s, --signature <SIGNATURE>    Signature to use (overrides config default)
+      --no-signature             Skip signature entirely
+  -A, --account <ACCOUNT>        Account to use
+  -h, --help                     Print help
+
+$ mp daemon install-service --help
+Install the login-start service for this user and enable it
+
+Usage: mp daemon install-service [OPTIONS]
+
+Options:
+      --force                  Replace a service file whose content differs from this version's
+      --check                  Report whether a service is installed, and write nothing
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon uninstall-service --help
+Disable the login-start service and remove its file
+
+Usage: mp daemon uninstall-service [OPTIONS]
+
+Options:
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon health --help
+Report the running daemon's health, its counters and its checks
+
+Usage: mp daemon health [OPTIONS]
+
+Options:
+      --json                   Print one JSON object instead of a human-readable block
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon logs --help
+Print the tail of the daemon's own structured log
+
+Usage: mp daemon logs [OPTIONS]
+
+Options:
+      --lines <LINES>          How many lines to print, at most 5000 [default: 200]
+      --level <LEVEL>          Print only lines at or above this level (trace, debug, info, warn, error)
+      --json                   Print the wire answer as one JSON object instead of the lines
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp daemon support-bundle --help
+Write a redacted support bundle and say what went into it
+
+Usage: mp daemon support-bundle [OPTIONS] [OUT]
+
+Arguments:
+  [OUT]  Where the bundle directory goes; below the data directory by default
+
+Options:
+      --no-redact              Copy every value verbatim, credentials included
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help

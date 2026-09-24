@@ -155,11 +155,6 @@ pub fn daemon_log_path() -> PathBuf {
 }
 
 /// `mp daemon <action>`.
-///
-/// Only compiled with the `daemon` feature, and hidden from `mp --help` until
-/// P4-U1 removes the feature: the help snapshot is a single file shared by the
-/// featured and unfeatured builds, so a visible subcommand would make one of
-/// the two `cargo test` runs fail on a snapshot it cannot also satisfy.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum DaemonAction {
     /// Run the daemon in the foreground; never connects to another daemon

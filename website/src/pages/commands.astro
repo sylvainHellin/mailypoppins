@@ -73,6 +73,20 @@ const configCommands = [
   { command: 'mp config path', description: 'Print config file path' },
 ];
 
+const daemonCommands = [
+  { command: 'mp daemon run [--foreground-logs]', description: 'Run the daemon in the foreground; never connects to another daemon' },
+  { command: 'mp daemon start [--timeout-secs N]', description: 'Start a detached daemon and return once it answers' },
+  { command: 'mp daemon status [--json]', description: 'Report whether a daemon is running against this data directory' },
+  { command: 'mp daemon stop [--grace-secs N] [--timeout-secs N]', description: 'Ask the running daemon to shut down, letting work in flight settle for the grace' },
+  { command: 'mp daemon restart [--grace-secs N]', description: "Stop the running daemon and start this executable's daemon" },
+  { command: 'mp daemon install-service [--check] [--force]', description: 'Install the login-start service (systemd user unit or launchd agent) and enable it; --check reports and writes nothing' },
+  { command: 'mp daemon uninstall-service', description: 'Disable the login-start service and remove its file' },
+  { command: 'mp daemon health [--json]', description: "Report the running daemon's health, its counters and its checks" },
+  { command: 'mp daemon logs [--lines N] [--level LEVEL] [--json]', description: "Print the tail of the daemon's own structured log" },
+  { command: 'mp daemon support-bundle [OUT] [--no-redact]', description: 'Write a redacted support bundle and say what went into it' },
+  { command: 'mp account list', description: 'List the configured accounts, their backend and their state' },
+];
+
 const contactsCommands = [
   { command: 'mp contacts search [<query>] [--parsable] [-n N]', description: 'Fuzzy-search the contact index by name and email; --parsable emits tab-delimited email/name lines for mutt, aerc or vim (default limit: 20)' },
   { command: 'mp contacts rebuild', description: 'Rebuild the contact index from the local message store (every account unless -A names one)' },
@@ -267,6 +281,16 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
     <section>
       <h2 id="config-commands">Config Commands</h2>
       <CommandTable commands={configCommands} />
+    </section>
+
+    <section>
+      <h2 id="daemon-commands">Daemon Commands</h2>
+      <CommandTable commands={daemonCommands} />
+      <p>
+        Every command that touches your mail asks a background daemon over a Unix socket, and
+        starts one if none is running. These manage it directly; <code>mp daemon *</code> never
+        starts a daemon it was only asked to report on.
+      </p>
     </section>
 
     <section>

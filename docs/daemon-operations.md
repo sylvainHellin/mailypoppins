@@ -4,8 +4,7 @@ How to start, inspect, stop and recover the local daemon, and what it leaves on 
 The wire contract is [daemon-protocol.md](daemon-protocol.md); this file is the operator's half of it.
 
 Everything here ships in every build: P4-U1 removed the `daemon` cargo feature, so `cargo install --path .` and a plain `cargo build` both contain the daemon and `--features daemon` no longer exists.
-The subcommands are still hidden from `mp --help` (`hide = true`), which `tests/daemon_read_only_methods.rs` asserts and `tests/cli_help_snapshot.rs` pins.
-`mp daemon --help` and `mp account --help` still render; a hidden command is absent from the parent's `Commands:` block, not from the binary.
+`mp daemon` and `mp account` are listed in `mp --help`, which `tests/daemon_read_only_methods.rs` asserts and `tests/cli_help_snapshot.rs` pins; only the debug `--daemon` flag stays hidden.
 
 ## The lifecycle commands
 
@@ -424,7 +423,7 @@ A line of the structured log is `2026-09-21 19:05:20.081 [INFO] [(thread) target
 
 ## Diagnostics
 
-Three hidden commands under `mp daemon`, all three reaching a running daemon and none of them starting one: a command that reports on a daemon must not conjure the thing it reports on.
+Three commands under `mp daemon`, all three reaching a running daemon and none of them starting one: a command that reports on a daemon must not conjure the thing it reports on.
 All three print the two lines `mp daemon status` prints when nothing answers, and exit 1:
 
 ```text

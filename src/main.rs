@@ -477,24 +477,12 @@ Examples:
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Inspect the configured accounts.
-    ///
-    /// Hidden for the same reason as `mp daemon` below: it is the oracle
-    /// `mp --daemon account list` must match, so it becomes visible with the
-    /// cutover rather than before it.
-    #[command(hide = true)]
+    /// Inspect the configured accounts
     Account {
         #[command(subcommand)]
         action: AccountAction,
     },
-    /// Manage the local mailypoppins daemon (run, start, status, stop, restart).
-    ///
-    /// Hidden until the cutover slices make the daemon the default:
-    /// `tests/cli_help_snapshot.rs` pins `mp --help` byte-identical to the
-    /// pre-daemon baseline, and a visible subcommand would move it. P4-U1
-    /// removed the `daemon` cargo feature; the `hide` stays until the surface
-    /// is meant to move, and the snapshot moves once with it.
-    #[command(hide = true)]
+    /// Manage the local mailypoppins daemon (run, start, status, stop, restart)
     Daemon {
         #[command(subcommand)]
         action: mailypoppins::daemon::lifecycle::DaemonAction,

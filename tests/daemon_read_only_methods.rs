@@ -81,8 +81,8 @@
 //!   quietly running the in-process path. Without that, "the routed output
 //!   matches the direct output" would be satisfiable by ignoring the flag.
 //! - **`mp account list` exists without `--daemon` too**, and is the oracle the
-//!   routed run must match byte for byte. Since `mp --help` may not move, that
-//!   subcommand is `hide = true` like `mp daemon` already is.
+//!   routed run must match byte for byte. It was `hide = true` like
+//!   `mp daemon` until the cutover shipped; both are listed now.
 //!
 //! # Process hygiene
 //!
@@ -1103,8 +1103,9 @@ async fn the_daemon_flag_does_not_fall_back_to_the_direct_path() {
 // ---------------------------------------------------------------------------
 
 /// Every command of the pre-daemon help surface is still reachable in the
-/// `mp --help` walk, and the daemon-era surfaces stay hidden: the `--daemon`
-/// flag is `hide = true`, and so are `mp daemon` and `mp account`.
+/// `mp --help` walk, and the daemon-era surfaces are where they belong: the
+/// debug `--daemon` flag stays `hide = true`, while `mp daemon` and
+/// `mp account` are listed like any other subcommand.
 ///
 /// Until the cutover shipped this compared the whole walk byte for byte with
 /// `docs/baselines/pre-daemon/cli-help.txt`. The CLI surface may evolve now
@@ -1143,10 +1144,10 @@ fn the_help_surface_still_offers_every_pre_daemon_command() {
         !top.contains("--daemon"),
         "the --daemon flag is hidden from the top-level help: {top}"
     );
-    for hidden in ["  daemon", "  account"] {
+    for listed in ["\n  daemon ", "\n  account "] {
         assert!(
-            !top.contains(hidden),
-            "the daemon-era subcommand{hidden} is hidden from the top-level help: {top}"
+            top.contains(listed),
+            "the daemon-era subcommand{listed:?} is listed in the top-level help: {top}"
         );
     }
 }

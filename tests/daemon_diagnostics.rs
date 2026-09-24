@@ -1701,12 +1701,12 @@ fn a_check_that_did_not_flip_publishes_nothing() {
 }
 
 // ===========================================================================
-// 7. The CLI, under the hidden `daemon` tree
+// 7. The CLI, under the `daemon` tree
 // ===========================================================================
 
-/// The three commands are under `mp daemon`, where `mp --help` never looks.
+/// The three commands are under `mp daemon`, not at the top level.
 #[test]
-fn the_three_commands_are_hidden_under_the_daemon_tree() {
+fn the_three_commands_live_under_the_daemon_tree() {
     let diag = Diag::start();
     let daemon_help = stdout_text(&diag.mp(&["daemon", "--help"]));
     for command in ["health", "logs", "support-bundle"] {
@@ -1718,7 +1718,7 @@ fn the_three_commands_are_hidden_under_the_daemon_tree() {
     let top = stdout_text(&diag.mp(&["--help"]));
     assert!(
         !top.contains("support-bundle"),
-        "and `mp --help` does not, so the frozen help baseline does not move: {top}"
+        "and `mp --help` lists only the `daemon` tree, not its leaves: {top}"
     );
     diag.stop();
 }

@@ -1363,7 +1363,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 
 - Classification: diagnostics and maintenance
 - Source anchor: none, new in this plan
-- Daemon surface: `diagnostic.health`, `diagnostic.logs`, `diagnostic.log_path` and `diagnostic.support_bundle`, fronted by `mp daemon health`, `mp daemon logs` and `mp daemon support-bundle` under the hidden `daemon` subtree; the non-`ok` checks also fill `state.bootstrap`'s `diagnostics` array and travel as the `diagnostic.check_changed` event
+- Daemon surface: `diagnostic.health`, `diagnostic.logs`, `diagnostic.log_path` and `diagnostic.support_bundle`, fronted by `mp daemon health`, `mp daemon logs` and `mp daemon support-bundle` under the `daemon` subtree; the non-`ok` checks also fill `state.bootstrap`'s `diagnostics` array and travel as the `diagnostic.check_changed` event
 - GUI location: TBD (Phase 9)
 - Validation: `tests/daemon_diagnostics.rs` and `crates/mp-tui/src/diagnostics_tests.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
 - Status: routed (P6-U8)
