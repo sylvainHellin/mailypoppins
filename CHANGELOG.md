@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-24
+
 ### Added
 - **`mp completions <bash|zsh|fish|elvish|powershell>` prints a shell completion script.** Save it with `mp completions zsh > "${fpath[1]}/_mp"` or load it with `eval "$(mp completions bash)"`; it reads no config and never contacts the daemon.
 - **The email list pages with `Ctrl+d`/`Ctrl+u` (half page), `PgDn`/`PgUp` (full page) and `Home`/`End`.** Sized to the visible list, clamped at both ends; the pre-daemon `tui-keys.json` capture is now a subset check rather than a byte pin.
