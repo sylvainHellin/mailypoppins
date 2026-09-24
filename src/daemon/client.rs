@@ -8,10 +8,10 @@
 //! 1. **Does this command need a daemon at all?** [`needs_daemon`] answers it
 //!    from the command's name alone, and the answer is the no-daemon list the
 //!    plan fixes: `mp daemon *`, `mp dump-keys`, `mp --help`, `mp --version`,
-//!    `mp config path`. Everything else needs one, `mp config init` included:
-//!    the daemon owns configuration and secrets, so an init that wrote
-//!    `config.toml` behind the daemon's back would leave the running instance
-//!    describing a file that no longer exists.
+//!    `mp config path`, plus `mp completions`. Everything else needs one,
+//!    `mp config init` included: the daemon owns configuration and secrets,
+//!    so an init that wrote `config.toml` behind the daemon's back would
+//!    leave the running instance describing a file that no longer exists.
 //! 2. **What happens when none is listening?** [`client_session`] starts one,
 //!    through the same routine `mp daemon start` uses, and waits a bounded
 //!    time for it. There is no fallback: a command that quietly answered from
@@ -108,6 +108,8 @@ pub fn needs_daemon(command: Option<&str>, subcommand: Option<&str>) -> bool {
         (Some("daemon"), _) => false,
         // A dump of the TUI key table, built from a compiled-in structure.
         (Some("dump-keys"), _) => false,
+        // A completion script, generated from the clap definition alone.
+        (Some("completions"), _) => false,
         // clap answers both of these and exits before dispatch.
         (Some("--help" | "-h" | "help" | "--version" | "-V"), _) => false,
         // Printing where the config file would live reads no config.
@@ -394,9 +396,10 @@ pub fn unavailable(why: &str, socket: &Path) -> ! {
 mod tests {
     use super::*;
 
-    /// The no-daemon list, exactly as plan section 3.6 (P4-U2) fixes it.
+    /// The no-daemon list, as plan section 3.6 (P4-U2) fixes it, plus
+    /// `mp completions`, which prints a script generated from clap alone.
     #[test]
-    fn the_no_daemon_list_is_the_five_entries_the_plan_names() {
+    fn the_no_daemon_list_is_the_entries_the_plan_names_plus_completions() {
         for (command, sub) in [
             ("daemon", Some("run")),
             ("daemon", Some("start")),
@@ -404,6 +407,7 @@ mod tests {
             ("daemon", Some("stop")),
             ("daemon", Some("restart")),
             ("dump-keys", None),
+            ("completions", None),
             ("--help", None),
             ("--version", None),
             ("config", Some("path")),

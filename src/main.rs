@@ -467,6 +467,16 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<Vec<String>>,
     },
+    /// Print a shell completion script (eval or save under the shell's completion dir)
+    #[command(after_help = "\
+Examples:
+  mp completions zsh > \"${fpath[1]}/_mp\"
+  eval \"$(mp completions bash)\"")]
+    Completions {
+        /// Shell to generate the script for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Inspect the configured accounts.
     ///
     /// Hidden for the same reason as `mp daemon` below: it is the oracle
@@ -3081,6 +3091,13 @@ fn refuse_all_accounts_with_selector(cli: &Cli) -> std::result::Result<(), clap:
     Ok(())
 }
 
+/// Write the `shell` completion script for `mp` to `out`.
+fn write_completions(shell: clap_complete::Shell, out: &mut dyn Write) -> Result<()> {
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    clap_complete::generate(shell, &mut cmd, "mp", out);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -3120,6 +3137,20 @@ async fn main() -> Result<()> {
     if let Some(Commands::Daemon { action }) = &cli.command {
         let code = mailypoppins::daemon::lifecycle::dispatch(action.clone()).await;
         std::process::exit(code);
+    }
+
+    // A completion script is generated from the clap definition alone: no
+    // config, no secrets, no daemon, and nothing on stderr to pollute an eval.
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        // Rendered into a buffer first: clap_complete panics on a write error,
+        // and `mp completions zsh | head` closing the pipe is not one.
+        let mut script = Vec::new();
+        write_completions(*shell, &mut script)?;
+        match io::stdout().write_all(&script) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            other => other?,
+        }
+        return Ok(());
     }
 
     // Move a pre-#0022 ~/.config/email directory before anything reads config
@@ -4019,6 +4050,7 @@ async fn main() -> Result<()> {
         // Dispatched and exited before the client preamble above, so control
         // never arrives here.
         Some(Commands::Daemon { .. }) => unreachable!("daemon commands exit before dispatch"),
+        Some(Commands::Completions { .. }) => unreachable!("completions exit before dispatch"),
     }
 
     // The parity hook (P4-U2): with MAILYPOPPINS_DAEMON_REQUIRE set, a command
@@ -4075,6 +4107,25 @@ mod tests {
             );
         }
         assert!(super::Cli::try_parse_from(["mp", "send-approved", "--all-accounts", "-y"]).is_ok());
+    }
+
+    /// `mp completions zsh` renders the whole command tree as a zsh completion
+    /// function named for the `mp` binary, not the clap `mailypoppins` name.
+    #[test]
+    fn completions_render_a_zsh_script_for_mp() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["mp", "completions", "zsh"]).expect("parses");
+        assert!(matches!(
+            cli.command,
+            Some(super::Commands::Completions { shell: clap_complete::Shell::Zsh })
+        ));
+        let mut out = Vec::new();
+        super::write_completions(clap_complete::Shell::Zsh, &mut out).unwrap();
+        let script = String::from_utf8(out).expect("UTF-8");
+        assert!(script.contains("#compdef mp"), "{script:.200}");
+        assert!(script.contains("_mp"));
+        assert!(script.contains("daemon"));
+        assert!(script.contains("completions"));
     }
 
     /// The global `-A` / `--account` reaches every subcommand, including the

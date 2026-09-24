@@ -61,12 +61,13 @@ One budget rather than two, so the worst case a user waits is that number and no
 When it expires, or when the spawn dies, the run exits 4 naming the socket, the daemon log and the literal `mp daemon run` to type by hand.
 There is no fallback to answering in process: a command that quietly did the work locally would let the user believe the daemon did it.
 
-Five commands never reach any of that, because each of them either *is* the lifecycle surface or answers from a compiled-in structure:
+Six commands never reach any of that, because each of them either *is* the lifecycle surface or answers from a compiled-in structure:
 
 | command | why |
 |---|---|
 | `mp daemon *` | `mp daemon run` is the daemon; a `status` that auto-started one would always report one running |
 | `mp dump-keys` | the TUI key table is compiled in |
+| `mp completions` | the script is generated from the compiled-in clap definition |
 | `mp --help` | clap answers it and exits |
 | `mp --version` | the same |
 | `mp config path` | it prints where the file would be, and reads nothing |

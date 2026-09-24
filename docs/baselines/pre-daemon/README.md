@@ -144,6 +144,7 @@ The sync and send slices (`tests/daemon_sync_slice.rs`, `tests/daemon_send_slice
 - The global `-A, --account` help reads `Account to use`, without `(default: first in config)`, which was wrong for `mp calendar rebuild`, `mp contacts rebuild` and `mp cutover` (every account by default).
 - The email list gained `Ctrl+d`/`Ctrl+u`, `PgDn`/`PgUp` and `Home`/`End`, so `tui-keys.json` is no longer a byte-identical pin: `tests/phase5_parity_gate.rs` checks that `mp dump-keys --json` still carries every binding of it, and pins the dump byte for byte to `website/src/data/tui-keys.json`.
 - `mp outbox list` and `mp list-mailboxes` gained `--json`.
+- `mp completions <shell>` is new: it prints a clap_complete script and is on the no-daemon list.
 
 ## What is deliberately absent
 

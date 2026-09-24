@@ -270,6 +270,19 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
     </section>
 
     <section>
+      <h2 id="shell-completions">Shell Completions</h2>
+      <p>
+        <code>mp completions &lt;bash|zsh|fish|elvish|powershell&gt;</code> prints a completion
+        script for every command and flag on stdout. It reads no config and needs no daemon.
+      </p>
+      <Code code={`# zsh: save it on your fpath, then restart the shell
+mp completions zsh > "\${fpath[1]}/_mp"
+
+# bash: load it in ~/.bashrc
+eval "$(mp completions bash)"`} lang="sh" />
+    </section>
+
+    <section>
       <h2 id="contacts-commands">Contacts Commands</h2>
       <CommandTable commands={contactsCommands} />
     </section>
