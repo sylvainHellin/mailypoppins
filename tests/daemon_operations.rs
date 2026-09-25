@@ -1579,3 +1579,77 @@ async fn cancelling_a_finished_or_unknown_operation_is_invalid_params() {
         "status and cancel refuse an unknown id the same way"
     );
 }
+
+/// A client that bootstraps while an operation is in flight finds it in the
+/// snapshot's `operations`, typed, and the entry is the very object
+/// `operation.status` answers for the same id (#0121).
+///
+/// This is the shape a reconnecting GUI depends on, taken over a real socket
+/// rather than off the registry. The operation is held open by its own step
+/// length, one step of ten minutes, and cancelled at the end, so nothing here
+/// waits on a clock: the only wait is the bounded poll until it is `running`,
+/// which fixes the one member that could otherwise move between the two reads.
+#[tokio::test]
+async fn a_bootstrap_taken_mid_operation_carries_it_in_the_snapshot() {
+    use mp_protocol::operation::{CancelScope as WireScope, OperationState as WireState};
+    use mp_protocol::state::Bootstrap;
+
+    let sandbox = Sandbox::single_account();
+    let _daemon = sandbox.start_daemon(true).await;
+    let mut owner = connect_subscribed(&sandbox).await;
+    let id = start_operation(&mut owner, 1, 600_000, CancelScope::Durable, None).await;
+    let status = wait_for_state(&mut owner, &id, OperationState::Running).await;
+
+    // A second client, as a reconnecting window would be: it was not there
+    // when the operation started and learns about it from its bootstrap.
+    let mut late = within(
+        "Connection::connect",
+        Connection::connect(&sandbox.socket()),
+    )
+    .await
+    .expect("connect");
+    within(
+        "Connection::initialize",
+        late.initialize(client_info(), sandbox.identity(), &[], &[]),
+    )
+    .await
+    .expect("handshake");
+    let raw = within("state.bootstrap", late.call("state.bootstrap", json!({})))
+        .await
+        .expect("state.bootstrap answers");
+
+    assert_eq!(
+        raw["snapshot"]["operations"],
+        json!([status]),
+        "the snapshot entry is the operation.status object, verbatim: {raw}"
+    );
+
+    let bootstrap: Bootstrap =
+        serde_json::from_value(raw.clone()).expect("the result decodes as a Bootstrap");
+    let operations = &bootstrap.snapshot.operations;
+    assert_eq!(operations.len(), 1, "exactly the one in flight: {raw}");
+    let entry = &operations[0];
+    assert_eq!(entry.operation_id, id);
+    assert_eq!(entry.method, TEST_OPERATION);
+    assert_eq!(entry.state, WireState::Running);
+    assert_eq!(entry.scope, WireScope::Durable);
+    assert_eq!(entry.progress, None, "the only step has not reported yet");
+    assert_eq!(entry.result, None);
+    assert_eq!(entry.error, None);
+
+    // Settled, it leaves the projection: the snapshot lists what is live.
+    within(
+        METHOD_OPERATION_CANCEL,
+        owner.call(METHOD_OPERATION_CANCEL, json!({"operation_id": id})),
+    )
+    .await
+    .expect("cancelling the held operation succeeds");
+    let after = within("state.bootstrap", late.call("state.bootstrap", json!({})))
+        .await
+        .expect("state.bootstrap answers again");
+    assert_eq!(
+        after["snapshot"]["operations"],
+        json!([]),
+        "a cancelled operation is terminal and no longer in flight: {after}"
+    );
+}
