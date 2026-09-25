@@ -13,9 +13,12 @@
 
 use std::collections::BTreeMap;
 
+use mp_protocol::diagnostic::HealthCheck;
 use mp_protocol::events::{
     Diagnostic, SyncCompleted, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SYNC_COMPLETED,
 };
+use mp_protocol::operation::OperationStatus;
+use mp_protocol::send::HoldStatus;
 use serde_json::{json, Value};
 
 use crate::config::AccountConfig;
@@ -293,23 +296,22 @@ pub struct Snapshot {
     pub(super) drafts: BTreeMap<String, Vec<DraftView>>,
     pub(super) outbox: BTreeMap<String, OutboxView>,
     /// The daemon's non-terminal operations, as
-    /// [`OperationStatus::to_json`](crate::daemon::operations::OperationStatus::to_json)
-    /// renders them. Filled by
+    /// [`OperationStatus::to_wire`](crate::daemon::operations::OperationStatus::to_wire)
+    /// types them, which is the `operation.status` result. Filled by
     /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from the
     /// registry, which is not part of the state a client mirrors.
-    pub(super) operations: Vec<Value>,
-    /// The undo-send windows this daemon is carrying, as
-    /// [`HoldStatus`](mp_protocol::send::HoldStatus) renders them, in arm
-    /// order. Filled by
+    pub(super) operations: Vec<OperationStatus>,
+    /// The undo-send windows this daemon is carrying, each the [`HoldStatus`]
+    /// `send.hold_status` answers with, in arm order. Filled by
     /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from the
     /// hold scheduler, which is not part of the state a client mirrors either.
-    pub(super) holds: Vec<Value>,
+    pub(super) holds: Vec<HoldStatus>,
     /// The health checks that are not `ok`, in report order, each the `checks`
     /// item of a `diagnostic.health` answer verbatim (P6-U8). Filled by
     /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from
     /// [`Diagnostics`](crate::daemon::diagnostics::Diagnostics), which is not
     /// part of the state a client mirrors either.
-    pub(super) diagnostics: Vec<Value>,
+    pub(super) diagnostics: Vec<HealthCheck>,
 }
 
 impl Snapshot {

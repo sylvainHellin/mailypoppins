@@ -329,16 +329,16 @@ impl Queries for RestartDoor {
         match method {
             "state.bootstrap" => {
                 let mut bootstrap = restarted_snapshot(3);
-                bootstrap.snapshot.holds = vec![serde_json::json!({
-                    "operation_id": "op-new-daemon",
-                    "account": ACCOUNT,
-                    "draft_id": "d2",
-                    "subject": "s2",
-                    "hold_secs": 20,
-                    "remaining_secs": 12,
-                    "fires_at": "2026-09-11T08:01:00Z",
-                    "origin": "gui",
-                })];
+                bootstrap.snapshot.holds = vec![mp_protocol::send::HoldStatus {
+                    operation_id: "op-new-daemon".to_string(),
+                    account: ACCOUNT.to_string(),
+                    draft_id: "d2".to_string(),
+                    subject: "s2".to_string(),
+                    hold_secs: 20,
+                    remaining_secs: 12,
+                    fires_at: "2026-09-11T08:01:00Z".to_string(),
+                    origin: "gui".to_string(),
+                }];
                 Ok(serde_json::to_value(bootstrap)?)
             }
             other => anyhow::bail!("the restart door answers no {other}"),

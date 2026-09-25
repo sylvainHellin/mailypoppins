@@ -545,7 +545,7 @@ impl CanonicalState {
                 registry
                     .live()
                     .iter()
-                    .map(crate::daemon::operations::OperationStatus::to_json)
+                    .map(crate::daemon::operations::OperationStatus::to_wire)
                     .collect()
             })
             .unwrap_or_default();
@@ -553,14 +553,7 @@ impl CanonicalState {
         // answers, so one renderer serves both.
         snapshot.holds = lock(&self.holds)
             .as_ref()
-            .map(|scheduler| {
-                scheduler
-                    .listing(None)
-                    .holds
-                    .iter()
-                    .map(|hold| serde_json::to_value(hold).unwrap_or_default())
-                    .collect()
-            })
+            .map(|scheduler| scheduler.listing(None).holds)
             .unwrap_or_default();
         // Evaluated rather than published: a bootstrap is a read, and a read
         // that announced a flip would tell this connection about a check it is

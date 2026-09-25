@@ -56,6 +56,7 @@
 //! it has today. The row `a_healthy_bootstrap_leaves_the_ring_empty` is that
 //! statement as an assertion.
 
+use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::state::{Bootstrap, Snapshot};
 use mp_protocol::EventEnvelope;
 use serde_json::json;
@@ -194,8 +195,12 @@ fn a_check_event_from_another_instance_is_refused() {
 #[test]
 fn the_bootstrap_seeds_the_ring_with_the_daemons_complaints() {
     let app = bootstrapped(vec![
-        json!({"name": "account:beta", "status": "warn", "detail": "another engine holds the lock"}),
-        json!({"name": "account:gamma", "status": "fail", "detail": "no local store yet"}),
+        check(
+            "account:beta",
+            CheckStatus::Warn,
+            "another engine holds the lock",
+        ),
+        check("account:gamma", CheckStatus::Fail, "no local store yet"),
     ]);
 
     assert_eq!(
@@ -225,15 +230,25 @@ fn a_healthy_bootstrap_leaves_the_ring_empty() {
     );
 }
 
-/// A diagnostics entry that is not a check is ignored rather than rendered as
-/// a line of JSON: the snapshot's array is `Value`, and a future daemon may
-/// put something else in it.
+/// A `diagnostic.check_changed` whose payload is not a check is ignored rather
+/// than rendered as a line of JSON. The snapshot's array is typed, so the same
+/// question cannot arise there: a snapshot carrying something else does not
+/// decode at all.
 #[test]
-fn a_diagnostic_that_is_not_a_check_is_skipped() {
-    let app = bootstrapped(vec![json!({"something": "else"}), json!("a bare string")]);
+fn a_check_changed_that_is_not_a_check_is_skipped() {
+    let mut app = bootstrapped(Vec::new());
+    for payload in [
+        json!({"something": "else"}),
+        json!("a bare string"),
+        json!({"name": "store_open", "status": "info", "detail": "a fourth status"}),
+    ] {
+        let mut event = check_event("unused", "warn", "unused");
+        event.payload = payload;
+        assert_eq!(app.apply_event(&event), Applied::Ignored);
+    }
     assert!(
         app.status_log.is_empty(),
-        "neither entry is a check: {:?}",
+        "no payload is a check: {:?}",
         messages(&app)
     );
 }
@@ -244,7 +259,7 @@ fn a_diagnostic_that_is_not_a_check_is_skipped() {
 
 /// An `App` that has bootstrapped against [`INSTANCE`] at [`WATERMARK`],
 /// carrying `diagnostics` in its snapshot.
-fn bootstrapped(diagnostics: Vec<serde_json::Value>) -> App {
+fn bootstrapped(diagnostics: Vec<HealthCheck>) -> App {
     let mut app = App::default_for_tests();
     app.apply_bootstrap(&Bootstrap {
         instance_id: INSTANCE.to_string(),
@@ -256,6 +271,15 @@ fn bootstrapped(diagnostics: Vec<serde_json::Value>) -> App {
         ..Bootstrap::default()
     });
     app
+}
+
+/// One snapshot diagnostic.
+fn check(name: &str, status: CheckStatus, detail: &str) -> HealthCheck {
+    HealthCheck {
+        name: name.to_string(),
+        status,
+        detail: detail.to_string(),
+    }
 }
 
 /// One `diagnostic.check_changed`, as the daemon frames it.

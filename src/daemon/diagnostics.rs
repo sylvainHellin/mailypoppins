@@ -149,6 +149,21 @@ impl Check {
     pub fn to_json(&self) -> Value {
         json!({"name": self.name, "status": self.status.as_str(), "detail": self.detail})
     }
+
+    /// The check as the protocol crate types it, which is what the bootstrap
+    /// snapshot carries.
+    pub fn to_wire(&self) -> mp_protocol::diagnostic::HealthCheck {
+        use mp_protocol::diagnostic::CheckStatus;
+        mp_protocol::diagnostic::HealthCheck {
+            name: self.name.clone(),
+            status: match self.status {
+                Status::Ok => CheckStatus::Ok,
+                Status::Warn => CheckStatus::Warn,
+                Status::Fail => CheckStatus::Fail,
+            },
+            detail: self.detail.clone(),
+        }
+    }
 }
 
 /// Take a lock whose holder may have panicked; the map behind it is whole
@@ -290,11 +305,11 @@ impl Diagnostics {
 
     /// The checks that are not `ok`, in report order, which is what
     /// `snapshot.diagnostics` carries.
-    pub fn not_ok(&self) -> Vec<Value> {
+    pub fn not_ok(&self) -> Vec<mp_protocol::diagnostic::HealthCheck> {
         self.checks()
             .iter()
             .filter(|check| check.status != Status::Ok)
-            .map(Check::to_json)
+            .map(Check::to_wire)
             .collect()
     }
 

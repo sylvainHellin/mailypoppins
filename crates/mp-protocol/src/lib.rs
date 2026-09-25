@@ -11,10 +11,12 @@
 //! document's protocol changelog.
 
 pub mod calendar;
+pub mod diagnostic;
 pub mod draft;
 pub mod events;
 pub mod frame;
 pub mod listing;
+pub mod operation;
 pub mod send;
 pub mod state;
 

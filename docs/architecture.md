@@ -74,6 +74,8 @@ Resolver v2 keeps a dev-dependency's features out of a plain `cargo build`, so t
 `crates/mp-protocol` owns the wire: the JSON-RPC message structs, the numeric error table, the newline framing codec and the event envelope.
 It knows nothing about sockets, accounts or the store, and `crates/mp-protocol/fixtures/*.json` pins one committed example of every public shape.
 It also owns the pure serde types both ends of the socket speak, which is why `mp_protocol::calendar` holds `EventFrontmatter` and `EventAttendee` (re-exported from `mailypoppins::types` under their old paths) beside the `AgendaEvent` row `calendar.events` answers with.
+The `state.bootstrap` snapshot is typed whole in `mp_protocol::state`, and its three projections reuse the types their other carriers decode with: `send::HoldStatus`, `operation::OperationStatus` and `diagnostic::HealthCheck`.
+The daemon builds those three from the protocol types too (`OperationStatus::to_wire`, `Check::to_wire`), so the snapshot, `operation.status` and the events cannot render one shape two ways.
 
 `crates/mp-client` owns the transport: one `Connection` is one Unix-socket connection, and the crate carries the `initialize` handshake and the typed errors a caller branches on.
 It owns no policy, no paths and no configuration.

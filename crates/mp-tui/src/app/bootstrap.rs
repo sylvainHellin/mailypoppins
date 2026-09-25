@@ -151,16 +151,7 @@ impl App {
         // cancel for an operation it never saw; a same-instance reconnect's
         // list drops a hold whose fire or cancel was published while the
         // socket was down, which no event would ever remove.
-        self.holds = bootstrap
-            .snapshot
-            .holds
-            .iter()
-            .filter_map(|hold| {
-                serde_json::from_value::<mp_protocol::send::HoldStatus>(hold.clone())
-                    .map_err(|e| log::warn!("[events] a snapshot hold did not decode: {e}"))
-                    .ok()
-            })
-            .collect();
+        self.holds = bootstrap.snapshot.holds.clone();
         self.hold = self.holds.last().cloned();
         if orphaned > 0 {
             // The daemon that was running them is gone, so the spinner they

@@ -17,14 +17,16 @@
 //!   Defaulting is for the other direction: a decoder that refuses a snapshot
 //!   over an empty section it would have ignored anyway turns an additive
 //!   protocol change into a client that will not start.
-//! - **`holds`, `operations` and `diagnostics` stay [`Value`].** A
-//!   `diagnostics` entry is one `checks` item of a `diagnostic.health` answer,
-//!   filled since P6-U8 with the checks that are not `ok`; a `holds` entry is a
-//!   [`HoldStatus`](crate::send::HoldStatus) and an `operations` entry is an
-//!   `operation.status` result whose owner is the daemon's operation registry.
-//!   Typing either here before a client reads it out of the *snapshot* would
-//!   pin a shape from the wrong end: the TUI reads a hold off the event and
-//!   off `send.hold_status`, both of which are typed already.
+//! - **`holds`, `operations` and `diagnostics` reuse the types their other
+//!   carriers already decode with.** A `holds` entry is a
+//!   [`HoldStatus`](crate::send::HoldStatus), the payload of the four
+//!   `send.hold_*` events and a row of `send.hold_status`; an `operations`
+//!   entry is an [`OperationStatus`](crate::operation::OperationStatus), the
+//!   `operation.status` result; a `diagnostics` entry is a
+//!   [`HealthCheck`](crate::diagnostic::HealthCheck), one `checks` item of a
+//!   `diagnostic.health` answer. They stayed `Value` until a GUI was about to
+//!   read them out of the snapshot, which is the moment the shape is pinned
+//!   from the right end; the bytes on the wire did not move.
 //!
 //! An account `state` and a `sync_health.state` are enums rather than strings:
 //! they are closed sets the protocol version fixes, a client branches on them,
@@ -34,7 +36,10 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+use crate::diagnostic::HealthCheck;
+use crate::operation::OperationStatus;
+use crate::send::HoldStatus;
 
 /// Whether an account's runtime has come up.
 ///
@@ -186,18 +191,18 @@ pub struct Snapshot {
     #[serde(default)]
     pub outbox: BTreeMap<String, OutboxCounts>,
     /// The undo-send windows the daemon is counting down, in arm order, each
-    /// one the [`HoldStatus`](crate::send::HoldStatus) the four `send.hold_*`
-    /// events and `send.hold_status` carry (P6-U4).
+    /// one the [`HoldStatus`] the four `send.hold_*` events and
+    /// `send.hold_status` carry (P6-U4).
     #[serde(default)]
-    pub holds: Vec<Value>,
+    pub holds: Vec<HoldStatus>,
     /// Every long-running operation the daemon has not settled, in start
     /// order, each entry an `operation.status` result.
     #[serde(default)]
-    pub operations: Vec<Value>,
+    pub operations: Vec<OperationStatus>,
     /// The health checks that are not `ok`, in report order, each one a
     /// `checks` item of a `diagnostic.health` answer verbatim (P6-U8).
     #[serde(default)]
-    pub diagnostics: Vec<Value>,
+    pub diagnostics: Vec<HealthCheck>,
 }
 
 impl Snapshot {
@@ -255,7 +260,9 @@ impl Bootstrap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::diagnostic::CheckStatus;
+    use crate::operation::{CancelScope, OperationState, Progress};
+    use serde_json::{json, Value};
 
     /// The committed fixture decodes whole, and every documented field lands
     /// where the daemon put it.
@@ -368,9 +375,35 @@ mod tests {
                         failed: 1,
                     },
                 )]),
-                holds: Vec::new(),
-                operations: vec![json!({"operation_id": "op-1"})],
-                diagnostics: Vec::new(),
+                holds: vec![HoldStatus {
+                    operation_id: "op-2".to_string(),
+                    account: "work".to_string(),
+                    draft_id: "d-one".to_string(),
+                    subject: "Angebot".to_string(),
+                    hold_secs: 20,
+                    remaining_secs: 12,
+                    fires_at: "2026-09-11T08:01:00Z".to_string(),
+                    origin: "gui".to_string(),
+                }],
+                operations: vec![OperationStatus {
+                    operation_id: "op-1".to_string(),
+                    method: "sync.quick".to_string(),
+                    state: OperationState::Running,
+                    scope: CancelScope::Durable,
+                    progress: Some(Progress {
+                        phase: "body".to_string(),
+                        done: 3,
+                        total: None,
+                        message: None,
+                    }),
+                    result: None,
+                    error: None,
+                }],
+                diagnostics: vec![HealthCheck {
+                    name: "account:work".to_string(),
+                    status: CheckStatus::Fail,
+                    detail: "work has no runtime at all".to_string(),
+                }],
             },
         };
 

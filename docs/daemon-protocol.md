@@ -226,7 +226,9 @@ Bootstrapping twice on one connection is allowed and is what a client does after
 
 The whole result is typed as `mp_protocol::state::Bootstrap` since P5-U2, so a client decodes one answer into one value (`serde_json::from_value::<Bootstrap>(result)`) rather than indexing a map with string literals.
 An account `state` and a `sync_health.state` are enums there, because both are closed sets this protocol version fixes and a client branches on them; every collection defaults, so a section a client does not read yet cannot stop it from starting.
-The daemon still renders the object by hand in `src/daemon/state/snapshot.rs`, which owns the state these are a projection of.
+The three projections are typed with the shapes their other carriers already use: a `holds` entry is `mp_protocol::send::HoldStatus`, an `operations` entry is `mp_protocol::operation::OperationStatus` (the `operation.status` result), and a `diagnostics` entry is `mp_protocol::diagnostic::HealthCheck` (a `diagnostic.health` `checks` item).
+An operation's `state` and `scope` and a check's `status` are closed enums like the two above, so a snapshot carrying a word outside them does not decode.
+The daemon still renders the object by hand in `src/daemon/state/snapshot.rs`, which owns the state these are a projection of, but builds the three projections from those protocol types, so the snapshot and the methods that answer the same shapes cannot drift apart.
 
 ### Read-only methods
 
@@ -1209,3 +1211,7 @@ The key stays, so a reader sees that a password was set; email addresses and OAu
 Neither `secrets.enc` nor the token cache is ever copied, redacted or not: ciphertext is still a credential and no support case needs it.
 The kind `diagnostic.check_changed` carries one check, `{name, status, detail}`, on a change of `status` only; the fixtures are `crates/mp-protocol/fixtures/diagnostic.health.request.json`, `diagnostic.health.response.json`, `diagnostic.logs.response.json` and `notification.diagnostic_check_changed.json`.
 The bootstrap snapshot's `diagnostics` array stopped being empty: it carries the checks that are not `ok`, in report order, so a client that has just connected finds the daemon's current complaints without waiting for a flip that may never come.
+
+The #0125 follow-ups typed the snapshot's three projections, which moves nothing on the wire.
+`mp_protocol::state::Snapshot` carries `holds` as `HoldStatus`, `operations` as the new `mp_protocol::operation::OperationStatus` (with `OperationState`, `CancelScope` and `Progress`), and `diagnostics` as the new `mp_protocol::diagnostic::HealthCheck` (with `CheckStatus`), where all three were `Value`.
+The existing fixtures decode into them unchanged; what a client gains is a decode error where it used to skip an entry it could not read.

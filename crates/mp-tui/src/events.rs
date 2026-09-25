@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use serde_json::json;
 
+use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
     Arrival, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
     KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
@@ -339,7 +340,13 @@ impl App {
             | KIND_SEND_HOLD_CANCELLED => self.apply_hold(event),
             KIND_DAEMON_SHUTTING_DOWN => self.apply_shutting_down(),
             KIND_DIAGNOSTIC_CHECK_CHANGED => {
-                land_check(self, &event.payload);
+                // A payload that is not a check is skipped rather than rendered
+                // as a line of JSON: the kind promises one, and a daemon that
+                // sent something else is one this client does not understand.
+                match serde_json::from_value::<HealthCheck>(event.payload.clone()) {
+                    Ok(check) => land_check(self, &check),
+                    Err(e) => log::warn!("[events] a check_changed payload is not a check: {e}"),
+                }
                 Applied::Ignored
             }
             // One hit of the search this overlay is showing, appended as it
@@ -643,28 +650,19 @@ impl App {
 /// it - the drain does not branch on this, nothing is reloaded and nothing is
 /// refetched, which is exactly what `Ignored` promises a caller.
 ///
-/// A payload that is not a check is skipped rather than rendered as a line of
-/// JSON: `snapshot.diagnostics` is an array of `Value` and a future daemon may
-/// put something else in it. Free rather than a method on [`App`] because
-/// [`App::apply_bootstrap`] lands the snapshot's array through the same
-/// reading, and two copies of it would eventually be two readings.
-pub(super) fn land_check(app: &mut App, payload: &serde_json::Value) {
-    let (Some(name), Some(status), Some(detail)) = (
-        payload["name"].as_str(),
-        payload["status"].as_str(),
-        payload["detail"].as_str(),
-    ) else {
-        return;
-    };
-    let level = match status {
-        "warn" => StatusLevel::Warning,
-        "fail" => StatusLevel::Error,
+/// Free rather than a method on [`App`] because [`App::apply_bootstrap`] lands
+/// the snapshot's array through the same reading, and two copies of it would
+/// eventually be two readings. Both carriers are typed as [`HealthCheck`], so a
+/// payload that is not a check never reaches this.
+pub(super) fn land_check(app: &mut App, check: &HealthCheck) {
+    let level = match check.status {
+        CheckStatus::Warn => StatusLevel::Warning,
+        CheckStatus::Fail => StatusLevel::Error,
         // A check that recovered says so, because a warning nobody saw clear is
         // a warning the user keeps believing.
-        "ok" => StatusLevel::Success,
-        _ => return,
+        CheckStatus::Ok => StatusLevel::Success,
     };
-    app.push_status(format!("{name}: {detail}"), level);
+    app.push_status(format!("{}: {}", check.name, check.detail), level);
 }
 
 /// The account of a `draft:<account>/<id>` resource, or `None` for a resource

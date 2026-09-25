@@ -172,6 +172,18 @@ impl OperationState {
             OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
         )
     }
+
+    /// The protocol crate's spelling of this state.
+    pub fn to_wire(self) -> mp_protocol::operation::OperationState {
+        use mp_protocol::operation::OperationState as Wire;
+        match self {
+            OperationState::Queued => Wire::Queued,
+            OperationState::Running => Wire::Running,
+            OperationState::Succeeded => Wire::Succeeded,
+            OperationState::Failed => Wire::Failed,
+            OperationState::Cancelled => Wire::Cancelled,
+        }
+    }
 }
 
 /// One progress report, as the plan fixes it.
@@ -192,12 +204,17 @@ impl Progress {
     /// may have nothing to say: a client reads `total` to draw a bar and has to
     /// tell "unknown" from "missing field".
     pub fn to_json(&self) -> Value {
-        json!({
-            "phase": self.phase,
-            "done": self.done,
-            "total": self.total,
-            "message": self.message,
-        })
+        serde_json::to_value(self.to_wire()).unwrap_or_else(|_| json!({}))
+    }
+
+    /// The report as the protocol crate types it.
+    pub fn to_wire(&self) -> mp_protocol::operation::Progress {
+        mp_protocol::operation::Progress {
+            phase: self.phase.clone(),
+            done: self.done,
+            total: self.total,
+            message: self.message.clone(),
+        }
     }
 }
 
@@ -231,16 +248,41 @@ impl OperationStatus {
     ///
     /// `owner` is not on the wire: it is a connection id inside this daemon,
     /// which no client can address and none may branch on.
+    ///
+    /// Serialising [`OperationStatus::to_wire`] is infallible in practice: an
+    /// empty object rather than a panic if that ever changes, because a daemon
+    /// must not die rendering a status.
     pub fn to_json(&self) -> Value {
-        json!({
-            "operation_id": self.id.as_str(),
-            "method": self.method,
-            "state": self.state.as_str(),
-            "scope": self.scope.as_str(),
-            "progress": self.progress.as_ref().map(Progress::to_json),
-            "result": self.result,
-            "error": self.error.as_ref().map(error_json),
-        })
+        serde_json::to_value(self.to_wire()).unwrap_or_else(|_| json!({}))
+    }
+
+    /// The status as the protocol crate types it, which is what the bootstrap
+    /// snapshot carries and what [`OperationStatus::to_json`] serialises.
+    pub fn to_wire(&self) -> mp_protocol::operation::OperationStatus {
+        use mp_protocol::operation::CancelScope as WireScope;
+        mp_protocol::operation::OperationStatus {
+            operation_id: self.id.as_str().to_string(),
+            method: self.method.to_string(),
+            state: self.state.to_wire(),
+            scope: match self.scope {
+                CancelScope::Durable => WireScope::Durable,
+                CancelScope::ClientScoped => WireScope::ClientScoped,
+            },
+            progress: self.progress.as_ref().map(Progress::to_wire),
+            result: self.result.clone(),
+            error: self.error.as_ref().map(rpc_error),
+        }
+    }
+}
+
+/// One error as the protocol crate's [`RpcError`](mp_protocol::RpcError),
+/// which omits `data` rather than nulling it exactly as [`error_json`] does.
+fn rpc_error(error: &DomainError) -> mp_protocol::RpcError {
+    mp_protocol::RpcError {
+        // Every code this daemon issues is a JSON-RPC code, well inside `i32`.
+        code: i32::try_from(error.code()).unwrap_or(-32603),
+        message: error.message(),
+        data: error.data(),
     }
 }
 
