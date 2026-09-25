@@ -1657,14 +1657,49 @@ fn a_check_that_flips_publishes_an_event() {
         "and the parser's sentence with it: {payload}"
     );
 
-    let health = block_on(async {
+    let (health, bootstrap) = block_on(async {
         let mut conn = client(diag.root()).await;
-        call(&mut conn, "diagnostic.health", json!({})).await
+        let health = call(&mut conn, "diagnostic.health", json!({})).await;
+        let bootstrap = call(&mut conn, "state.bootstrap", json!({})).await;
+        (health, bootstrap)
     });
     assert_eq!(
         check(&health, "config_loaded"),
         payload,
         "the event and the report are one value"
+    );
+
+    // The bootstrap a client takes now carries the failing check in the shape
+    // `crates/mp-protocol/fixtures/state.bootstrap.diagnostics.response.json`
+    // pins: the same keys, typed, and the same value the event carried.
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../crates/mp-protocol/fixtures/state.bootstrap.diagnostics.response.json"
+    ))
+    .expect("the fixture is JSON");
+    let pinned = &fixture["result"]["snapshot"]["diagnostics"][0];
+    let entries = bootstrap["snapshot"]["diagnostics"]
+        .as_array()
+        .expect("the snapshot always carries the array");
+    let live = entries
+        .iter()
+        .find(|entry| entry["name"] == json!("config_loaded"))
+        .unwrap_or_else(|| panic!("the failing check is in the snapshot: {bootstrap}"));
+    assert_eq!(live, &payload, "the snapshot and the event are one value");
+    assert_eq!(
+        keys(live),
+        keys(pinned),
+        "the live entry has the pinned shape"
+    );
+    let typed: mp_protocol::state::Bootstrap =
+        serde_json::from_value(bootstrap.clone()).expect("the live bootstrap decodes");
+    assert!(
+        typed
+            .snapshot
+            .diagnostics
+            .iter()
+            .any(|check| check.name == "config_loaded"
+                && check.status == mp_protocol::diagnostic::CheckStatus::Fail),
+        "and decodes to a failing check: {bootstrap}"
     );
     diag.stop();
 }

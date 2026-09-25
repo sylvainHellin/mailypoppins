@@ -1,0 +1,88 @@
+{
+  "id": 5,
+  "jsonrpc": "2.0",
+  "result": {
+    "capabilities": [
+      "state.bootstrap",
+      "account.list",
+      "diagnostic.health"
+    ],
+    "instance_id": "01J8Z6Q9X4V3N2M1K0H7G5F4D3",
+    "revision": 4233,
+    "snapshot": {
+      "accounts": [
+        {
+          "name": "work",
+          "state": "ready",
+          "sync_health": {
+            "state": "failed"
+          }
+        }
+      ],
+      "diagnostics": [
+        {
+          "detail": "expected `]`, at line 1 of /home/u/.config/mailypoppins/config.toml",
+          "name": "config_loaded",
+          "status": "fail"
+        }
+      ],
+      "drafts": {
+        "work": [
+          {
+            "id": "2026-07-02-angebot",
+            "path": "/home/u/.local/share/mailypoppins/accounts/work/drafts/2026-07-02-angebot.md",
+            "ready": true,
+            "status": "draft",
+            "subject": "Angebot",
+            "to": "robin@example.com",
+            "valid": true
+          }
+        ]
+      },
+      "holds": [],
+      "mailboxes": {
+        "work": [
+          {
+            "badge": 12,
+            "label": "Inbox",
+            "role": "inbox",
+            "slug": "inbox",
+            "total": 1841,
+            "unread": 12
+          },
+          {
+            "badge": 1,
+            "label": "Drafts",
+            "role": "drafts",
+            "slug": "drafts",
+            "total": 1,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Sent",
+            "role": "sent",
+            "slug": "sent",
+            "total": 402,
+            "unread": 0
+          },
+          {
+            "badge": 0,
+            "label": "Archive",
+            "role": "archive",
+            "slug": "archive",
+            "total": 9130,
+            "unread": 0
+          }
+        ]
+      },
+      "operations": [],
+      "outbox": {
+        "work": {
+          "failed": 0,
+          "queued": 0
+        }
+      }
+    }
+  }
+}

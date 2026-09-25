@@ -1075,6 +1075,9 @@ The file name selects the type a fixture must parse into: `error.*` is an error 
 Parsing a fixture and serialising it back must reproduce the file's JSON exactly, which is what catches a field the type forgot or invented.
 A new fixture whose name matches no rule fails the suite rather than being skipped.
 
+`state.bootstrap` has two fixtures: `state.bootstrap.response.json`, a healthy daemon's answer with an empty `diagnostics`, and `state.bootstrap.diagnostics.response.json`, whose `diagnostics` carries one failing check.
+Both have their member set pinned down to one account and one check entry, and both decode as `mp_protocol::state::Bootstrap`; the second is in its current shape throughout, so it also survives that typed decode unchanged.
+
 ## Protocol changelog
 
 ### Version 1
@@ -1221,3 +1224,4 @@ The #0125 follow-ups typed the snapshot's three projections, which moves nothing
 `mp_protocol::state::Snapshot` carries `holds` as `HoldStatus`, `operations` as the new `mp_protocol::operation::OperationStatus` (with `OperationState`, `CancelScope` and `Progress`), and `diagnostics` as the new `mp_protocol::diagnostic::HealthCheck` (with `CheckStatus`), where all three were `Value`.
 The existing fixtures decode into them unchanged; what a client gains is a decode error where it used to skip an entry it could not read.
 The same follow-ups filled an account's `sync_health`, which every bootstrap had reported as `unknown` whatever the last pass did; it now reports the last completed pass's verdict at bootstrap time, as described above, and stays `unknown` only until a pass finishes.
+`crates/mp-protocol/fixtures/state.bootstrap.diagnostics.response.json` is the fixture for a snapshot whose `diagnostics` is not empty, which nothing pinned before.

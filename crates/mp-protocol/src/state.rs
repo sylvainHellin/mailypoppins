@@ -329,6 +329,35 @@ mod tests {
         assert!(bootstrap.snapshot.drafts_of("perso").is_empty());
     }
 
+    /// The second fixture pins a snapshot whose `diagnostics` carries one
+    /// failing check, typed down to its status.
+    #[test]
+    fn the_diagnostics_fixture_decodes_its_failing_check() {
+        let raw = include_str!("../fixtures/state.bootstrap.diagnostics.response.json");
+        let response: Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let bootstrap: Bootstrap =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+
+        assert_eq!(
+            bootstrap.snapshot.diagnostics,
+            vec![HealthCheck {
+                name: "config_loaded".to_string(),
+                status: CheckStatus::Fail,
+                detail: "expected `]`, at line 1 of /home/u/.config/mailypoppins/config.toml"
+                    .to_string(),
+            }]
+        );
+        assert_eq!(
+            bootstrap.snapshot.accounts[0].sync_health.state,
+            SyncHealthState::Failed
+        );
+        assert_eq!(
+            serde_json::to_value(&bootstrap).expect("it serialises"),
+            response["result"],
+            "every row is in its current shape, so nothing moves on the way through"
+        );
+    }
+
     /// Round trip: a value that went out re-decodes equal, which is what lets
     /// a test build one by hand and a client trust the wire.
     #[test]

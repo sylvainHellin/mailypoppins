@@ -82,6 +82,17 @@ const P5_U10D_FIXTURES: &[&str] = &[
     "message.thread.response.json",
 ];
 
+/// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
+/// is empty, and one carrying a failing check, which pins the shape a client
+/// renders as a complaint (the #0125 follow-ups).
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other, and read by the snapshot rows below as well as by the presence check.
+const BOOTSTRAP_FIXTURES: &[&str] = &[
+    "state.bootstrap.response.json",
+    "state.bootstrap.diagnostics.response.json",
+];
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -136,6 +147,7 @@ fn every_required_fixture_is_committed() {
         .iter()
         .chain(P5_U10C_FIXTURES)
         .chain(P5_U10D_FIXTURES)
+        .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
     assert!(
@@ -849,4 +861,83 @@ fn initialize_is_the_only_unnamespaced_method() {
             "fixture {name}: method `{method}` is neither `initialize` nor `family.name`"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The #0125 follow-ups: the bootstrap snapshot's field set
+// ---------------------------------------------------------------------------
+
+/// Both `state.bootstrap` fixtures carry exactly the documented members, down
+/// to one account entry and one diagnostics entry, and decode whole into
+/// `mp_protocol::state::Bootstrap`.
+///
+/// Written out here rather than derived from the type, for the reason the
+/// read-only lists above give: a key silently added, renamed or dropped fails
+/// this row instead of regenerating a fixture that agrees with the new code.
+#[test]
+fn the_bootstrap_fixtures_carry_the_documented_fields() {
+    const RESULT: &[&str] = &["capabilities", "instance_id", "revision", "snapshot"];
+    const SNAPSHOT: &[&str] = &[
+        "accounts",
+        "diagnostics",
+        "drafts",
+        "holds",
+        "mailboxes",
+        "operations",
+        "outbox",
+    ];
+    const ACCOUNT: &[&str] = &["name", "state", "sync_health"];
+    const CHECK: &[&str] = &["detail", "name", "status"];
+
+    for name in BOOTSTRAP_FIXTURES {
+        let value = load(name);
+        let result = &value["result"];
+        assert_keys(result, RESULT, &format!("{name} result"));
+        assert_keys(&result["snapshot"], SNAPSHOT, &format!("{name} snapshot"));
+        let accounts = result["snapshot"]["accounts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: accounts is an array"));
+        for (index, account) in accounts.iter().enumerate() {
+            assert_keys(account, ACCOUNT, &format!("{name} accounts[{index}]"));
+            assert_keys(
+                &account["sync_health"],
+                &["state"],
+                &format!("{name} accounts[{index}].sync_health"),
+            );
+        }
+        for (index, check) in result["snapshot"]["diagnostics"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: diagnostics is an array"))
+            .iter()
+            .enumerate()
+        {
+            assert_keys(check, CHECK, &format!("{name} diagnostics[{index}]"));
+        }
+        serde_json::from_value::<mp_protocol::state::Bootstrap>(result.clone())
+            .unwrap_or_else(|error| panic!("{name} does not decode as a Bootstrap: {error}"));
+    }
+}
+
+/// The diagnostics fixture carries one failing check, and every row of it is
+/// in its current shape, so the typed decode re-encodes to the same JSON: no
+/// member of the snapshot is lost or invented on the way through
+/// `Bootstrap`.
+#[test]
+fn the_diagnostics_bootstrap_fixture_pins_one_failing_check() {
+    use mp_protocol::diagnostic::CheckStatus;
+
+    let name = "state.bootstrap.diagnostics.response.json";
+    let value = load(name);
+    let bootstrap: mp_protocol::state::Bootstrap =
+        serde_json::from_value(value["result"].clone()).expect("the result decodes");
+    let diagnostics = &bootstrap.snapshot.diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{name} carries one check");
+    assert_eq!(diagnostics[0].status, CheckStatus::Fail);
+    assert_eq!(diagnostics[0].name, "config_loaded");
+    assert!(!diagnostics[0].detail.is_empty(), "a detail is never empty");
+    assert_eq!(
+        serde_json::to_value(&bootstrap).expect("it serialises"),
+        value["result"],
+        "{name} survives a typed round trip unchanged"
+    );
 }
