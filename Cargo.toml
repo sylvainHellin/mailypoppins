@@ -112,3 +112,8 @@ mp-core = { path = "crates/mp-core", features = ["test-support"] }
 # previews and renders the golden-frame fixtures, all of which were
 # `#[cfg(test)]` while the TUI was a module of this crate.
 mp-tui = { path = "crates/mp-tui", features = ["test-support"] }
+
+# Line tables keep file:line in backtraces but drop full debug info: test binaries
+# shrink several-fold, and cargo never deletes stale ones from target/debug.
+[profile.dev]
+debug = "line-tables-only"
