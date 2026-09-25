@@ -21,8 +21,9 @@ use mp_protocol::operation::OperationStatus;
 use mp_protocol::send::HoldStatus;
 use serde_json::{json, Value};
 
+use mp_protocol::state::SyncHealthState;
+
 use crate::config::AccountConfig;
-use crate::sync_health::SyncHealth;
 
 /// One mailbox of a seeded account, as the sidebar hierarchy names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,7 +255,6 @@ impl AccountState {
 pub struct AccountView {
     pub(super) name: String,
     pub(super) state: AccountState,
-    pub(super) health: SyncHealth,
 }
 
 /// One mailbox row of a snapshot: its seed and the three counts.
@@ -312,6 +312,14 @@ pub struct Snapshot {
     /// [`Diagnostics`](crate::daemon::diagnostics::Diagnostics), which is not
     /// part of the state a client mirrors either.
     pub(super) diagnostics: Vec<HealthCheck>,
+    /// How each account's last completed sync went, keyed by account name and
+    /// absent for an account that has not finished one. Filled by
+    /// [`CanonicalState::bootstrap`](super::CanonicalState::bootstrap) from
+    /// the `last_sync` ledger beside the state, under the same gate a
+    /// `Change::SyncCompleted` commits under, so it agrees with the captured
+    /// revision: a `sync.completed` at or below it is reflected here, and one
+    /// above it reaches the client as the event.
+    pub(super) sync_health: BTreeMap<String, SyncHealthState>,
 }
 
 impl Snapshot {
@@ -325,19 +333,21 @@ impl Snapshot {
     /// having to ask.
     pub fn to_json(&self) -> Value {
         // `sync_health` is an object rather than a bare string so the reason
-        // and the timestamp can join it without a version bump.
+        // and the timestamp can join it without a version bump. `unknown` for
+        // an account no pass has finished on yet.
         let accounts: Vec<Value> = self
             .accounts
             .iter()
             .map(|account| {
+                let health = self
+                    .sync_health
+                    .get(&account.name)
+                    .copied()
+                    .unwrap_or_default();
                 json!({
                     "name": account.name,
                     "state": account.state.as_str(),
-                    "sync_health": {"state": match account.health {
-                        SyncHealth::Unknown => "unknown",
-                        SyncHealth::Ok { .. } => "ok",
-                        SyncHealth::Failed { .. } => "failed",
-                    }},
+                    "sync_health": {"state": health},
                 })
             })
             .collect();

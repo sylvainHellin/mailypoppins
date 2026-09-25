@@ -213,7 +213,11 @@ An account's `state` is one of `opening`, `ready` or `blocked`, and it reports t
 The two are deliberately different questions.
 An account is `opening` in a snapshot taken before its runtime came back and converges by event afterwards.
 For an `opening` account all counts are `0` and the draft list is empty, exactly as the TUI presents an account it has not opened yet; readiness arrives afterwards as an ordinary event.
-`sync_health` is an object whose `state` is `unknown`, `ok` or `failed`, and a fresh bootstrap reports `unknown`.
+`sync_health` is an object whose `state` is `unknown`, `ok` or `failed`.
+It reflects the account's last completed pass at bootstrap time: `failed` when that pass carried an `error`, `ok` when it did not, and `unknown` until one has finished, which is what a fresh daemon reports.
+It is a projection of the daemon's `last_sync` ledger read at capture, not a reduction of a change: a completed pass takes a revision for its `sync.completed` event and moves nothing a revision describes.
+A client keeps the field current from `sync.completed` events after the bootstrap, not from a revisioned change to it.
+The ledger is read under the same gate a pass is noted under, so the two agree: a `sync.completed` at or below the captured revision is already in `sync_health`, and one above it arrives as the event.
 
 The ordering rule is the reason a bootstrap is one serialised operation.
 The daemon registers the connection as a subscriber **before** it captures the snapshot, so every change committed from the registration onwards is already queued; a register-last daemon loses exactly the changes that land between the capture and the start of queuing.
@@ -963,6 +967,7 @@ The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.remov
 
 One sync tick finished, and the payload is everything it did.
 A tick is a command outcome rather than a resource's state, so the event names no resource, reduces into no snapshot, and a client that bootstraps between two ticks learns about neither.
+The one trace it leaves in a later bootstrap is the account's `sync_health` verdict, read from the daemon's `last_sync` ledger at capture time ([Bootstrap](#bootstrap)); this event is what keeps that field current afterwards.
 
 | field | type | meaning |
 |---|---|---|
@@ -1215,3 +1220,4 @@ The bootstrap snapshot's `diagnostics` array stopped being empty: it carries the
 The #0125 follow-ups typed the snapshot's three projections, which moves nothing on the wire.
 `mp_protocol::state::Snapshot` carries `holds` as `HoldStatus`, `operations` as the new `mp_protocol::operation::OperationStatus` (with `OperationState`, `CancelScope` and `Progress`), and `diagnostics` as the new `mp_protocol::diagnostic::HealthCheck` (with `CheckStatus`), where all three were `Value`.
 The existing fixtures decode into them unchanged; what a client gains is a decode error where it used to skip an entry it could not read.
+The same follow-ups filled an account's `sync_health`, which every bootstrap had reported as `unknown` whatever the last pass did; it now reports the last completed pass's verdict at bootstrap time, as described above, and stays `unknown` only until a pass finishes.

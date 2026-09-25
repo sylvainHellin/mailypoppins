@@ -144,7 +144,10 @@
 //!   untouched, exactly as it does for a `MailboxCounts` naming a mailbox no
 //!   account has. Phase 3b's snapshot carries no last-sync section, so nothing
 //!   in it could be reduced into; a client that bootstraps between two ticks
-//!   learns about neither, which is what a command outcome is.
+//!   learns about neither, which is what a command outcome is. The one trace a
+//!   pass leaves in a later bootstrap is an account's `sync_health`, which the
+//!   capture projects from the daemon's `last_sync` ledger rather than from a
+//!   reduced change, so the pass still moves nothing a revision describes.
 //! - **The ticks are forced by a test-only environment hook.** Phase 3b
 //!   schedules no tick, so nothing would ever emit an outcome and every socket
 //!   assertion here would be vacuous. `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME`
@@ -1227,10 +1230,59 @@ fn applying_an_outcome_queues_one_event_and_leaves_the_snapshot_alone() {
     // A capture on a connection that never subscribed: it registers nothing and
     // only reads the daemon's own truth.
     let (after, _, _) = state.bootstrap(ConnectionId(99));
+    let after = after.to_json();
+    // The one thing that may differ is the account's `sync_health`, which is a
+    // projection of the last completed pass read at capture time rather than a
+    // reduction into the state: the outcome itself is carried by no snapshot.
     assert_eq!(
-        after.to_json(),
-        before,
-        "an outcome is a command outcome: no snapshot carries it, so none changed"
+        before["accounts"][0]["sync_health"],
+        json!({"state": "unknown"})
+    );
+    assert_eq!(
+        after["accounts"][0]["sync_health"],
+        json!({"state": "ok"}),
+        "the bootstrap projects the verdict of the last completed pass"
+    );
+    assert_eq!(
+        without_sync_health(after),
+        without_sync_health(before),
+        "an outcome is a command outcome: no snapshot carries it, so nothing else changed"
+    );
+}
+
+/// A snapshot's JSON with every account's `sync_health` taken out, which is
+/// the part of a bootstrap a completed pass is allowed to move.
+fn without_sync_health(mut snapshot: Value) -> Value {
+    for account in snapshot["accounts"]
+        .as_array_mut()
+        .expect("accounts is an array")
+    {
+        account
+            .as_object_mut()
+            .expect("an account is an object")
+            .remove("sync_health");
+    }
+    snapshot
+}
+
+/// A failed pass projects `failed` into the next bootstrap, and a later clean
+/// one projects `ok` over it: the field is the last completed pass, whatever
+/// came before it.
+#[test]
+fn the_bootstrap_reports_the_last_completed_pass() {
+    let state = fresh_state();
+    state.apply(Change::SyncCompleted(failed()));
+    let (snapshot, _, _) = state.bootstrap(ConnectionId(1));
+    assert_eq!(
+        snapshot.to_json()["accounts"][0]["sync_health"],
+        json!({"state": "failed"})
+    );
+
+    state.apply(Change::SyncCompleted(clean()));
+    let (snapshot, _, _) = state.bootstrap(ConnectionId(2));
+    assert_eq!(
+        snapshot.to_json()["accounts"][0]["sync_health"],
+        json!({"state": "ok"})
     );
 }
 
@@ -1626,6 +1678,48 @@ async fn a_client_receives_one_sync_completed_notification_per_tick() {
     assert_eq!(
         payloads[2].bodies_truncated, 2,
         "a deadline stop reaches the client as progress"
+    );
+}
+
+/// A client that bootstraps after a pass finished sees that pass's verdict in
+/// the account's `sync_health`, and one that bootstrapped before it sees
+/// `unknown` and learns the rest from `sync.completed`.
+///
+/// The second bootstrap is taken after the event arrived, and the daemon notes
+/// the verdict before it fans the event out, so no wait is needed beyond the
+/// event itself.
+#[tokio::test]
+async fn a_later_bootstrap_carries_the_last_passes_verdict() {
+    let failing = json!([{
+        "account": "ignored-by-the-hook",
+        "severity": "error",
+        "saved": 0, "skipped": 0, "flags_updated": 0, "pruned": 0,
+        "prunes_deferred": 0, "uid_rebound": 0, "uidvalidity_resets": 0,
+        "bodies_truncated": 0, "non_converging": [],
+        "failed_mutations": 0, "error": "login refused: AUTHENTICATIONFAILED"
+    }]);
+    let sandbox = Sandbox::single_account();
+    let _daemon = sandbox.start_daemon(Some(&failing)).await;
+    let (mut conn, hello) = connect_initialized(&sandbox).await;
+
+    let first = within("state.bootstrap", conn.call("state.bootstrap", json!({})))
+        .await
+        .expect("state.bootstrap answers");
+    assert_eq!(
+        first["snapshot"]["accounts"][0]["sync_health"],
+        json!({"state": "unknown"}),
+        "no pass has finished before the first bootstrap: {first}"
+    );
+    let revision = first["revision"].as_u64().expect("a u64 revision");
+    collect_outcomes(&mut conn, revision, &hello.instance_id, 1).await;
+
+    let second = within("state.bootstrap", conn.call("state.bootstrap", json!({})))
+        .await
+        .expect("state.bootstrap answers again");
+    assert_eq!(
+        second["snapshot"]["accounts"][0]["sync_health"],
+        json!({"state": "failed"}),
+        "the pass the event reported is in the next bootstrap: {second}"
     );
 }
 

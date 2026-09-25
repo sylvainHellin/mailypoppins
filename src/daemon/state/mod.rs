@@ -38,6 +38,8 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+use mp_protocol::state::SyncHealthState;
+
 pub use revision::{ConnectionId, InstanceId, Revision};
 pub use snapshot::{seeds_from_config, AccountSeed, AccountState, Change, MailboxSeed, Snapshot};
 
@@ -239,7 +241,8 @@ pub struct CanonicalState {
     holds: Mutex<Option<Arc<crate::daemon::hold::HoldScheduler>>>,
     diagnostics: Mutex<Option<Arc<crate::daemon::diagnostics::Diagnostics>>>,
     /// When each account's last tick finished and how it went. Not part of the
-    /// snapshot, for the reason [`CanonicalState::last_sync`] gives.
+    /// state a change reduces into, for the reason [`CanonicalState::last_sync`]
+    /// gives; the snapshot projects the outcome into `sync_health` at capture.
     last_sync: Mutex<BTreeMap<String, (chrono::DateTime<chrono::Local>, &'static str)>>,
 }
 
@@ -287,7 +290,6 @@ impl CanonicalState {
             inner.accounts.push(AccountView {
                 name: seed.name,
                 state: AccountState::Opening,
-                health: crate::sync_health::SyncHealth::default(),
             });
         }
         CanonicalState {
@@ -339,10 +341,11 @@ impl CanonicalState {
     /// has (P6-U8).
     ///
     /// Beside the state rather than in it: a `sync.completed` is a command
-    /// outcome, no snapshot carries one, and a client that bootstraps between
-    /// two ticks learns about neither. A health report is not a client mirror
-    /// though - it is a statement about this process - so the daemon keeps the
-    /// one fact it needs here, where the change already passes through.
+    /// outcome, no snapshot carries the tick itself, and a client that
+    /// bootstraps between two ticks learns about neither. The one fact a
+    /// health report and a bootstrap's `sync_health` need is kept here, where
+    /// the change already passes through, and read out as a projection
+    /// rather than reduced into the state a revision describes.
     pub fn last_sync(
         &self,
         account: &str,
@@ -471,7 +474,6 @@ impl CanonicalState {
             inner.accounts.push(AccountView {
                 name: seed.name,
                 state: AccountState::Opening,
-                health: crate::sync_health::SyncHealth::default(),
             });
         }
         // The order a client reads is the order `config.toml` writes.
@@ -562,6 +564,23 @@ impl CanonicalState {
             .as_ref()
             .map(|diagnostics| diagnostics.not_ok())
             .unwrap_or_default();
+        // The last completed pass of each account, read under the gate that
+        // `apply` notes a `Change::SyncCompleted` under, so the health agrees
+        // with the captured revision. A projection rather than a reduction:
+        // a completed sync still reduces nothing into the state, and a client
+        // keeps the field current from `sync.completed` events, not from a
+        // revisioned change to it.
+        snapshot.sync_health = lock(&self.last_sync)
+            .iter()
+            .map(|(account, (_, outcome))| {
+                let health = if *outcome == "failed" {
+                    SyncHealthState::Failed
+                } else {
+                    SyncHealthState::Ok
+                };
+                (account.clone(), health)
+            })
+            .collect();
         self.fire(Boundary::AfterCapture);
         self.fire(Boundary::AfterQueueStart);
 
@@ -660,13 +679,13 @@ impl Inner {
                     outbox.failed = *failed;
                 }
             }
-            // A command outcome reduces to nothing: no snapshot carries a last
-            // sync, so a client that bootstraps between two ticks learns about
-            // neither, which is what a command outcome is. It still takes a
-            // revision and still fans out, and
-            // [`CanonicalState::apply`] notes it in the ledger a health report
-            // reads `last_sync` out of, which is beside the state rather than
-            // in it for exactly this reason.
+            // A command outcome reduces to nothing: no snapshot carries the
+            // tick itself, so a client that bootstraps between two ticks learns
+            // about neither, which is what a command outcome is. It still takes
+            // a revision and still fans out, and [`CanonicalState::apply`]
+            // notes its verdict in the `last_sync` ledger a health report and
+            // a bootstrap's `sync_health` projection read, which is beside the
+            // state rather than in it for exactly this reason.
             Change::SyncCompleted(_) => {}
         }
     }
@@ -699,6 +718,7 @@ impl Inner {
             operations: Vec::new(),
             holds: Vec::new(),
             diagnostics: Vec::new(),
+            sync_health: BTreeMap::new(),
         }
     }
 }
