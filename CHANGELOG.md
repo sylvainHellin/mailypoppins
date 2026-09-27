@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **A client that connects to the daemon now sees each account's real sync health.** The bootstrap snapshot reported `unknown` for every account whatever the last pass did; it now carries the verdict of the last completed pass, and `sync.completed` keeps it current. The snapshot's pending holds, running operations and failing diagnostics are typed in `mp-protocol` with the same shapes `send.hold_status`, `operation.status` and `diagnostic.health` answer, so a GUI decodes one type per shape. Nothing on the wire changes apart from the `sync_health` value.
+
 ## [0.10.0] - 2026-09-24
 
 ### Added
