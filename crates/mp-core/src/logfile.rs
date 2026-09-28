@@ -219,8 +219,22 @@ fn open_current(dir: &Path, file_cap: u64, now: DateTime<Utc>) -> io::Result<(Pa
 ///
 /// A file another process still writes survives as an unlinked inode until
 /// that process rolls, which it does at the latest when the date changes.
+///
+/// A file already gone counts as deleted: processes starting together list the
+/// same files and race to delete the same oldest ones, and a loser that did not
+/// subtract it would go on deleting newer files until nothing was left.
 pub fn prune(dir: &Path, total_cap: u64, keep: &Path) -> io::Result<()> {
-    let mut files = log_files(dir)?;
+    delete_oldest(log_files(dir)?, total_cap, keep);
+    let daemon_log = dir.join("daemon.log");
+    if fs::metadata(&daemon_log).is_ok_and(|m| m.len() > DAEMON_LOG_CAP_BYTES) {
+        OpenOptions::new().write(true).open(&daemon_log)?.set_len(0)?;
+    }
+    Ok(())
+}
+
+/// Delete from `files`, a listing that may be stale, oldest first until the
+/// rest fit in `total_cap`.
+fn delete_oldest(mut files: Vec<(PathBuf, u64)>, total_cap: u64, keep: &Path) {
     files.sort();
     let mut total: u64 = files.iter().map(|(_, size)| size).sum();
     for (path, size) in files {
@@ -230,15 +244,12 @@ pub fn prune(dir: &Path, total_cap: u64, keep: &Path) -> io::Result<()> {
         if path == keep {
             continue;
         }
-        if fs::remove_file(&path).is_ok() {
-            total -= size;
+        match fs::remove_file(&path) {
+            Ok(()) => total -= size,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => total -= size,
+            Err(_) => {}
         }
     }
-    let daemon_log = dir.join("daemon.log");
-    if fs::metadata(&daemon_log).is_ok_and(|m| m.len() > DAEMON_LOG_CAP_BYTES) {
-        OpenOptions::new().write(true).open(&daemon_log)?.set_len(0)?;
-    }
-    Ok(())
 }
 
 /// Every dated log file under `dir` with its size.
@@ -367,6 +378,22 @@ mod tests {
         fs::write(&keep, [b'x'; 500]).unwrap();
         prune(tmp.path(), 10, &keep).unwrap();
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn a_file_another_process_deleted_first_counts_as_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        for day in ["01", "02", "03"] {
+            fs::write(tmp.path().join(format!("mailypoppins-2026-09-{day}.log")), [b'x'; 100]).unwrap();
+        }
+        // A second process listed the files, then the first deleted `01`.
+        let stale = log_files(tmp.path()).unwrap();
+        fs::remove_file(tmp.path().join("mailypoppins-2026-09-01.log")).unwrap();
+        delete_oldest(stale, 250, &tmp.path().join("mailypoppins-2026-09-03.log"));
+        assert_eq!(
+            names(tmp.path()),
+            ["mailypoppins-2026-09-02.log", "mailypoppins-2026-09-03.log"]
+        );
     }
 
     #[test]

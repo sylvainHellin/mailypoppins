@@ -27,7 +27,11 @@ const MP: &str = env!("CARGO_BIN_EXE_mp");
 /// wrote nothing to stderr, so a broken subcommand cannot slip in as an empty
 /// section.
 fn help_for(args: &[&str]) -> String {
+    // Every `mp` run opens, and prunes, the log directory before `--help`
+    // answers, so a run without its own data dir would touch the user's logs.
+    let data = tempfile::tempdir().expect("a temporary data dir");
     let out = Command::new(MP)
+        .env("MAILYPOPPINS_DATA_DIR", data.path())
         .args(args)
         .arg("--help")
         .output()

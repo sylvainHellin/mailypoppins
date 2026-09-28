@@ -2190,3 +2190,7 @@ The volume came from a dependency: the logger ran at `DEBUG` for every target, a
 `crates/mp-core/src/logfile.rs` now rolls on the UTC date and at 20 MB, prunes the directory to 200 MB on every open, and keeps `DEBUG` only for the workspace's own crate targets.
 The writer rolls only between records: `simplelog` writes a record in several `write` calls, so it tracks whether the last byte was a newline.
 When a process's lifetime can outrun the name its output file was given, the name has to be re-evaluated on write, not on open.
+Two things went wrong on the first run of it.
+`tests/cli_help_snapshot.rs` ran `mp --help` with no `MAILYPOPPINS_DATA_DIR`, so every run had been appending to the developer's real log, and with pruning in `init_logging` a dozen of those processes pruned the real directory at once.
+They raced, and a process that found the oldest file already deleted did not subtract it, so it kept deleting newer files until only the current one was left: `delete_oldest` now counts `NotFound` as deleted, and the snapshot test sets a temporary data dir.
+Any test that execs `mp` needs its own data dir, even for `--help`, because `init_logging` runs before argument parsing.
