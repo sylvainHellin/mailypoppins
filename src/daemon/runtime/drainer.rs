@@ -29,6 +29,23 @@
 //! publishes none, so this is where the sidebar of every client converges on
 //! what the queued mutations and any rollback left.
 //!
+//! # A backlog, and a refused turn
+//!
+//! A new drainer counts as one request, so it drains once a quiet period after
+//! it starts. Rows can be queued with nobody asking: a daemon restarted inside
+//! the debounce, or a mutation that landed while a configuration swap had
+//! taken the old runtime out of the table and not yet put the new one in, which
+//! finds no runtime to ask. A clean account pays one `COUNT` for it.
+//!
+//! The runtime's turn keeps a drain off a tick, but it does not cover every
+//! guarded pass in the process: the post-send outbox drain and a guarded
+//! `mp sync --mailbox` take the engine gate without it. A mutation drain that
+//! loses the gate to one of those reports [`DrainOutcome::busy`], and the
+//! drainer tries again after a backoff that starts at the quiet period and
+//! doubles, [`BUSY_RETRIES`] times at most, so a holder that runs for minutes
+//! costs a handful of `COUNT`s rather than a loop. What is still queued after
+//! the last retry waits for the next request or the next tick.
+//!
 //! # Lifetime
 //!
 //! The watcher's rules, for the watcher's reasons: spawned for a ready runtime
@@ -57,6 +74,31 @@ use super::account::{AccountRuntime, DrainOutcome, Readiness};
 /// the user looks at another client.
 pub const DRAIN_DEBOUNCE: Duration = Duration::from_millis(1500);
 
+/// How often in a row the drainer retries a drain that was refused the engine
+/// turn, after the quiet period doubled once per retry: 1.5 s, 3 s, ... 48 s,
+/// about a minute and a half in all.
+pub const BUSY_RETRIES: u32 = 6;
+
+/// How the drainer paces itself: the production values, or a test's shorter
+/// ones.
+#[derive(Clone, Copy, Debug)]
+struct Pacing {
+    /// How long requests must be quiet before a drain, and the first retry
+    /// delay after a refused one.
+    quiet: Duration,
+    /// How many refused drains in a row are retried.
+    busy_retries: u32,
+}
+
+impl Pacing {
+    /// The wait before the retry that follows `refused` refused drains in a
+    /// row, counting from one.
+    fn retry_delay(self, refused: u32) -> Duration {
+        self.quiet
+            .saturating_mul(1u32 << refused.saturating_sub(1).min(16))
+    }
+}
+
 /// Start the drainer for `runtime`, if it can drain.
 ///
 /// A local-only account owes no server anything, and a blocked runtime holds
@@ -74,7 +116,10 @@ pub fn spawn(
         Arc::downgrade(runtime),
         runtime.retired(),
         runtime.drain_requests(),
-        DRAIN_DEBOUNCE,
+        Pacing {
+            quiet: DRAIN_DEBOUNCE,
+            busy_retries: BUSY_RETRIES,
+        },
         Arc::new(move |runtime: &AccountRuntime, outcome: DrainOutcome| {
             let canonical = Arc::clone(&canonical);
             let account = runtime.account().to_string();
@@ -100,7 +145,7 @@ async fn run(
     runtime: Weak<AccountRuntime>,
     mut retired: watch::Receiver<bool>,
     mut requests: watch::Receiver<u64>,
-    quiet: Duration,
+    pacing: Pacing,
     publish: Publish,
 ) {
     let account = runtime
@@ -108,33 +153,71 @@ async fn run(
         .map(|runtime| runtime.account().to_string())
         .unwrap_or_default();
     debug!("[drainer] draining {account} on request");
+    // Starting is a request: whatever an earlier runtime left queued drains
+    // without waiting for the next mutation (see the module docs).
+    requests.mark_changed();
+    // Refused drains in a row, and the retry the last one armed.
+    let mut refused: u32 = 0;
+    let mut retry: Option<Duration> = None;
     loop {
-        // The first request of a burst. A request made while the previous
-        // drain ran is already marked, so it is answered here at once.
-        tokio::select! {
-            () = stopped(&mut retired) => break,
-            changed = requests.changed() => if changed.is_err() { break },
-        }
-        // The trailing debounce: every request restarts the wait.
-        loop {
-            tokio::select! {
-                () = stopped(&mut retired) => return finish(&account),
-                changed = requests.changed() => {
-                    if changed.is_err() {
-                        return finish(&account);
+        // The first request of a burst, or the retry of a refused drain. A
+        // request made while the previous drain ran is already marked, so it
+        // is answered here at once.
+        let requested = match retry.take() {
+            None => tokio::select! {
+                () = stopped(&mut retired) => break,
+                changed = requests.changed() => if changed.is_err() { break } else { true },
+            },
+            Some(delay) => tokio::select! {
+                () = stopped(&mut retired) => break,
+                changed = requests.changed() => if changed.is_err() { break } else { true },
+                () = tokio::time::sleep(delay) => false,
+            },
+        };
+        if requested {
+            // A fresh request starts a fresh retry budget.
+            refused = 0;
+            // The trailing debounce: every request restarts the wait.
+            loop {
+                tokio::select! {
+                    () = stopped(&mut retired) => return finish(&account),
+                    changed = requests.changed() => {
+                        if changed.is_err() {
+                            return finish(&account);
+                        }
                     }
+                    () = tokio::time::sleep(pacing.quiet) => break,
                 }
-                () = tokio::time::sleep(quiet) => break,
             }
         }
         let Some(runtime) = runtime.upgrade() else {
             break;
         };
         let outcome = runtime.drain().await;
+        let busy = outcome.busy;
         if outcome.ran {
             debug!("[drainer] drained {account}{}", outcome.status);
             publish(&runtime, outcome).await;
         }
+        if !busy {
+            refused = 0;
+            continue;
+        }
+        refused += 1;
+        if refused > pacing.busy_retries {
+            info!(
+                "[drainer] {account} was refused the engine turn {refused} times in a row; \
+                 its queued ops wait for the next request or tick"
+            );
+            refused = 0;
+            continue;
+        }
+        let delay = pacing.retry_delay(refused);
+        debug!(
+            "[drainer] {account}'s drain was refused the engine turn; retrying in {}ms",
+            delay.as_millis()
+        );
+        retry = Some(delay);
     }
     finish(&account);
 }
@@ -326,6 +409,12 @@ mod tests {
         assert!(state.last_sync("alpha").is_none(), "a drain is not a sync");
     }
 
+    /// The test's pacing: [`QUIET`], and two retries of a refused drain.
+    const PACING: Pacing = Pacing {
+        quiet: QUIET,
+        busy_retries: 2,
+    };
+
     /// The drainer over `runtime`, with a publish that counts the drains it is
     /// handed.
     fn drainer(runtime: &Arc<AccountRuntime>, published: &Arc<AtomicUsize>) -> JoinHandle<()> {
@@ -334,7 +423,7 @@ mod tests {
             Arc::downgrade(runtime),
             runtime.retired(),
             runtime.drain_requests(),
-            QUIET,
+            PACING,
             Arc::new(move |_runtime: &AccountRuntime, _outcome: DrainOutcome| {
                 published.fetch_add(1, Ordering::SeqCst);
                 async {}.boxed()
@@ -432,6 +521,131 @@ mod tests {
         let _task = drainer(&runtime, &published);
         tokio::time::sleep(QUIET * 4).await;
         assert_eq!(drains(&entered).len(), 2);
+    }
+
+    /// A new drainer drains once with nobody asking, so a backlog an earlier
+    /// runtime left queued (a restart inside the debounce, a mutation that
+    /// found no runtime during a swap) does not wait for the next mutation.
+    #[tokio::test]
+    async fn a_new_drainer_drains_the_backlog_unasked() {
+        let dir = tempfile::tempdir().unwrap();
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(dir.path(), config(), 1, counting_hooks(&entered))
+                .unwrap(),
+        );
+        let published = Arc::new(AtomicUsize::new(0));
+        let _task = drainer(&runtime, &published);
+        tokio::time::sleep(QUIET / 2).await;
+        assert!(drains(&entered).is_empty(), "the startup drain is debounced too");
+        tokio::time::sleep(QUIET * 4).await;
+        assert_eq!(
+            drains(&entered),
+            vec![Phase::DrainOutbox, Phase::DrainMutations]
+        );
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        // And only once.
+        tokio::time::sleep(QUIET * 4).await;
+        assert_eq!(drains(&entered).len(), 2);
+    }
+
+    /// A runtime whose mutation hook reports a refused engine turn for its
+    /// first `refusals` drains, and records every slot it enters.
+    fn refusing_runtime(
+        dir: &std::path::Path,
+        entered: &Arc<Mutex<Vec<Phase>>>,
+        refusals: usize,
+    ) -> Arc<AccountRuntime> {
+        use super::super::account::TickReport;
+        let report = TickReport::default();
+        let mut hooks = counting_hooks(entered);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mutations_entered = Arc::clone(entered);
+        let hook_report = report.clone();
+        hooks.mutations = Arc::new(move |ctx| {
+            mutations_entered.lock().unwrap().push(ctx.phase);
+            if calls.fetch_add(1, Ordering::SeqCst) < refusals {
+                // What the production hook does with `Resume::Busy`.
+                hook_report.mark_busy();
+            }
+            async { String::new() }.boxed()
+        });
+        Arc::new(
+            AccountRuntime::start_at_with_hooks(dir, config(), 1, hooks)
+                .unwrap()
+                .with_report(report),
+        )
+    }
+
+    /// A drain refused the engine turn by a pass outside the runtime's turn is
+    /// not counted as clean: it is retried after the quiet period, with no new
+    /// request.
+    #[tokio::test]
+    async fn a_refused_drain_is_retried_after_the_quiet_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        {
+            let direct = refusing_runtime(dir.path(), &entered, 1);
+            assert!(direct.drain().await.busy, "the first drain is refused");
+            assert!(!direct.drain().await.busy, "and the second is not");
+        }
+        entered.lock().unwrap().clear();
+
+        let runtime = refusing_runtime(dir.path(), &entered, 1);
+        let published = Arc::new(AtomicUsize::new(0));
+        let _task = drainer(&runtime, &published);
+        // The startup drain at QUIET is refused and nothing asks again: only
+        // the retry, QUIET later, can enter the slots a second time.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while drains(&entered).len() < 4 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the refused drain was retried");
+        assert_eq!(published.load(Ordering::SeqCst), 2);
+        // The retry was clean, so nothing more is armed.
+        tokio::time::sleep(QUIET * 6).await;
+        assert_eq!(drains(&entered).len(), 4);
+    }
+
+    /// A pass that keeps the turn is retried a bounded number of times, with a
+    /// widening gap, and then left to the next request or tick: no hot loop.
+    #[tokio::test]
+    async fn a_refused_drain_is_retried_a_bounded_number_of_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let runtime = refusing_runtime(dir.path(), &entered, usize::MAX);
+        let published = Arc::new(AtomicUsize::new(0));
+        let _task = drainer(&runtime, &published);
+
+        // The startup drain at QUIET, the retries QUIET and 2 * QUIET after it.
+        tokio::time::sleep(QUIET * 8).await;
+        let drained = drains(&entered).len() / 2;
+        assert_eq!(drained, 1 + PACING.busy_retries as usize);
+        tokio::time::sleep(QUIET * 8).await;
+        assert_eq!(drains(&entered).len() / 2, drained, "the retries stopped");
+
+        // A new request is a fresh budget.
+        runtime.request_drain();
+        tokio::time::sleep(QUIET * 2).await;
+        assert!(drains(&entered).len() / 2 > drained);
+    }
+
+    #[test]
+    fn the_retry_gap_doubles_from_the_quiet_period() {
+        let pacing = Pacing {
+            quiet: DRAIN_DEBOUNCE,
+            busy_retries: BUSY_RETRIES,
+        };
+        let gaps: Vec<Duration> = (1..=BUSY_RETRIES).map(|n| pacing.retry_delay(n)).collect();
+        assert_eq!(gaps[0], DRAIN_DEBOUNCE);
+        assert_eq!(gaps[1], DRAIN_DEBOUNCE * 2);
+        assert_eq!(
+            gaps.iter().sum::<Duration>(),
+            DRAIN_DEBOUNCE * 63,
+            "about a minute and a half in all"
+        );
     }
 
     /// A runtime retired inside the quiet period drains nothing, and its

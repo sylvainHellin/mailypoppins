@@ -640,8 +640,9 @@ fn selected_selector(app: &App) -> Option<String> {
 
 // The server half of a mutation is no longer fired from here (#0039): a
 // mutation enqueues its op through `mutations::queue_*` and the durable
-// `pending_ops` drain retires it at the next sync/fetch resume point, rolling
-// back a refusal itself. So this module keeps no backend resolver, no per-op
+// `pending_ops` drain retires it, which the daemon runs about 1.5 s after the
+// account's last mutation (#0133) or at a sync tick, rolling back a refusal
+// itself. So this module keeps no backend resolver, no per-op
 // dispatch thread and no rollback of its own: the queue owns all three.
 
 pub(super) fn handle_action(

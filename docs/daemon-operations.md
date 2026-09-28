@@ -366,9 +366,11 @@ A ready runtime with a server also runs a drainer (`src/daemon/runtime/drainer.r
 A `settle: false` mutation, which is every mutation the TUI makes, commits its row change and the op it owes and then calls `AccountRuntime::request_drain`, which only records the request; the RPC answer does not wait for anything.
 Once an account's requests have been quiet for `DRAIN_DEBOUNCE` (1.5 s, a constant and not a config key) the drainer runs `AccountRuntime::drain`: the outbox, then the mutation queue, through the same hooks a tick's drains use, and no sync.
 The debounce trails, so a thousand-row selection, one call per row, is one drain after the last row.
+A drainer that starts counts as one request, so it drains once a quiet period after the runtime comes up: rows queued with nobody left to ask (a restart inside the debounce, a mutation that found no runtime while a swap was replacing it) do not wait for the next mutation, and a clean account pays one `COUNT`.
 
 A drain and a tick's run hold the same runtime turn, so they never run side by side: a drain requested during a tick waits for it and then drains, which is what catches an op queued after the tick's tail drain read the queue.
-A drain the engine lock refuses (another pass in this process holds the gate) drains nothing and loses nothing: the row stays queued for the next tick.
+The turn does not cover every guarded pass in the process: the post-send outbox drain and a guarded `mp sync --mailbox` or `--dry-run` take the engine gate without it.
+A mutation drain that finds ops owed and loses the gate to one of them drains nothing and loses nothing, and the drainer retries it after a backoff that starts at 1.5 s and doubles, six times at most (about a minute and a half in all); what is still queued after that waits for the next request or tick.
 A retired runtime refuses the drain, and a blocked one gets no drainer at all.
 
 A drain that rolled ops back publishes `mutations.rolled_back` `{account, failed}`, which the TUI shows as the tick's rollback warning and answers with a reload of the account's rows; it is never a `sync.completed`, because that would move the `last_sync` ledger for a drain that ran no sync.

@@ -574,15 +574,57 @@ pub async fn drain_account(
     account: &str,
     backend: &mut Backend,
 ) -> Result<Option<DrainResult>> {
+    drain_account_or_busy(store, blobs, account, backend)
+        .await
+        .map(Resume::into_drained)
+}
+
+/// What one attempt at the mutation queue came to, for a caller that has to
+/// tell a refused turn from an empty queue (#0133).
+///
+/// [`resume_account`] and [`drain_account`] fold the first two into one
+/// `Ok(None)`, which is right for a caller that only reports: either way it
+/// drained nothing. The daemon's debounced drainer is not such a caller. A turn
+/// refused to it (the post-send outbox drain, a guarded `mp sync --mailbox`)
+/// leaves an op queued that nothing else is about to drain, so it has to try
+/// again, while an empty queue is done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resume {
+    /// No row was owed, or the account has no store: nothing to do.
+    NothingQueued,
+    /// Rows were owed and the engine turn was refused, or the lock could not
+    /// be asked for at all: they are still queued.
+    Busy,
+    /// The drain ran under the engine turn.
+    Drained(DrainResult),
+}
+
+impl Resume {
+    /// The `Option` the older entry points return: a drain that ran, or none.
+    pub fn into_drained(self) -> Option<DrainResult> {
+        match self {
+            Resume::Drained(result) => Some(result),
+            Resume::NothingQueued | Resume::Busy => None,
+        }
+    }
+}
+
+/// [`drain_account`], telling a refused turn apart from a drain that ran.
+pub async fn drain_account_or_busy(
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    backend: &mut Backend,
+) -> Result<Resume> {
     match crate::engine_lock::EngineLock::take_turn(account) {
         Ok(Some(_lock)) => {
             let result = drain(store, blobs, account, backend, unix_now()).await?;
-            Ok(Some(result))
+            Ok(Resume::Drained(result))
         }
-        Ok(None) => Ok(None),
+        Ok(None) => Ok(Resume::Busy),
         Err(e) => {
             warn!("[pending_ops] no engine lock for {account}, not draining: {e:#}");
-            Ok(None)
+            Ok(Resume::Busy)
         }
     }
 }
@@ -596,18 +638,26 @@ pub async fn drain_account(
 /// queued ops (#0039). `Ok(None)` means there was nothing to drain, or another
 /// process holds the engine lock and is draining this account instead.
 pub async fn resume_account(account: &AccountConfig) -> Result<Option<DrainResult>> {
+    resume_account_or_busy(account)
+        .await
+        .map(Resume::into_drained)
+}
+
+/// [`resume_account`], telling an empty queue apart from a refused turn
+/// ([`Resume`]).
+pub async fn resume_account_or_busy(account: &AccountConfig) -> Result<Resume> {
     let path = crate::config::store_path(&account.name);
     if !path.exists() {
-        return Ok(None);
+        return Ok(Resume::NothingQueued);
     }
     let store = Store::open(&path)?;
     let (queued, _failed) = counts(&store, &account.name)?;
     if queued == 0 {
-        return Ok(None);
+        return Ok(Resume::NothingQueued);
     }
     let blobs = BlobStore::for_account(&account.name);
     let mut backend = Backend::resolve(account)?;
-    drain_account(&store, &blobs, &account.name, &mut backend).await
+    drain_account_or_busy(&store, &blobs, &account.name, &mut backend).await
 }
 
 /// Run one just-enqueued op synchronously and settle its row, for a caller that

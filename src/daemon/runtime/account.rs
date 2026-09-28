@@ -70,7 +70,7 @@
 //! lock is already held for longer than the call, which is strictly stronger.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -205,6 +205,12 @@ pub struct DrainOutcome {
     /// Mutations the drain rolled back. Always zero for a runtime built with
     /// injected hooks, exactly as a tick's count is.
     pub failed_mutations: u64,
+    /// Whether the mutation drain found ops owed and was refused the engine
+    /// turn, by a guarded pass this runtime's turn does not cover (the
+    /// post-send outbox drain, a `mp sync --mailbox`). The ops are still
+    /// queued, and the drainer tries again rather than counting the drain as
+    /// clean.
+    pub busy: bool,
 }
 
 /// What a hook is told about the slot it is filling.
@@ -252,12 +258,15 @@ pub struct TickHooks {
 /// and its production hooks share, and [`AccountRuntime::run_tick`] empties it
 /// once per tick.
 #[derive(Clone, Debug, Default)]
-struct TickReport {
+pub(super) struct TickReport {
     /// What the body's sync returned, `None` for a tick whose body is injected
     /// or failed before the engine ran.
     sync: Arc<Mutex<Option<SyncResult>>>,
     /// Mutations rolled back across both of the tick's drains.
     failed_mutations: Arc<AtomicU64>,
+    /// Set by a mutation drain that was refused the engine turn with ops owed
+    /// ([`crate::pending_ops::Resume::Busy`]); read by [`AccountRuntime::drain`].
+    busy: Arc<AtomicBool>,
 }
 
 impl TickReport {
@@ -265,6 +274,12 @@ impl TickReport {
     fn reset(&self) {
         *lock(&self.sync) = None;
         self.failed_mutations.store(0, Ordering::SeqCst);
+        self.busy.store(false, Ordering::SeqCst);
+    }
+
+    /// Record that a mutation drain was refused its turn with ops owed.
+    pub(super) fn mark_busy(&self) {
+        self.busy.store(true, Ordering::SeqCst);
     }
 
     /// Everything this tick recorded, leaving the slot empty.
@@ -642,12 +657,22 @@ impl AccountRuntime {
         // The tick's order, for the tick's reason: the outbox first.
         let outbox = (self.hooks.outbox)(context(Phase::DrainOutbox)).await;
         let mutations = (self.hooks.mutations)(context(Phase::DrainMutations)).await;
+        let busy = self.report.busy.swap(false, Ordering::SeqCst);
         let (_, failed_mutations) = self.report.take();
         DrainOutcome {
             ran: true,
             status: format!("{outbox}{mutations}"),
             failed_mutations,
+            busy,
         }
+    }
+
+    /// Install the report the test's hooks write into, as the production
+    /// constructor installs the one its hooks share.
+    #[cfg(test)]
+    pub(super) fn with_report(mut self, report: TickReport) -> Self {
+        self.report = report;
+        self
     }
 
     /// The tick itself: [`run_tick_with_drains`] over the installed hooks.
@@ -763,12 +788,23 @@ fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport) -> DrainHook {
         let report = report.clone();
         async move {
             let drained = off_thread("the mutation-queue drain", move || async move {
-                crate::pending_ops::resume_account(&cfg).await
+                crate::pending_ops::resume_account_or_busy(&cfg).await
             })
             .await
             .and_then(|inner| inner);
             match drained {
-                Ok(Some(drained)) if drained.failed > 0 => {
+                Ok(crate::pending_ops::Resume::Busy) => {
+                    // Ops are owed and another pass holds the turn. A tick
+                    // ignores this (its next run drains them); the debounced
+                    // drainer retries (#0133).
+                    debug!(
+                        "[pending_ops] {} was refused the engine turn at {:?}; ops stay queued",
+                        ctx.account, ctx.phase
+                    );
+                    report.mark_busy();
+                    String::new()
+                }
+                Ok(crate::pending_ops::Resume::Drained(drained)) if drained.failed > 0 => {
                     // Added rather than stored: a tick drains twice, and the
                     // outcome reports what the whole tick rolled back.
                     report
@@ -1042,6 +1078,7 @@ mod tests {
                 ran: true,
                 status: "; 2 mutation(s) failed".to_string(),
                 failed_mutations: 2,
+                busy: false,
             }
         );
         assert_eq!(

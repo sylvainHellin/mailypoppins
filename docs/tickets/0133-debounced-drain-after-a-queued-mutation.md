@@ -23,7 +23,9 @@ A per-account drainer, `src/daemon/runtime/drainer.rs`, spawned beside the watch
 - The drainer runs `AccountRuntime::drain` once the requests have been quiet for `DRAIN_DEBOUNCE` (1.5 s, a constant). The debounce trails, so a thousand-row selection is one drain.
 - `AccountRuntime::drain` runs the tick's outbox hook and then its mutation hook (`crate::send::resume_outbox`, then `crate::pending_ops::resume_account`, off-thread), entered as `Phase::DrainOutbox` and `Phase::DrainMutations`, and no sync.
 - A tick's run and a drain hold one async mutex, the runtime's turn, so they never run side by side and never write the shared `TickReport` at once. A drain requested during a tick waits for it and then drains, which catches an op queued after the tick's tail read the queue. `retire` waits the turn out within its bound, and a drain or a tick that gets the turn after retirement refuses.
-- A blocked runtime gets no drainer and refuses `drain`; a retired one refuses too. A drain the in-process engine gate refuses drains nothing and loses nothing: the row stays queued for the next tick.
+- A blocked runtime gets no drainer and refuses `drain`; a retired one refuses too.
+- A drainer counts its own start as one request, so rows queued while no runtime was there to ask (a restart inside the debounce, a mutation during a swap's gap between `stop_account` and `start_account`) drain a quiet period after it starts; a clean account pays one `COUNT` (review follow-up).
+- A mutation drain refused the in-process engine gate by a pass outside the turn (the post-send outbox drain, a guarded `mp sync --mailbox` or `--dry-run`) is no longer counted as clean: `pending_ops::resume_account_or_busy` returns `Resume::Busy` where `resume_account` folded it into `Ok(None)`, the mutation hook marks the drain `busy`, and the drainer retries after a backoff that starts at the quiet period and doubles, `BUSY_RETRIES` (6) times at most; a new request resets the budget (review follow-up).
 - A drain that rolled ops back commits `Change::MutationsRolledBack`, published as the new lifecycle kind `mutations.rolled_back` `{account, failed}` (`mp_protocol::events::MutationsRolledBack`). The TUI shows the tick's rollback wording as a warning and reloads the account's rows. A `sync.completed` was rejected for this because it moves the `last_sync` ledger and the TUI's sync-health mark, and a drain ran no sync.
 - Every drain that ran commits one `MailboxCounts` per mailbox whose store counts differ from the canonical state's (`CanonicalState::mailbox_counts`), so the sidebar converges.
 
@@ -31,7 +33,7 @@ The CLI path (`settle: true`, `run_and_settle`) is unchanged.
 
 ## Tests
 
-- `src/daemon/runtime/drainer.rs`: a burst is one drain after the last request; one request drains after the quiet period and not before; a request made before the drainer subscribed still drains; a retired runtime drains nothing and its drainer stops; a blocked runtime gets no drainer and drains nothing; a drain requested during a tick waits for it and then runs; only moved counts are committed; a rollback is published and a clean drain is not, and neither touches `last_sync`.
+- `src/daemon/runtime/drainer.rs`: a new drainer drains the backlog unasked, once; a refused drain is retried after the quiet period; refused drains stop after the retry budget and a new request restarts it; the retry gap doubles from the quiet period; a burst is one drain after the last request; one request drains after the quiet period and not before; a request made before the drainer subscribed still drains; a retired runtime drains nothing and its drainer stops; a blocked runtime gets no drainer and drains nothing; a drain requested during a tick waits for it and then runs; only moved counts are committed; a rollback is published and a clean drain is not, and neither touches `last_sync`.
 - `src/daemon/runtime/account.rs`: a drain enters its two slots, outbox first, runs no body, and reports its rollbacks.
 - `src/tui_tests/events.rs`: a `mutations.rolled_back` warns and reloads without a sync verdict.
 - `crates/mp-protocol/fixtures/notification.mutations_rolled_back.json`, checked by `tests/daemon_protocol_fixtures.rs`.
@@ -39,5 +41,6 @@ The CLI path (`settle: true`, `run_and_settle`) is unchanged.
 ## Left open
 
 - An op that fails with retries left stays queued behind its backoff; nothing re-arms the drainer for it, so it is retried by the next tick or by the drain a later mutation asks for. The periodic tick (the `BACKLOG.md` scheduler item) is what closes this.
-- A drain refused by the in-process engine gate (a guarded pass holding it at that moment) is not retried either, for the same reason.
+- A drain refused by the in-process engine gate for longer than its retry budget (about 95 s) waits for the next request or tick.
+- A refused *outbox* drain is not retried by the drainer: the holder is either the post-send outbox drain itself, which does that work, or a guarded sync, whose own drains or the next tick pick it up.
 - The watcher's own `publish_counts` still compares against a private map rather than the canonical state.

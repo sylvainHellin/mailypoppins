@@ -964,8 +964,8 @@ A name a client has not seen before was `ok` as far as the daemon is concerned, 
 `mutations.rolled_back` says that a drain of the mutation queue that ran outside a sync tick rolled queued mutations back, with a payload of `{account, failed}`, `failed` being the count that the drain rolled back (#0133).
 It is the drain's counterpart of a tick's `failed_mutations`, published only when `failed` is above zero, and a client answers it the way it answers that count: a warning and a re-read of the account's rows, which is where the rolled-back rows come back.
 It is its own kind rather than a `sync.completed` with every counter at zero, because a `sync.completed` moves the `last_sync` ledger behind `sync_health` and a drain ran no sync: an account whose sync is failing would read as synced.
-It is a lifecycle event, reduces into no snapshot, and merges with nothing, since two rollbacks are two counts.
-`config.changed` and `config.invalid` are the fourth and fifth: `config.changed` carries `{added, updated, removed, config_revision}` and closes every successful swap, `config.invalid` carries `{path, line, message}` and is the diagnostic a rejected candidate publishes.
+It is the fourth lifecycle kind, reduces into no snapshot, and merges with nothing, since two rollbacks are two counts.
+`config.changed` and `config.invalid` are the fifth and sixth: `config.changed` carries `{added, updated, removed, config_revision}` and closes every successful swap, `config.invalid` carries `{path, line, message}` and is the diagnostic a rejected candidate publishes.
 Both are lifecycle events, so two swaps never coalesce into one: the lists are the whole payload, and merging them would hide the first swap's from a client that was slow to read.
 An account removed by a swap travels as `state.remove` of `account:<name>` and needs no kind of its own.
 The daemon's own `Change` type also names `mailbox.counts_changed`, `draft.removed` and `outbox.counts_changed`, which are not wire kinds: those changes travel as `state.invalidate` and `state.remove`, and the kinds listed here are the whole of what a client sees.

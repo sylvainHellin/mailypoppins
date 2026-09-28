@@ -724,9 +724,10 @@ pub enum BgResult {
     },
     // Archive / Move / Delete / ToggleRead / ToggleFlag are gone (#0039):
     // a mutation no longer fires a per-op server thread that reports back
-    // here. It enqueues into the durable `pending_ops` queue and the drain
-    // retires it at the sync/fetch resume point, surfacing failures through
-    // the sync result rather than a dedicated BgResult.
+    // here. It enqueues into the durable `pending_ops` queue and the daemon's
+    // drain retires it about 1.5 s after the account's last mutation (#0133),
+    // surfacing failures as a `mutations.rolled_back` event or through a
+    // tick's sync result rather than a dedicated BgResult.
     /// A `message.search_server` settled (`LST-08`, #0126).
     ///
     /// The hits are not here: they streamed as `message.server_hit` events

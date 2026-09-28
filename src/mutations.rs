@@ -5,8 +5,9 @@
 //! commit the local store change and the owed [`ServerOp`] in one transaction
 //! through [`crate::pending_ops`] (#0039), then hand back what they queued so
 //! the caller can drop those rows from the list it is showing and settle the
-//! ops it owes. The server op is retired later by the background drain at the
-//! sync/fetch resume point, and a refusal is rolled back there, so a queueing
+//! ops it owes. The server op is retired later by the background drain, which
+//! the daemon runs about 1.5 s after the account's last mutation (#0133) and
+//! at every sync tick, and a refusal is rolled back there, so a queueing
 //! caller spawns no per-op server thread and keeps no rollback of its own: the
 //! queue owns both.
 //!

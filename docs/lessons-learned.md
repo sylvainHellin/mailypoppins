@@ -2166,3 +2166,11 @@ Until #0133 the only thing that drained that queue was a sync tick (`run_tick_wi
 An archive therefore stayed local, on screen as done, until the user synced by hand or unrelated mail arrived; nothing failed and nothing logged, which is why it went unnoticed.
 The fix is a trailing-debounced drain on the account runtime (`src/daemon/runtime/drainer.rs`), 1.5 s after the account's last `settle: false` call, sharing the tick's turn so it never runs beside one.
 When a change is made durable by queueing it, ask what drains the queue and what triggers that, and check that the trigger fires for this change: "the next tick drains it" is only true if a next tick is coming.
+
+## `Ok(None)` from a guarded drain means two things, and a retrier has to tell them apart
+
+`pending_ops::resume_account` returned `Ok(None)` both when no row was owed and when the engine gate was refused, because every caller before #0133 only reported, and either way it drained nothing.
+The debounced drainer is the first caller that has to act on the difference: a clean queue is done, a refused turn left ops owed that nothing else is about to drain.
+The runtime's `turn` does not cover every guarded pass in the process (the post-send outbox drain and a guarded `mp sync --mailbox` take the gate without it), so the refusal is reachable, and it was silent: the drain counted as clean.
+The fix is `resume_account_or_busy` returning `Resume::{NothingQueued, Busy, Drained}`, with a bounded, doubling retry on `Busy`; the old entry points fold it back into the `Option`.
+When an API collapses "nothing to do" and "could not do it" into one value, check every new caller that retries or schedules against it.

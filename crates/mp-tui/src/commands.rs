@@ -1217,7 +1217,8 @@ pub fn local_search(
 /// caller's own "nothing to …" line.
 fn mutate_one(commands: &dyn Queries, method: &str, mut params: Value) -> bool {
     // The interactive contract: commit the row and the owed op, and let the
-    // next sync tick drain it. See the module header.
+    // daemon drain it about 1.5 s after the account's last mutation (#0133).
+    // See the module header.
     params["settle"] = json!(false);
     match commands.call(method, params) {
         Ok(_) => true,
@@ -1252,8 +1253,9 @@ fn mutate_each(
 /// Archive one or many messages (`MSG-01`): each row moves into the archive
 /// mailbox and the owed server move is queued with it (#0039).
 ///
-/// The drain carries them to the server at the next sync/fetch resume point and
-/// rolls a refusal back, so there is no per-op thread and no status to wait on:
+/// The daemon drains them to the server about 1.5 s after the account's last
+/// mutation (#0133), or at a sync tick if one comes first, and rolls a refusal
+/// back, so there is no per-op thread and no status to wait on:
 /// the local move is instant and confirmed. `batch` says whether the selection
 /// should be cleared afterwards, the only difference between the single and the
 /// batch arm.
