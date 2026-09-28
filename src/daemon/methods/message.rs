@@ -792,6 +792,9 @@ pub struct MessageMutationMethod {
     pub config: Arc<super::super::config::ConfigStore>,
     /// The state whose revision a command reports.
     pub canonical: Arc<super::super::state::CanonicalState>,
+    /// The account runtimes, so a queued mutation can ask the one serving its
+    /// account for a drain (#0133).
+    pub runtimes: Arc<super::super::server::RuntimeTable>,
 }
 
 impl Method for MessageMutationMethod {
@@ -808,6 +811,13 @@ impl Method for MessageMutationMethod {
         Box::pin(async move {
             let snapshot = self.config.snapshot();
             let kind = Kind::of(self.spec.name);
+            // Read before `params` moves into the worker. A malformed `settle`
+            // is refused inside `mutate`, so this never drains for one.
+            let queued = params.get("settle").and_then(Value::as_bool) == Some(false);
+            let account = params
+                .get("account")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             // On a blocking thread, because a [`Store`] is not `Sync` and this
             // method holds one across the drain's `await`: the local commit and
             // the server op are one unit, and splitting them to satisfy the
@@ -826,6 +836,14 @@ impl Method for MessageMutationMethod {
                     )))
                 }
             };
+            // The op is committed and owed; ask the account's runtime to drain
+            // it once the burst this call may be part of goes quiet (#0133).
+            // Only a request: the answer does not wait for the server.
+            if queued {
+                if let Some(runtime) = account.and_then(|name| self.runtimes.get(&name)) {
+                    runtime.request_drain();
+                }
+            }
             Ok(Outcome::command(
                 result,
                 self.canonical.revision().get(),
@@ -840,6 +858,7 @@ pub fn register_mutations(
     dispatcher: &mut Dispatcher,
     config: Arc<super::super::config::ConfigStore>,
     canonical: Arc<super::super::state::CanonicalState>,
+    runtimes: Arc<super::super::server::RuntimeTable>,
 ) {
     for spec in MESSAGE_MUTATION_METHOD_SPECS
         .into_iter()
@@ -849,6 +868,7 @@ pub fn register_mutations(
             spec,
             config: Arc::clone(&config),
             canonical: Arc::clone(&canonical),
+            runtimes: Arc::clone(&runtimes),
         }));
     }
 }
@@ -894,8 +914,10 @@ impl Kind {
 /// That third step is what `settle: false` skips (P5-U6). It defaults to
 /// `true`, which is `mp archive`'s blocking UX unchanged, and a client that
 /// sends `false` gets the interactive contract instead: the row change and the
-/// owed server op commit in one transaction and the next sync tick drains it
-/// (#0039). The TUI has never waited for a server on a keystroke - it is why
+/// owed server op commit in one transaction (#0039), and the method asks the
+/// account's runtime for a drain, which runs once the account's mutations have
+/// been quiet for [`crate::daemon::runtime::drainer::DRAIN_DEBOUNCE`] (#0133);
+/// a sync tick that comes first drains it at its head or tail instead. The TUI has never waited for a server on a keystroke - it is why
 /// `u` over a thousand-message selection costs no network - and a mutation that
 /// resolved credentials would also refuse outright on an account whose password
 /// is not in the keyring yet, where the pre-daemon TUI wrote the local half and

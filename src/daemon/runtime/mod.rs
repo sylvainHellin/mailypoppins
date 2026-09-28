@@ -30,7 +30,9 @@
 //! then, and the paths and the start lock below are unchanged by the move.
 //! [`watcher`] is P5-U8's: the IMAP IDLE loop and the Graph poller the TUI used
 //! to run per client, one per account and beside the engine that ingests what
-//! they find.
+//! they find. [`drainer`] is #0133's: the debounced drain of the outbox and the
+//! mutation queue after an interactive mutation, one per account beside the
+//! watcher and bound to the runtime the same way.
 //!
 //! ## Why a probe classifies instead of deciding
 //!
@@ -53,6 +55,7 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 
 pub mod account;
+pub mod drainer;
 pub mod pool;
 pub mod watcher;
 

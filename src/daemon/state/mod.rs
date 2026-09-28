@@ -353,6 +353,22 @@ impl CanonicalState {
         lock(&self.last_sync).get(account).copied()
     }
 
+    /// The `(total, unread)` counts the state holds for one mailbox, `None`
+    /// for a mailbox it does not have (#0133).
+    ///
+    /// What a publisher compares a fresh store count against, so it commits a
+    /// `MailboxCounts` only for a mailbox whose counts actually moved, and
+    /// compares against what every client was last told rather than against a
+    /// private memory another publisher could have overtaken.
+    pub fn mailbox_counts(&self, account: &str, mailbox: &str) -> Option<(u64, u64)> {
+        lock(&self.inner)
+            .mailboxes
+            .get(account)?
+            .iter()
+            .find(|view| view.seed.slug == mailbox)
+            .map(|view| (view.total, view.unread))
+    }
+
     /// The daemon process this state belongs to.
     pub fn instance_id(&self) -> InstanceId {
         self.instance.clone()
@@ -687,6 +703,9 @@ impl Inner {
             // a bootstrap's `sync_health` projection read, which is beside the
             // state rather than in it for exactly this reason.
             Change::SyncCompleted(_) => {}
+            // A command outcome too, and it notes nothing in the ledger: a
+            // drain ran no sync, so it has no sync verdict to record.
+            Change::MutationsRolledBack(_) => {}
         }
     }
 

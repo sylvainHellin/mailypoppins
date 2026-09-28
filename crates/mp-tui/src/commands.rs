@@ -35,10 +35,13 @@
 //! Every call below sends `settle: false`. `mp archive` resolves the backend,
 //! commits the row and drains the owed op before it answers, which is its
 //! blocking UX; the TUI has never done either (#0039). It commits the row
-//! change and the owed op in one transaction and lets the next sync tick drain
-//! it, which is why `u` over a thousand-message selection costs no network and
-//! why the mark-read of an explicit open cannot stall a frame. The parameter
-//! defaults to `true` on the wire so the CLI does not move.
+//! change and the owed op in one transaction and answers, which is why `u` over
+//! a thousand-message selection costs no network on the keystroke and why the
+//! mark-read of an explicit open cannot stall a frame. The daemon drains the
+//! queued ops itself once the account's mutations have been quiet for 1.5 s,
+//! one drain for the whole selection, and publishes `mutations.rolled_back`
+//! for any the server refused (#0133). The parameter defaults to `true` on the
+//! wire so the CLI does not move.
 //!
 //! # A batch is one call per message
 //!

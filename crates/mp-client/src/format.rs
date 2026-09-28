@@ -62,6 +62,16 @@ pub fn drain_failed_line(error: &str) -> String {
     format!("  \u{26a0} mutations: drain failed: {error}")
 }
 
+/// The status line of a `mutations.rolled_back` event: a drain outside a tick
+/// rolled `failed` queued mutations back (#0133).
+///
+/// The words of [`sync_status_line`]'s rollback suffix, so a rollback reads
+/// the same whichever drain found it, and they carry the substring the TUI
+/// reads to show the line as a warning.
+pub fn mutations_rolled_back_line(failed: u64) -> String {
+    format!("{failed} mutation(s) failed and were rolled back (see the log)")
+}
+
 /// [`TAIL_LABEL`] for a tail phase, nothing for the head's.
 fn label(tail: bool) -> &'static str {
     if tail {

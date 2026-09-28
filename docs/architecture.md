@@ -253,6 +253,9 @@ A flag, move, archive or delete is one local write plus one server op, and both 
 `apply_move` / `apply_delete` / `apply_set_read` / `apply_set_flagged` commit the local write and the owed `ServerOp` (defined in `src/ops.rs`, the library home of the remote op) in one transaction, so a crash between the halves can never lose the op nor leave the store optimistically changed with nothing owed.
 `src/mutations.rs`'s `queue_*` functions call those `apply_*` and return the rows they touched for the list update; they moved out of the TUI in P5-U6, so the daemon's five message mutations and the TUI that asks for them run one pairing rather than two copies of one, and neither keeps a server thread or a rollback of its own, because the queue owns both.
 The background `drain` retires confirmed ops and rolls failed ones back under the engine lock, and it runs at the sync/fetch resume points beside `resume_outbox` (`pending_ops::resume_account`), draining nothing and building no backend when no row is owed.
+A `settle: false` mutation also asks its account's runtime for a drain (`AccountRuntime::request_drain`), and the runtime's drainer (`src/daemon/runtime/drainer.rs`, #0133) runs `resume_outbox` and then `resume_account` once that account's requests have been quiet for `DRAIN_DEBOUNCE` (1.5 s), without a sync: before it, only a tick drained the queue, and nothing scheduled a tick after a local mutation, so an archive stayed local until a manual sync or unrelated new mail.
+The drain and a tick hold the same runtime turn, so a drain requested during a tick waits for it and then drains what arrived after the tick's tail read the queue.
+A drain that rolled ops back publishes `mutations.rolled_back` rather than a `sync.completed`, and every drain that ran publishes the mailbox counts that moved.
 Replay is exactly-once for the local half because the drain runs only the server op and never re-applies the local change, and it converges a crash-replayed not-found rather than failing it.
 The CLI (`mp archive`, `mp delete`) enqueues through the same `apply_*` and then runs the op synchronously with `pending_ops::run_and_settle`, keeping its blocking UX: a success retires the row, a refusal rolls the local half back and returns the error verbatim, so a not-found stays byte-identical to the pre-queue message.
 The synchronous settle deliberately does *not* converge a not-found, because a CLI invocation runs the op once in the process that enqueued it and so is never a crash replay.
@@ -449,7 +452,8 @@ The protocol boundary stays absolute: no SMTP, IMAP, MIME or Graph code in `app/
 - Account state proxy pattern.
 `App` holds a `Vec<AccountState>` plus top-level proxy fields (mailboxes, list index) that mirror the active account, with `save_to_account()` and `load_from_account()` syncing on switch.
 This avoids routing every key handler through indirect access.
-- Mutations are optimistic and stay so: the daemon commits the row change and the owed server op in one transaction and lets the next sync tick drain it, which is what `settle: false` on the five message mutations means and why a thousand-row selection costs no network (#0039, P5-U6).
+- Mutations are optimistic and stay so: the daemon commits the row change and the owed server op in one transaction and answers, which is what `settle: false` on the five message mutations means and why a thousand-row selection costs no network on the keystroke (#0039, P5-U6).
+The runtime drains the op once the account's mutations go quiet for 1.5 s, one drain for the whole selection (#0133), and a `mutations.rolled_back` event brings back any row the server refused.
 
 ### The session thread
 
@@ -577,7 +581,7 @@ It is a full walk of the file, so it runs once per file per process, not once pe
 - **Queued mutations.**
 A mutation enqueues into the durable `pending_ops` queue and applies locally at once, spawning no background job.
 Nothing defers a fetch or sync behind it any more: #0039 retired the mutation-count gate and the "Quick sync queued (N ops pending)" stacking it needed, and #0076 removed the vestigial always-zero field it left behind.
-The owed server op is drained at the next sync/fetch resume point.
+The owed server op is drained by the account runtime's debounced drain 1.5 s after the account's last mutation (#0133), or at the next sync/fetch resume point if one comes first.
 
 ## Data and config layout
 

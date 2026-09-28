@@ -125,6 +125,21 @@ fn apply_contacts_rebuild(
     app.set_status(format!("Contacts refreshed ({contacts})"));
 }
 
+/// A drain outside a tick rolled `failed` of `account_index`'s queued
+/// mutations back (#0133): the warning a tick's rollback suffix earns, and the
+/// refresh a tick owes, so the rows it put back reappear.
+pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
+    let prefix = match app.accounts.get(account_index) {
+        Some(acct) if app.accounts.len() > 1 => format!("{}: ", acct.account_config.name),
+        _ => String::new(),
+    };
+    app.set_status_level(
+        format!("{prefix}{}", mp_client::format::mutations_rolled_back_line(failed)),
+        StatusLevel::Warning,
+    );
+    refresh_after_server_sync(app, account_index);
+}
+
 /// ` (name)` for a known account of a multi-account setup, empty otherwise,
 /// for status lines that would not otherwise say which account they are about.
 fn account_label(app: &App, account_index: usize) -> String {

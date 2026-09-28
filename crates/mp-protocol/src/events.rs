@@ -102,6 +102,28 @@ pub struct SyncCompleted {
     pub new_inbox_mail: Vec<Arrival>,
 }
 
+/// The `kind` a mutation-queue drain outside a tick travels as, when it rolled
+/// something back (#0133).
+pub const KIND_MUTATIONS_ROLLED_BACK: &str = "mutations.rolled_back";
+
+/// What a mutation-queue drain that ran outside a sync tick rolled back, as the
+/// `mutations.rolled_back` event carries it (#0133).
+///
+/// A kind of its own rather than a [`SyncCompleted`] with every sync counter at
+/// zero: a `sync.completed` moves the daemon's `last_sync` ledger and a
+/// client's sync-health mark, and a drain that ran no sync may not report an
+/// account whose sync is failing as one that synced. Published only when
+/// `failed` is above zero, because a drain whose ops all landed changed nothing
+/// a client holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationsRolledBack {
+    /// The account whose queue was drained.
+    pub account: String,
+    /// Queued mutations that failed and were rolled back locally, the number a
+    /// tick reports as [`SyncCompleted::failed_mutations`].
+    pub failed: u64,
+}
+
 /// The `kind` a completed configuration swap travels as.
 pub const KIND_CONFIG_CHANGED: &str = "config.changed";
 

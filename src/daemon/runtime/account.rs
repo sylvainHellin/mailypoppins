@@ -41,6 +41,23 @@
 //! reports `Quick`, because reporting the kind it asked for would claim a full
 //! pass that never ran. The join lasts exactly as long as the run.
 //!
+//! ## A drain outside a tick (#0133)
+//!
+//! [`AccountRuntime::drain`] is the tick's drain without its body: the outbox
+//! hook and then the mutation hook, entered as [`Phase::DrainOutbox`] and
+//! [`Phase::DrainMutations`]. It is what the debounced drainer
+//! ([`super::drainer`]) runs after a `settle: false` mutation, which queued an
+//! op and touched no server, and which no tick would otherwise drain until a
+//! manual sync or unrelated new mail.
+//!
+//! A tick's run and a drain take the same **turn**, an async mutex held across
+//! the whole of either, so neither ever runs beside the other and the shared
+//! [`TickReport`] is never written by two of them at once. A drain that finds a
+//! tick running waits for it and then drains, rather than skipping: an op
+//! queued after the tick's tail drain read the queue would otherwise wait for
+//! the next tick. A drain is not a tick and nothing joins it; a tick that
+//! arrives during one waits for its turn and then runs its own body.
+//!
 //! ## Why the production body calls `run_sync` and not `run_sync_guarded_at`
 //!
 //! The guard exists to make sure exactly one engine ingests an account, and a
@@ -97,7 +114,8 @@ pub enum TickKind {
     Full,
 }
 
-/// One of the five slots a tick enters, in order.
+/// One of the five slots a tick enters, in order, or one of the two a drain
+/// outside a tick enters (#0133).
 ///
 /// A drain is two slots, not one, because "the outbox goes first and the
 /// mutation queue second" is the invariant and a single symbol per drain would
@@ -114,14 +132,20 @@ pub enum Phase {
     TailOutbox,
     /// The tail drain's mutation-queue half.
     TailMutations,
+    /// The outbox half of a drain outside a tick ([`AccountRuntime::drain`]).
+    DrainOutbox,
+    /// The mutation-queue half of a drain outside a tick.
+    DrainMutations,
 }
 
 impl Phase {
     /// The name this slot travels under in an `operation.progress` report.
     ///
-    /// The five names are wire surface (P4-U10): `mp sync` labels a drain
-    /// report line ` (after sync)` when the phase it came from is one of the
-    /// tail's, and derives that from this string and nothing else.
+    /// The five names of a tick's slots are wire surface (P4-U10): `mp sync`
+    /// labels a drain report line ` (after sync)` when the phase it came from
+    /// is one of the tail's, and derives that from this string and nothing
+    /// else. The two drain names never travel: a drain outside a tick is no
+    /// operation and reports no progress, so they only name the slot in a log.
     pub fn as_str(self) -> &'static str {
         match self {
             Phase::HeadOutbox => "head_outbox",
@@ -129,6 +153,8 @@ impl Phase {
             Phase::Body => "body",
             Phase::TailOutbox => "tail_outbox",
             Phase::TailMutations => "tail_mutations",
+            Phase::DrainOutbox => "drain_outbox",
+            Phase::DrainMutations => "drain_mutations",
         }
     }
 
@@ -168,12 +194,26 @@ pub struct TickOutcome {
     pub sync: Option<SyncCompleted>,
 }
 
+/// What one [`AccountRuntime::drain`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DrainOutcome {
+    /// Whether the drain ran at all: `false` on a blocked or retired runtime,
+    /// which entered no slot.
+    pub ran: bool,
+    /// The two hooks' status suffixes, the outbox's then the mutation queue's.
+    pub status: String,
+    /// Mutations the drain rolled back. Always zero for a runtime built with
+    /// injected hooks, exactly as a tick's count is.
+    pub failed_mutations: u64,
+}
+
 /// What a hook is told about the slot it is filling.
 #[derive(Clone, Debug)]
 pub struct TickContext {
     /// The account this tick belongs to.
     pub account: String,
-    /// The kind of tick that is running.
+    /// The kind of tick that is running. A drain outside a tick has no kind
+    /// and says [`TickKind::Quick`], which no drain hook reads.
     pub kind: TickKind,
     /// Which of the five slots this call is.
     pub phase: Phase,
@@ -259,6 +299,13 @@ pub struct AccountRuntime {
     /// `Some` while a tick is running: its receiver resolves to that tick's
     /// outcome, which is what a joiner returns.
     running: Mutex<Option<watch::Receiver<Option<TickOutcome>>>>,
+    /// The engine turn a tick's run and a drain both hold for their whole
+    /// length, so neither runs beside the other (#0133).
+    turn: tokio::sync::Mutex<()>,
+    /// Bumped by [`AccountRuntime::request_drain`], read by the drainer. A
+    /// counter rather than a unit so a receiver created after the first
+    /// request can still tell it was made.
+    drain_requests: watch::Sender<u64>,
     /// Where the production hooks leave the engine's result. Empty for a
     /// runtime built with injected hooks, which report zeros.
     report: TickReport,
@@ -350,6 +397,8 @@ impl AccountRuntime {
             body_deadline: (cfg.imap.body_fetch_deadline_secs > 0)
                 .then(|| Duration::from_secs(cfg.imap.body_fetch_deadline_secs)),
             running: Mutex::new(None),
+            turn: tokio::sync::Mutex::new(()),
+            drain_requests: watch::channel(0).0,
             report: TickReport::default(),
         })
     }
@@ -370,6 +419,35 @@ impl AccountRuntime {
         self.retired.subscribe()
     }
 
+    /// Ask for a drain of the outbox and the mutation queue soon (#0133).
+    ///
+    /// What a `settle: false` mutation calls once its row change and owed op
+    /// are committed. It only records the request and returns, so the
+    /// keystroke that caused it stays network-free; the drainer spawned for
+    /// this runtime runs the drain once the requests stop for
+    /// [`super::drainer::DRAIN_DEBOUNCE`]. A no-op on a blocked or retired
+    /// runtime, which has no engine lock to drain under.
+    pub fn request_drain(&self) {
+        if self.readiness != Readiness::Ready || *self.retired.borrow() {
+            return;
+        }
+        self.drain_requests
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    /// A receiver that changes on every [`AccountRuntime::request_drain`], and
+    /// closes when the runtime is dropped: what the drainer waits on.
+    ///
+    /// A request made before this was called is not lost: the receiver is
+    /// marked changed when any request has ever been made.
+    pub fn drain_requests(&self) -> watch::Receiver<u64> {
+        let mut receiver = self.drain_requests.subscribe();
+        if *receiver.borrow() != 0 {
+            receiver.mark_changed();
+        }
+        receiver
+    }
+
     /// Take this runtime out of service ahead of its drop: refuse every tick
     /// from here on, wait up to `bound` for the one running to finish, then
     /// release the engine lock.
@@ -381,9 +459,10 @@ impl AccountRuntime {
     /// would still be held when the replacement asks, leaving it blocked for
     /// good (readiness is fixed at start).
     ///
-    /// `false` when the running tick outlived `bound`; the lock then stays
-    /// with that tick and comes free when its last clone drops.
+    /// `false` when the running tick, or a drain in flight, outlived `bound`;
+    /// the lock then stays with it and comes free when its last clone drops.
     pub async fn retire(&self, bound: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + bound;
         // Under the tick's own lock, so no `tick()` can take the run slot
         // between the flag and the capture of the run in flight.
         let running = {
@@ -391,19 +470,32 @@ impl AccountRuntime {
             self.retired.send_replace(true);
             running.clone()
         };
+        let overran = || {
+            warn!(
+                "[daemon] {}'s tick or drain was still running after {}s; its engine lock \
+                 is released when it ends",
+                self.account,
+                bound.as_secs()
+            );
+            false
+        };
         if let Some(mut receiver) = running {
             // A closed channel is a runner that ended without reporting, which
             // is over just the same.
-            let finished = tokio::time::timeout(bound, receiver.wait_for(Option::is_some)).await;
+            let finished =
+                tokio::time::timeout_at(deadline, receiver.wait_for(Option::is_some)).await;
             if finished.is_err() {
-                warn!(
-                    "[daemon] {}'s tick was still running after {}s; its engine lock is \
-                     released when the tick ends",
-                    self.account,
-                    bound.as_secs()
-                );
-                return false;
+                return overran();
             }
+        }
+        // A drain holds the turn without the run slot (#0133), so it is waited
+        // out here. Anything that takes the turn after this sees the flag and
+        // refuses, so the turn is released as soon as it is had.
+        if tokio::time::timeout_at(deadline, self.turn.lock())
+            .await
+            .is_err()
+        {
+            return overran();
         }
         drop(lock(&self.engine_lock).take());
         true
@@ -496,12 +588,66 @@ impl AccountRuntime {
             Slot::Run(sender) => sender,
         };
 
-        let outcome = self.run_tick(kind).await;
+        let outcome = {
+            // A drain in flight holds the turn; this run waits for it (#0133).
+            let _turn = self.turn.lock().await;
+            if *self.retired.borrow() {
+                // Retired while it waited: the engine lock is about to go.
+                debug!("[daemon] {} dropped a {kind:?} tick: retired", self.account);
+                TickOutcome {
+                    kind,
+                    phases: Vec::new(),
+                    joined: false,
+                    blocked: true,
+                    body_deadline: self.body_deadline,
+                    status: String::new(),
+                    error: None,
+                    sync: None,
+                }
+            } else {
+                self.run_tick(kind).await
+            }
+        };
         // Cleared first: the next `tick()` after this one returns must start a
         // fresh body rather than join a run that is over.
         *lock(&self.running) = None;
         let _ = sender.send(Some(outcome.clone()));
         outcome
+    }
+
+    /// Drain the outbox and then the mutation queue, outside any tick (#0133).
+    ///
+    /// The tick's drain without its body, through the same two hooks and under
+    /// the same turn, so it waits for a tick in flight rather than running
+    /// beside it. It runs no sync. A blocked runtime refuses at once, and a
+    /// retired one refuses once it has the turn; neither enters a slot, and a
+    /// queued op they leave stays queued for the next tick.
+    pub async fn drain(&self) -> DrainOutcome {
+        if self.readiness != Readiness::Ready {
+            debug!("[daemon] {} refused a drain: blocked", self.account);
+            return DrainOutcome::default();
+        }
+        let _turn = self.turn.lock().await;
+        if *self.retired.borrow() {
+            debug!("[daemon] {} refused a drain: retired", self.account);
+            return DrainOutcome::default();
+        }
+        self.report.reset();
+        let context = |phase: Phase| TickContext {
+            account: self.account.clone(),
+            kind: TickKind::Quick,
+            phase,
+            body_deadline: self.body_deadline,
+        };
+        // The tick's order, for the tick's reason: the outbox first.
+        let outbox = (self.hooks.outbox)(context(Phase::DrainOutbox)).await;
+        let mutations = (self.hooks.mutations)(context(Phase::DrainMutations)).await;
+        let (_, failed_mutations) = self.report.take();
+        DrainOutcome {
+            ran: true,
+            status: format!("{outbox}{mutations}"),
+            failed_mutations,
+        }
     }
 
     /// The tick itself: [`run_tick_with_drains`] over the installed hooks.
@@ -853,6 +999,57 @@ mod tests {
             .expect("a blocked runtime still reads");
         assert_eq!(one, 1);
         drop(holder);
+    }
+
+    /// A drain outside a tick enters the two drain slots, outbox first, runs no
+    /// body, and reports what its mutation drain rolled back.
+    #[tokio::test]
+    async fn a_drain_enters_its_two_slots_and_reports_its_rollbacks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        let entered = Arc::new(Mutex::new(Vec::new()));
+        let record = |entered: &Arc<Mutex<Vec<Phase>>>| -> DrainHook {
+            let entered = Arc::clone(entered);
+            Arc::new(move |ctx| {
+                lock(&entered).push(ctx.phase);
+                async { String::new() }.boxed()
+            })
+        };
+        let rolled_back = {
+            let entered = Arc::clone(&entered);
+            let report = report.clone();
+            Arc::new(move |ctx: TickContext| {
+                lock(&entered).push(ctx.phase);
+                // What the production mutation hook does with a rollback.
+                report.failed_mutations.fetch_add(2, Ordering::SeqCst);
+                async { "; 2 mutation(s) failed".to_string() }.boxed()
+            }) as DrainHook
+        };
+        let hooks = TickHooks {
+            outbox: record(&entered),
+            mutations: rolled_back,
+            body: Arc::new(|_ctx| async { panic!("a drain runs no sync") }.boxed()),
+        };
+        let mut runtime =
+            AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 0), 1, hooks)
+                .expect("a free lock");
+        runtime.report = report;
+
+        let outcome = runtime.drain().await;
+        assert_eq!(
+            outcome,
+            DrainOutcome {
+                ran: true,
+                status: "; 2 mutation(s) failed".to_string(),
+                failed_mutations: 2,
+            }
+        );
+        assert_eq!(
+            *lock(&entered),
+            vec![Phase::DrainOutbox, Phase::DrainMutations]
+        );
+        // The count is the drain's alone: the next one starts from zero.
+        assert_eq!(runtime.drain().await.failed_mutations, 2);
     }
 
     /// Dropping the runtime frees the lock for the next engine.

@@ -2158,3 +2158,11 @@ The parity rows compare the build under test byte for byte with the oracle built
 Moving `font_size` from `12pt` to `16px` (#0127) therefore broke `mp config show` and every draft preview row, whose settings block prints the font.
 The fix is the one the ports already use in `tests/support/admin_fixture.rs`: write the current default into the fixture's `config.toml`, which leaves the build under test reading the same value and takes the deliberate change out of the comparison.
 `pin_font_size` in `tests/support/parity.rs` does it per slice rather than in `read_fixture::CONFIG`, because several suites prepend their own `[email]` table for `send_hold_secs` and TOML refuses a second one.
+
+## A queued mutation waits for whatever drains the queue, so something has to schedule that
+
+The TUI's five mutations send `settle: false`: the daemon commits the row change and a `pending_ops` row in one transaction and answers without touching the server.
+Until #0133 the only thing that drained that queue was a sync tick (`run_tick_with_drains`: drain, sync, drain), and nothing scheduled a tick after a local mutation: ticks came from a manual `sync.quick`/`sync.full`, the TUI's startup auto-fetch, or the watcher seeing INBOX change on the server, and a queued archive has not changed the server, so the watcher never fired for it.
+An archive therefore stayed local, on screen as done, until the user synced by hand or unrelated mail arrived; nothing failed and nothing logged, which is why it went unnoticed.
+The fix is a trailing-debounced drain on the account runtime (`src/daemon/runtime/drainer.rs`), 1.5 s after the account's last `settle: false` call, sharing the tick's turn so it never runs beside one.
+When a change is made durable by queueing it, ask what drains the queue and what triggers that, and check that the trigger fires for this change: "the next tick drains it" is only true if a next tick is coming.

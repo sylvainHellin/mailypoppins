@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **An archive, delete, move or flag change made in the TUI reaches the server on its own now (#0133).** The daemon queued the change and waited for a sync that nothing scheduled, so it stayed local until you synced by hand or new mail happened to arrive. It now sends the queued changes 1.5 s after your last one, as one batch for a whole selection, without running a sync; a change the server refuses is rolled back, the rows come back, and the status line says how many.
+
 ### Changed
 - **A client that connects to the daemon now sees each account's real sync health.** The bootstrap snapshot reported `unknown` for every account whatever the last pass did; it now carries the verdict of the last completed pass, and `sync.completed` keeps it current. The snapshot's pending holds, running operations and failing diagnostics are typed in `mp-protocol` with the same shapes `send.hold_status`, `operation.status` and `diagnostic.health` answer, so a GUI decodes one type per shape. Nothing on the wire changes apart from the `sync_health` value.
 

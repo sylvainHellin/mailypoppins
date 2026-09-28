@@ -47,8 +47,9 @@ use serde_json::json;
 
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
-    Arrival, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
-    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    Arrival, MutationsRolledBack, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN,
+    KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
+    KIND_MUTATIONS_ROLLED_BACK, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
     KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
@@ -333,6 +334,7 @@ impl App {
     fn apply_admitted(&mut self, event: &EventEnvelope) -> Applied {
         match event.kind.as_str() {
             KIND_SYNC_COMPLETED => self.apply_tick(event),
+            KIND_MUTATIONS_ROLLED_BACK => self.apply_rollback(event),
             KIND_OPERATION_FINISHED => self.apply_finished(event),
             KIND_SEND_HOLD_STARTED
             | KIND_SEND_HOLD_TICK
@@ -420,6 +422,24 @@ impl App {
         };
         super::bg::land_sync(self, index, result, arrivals_as_meta(&arrivals));
         Applied::NewMail(notified)
+    }
+
+    /// A drain outside a tick rolled queued mutations back (#0133): the
+    /// warning and the reload a tick's `failed_mutations` earns, without the
+    /// sync-health mark, because no sync ran.
+    fn apply_rollback(&mut self, event: &EventEnvelope) -> Applied {
+        let outcome: MutationsRolledBack = match serde_json::from_value(event.payload.clone()) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                log::warn!("[events] a mutations.rolled_back did not decode: {e}");
+                return Applied::Ignored;
+            }
+        };
+        let Some(index) = self.account_index(&outcome.account) else {
+            return Applied::Ignored;
+        };
+        super::bg::land_rollback(self, index, outcome.failed);
+        Applied::Rows
     }
 
     /// An operation finished. This client's own land where its poll's answer

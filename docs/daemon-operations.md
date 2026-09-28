@@ -128,7 +128,7 @@ The table is what routes and through what:
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 | `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
 | `mp`'s mailbox list, sidebar counts and preview body | `message.list` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
-| `mp`'s five message mutations (`a`, `d`, `u`, `*`, the quick move) | `message.archive`, `message.delete`, `message.set_read`, `message.set_flag`, `message.move`, all with `settle: false` | P5-U6 |
+| `mp`'s five message mutations (`a`, `d`, `u`, `*`, the quick move) | `message.archive`, `message.delete`, `message.set_read`, `message.set_flag`, `message.move`, all with `settle: false`; the daemon drains the queued ops 1.5 s after the account's last one (#0133) | P5-U6 |
 | `mp`'s draft keys (`cA`, `cD`, `d` on a drafts row, `e`, `ce`) | `draft.approve`, `draft.demote`, `draft.discard`, `draft.path` | P5-U6 |
 | `mp`'s two sync keys and the startup auto-fetch | `sync.quick` / `sync.full`, then `operation.status` polled to a terminal state | P5-U6 |
 | `mp`'s `cX` and its RSVP key | `send.approved`, `calendar.rsvp`, the same wait | P5-U6 |
@@ -360,6 +360,21 @@ A watcher belongs to the runtime it was spawned for, never to the account's name
 The old watcher's IDLE round in flight runs on its own OS thread (`off_thread` in `src/daemon/runtime/account.rs`) and cannot be cancelled there, so its connection stays open until that round ends, up to the 300-second `IDLE_ROUND_SECS`; its outcome goes nowhere.
 This is a watch and not a scheduler - it reacts to a server saying something changed - and a periodic tick that keeps a store fresh with no client anywhere is **not built**: the plan put it in Phase 5/6 and neither phase built one, so it is a `BACKLOG.md` item rather than a phase's.
 
+### The drainer
+
+A ready runtime with a server also runs a drainer (`src/daemon/runtime/drainer.rs`, #0133), spawned beside the watcher and bound to the runtime the same way.
+A `settle: false` mutation, which is every mutation the TUI makes, commits its row change and the op it owes and then calls `AccountRuntime::request_drain`, which only records the request; the RPC answer does not wait for anything.
+Once an account's requests have been quiet for `DRAIN_DEBOUNCE` (1.5 s, a constant and not a config key) the drainer runs `AccountRuntime::drain`: the outbox, then the mutation queue, through the same hooks a tick's drains use, and no sync.
+The debounce trails, so a thousand-row selection, one call per row, is one drain after the last row.
+
+A drain and a tick's run hold the same runtime turn, so they never run side by side: a drain requested during a tick waits for it and then drains, which is what catches an op queued after the tick's tail drain read the queue.
+A drain the engine lock refuses (another pass in this process holds the gate) drains nothing and loses nothing: the row stays queued for the next tick.
+A retired runtime refuses the drain, and a blocked one gets no drainer at all.
+
+A drain that rolled ops back publishes `mutations.rolled_back` `{account, failed}`, which the TUI shows as the tick's rollback warning and answers with a reload of the account's rows; it is never a `sync.completed`, because that would move the `last_sync` ledger for a drain that ran no sync.
+Every drain that ran then publishes one count change per mailbox whose counts differ from the canonical state's, so the sidebar converges on what the mutations left.
+An op that fails and still has retries left stays queued with its backoff, and the next tick, or the next drain a later mutation asks for, retries it.
+
 ### The engine lock
 
 A ready runtime holds `<account_dir>/store.lock` for its whole lifetime, not for the length of one operation, which is what makes the daemon *the* engine for that account.
@@ -387,6 +402,7 @@ Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailb
 
 Nothing schedules a tick.
 A runtime holds its lock, serves reads, and ticks when its watcher sees the mailbox move or when something in the process asks it to; a periodic pass on a timer is the `BACKLOG.md` item above and no phase of the migration has built it.
+The queues do not wait for a tick any more: the drainer above empties them after an interactive mutation without one.
 
 ## The undo-send hold
 

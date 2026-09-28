@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 
 use mp_protocol::diagnostic::HealthCheck;
 use mp_protocol::events::{
-    Diagnostic, SyncCompleted, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SYNC_COMPLETED,
+    Diagnostic, MutationsRolledBack, SyncCompleted, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
+    KIND_MUTATIONS_ROLLED_BACK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::operation::OperationStatus;
 use mp_protocol::send::HoldStatus;
@@ -134,6 +135,13 @@ pub enum Change {
     /// travels as a non-coalescing [`Event::Lifecycle`](super::events::Event)
     /// and carries a payload the protocol crate owns.
     SyncCompleted(SyncCompleted),
+    /// A mutation-queue drain that ran outside a tick rolled mutations back
+    /// (#0133).
+    ///
+    /// A command outcome for the reason [`Change::SyncCompleted`] is one, and
+    /// a variant of its own rather than a zeroed `SyncCompleted` because that
+    /// one moves the `last_sync` ledger, and a drain ran no sync.
+    MutationsRolledBack(MutationsRolledBack),
 }
 
 impl Change {
@@ -148,6 +156,7 @@ impl Change {
             | Change::DraftRemoved { account, .. }
             | Change::OutboxCounts { account, .. } => account,
             Change::SyncCompleted(outcome) => &outcome.account,
+            Change::MutationsRolledBack(outcome) => &outcome.account,
         }
     }
 
@@ -161,6 +170,7 @@ impl Change {
             Change::DraftRemoved { .. } => "draft.removed",
             Change::OutboxCounts { .. } => "outbox.counts_changed",
             Change::SyncCompleted(_) => KIND_SYNC_COMPLETED,
+            Change::MutationsRolledBack(_) => KIND_MUTATIONS_ROLLED_BACK,
         }
     }
 
@@ -215,6 +225,9 @@ impl Change {
             // changes, because a daemon must not die inside a fan-out.
             Change::SyncCompleted(outcome) => {
                 serde_json::to_value(outcome).unwrap_or_else(|_| json!({}))
+            }
+            Change::MutationsRolledBack(outcome) => {
+                json!({"account": outcome.account, "failed": outcome.failed})
             }
         }
     }

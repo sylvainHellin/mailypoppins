@@ -392,6 +392,7 @@ fn reduce(snapshot: &mut Value, change: &Change) {
         // A sync outcome reduces nothing into the snapshot, matching the
         // daemon's own reducer in `src/daemon/state/mod.rs`.
         Change::SyncCompleted(_) => {}
+        Change::MutationsRolledBack(_) => {}
     }
 }
 

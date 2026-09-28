@@ -600,6 +600,9 @@ pub async fn start_account(
             // blocked runtime does not watch: the engine holding the lock is
             // watching the same mailbox.
             if ready {
+                // The debounced drain after an interactive mutation (#0133),
+                // bound to this runtime for the watcher's reasons.
+                super::runtime::drainer::spawn(&runtime, Arc::clone(canonical), &cfg_for_watch);
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);
             }
             change

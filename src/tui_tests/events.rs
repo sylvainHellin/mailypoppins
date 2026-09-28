@@ -456,6 +456,43 @@ fn a_failed_tick_marks_the_account_it_belongs_to() {
     );
 }
 
+/// A drain outside a tick that rolled mutations back warns and reloads the
+/// open list, so the rows it put back reappear, and leaves the account's sync
+/// health alone, because no sync ran (#0133).
+#[test]
+fn a_rollback_outside_a_tick_warns_and_reloads_without_a_sync_verdict() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    watermarked(&mut app);
+    app.pending_actions.clear();
+    let account = app.accounts[0].account_config.name.clone();
+
+    let applied = app.apply_event(&envelope(
+        INSTANCE,
+        WATERMARK + 1,
+        "mutations.rolled_back",
+        json!({"account": account, "failed": 2}),
+    ));
+
+    assert_eq!(applied, Applied::Rows);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("2 mutation(s) failed and were rolled back (see the log)"),
+        "the wording of a tick's rollback suffix, from mp_client::format"
+    );
+    assert!(
+        app.pending_actions
+            .iter()
+            .any(|a| matches!(a, Action::LoadMailbox { .. })),
+        "the rolled-back rows come back through a reload of the open mailbox"
+    );
+    assert!(
+        !app.accounts[0].sync_health.is_failed(),
+        "a drain is not a sync and marks no sync outcome"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // (c) an operation finishes by event, not by poll
 // ---------------------------------------------------------------------------

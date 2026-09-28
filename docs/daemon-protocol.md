@@ -478,7 +478,9 @@ It is not spelled `mailbox` because that key already narrows a selector address 
 **`settle` decides whether the answer is the settled outcome or the queued one**, and it defaults to `true`.
 With `settle: true` the order of the four steps is the pre-daemon command's, and it is the whole safety property of the slice: resolve the account, resolve the message, **resolve the backend**, and only then commit the row change and drain the op it owes.
 An account with no credentials therefore refuses with the secret store's own sentence (`-32603` with `{account}`) and leaves the row exactly where it was, which is what preserves the blocking UX `mp archive` and `mp delete` have always had.
-With `settle: false` the daemon commits the row change and the owed server op in one transaction and answers, leaving the op for the next sync tick's drain (#0039), and resolves no credential at all: an interactive client has never waited for a server on a keystroke, and one that had to resolve credentials could not mutate an account whose password is not in the keyring yet.
+With `settle: false` the daemon commits the row change and the owed server op in one transaction and answers (#0039), and resolves no credential at all: an interactive client has never waited for a server on a keystroke, and one that had to resolve credentials could not mutate an account whose password is not in the keyring yet.
+The answer does not wait for the op, but the daemon does not leave it for a tick either: the account's runtime drains the outbox and the mutation queue once the account's `settle: false` calls have been quiet for 1.5 s, one drain for a whole burst, and a tick that comes first drains it instead (#0133).
+An op that drain rolls back is announced as `mutations.rolled_back`, below.
 
 **A message is addressed exactly as `message.get` addresses one**: `row_id` is the `id` a `message.list` row carries, `id` is `"<mailbox>/<uid>"`, `selector` is the grammar the user types, `mailbox` narrows a selector the way `--mailbox` does, and none or more than one is `-32602`.
 The refusals are that resolution's own sentences, ambiguity included, so a routed command reports what the pre-daemon one reported.
@@ -958,6 +960,11 @@ A name a client has not seen before was `ok` as far as the daemon is concerned, 
 
 `operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
 `sync.completed` is the third lifecycle kind, described below.
+
+`mutations.rolled_back` says that a drain of the mutation queue that ran outside a sync tick rolled queued mutations back, with a payload of `{account, failed}`, `failed` being the count that the drain rolled back (#0133).
+It is the drain's counterpart of a tick's `failed_mutations`, published only when `failed` is above zero, and a client answers it the way it answers that count: a warning and a re-read of the account's rows, which is where the rolled-back rows come back.
+It is its own kind rather than a `sync.completed` with every counter at zero, because a `sync.completed` moves the `last_sync` ledger behind `sync_health` and a drain ran no sync: an account whose sync is failing would read as synced.
+It is a lifecycle event, reduces into no snapshot, and merges with nothing, since two rollbacks are two counts.
 `config.changed` and `config.invalid` are the fourth and fifth: `config.changed` carries `{added, updated, removed, config_revision}` and closes every successful swap, `config.invalid` carries `{path, line, message}` and is the diagnostic a rejected candidate publishes.
 Both are lifecycle events, so two swaps never coalesce into one: the lists are the whole payload, and merging them would hide the first swap's from a client that was slow to read.
 An account removed by a swap travels as `state.remove` of `account:<name>` and needs no kind of its own.
@@ -1157,6 +1164,10 @@ P5-U8 added one field and turned one thing on.
 It is `default` on the way in, so a payload written by a daemon that predates it decodes as a tick that notified about nothing.
 `sync.quick` and `sync.full` keep their sibling `new_inbox_mail`, which now reports the same list whether the pass went through the guarded path or through the runtime's tick.
 `crates/mp-protocol/fixtures/notification.sync_completed.json` is the fixture for it, and `tests/daemon_sync_outcome.rs`'s payload key list is fourteen names.
+
+#0133 added one lifecycle kind, additively: `mutations.rolled_back` `{account, failed}`, typed as `mp_protocol::events::MutationsRolledBack`, published when the debounced drain a `settle: false` mutation schedules rolls queued mutations back.
+No method, parameter or existing payload moved, and a client that does not know the kind ignores it and learns about the rollback from the next tick's reload.
+`crates/mp-protocol/fixtures/notification.mutations_rolled_back.json` is its fixture.
 
 P5-U10 added three queries, all additive; no field was renamed, none was dropped, and no command's output moved.
 `calendar.events` `{account}` -> `{account, events}` answers one account's agenda: the rows are already deduped by `(UID, RECURRENCE-ID)`, folded with the account's stored `METHOD:REPLY` and `METHOD:CANCEL` rows, and sorted by start instant with undated events last, because every one of those is a fold over the account's *other* rows and is exactly what a client with no store cannot do.

@@ -37,7 +37,9 @@
 
 use std::collections::VecDeque;
 
-use mp_protocol::events::{KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_SYNC_COMPLETED};
+use mp_protocol::events::{
+    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_SYNC_COMPLETED,
+};
 use serde_json::{json, Value};
 
 use crate::daemon::dispatch::ResourceId;
@@ -161,6 +163,12 @@ impl Event {
             // construction.
             Change::SyncCompleted(_) => Event::Lifecycle {
                 kind: KIND_SYNC_COMPLETED,
+                payload: change.payload(),
+            },
+            // Lifecycle for the same reason: two rollbacks are two facts, and
+            // merging them would under-report the first one's count.
+            Change::MutationsRolledBack(_) => Event::Lifecycle {
+                kind: KIND_MUTATIONS_ROLLED_BACK,
                 payload: change.payload(),
             },
         }
