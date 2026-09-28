@@ -4,6 +4,9 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **The daemon syncs each account on its own every fifteen minutes (#0134).** It already synced when new mail reached the inbox, and only then, so a message moved or read in another client, a change in any other folder, a queued change waiting to be retried, or a connection the server had quietly dropped stayed stale until you synced by hand. Now an account that has gone `sync_interval_secs` without a sync gets a quick one, and any sync resets the wait, so an account you sync often is not synced twice. Set `[accounts.imap] sync_interval_secs` to change the interval (default `900`, minimum `60`) or to `0` to turn it off; a config reload applies it. Microsoft Graph accounts are not synced on a schedule yet.
+
 ### Fixed
 - **An archive, delete, move or flag change made in the TUI reaches the server on its own now (#0133).** The daemon queued the change and waited for a sync that nothing scheduled, so it stayed local until you synced by hand or new mail happened to arrive. It now sends the queued changes 1.5 s after your last one, as one batch for a whole selection, without running a sync; a change the server refuses is rolled back, the rows come back, and the status line says how many. Changes left queued by a daemon restart go out within seconds of the daemon coming back, and a batch that collides with a send finishing on the same account is retried instead of waiting for the next sync.
 

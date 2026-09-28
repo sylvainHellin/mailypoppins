@@ -317,6 +317,11 @@ pub struct AccountRuntime {
     /// The engine turn a tick's run and a drain both hold for their whole
     /// length, so neither runs beside the other (#0133).
     turn: tokio::sync::Mutex<()>,
+    /// When the last tick this runtime ran finished, or when the runtime
+    /// started if none has: what the scheduler measures its interval from
+    /// (#0134). Set by the runner of every tick that ran a body, whatever
+    /// asked for it; a joiner, a refused tick and a drain leave it alone.
+    ticked: watch::Sender<tokio::time::Instant>,
     /// Bumped by [`AccountRuntime::request_drain`], read by the drainer. A
     /// counter rather than a unit so a receiver created after the first
     /// request can still tell it was made.
@@ -413,6 +418,7 @@ impl AccountRuntime {
                 .then(|| Duration::from_secs(cfg.imap.body_fetch_deadline_secs)),
             running: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
+            ticked: watch::channel(tokio::time::Instant::now()).0,
             drain_requests: watch::channel(0).0,
             report: TickReport::default(),
         })
@@ -432,6 +438,13 @@ impl AccountRuntime {
     /// table: what ends the account's watcher.
     pub fn retired(&self) -> watch::Receiver<bool> {
         self.retired.subscribe()
+    }
+
+    /// A receiver holding when the last tick finished (the runtime's start
+    /// until one has), which changes as each tick that ran a body finishes and
+    /// closes when the runtime is dropped: what the scheduler waits on (#0134).
+    pub fn completed_ticks(&self) -> watch::Receiver<tokio::time::Instant> {
+        self.ticked.subscribe()
     }
 
     /// Ask for a drain of the outbox and the mutation queue soon (#0133).
@@ -620,7 +633,12 @@ impl AccountRuntime {
                     sync: None,
                 }
             } else {
-                self.run_tick(kind).await
+                let outcome = self.run_tick(kind).await;
+                // Whatever asked for it: a manual sync, the watcher, a
+                // client's startup fetch or the scheduler all push the next
+                // scheduled tick back (#0134).
+                self.ticked.send_replace(tokio::time::Instant::now());
+                outcome
             }
         };
         // Cleared first: the next `tick()` after this one returns must start a

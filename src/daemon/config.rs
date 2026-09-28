@@ -345,6 +345,7 @@ pub fn effective_account(config: &GlobalConfig, account: &AccountConfig) -> Valu
             "accept_invalid_certs": account.imap.accept_invalid_certs,
             "fetch_concurrency": account.imap.fetch_concurrency,
             "body_fetch_deadline_secs": account.imap.body_fetch_deadline_secs,
+            "sync_interval_secs": account.imap.sync_interval_secs,
             "password": REDACTED,
         },
         "mailboxes": {
@@ -603,6 +604,9 @@ pub async fn start_account(
                 // The debounced drain after an interactive mutation (#0133),
                 // bound to this runtime for the watcher's reasons.
                 super::runtime::drainer::spawn(&runtime, Arc::clone(canonical), &cfg_for_watch);
+                // The periodic quick tick for what the watcher cannot hear
+                // (#0134), bound the same way again.
+                super::runtime::scheduler::spawn(&runtime, Arc::clone(canonical), &cfg_for_watch);
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);
             }
             change
@@ -752,6 +756,22 @@ mod tests {
         assert_eq!(plan.added, vec!["gamma".to_string()]);
         assert_eq!(plan.updated, vec!["beta".to_string()]);
         assert_eq!(plan.removed, vec!["alpha".to_string()]);
+    }
+
+    /// The scheduled sync interval is part of the effective account, so a
+    /// reload that changes it restarts that account's runtime, and with it the
+    /// scheduler (#0134).
+    #[test]
+    fn a_changed_sync_interval_updates_the_account() {
+        let previous = parse("[[accounts]]\nname = \"alpha\"\n");
+        let next = parse("[[accounts]]\nname = \"alpha\"\n\n[accounts.imap]\nsync_interval_secs = 0\n");
+        assert_eq!(
+            effective_account(&previous, &previous.accounts[0])["imap"]["sync_interval_secs"],
+            json!(900),
+            "the default"
+        );
+        let plan = Reconcile::between(&previous, &next);
+        assert_eq!(plan.updated, vec!["alpha".to_string()]);
     }
 
     /// A reformatted file is not a change.

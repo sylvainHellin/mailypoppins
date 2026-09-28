@@ -358,7 +358,19 @@ A round that sees the mailbox move runs one quick tick, which publishes `sync.co
 A blocked runtime does not watch: the engine holding the lock is watching the same mailbox.
 A watcher belongs to the runtime it was spawned for, never to the account's name, and stops the moment that runtime is retired or dropped, mid-round included, so after a swap that changes an account only the replacement's watcher triggers ticks.
 The old watcher's IDLE round in flight runs on its own OS thread (`off_thread` in `src/daemon/runtime/account.rs`) and cannot be cancelled there, so its connection stays open until that round ends, up to the 300-second `IDLE_ROUND_SECS`; its outcome goes nowhere.
-This is a watch and not a scheduler - it reacts to a server saying something changed - and a periodic tick that keeps a store fresh with no client anywhere is **not built**: the plan put it in Phase 5/6 and neither phase built one, so it is a `BACKLOG.md` item rather than a phase's.
+This is a watch and not a scheduler - it reacts to a server saying something changed, and it hears only INBOX - so the periodic tick below covers the rest.
+
+### The scheduler
+
+A ready runtime with an IMAP server also runs a scheduler (`src/daemon/runtime/scheduler.rs`, #0134), spawned beside the watcher and the drainer and bound to the runtime the same way.
+It runs one quick tick once the account has gone `[accounts.imap] sync_interval_secs` without one: 900 seconds by default, `0` turns it off, and a value under 60 is raised to 60.
+The interval is measured from the end of the last tick of any origin (a manual `mp sync`, a TUI sync key, a client's startup fetch, a watcher round, the scheduler itself), which the runtime records as each tick that ran a body finishes, so another tick pushes the scheduled one back; a drain is not a tick and moves nothing.
+The first scheduled tick is an interval after the runtime starts.
+It is what catches everything the watcher cannot hear: a change in any mailbox other than INBOX, a queued op or an outbox Sent copy waiting out its backoff, a body fetch the deadline cut short, an IDLE connection the server dropped silently, and an account with no client open at all.
+The scheduled tick goes through the same `tick_and_publish` as the watcher's, so it publishes `sync.completed` and the counts that moved exactly as a watcher tick does; it joins a tick already running, and it waits for a drain in flight through the runtime's turn.
+A blocked runtime, a local-only account and an interval of `0` get no scheduler, and neither does a Graph account, because the daemon tick has no Graph backend yet (`sync_once` refuses one) and a scheduled tick would report a failed sync every interval.
+Changing `sync_interval_secs` changes the effective account, so `config.reload` restarts that account's runtime and the scheduler comes back with the new interval.
+Accounts are not staggered: each runtime's clock starts when it comes up and ticks run on independent runtimes, so two accounts ticking in the same second contend for nothing.
 
 ### The drainer
 
@@ -375,7 +387,7 @@ A retired runtime refuses the drain, and a blocked one gets no drainer at all.
 
 A drain that rolled ops back publishes `mutations.rolled_back` `{account, failed}`, which the TUI shows as the tick's rollback warning and answers with a reload of the account's rows; it is never a `sync.completed`, because that would move the `last_sync` ledger for a drain that ran no sync.
 Every drain that ran then publishes one count change per mailbox whose counts differ from the canonical state's, so the sidebar converges on what the mutations left.
-An op that fails and still has retries left stays queued with its backoff, and the next tick, or the next drain a later mutation asks for, retries it.
+An op that fails and still has retries left stays queued with its backoff, and the next tick (at the latest the scheduled one), or the next drain a later mutation asks for, retries it.
 
 ### The engine lock
 
@@ -402,8 +414,7 @@ The body's error is carried on the outcome rather than propagated, because the t
 A second tick arriving while one runs joins it and reports the running tick's outcome rather than starting a second engine pass.
 Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailbox body budget, with `0` meaning unbounded; `mp sync`, the explicit recovery path, stays unbounded whatever the config says.
 
-Nothing schedules a tick.
-A runtime holds its lock, serves reads, and ticks when its watcher sees the mailbox move or when something in the process asks it to; a periodic pass on a timer is the `BACKLOG.md` item above and no phase of the migration has built it.
+A runtime ticks when its watcher sees the mailbox move, when a client asks, and when its scheduler finds it has gone `sync_interval_secs` without a tick (see the scheduler above).
 The queues do not wait for a tick any more: the drainer above empties them after an interactive mutation without one.
 
 ## The undo-send hold
@@ -537,7 +548,7 @@ It is what pins the backpressure cases in `tests/daemon_events.rs`, and its name
 
 `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME=<json>` commits one `sync.completed` outcome per element of a JSON array after **every** `state.bootstrap`, in array order, against the first configured account.
 A bare object is read as an array of one.
-Phase 3b schedules no tick, so nothing would otherwise publish an outcome and every assertion about one arriving over the socket would be vacuous.
+A test daemon runs no real sync (the scheduler's first tick is fifteen minutes away and needs a server), so nothing would otherwise publish an outcome and every assertion about one arriving over the socket would be vacuous.
 Each element's `account` is ignored and replaced by the configured name, and every other field travels verbatim, `severity` included, so a test can pin a severity no fake sync could produce.
 The outcomes are committed off the bootstrap's own path and after its revision was captured, so every one of them lands above the revision the bootstrap reported.
 Unset, empty, unparseable, or with no configured account it does nothing.

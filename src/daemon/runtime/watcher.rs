@@ -10,18 +10,23 @@
 //!
 //! It runs here now, once per account, beside the runtime that would do the
 //! ingest anyway. A round that sees the mailbox move runs one
-//! [`TickKind::Quick`] tick through [`tick_and_commit`], which is what
-//! publishes the `sync.completed` every subscribed client reads, arrivals
-//! included ([`mp_protocol::events::Arrival`]). The counts move with it, as one
-//! [`Change::MailboxCounts`] per mailbox whose totals actually changed, so a
-//! client's sidebar converges without asking.
+//! [`TickKind::Quick`] tick through [`tick_and_publish`], which commits the
+//! `sync.completed` every subscribed client reads, arrivals included
+//! ([`mp_protocol::events::Arrival`]). The counts move with it, as one
+//! [`crate::daemon::state::Change::MailboxCounts`] per mailbox whose totals
+//! differ from the canonical state's, so a client's sidebar converges without
+//! asking.
 //!
 //! # Why a watcher is not a scheduler
 //!
 //! This is the watch the TUI had and nothing more: it reacts to a server
-//! saying something changed. A periodic tick on an interval - the thing that
-//! keeps a store fresh with no client anywhere - is the Phase 6 scheduler's,
-//! and `BACKLOG.md` carries it.
+//! saying something changed, and it only hears INBOX (IDLE) or the Graph inbox
+//! id set. Everything it cannot hear - another mailbox, a flag changed on a
+//! Graph account, a queued op waiting out its backoff, a dead IDLE connection
+//! nobody noticed - is the scheduler's ([`super::scheduler`], #0134): a quick
+//! tick once the account has gone `imap.sync_interval_secs` without one. A
+//! tick the watcher runs pushes the scheduled one back, so the two never
+//! double up.
 //!
 //! # What ends a watch
 //!
@@ -38,7 +43,7 @@
 //! started would refuse itself, and the engine that does hold the lock is
 //! watching the same mailbox.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -47,10 +52,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::config::{AccountConfig, AuthMethod, ImapConfig};
-use crate::daemon::server::commit_tick;
-use crate::daemon::state::{CanonicalState, Change};
+use crate::daemon::state::CanonicalState;
 
 use super::account::{off_thread, AccountRuntime, TickKind};
+use super::publish::tick_and_publish;
 
 /// The mailbox an IDLE round watches, which is the one the TUI watched.
 const WATCHED_MAILBOX: &str = "INBOX";
@@ -185,7 +190,6 @@ async fn watch(
 ) {
     info!("[watcher] watching {} over {}", cfg.name, source.label());
     let mut failures: u32 = 0;
-    let mut counts: HashMap<String, (u64, u64)> = HashMap::new();
 
     loop {
         let round = tokio::select! {
@@ -199,7 +203,8 @@ async fn watch(
                     let Some(runtime) = runtime.upgrade() else {
                         break;
                     };
-                    tick(&runtime, &canonical, &cfg, &mut counts).await;
+                    info!("[watcher] {} changed; ticking", cfg.name);
+                    tick_and_publish(&runtime, &canonical, TickKind::Quick).await;
                 }
                 source.gap()
             }
@@ -271,62 +276,6 @@ async fn poll_graph(
     let changed = known.as_ref().is_some_and(|previous| *previous != ids);
     *known = Some(ids);
     Ok(changed)
-}
-
-/// Run one quick tick on this watcher's own runtime and publish what moved.
-async fn tick(
-    runtime: &AccountRuntime,
-    canonical: &Arc<CanonicalState>,
-    cfg: &AccountConfig,
-    counts: &mut HashMap<String, (u64, u64)>,
-) {
-    info!("[watcher] {} changed; ticking", cfg.name);
-    // `commit_tick` publishes the `sync.completed`, arrivals included; a
-    // blocked or joined tick carries no outcome and publishes nothing.
-    let outcome = commit_tick(runtime, canonical, TickKind::Quick).await;
-    if outcome.blocked {
-        return;
-    }
-    publish_counts(canonical, &cfg.name, counts).await;
-}
-
-/// Commit one [`Change::MailboxCounts`] per mailbox whose totals moved.
-///
-/// Per mailbox and only on a change, because the event coalesces by resource
-/// and a client answers each one with a `mailbox.list`: a tick that ingested
-/// into the inbox may not cost every other mailbox a round trip.
-async fn publish_counts(
-    canonical: &Arc<CanonicalState>,
-    account: &str,
-    previous: &mut HashMap<String, (u64, u64)>,
-) {
-    let name = account.to_string();
-    let read = tokio::task::spawn_blocking(move || {
-        let store = crate::store::Store::open(crate::config::store_path(&name))?;
-        crate::store::read::mailbox_read_counts(&store, &name)
-    })
-    .await;
-    let fresh = match read {
-        Ok(Ok(fresh)) => fresh,
-        Ok(Err(e)) => return warn!("[watcher] counting the mailboxes of {account}: {e:#}"),
-        Err(e) => return warn!("[watcher] the count task for {account} {e}"),
-    };
-    for (mailbox, counts) in fresh {
-        let pair = (counts.total as u64, counts.unread as u64);
-        if previous.get(&mailbox) == Some(&pair) {
-            continue;
-        }
-        previous.insert(mailbox.clone(), pair);
-        canonical.apply(Change::MailboxCounts {
-            account: account.to_string(),
-            mailbox,
-            total: pair.0,
-            unread: pair.1,
-            // What the sidebar prints beside the label, which is the total
-            // (`src/daemon/methods/mailbox.rs`).
-            badge: pair.0,
-        });
-    }
 }
 
 #[cfg(test)]

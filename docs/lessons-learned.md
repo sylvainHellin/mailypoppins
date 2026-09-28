@@ -2174,3 +2174,10 @@ The debounced drainer is the first caller that has to act on the difference: a c
 The runtime's `turn` does not cover every guarded pass in the process (the post-send outbox drain and a guarded `mp sync --mailbox` take the gate without it), so the refusal is reachable, and it was silent: the drain counted as clean.
 The fix is `resume_account_or_busy` returning `Resume::{NothingQueued, Busy, Drained}`, with a bounded, doubling retry on `Busy`; the old entry points fold it back into the `Option`.
 When an API collapses "nothing to do" and "could not do it" into one value, check every new caller that retries or schedules against it.
+
+## A schedule measured from the last tick needs a floor of its own
+
+The scheduler (#0134) waits until the last completed tick plus the interval, so that a manual sync or a watcher tick pushes the scheduled one back.
+Only a tick that ran a body moves that record: a refused one (a blocked or retiring runtime) moves nothing, and a scheduler that only read the record would find its deadline still in the past and fire again at once, forever.
+The scheduler therefore also remembers when it last fired and waits an interval from the later of the two.
+When a timer is re-armed from a fact that the fired action is supposed to update, check what happens when the action fails to update it.

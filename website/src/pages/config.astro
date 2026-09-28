@@ -51,6 +51,7 @@ port = 993
 username = ""               # Falls back to smtp.username if omitted
 fetch_concurrency = 4       # Mailboxes fetched in parallel per sync (1-8)
 body_fetch_deadline_secs = 30  # Per-mailbox download budget on a TUI sync (0 = unbounded)
+sync_interval_secs = 900    # Daemon syncs after this long without a sync (0 = never)
 # Password falls back to SMTP password if not set separately
 
 [mailboxes.inbox]
@@ -168,12 +169,23 @@ default_from = "your.name@example.com"`} />
         a sync that stopped early. <code>mp sync</code> ignores the budget and always
         downloads everything it owes.
       </p>
+      <p>
+        <code>sync_interval_secs</code> is how long the daemon lets the account go without
+        a sync before it runs a quick one on its own (default <code>900</code>, fifteen
+        minutes; <code>0</code> turns it off; values under <code>60</code> are raised to
+        <code>60</code>). The daemon already syncs when new mail reaches the inbox; this
+        catches what that cannot see, such as changes in other folders, retries of queued
+        changes, and an account with no window open. Any sync, whether you started it or
+        the daemon did, restarts the wait. It does not apply to Microsoft Graph accounts
+        yet.
+      </p>
       <ConfigExample code={`[imap]
 host = "imap.example.com"   # Falls back to smtp.host
 port = 993
 username = ""               # Falls back to smtp.username
 fetch_concurrency = 4       # Parallel mailbox fetches per sync (1-8)
-body_fetch_deadline_secs = 30  # Per-mailbox body download budget, seconds (0 = unbounded)`} />
+body_fetch_deadline_secs = 30  # Per-mailbox body download budget, seconds (0 = unbounded)
+sync_interval_secs = 900    # Seconds without a sync before the daemon runs one (0 = never)`} />
 
       <!-- Where data lives -->
       <h3 id="data-dir-section">Data directory (not configurable)</h3>

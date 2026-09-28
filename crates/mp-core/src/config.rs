@@ -247,6 +247,34 @@ pub struct ImapSettings {
     /// Clamped to [0, 600] at load.
     #[serde(default = "default_body_fetch_deadline_secs")]
     pub body_fetch_deadline_secs: u64,
+    /// How long the daemon lets this account go without a sync before it runs
+    /// one on its own (#0134): a quick tick, measured from the end of the last
+    /// tick of any origin, so a manual sync or one the watcher started pushes
+    /// the next scheduled one back.
+    ///
+    /// The watcher only hears INBOX (IMAP IDLE), so this is what picks up
+    /// changes in every other mailbox, retries queued work that backed off,
+    /// and keeps a store fresh with no client open. `0` disables it; a value
+    /// under [`MIN_SYNC_INTERVAL_SECS`] is raised to it
+    /// ([`ImapSettings::sync_interval`]). Per account because the tick is per
+    /// account, and changing it restarts only that account's runtime.
+    #[serde(default = "default_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+}
+
+/// The shortest scheduled sync interval, in seconds: a quick tick opens IMAP
+/// sessions to every configured mailbox, and a server that throttles
+/// connections should not be asked more often than once a minute.
+pub const MIN_SYNC_INTERVAL_SECS: u64 = 60;
+
+impl ImapSettings {
+    /// The scheduled sync interval, `None` when `sync_interval_secs` is `0`,
+    /// and never under [`MIN_SYNC_INTERVAL_SECS`].
+    pub fn sync_interval(&self) -> Option<std::time::Duration> {
+        (self.sync_interval_secs > 0).then(|| {
+            std::time::Duration::from_secs(self.sync_interval_secs.max(MIN_SYNC_INTERVAL_SECS))
+        })
+    }
 }
 
 /// As for [`SmtpSettings`]: an absent `[accounts.imap]` table and an empty one
@@ -260,6 +288,7 @@ impl Default for ImapSettings {
             accept_invalid_certs: false,
             fetch_concurrency: default_fetch_concurrency(),
             body_fetch_deadline_secs: default_body_fetch_deadline_secs(),
+            sync_interval_secs: default_sync_interval_secs(),
         }
     }
 }
@@ -280,6 +309,13 @@ fn default_fetch_concurrency() -> usize {
 /// that a mailbox that cannot does not hold the tick.
 fn default_body_fetch_deadline_secs() -> u64 {
     30
+}
+
+/// The default scheduled sync interval: fifteen minutes, often enough that a
+/// change the watcher cannot see is not a day old, rare enough to cost a
+/// server nothing it would notice.
+fn default_sync_interval_secs() -> u64 {
+    900
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1741,6 +1777,35 @@ name = "test"
 "#;
         let config: GlobalConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.theme, "tokyo-night");
+    }
+
+    /// The scheduled sync interval (#0134): fifteen minutes whether the
+    /// `[accounts.imap]` table is absent or omits the key, `0` disables it,
+    /// and a value under a minute is raised to one.
+    #[test]
+    fn test_sync_interval_defaults_disables_and_floors() {
+        use std::time::Duration;
+        let parse = |imap: &str| -> ImapSettings {
+            let config: GlobalConfig =
+                toml::from_str(&format!("[[accounts]]\nname = \"a\"\n{imap}")).unwrap();
+            config.accounts[0].imap.clone()
+        };
+        assert_eq!(parse("").sync_interval_secs, 900);
+        assert_eq!(parse("[accounts.imap]\nport = 993\n").sync_interval_secs, 900);
+        assert_eq!(ImapSettings::default().sync_interval_secs, 900);
+        assert_eq!(parse("").sync_interval(), Some(Duration::from_secs(900)));
+        assert_eq!(
+            parse("[accounts.imap]\nsync_interval_secs = 0\n").sync_interval(),
+            None
+        );
+        assert_eq!(
+            parse("[accounts.imap]\nsync_interval_secs = 5\n").sync_interval(),
+            Some(Duration::from_secs(MIN_SYNC_INTERVAL_SECS))
+        );
+        assert_eq!(
+            parse("[accounts.imap]\nsync_interval_secs = 3600\n").sync_interval(),
+            Some(Duration::from_secs(3600))
+        );
     }
 
     #[test]

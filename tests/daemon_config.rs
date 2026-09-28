@@ -373,13 +373,14 @@ const SMTP_KEYS: [&str; 5] = [
 ];
 
 /// The keys of an account's `imap` object.
-const IMAP_KEYS: [&str; 7] = [
+const IMAP_KEYS: [&str; 8] = [
     "accept_invalid_certs",
     "body_fetch_deadline_secs",
     "fetch_concurrency",
     "host",
     "password",
     "port",
+    "sync_interval_secs",
     "username",
 ];
 
@@ -419,6 +420,9 @@ const DEFAULT_FETCH_CONCURRENCY: u64 = 4;
 
 /// `default_body_fetch_deadline_secs`.
 const DEFAULT_BODY_FETCH_DEADLINE_SECS: u64 = 30;
+
+/// `default_sync_interval_secs` (#0134).
+const DEFAULT_SYNC_INTERVAL_SECS: u64 = 900;
 
 /// `default_send_hold_secs` (#0090).
 const DEFAULT_SEND_HOLD_SECS: u64 = 20;
@@ -1338,6 +1342,10 @@ async fn config_get_reports_the_effective_configuration_with_every_secret_redact
     assert_eq!(
         alpha["imap"]["body_fetch_deadline_secs"],
         json!(DEFAULT_BODY_FETCH_DEADLINE_SECS)
+    );
+    assert_eq!(
+        alpha["imap"]["sync_interval_secs"],
+        json!(DEFAULT_SYNC_INTERVAL_SECS)
     );
 
     assert_eq!(

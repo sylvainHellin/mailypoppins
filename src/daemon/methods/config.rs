@@ -464,7 +464,12 @@ fn account_block(account: &Value) -> Result<String, DomainError> {
         };
         out.push_str(&format!("\n[accounts.{table}]\n"));
         out.push_str(&strings(settings, &["host", "username"]));
-        for field in ["port", "fetch_concurrency", "body_fetch_deadline_secs"] {
+        for field in [
+            "port",
+            "fetch_concurrency",
+            "body_fetch_deadline_secs",
+            "sync_interval_secs",
+        ] {
             if let Some(number) = settings.get(field).and_then(Value::as_u64) {
                 out.push_str(&format!("{field} = {number}\n"));
             }

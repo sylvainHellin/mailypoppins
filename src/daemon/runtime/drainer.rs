@@ -25,7 +25,8 @@
 //! would move the `last_sync` ledger for a drain that ran no sync.
 //!
 //! Every drain that ran then commits one [`Change::MailboxCounts`] per mailbox
-//! whose counts differ from what the canonical state holds. The mutation itself
+//! whose counts differ from what the canonical state holds
+//! ([`super::publish::publish_changed_counts`]). The mutation itself
 //! publishes none, so this is where the sidebar of every client converges on
 //! what the queued mutations and any rollback left.
 //!
@@ -56,7 +57,7 @@
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use mp_protocol::events::MutationsRolledBack;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -229,7 +230,7 @@ fn finish(account: &str) {
 /// Commit what a drain that ran changed.
 async fn publish(canonical: &Arc<CanonicalState>, account: &str, outcome: &DrainOutcome) {
     commit_rollback(canonical, account, outcome.failed_mutations);
-    publish_changed_counts(canonical, account).await;
+    super::publish::publish_changed_counts(canonical, account).await;
 }
 
 /// Commit a [`Change::MutationsRolledBack`] when the drain rolled anything
@@ -240,57 +241,6 @@ fn commit_rollback(canonical: &CanonicalState, account: &str, failed: u64) {
             account: account.to_string(),
             failed,
         }));
-    }
-}
-
-/// Commit one [`Change::MailboxCounts`] per mailbox whose store counts differ
-/// from what `canonical` holds for it.
-///
-/// Compared against the canonical state rather than a memory of this task's
-/// own, because the watcher and a server fetch publish counts too, and a
-/// private memory would miss a mailbox that moved away and back between two
-/// drains.
-async fn publish_changed_counts(canonical: &Arc<CanonicalState>, account: &str) {
-    let name = account.to_string();
-    let read = tokio::task::spawn_blocking(move || {
-        let store = crate::store::Store::open(crate::config::store_path(&name))?;
-        crate::store::read::mailbox_read_counts(&store, &name)
-    })
-    .await;
-    let fresh = match read {
-        Ok(Ok(fresh)) => fresh,
-        Ok(Err(e)) => return warn!("[drainer] counting the mailboxes of {account}: {e:#}"),
-        Err(e) => return warn!("[drainer] the count task for {account} {e}"),
-    };
-    commit_changed_counts(
-        canonical,
-        account,
-        fresh
-            .into_iter()
-            .map(|(mailbox, counts)| (mailbox, (counts.total as u64, counts.unread as u64))),
-    );
-}
-
-/// The comparison and the commits of [`publish_changed_counts`], apart from
-/// the store read so a test can drive it.
-fn commit_changed_counts(
-    canonical: &CanonicalState,
-    account: &str,
-    fresh: impl IntoIterator<Item = (String, (u64, u64))>,
-) {
-    for (mailbox, pair) in fresh {
-        if canonical.mailbox_counts(account, &mailbox) == Some(pair) {
-            continue;
-        }
-        canonical.apply(Change::MailboxCounts {
-            account: account.to_string(),
-            mailbox,
-            total: pair.0,
-            unread: pair.1,
-            // What the sidebar prints beside the label, which is the total
-            // (`src/daemon/methods/mailbox.rs`).
-            badge: pair.0,
-        });
     }
 }
 
@@ -348,34 +298,6 @@ mod tests {
                     .collect(),
             }],
         )
-    }
-
-    /// Only a mailbox whose counts differ from the state's is committed, so a
-    /// drain that moved nothing publishes nothing.
-    #[test]
-    fn only_moved_counts_are_committed() {
-        let state = seeded_state();
-        let before = state.revision().get();
-        let fresh = || {
-            vec![
-                ("inbox".to_string(), (4, 1)),
-                ("archive".to_string(), (0, 0)),
-            ]
-        };
-        commit_changed_counts(&state, "alpha", fresh());
-        assert_eq!(
-            state.revision().get(),
-            before + 1,
-            "the archive was already 0/0"
-        );
-        assert_eq!(state.mailbox_counts("alpha", "inbox"), Some((4, 1)));
-
-        commit_changed_counts(&state, "alpha", fresh());
-        assert_eq!(
-            state.revision().get(),
-            before + 1,
-            "nothing moved the second time"
-        );
     }
 
     /// A drain that rolled mutations back tells every client, as a lifecycle

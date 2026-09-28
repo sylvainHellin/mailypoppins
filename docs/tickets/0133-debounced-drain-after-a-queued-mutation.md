@@ -40,7 +40,6 @@ The CLI path (`settle: true`, `run_and_settle`) is unchanged.
 
 ## Left open
 
-- An op that fails with retries left stays queued behind its backoff; nothing re-arms the drainer for it, so it is retried by the next tick or by the drain a later mutation asks for. The periodic tick (the `BACKLOG.md` scheduler item) is what closes this.
+- An op that fails with retries left stays queued behind its backoff; nothing re-arms the drainer for it, so it is retried by the next tick (at the latest the scheduled one, #0134) or by the drain a later mutation asks for.
 - A drain refused by the in-process engine gate for longer than its retry budget (about 95 s) waits for the next request or tick.
 - A refused *outbox* drain is not retried by the drainer: the holder is either the post-send outbox drain itself, which does that work, or a guarded sync, whose own drains or the next tick pick it up.
-- The watcher's own `publish_counts` still compares against a private map rather than the canonical state.

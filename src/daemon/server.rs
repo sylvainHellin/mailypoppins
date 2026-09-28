@@ -406,11 +406,13 @@ impl DaemonState {
     /// one carry no outcome and commit nothing: the first ran no engine, and
     /// the second is reporting a tick whose runner commits it once.
     ///
-    /// Nothing calls this on a schedule yet: the periodic tick is the Phase 5/6
-    /// scheduler's. Since P4-U10 `sync.quick` and `sync.full` reach the same
-    /// mechanism through [`tick_and_commit`], which is this method's body, held
-    /// apart so a dispatched method can call it without reaching back into the
-    /// state that owns the dispatcher.
+    /// The periodic tick does not come through here: the scheduler
+    /// (`runtime::scheduler`, #0134) holds its runtime and calls
+    /// [`commit_tick`] directly, as the watcher does. Since P4-U10
+    /// `sync.quick` and `sync.full` reach the same mechanism through
+    /// [`tick_and_commit`], which is this method's body, held apart so a
+    /// dispatched method can call it without reaching back into the state that
+    /// owns the dispatcher.
     pub async fn tick_account(&self, account: &str, kind: TickKind) -> Option<TickOutcome> {
         tick_and_commit(&self.runtimes, &self.canonical, account, kind).await
     }
