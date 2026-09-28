@@ -26,6 +26,7 @@ pub mod calendar;
 pub mod config;
 pub mod imap_query;
 pub mod invite;
+pub mod logfile;
 pub mod notify;
 pub mod oauth2;
 pub mod contacts;

@@ -2,12 +2,11 @@ use anyhow::{Context, Result};
 use colored::*;
 use log::debug;
 use serde::Deserialize;
-use simplelog::{format_description, CombinedLogger, ConfigBuilder, LevelFilter, WriteLogger};
+use simplelog::{format_description, ConfigBuilder, LevelFilter, WriteLogger};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 
 use crate::types::MailboxRole;
 
@@ -1288,8 +1287,9 @@ pub fn logs_dir() -> PathBuf {
 }
 
 /// Newest log file in `logs_dir()`, by filename. Daily files are named
-/// `mailypoppins-YYYY-MM-DD.log` (see `init_logging`), so lexicographic
-/// order equals date order. `None` when the directory is missing or
+/// `mailypoppins-YYYY-MM-DD.log`, and one rolled for size
+/// `mailypoppins-YYYY-MM-DDTHHMMSSmmm.log` (see [`crate::logfile`]), so
+/// lexicographic order equals date order. `None` when the directory is missing or
 /// contains no matching file.
 pub fn latest_log_file() -> Option<PathBuf> {
     let entries = fs::read_dir(logs_dir()).ok()?;
@@ -1299,7 +1299,7 @@ pub fn latest_log_file() -> Option<PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("mailypoppins-") && n.ends_with(".log"))
+                .map(crate::logfile::is_log_name)
                 .unwrap_or(false)
         })
         .max()
@@ -1485,7 +1485,9 @@ pub fn default_account(config: &GlobalConfig) -> Option<&AccountConfig> {
 // Logging (unchanged)
 // ---------------------------------------------------------------------------
 
-/// Initialize file-based logging to `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`.
+/// Initialize file-based logging to `<data_dir>/logs/mailypoppins-YYYY-MM-DD.log`,
+/// rolled and pruned by [`crate::logfile`] so the directory stays under
+/// [`crate::logfile::TOTAL_CAP_BYTES`].
 /// Non-fatal: prints a warning and continues if setup fails.
 pub fn init_logging() {
     let log_dir = logs_dir();
@@ -1499,20 +1501,13 @@ pub fn init_logging() {
         return;
     }
 
-    let filename = format!("mailypoppins-{}.log", Utc::now().format("%Y-%m-%d"));
-    let log_path = log_dir.join(filename);
-
-    let log_file = match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    let log_file = match crate::logfile::RotatingLog::open(&log_dir) {
         Ok(f) => f,
         Err(e) => {
             eprintln!(
-                "{} Could not open log file {}: {}",
+                "{} Could not open a log file in {}: {}",
                 "⚠".yellow(),
-                log_path.display(),
+                log_dir.display(),
                 e
             );
             return;
@@ -1529,12 +1524,16 @@ pub fn init_logging() {
     let _ = builder.set_time_offset_to_local();
     let log_config = builder.build();
 
-    if let Err(e) = CombinedLogger::init(vec![WriteLogger::new(
+    // `DEBUG` for this workspace's crates, `INFO` for a dependency: html5ever
+    // alone wrote gigabytes of `DEBUG` tree-builder trace.
+    let logger = crate::logfile::CrateLevels::new(*WriteLogger::new(
         LevelFilter::Debug,
         log_config,
         log_file,
-    )]) {
-        eprintln!("{} Could not initialize logger: {}", "⚠".yellow(), e);
+    ));
+    match log::set_boxed_logger(Box::new(logger)) {
+        Ok(()) => log::set_max_level(LevelFilter::Debug),
+        Err(e) => eprintln!("{} Could not initialize logger: {}", "⚠".yellow(), e),
     }
 }
 

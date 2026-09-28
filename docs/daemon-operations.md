@@ -447,6 +447,10 @@ Filter a startup with `rg '\[daemon\]' <data_dir>/logs/mailypoppins-*.log`.
 It is only where `mp daemon start` points a detached child's stdout and stderr, opened in append mode, so it holds whatever the process wrote outside the logging framework, a panic among them, and it is empty for a daemon started in the foreground.
 The exit-4 diagnostic prints both, since the reason is usually in the structured one and an early crash lands in the other.
 
+The directory is capped (`crates/mp-core/src/logfile.rs`): every process moves to a fresh file when the UTC date changes or its file reaches 20 MB (`mailypoppins-YYYY-MM-DDTHHMMSSmmm.log`, which sorts after the day's first file), and each time one opens a file the oldest dated files are deleted until the rest fit in 200 MB.
+`daemon.log` is emptied at the same moment once it is past 10 MB.
+Records below `INFO` are kept only for this workspace's own crates, since a dependency's `DEBUG` trace (html5ever's tree builder, one line per token of every rendered message) is what used to fill gigabytes.
+
 A line of the structured log is `2026-09-21 19:05:20.081 [INFO] [(thread) target: ]message`, the simplelog `WriteLogger` `crate::config::init_logging` installs; the thread id and the module path appear at `DEBUG` and below only, which is what that writer's level-dependent formatting produces.
 `src/timing.rs` is a producer of `[TIMING]` lines in that same file and not a second format.
 

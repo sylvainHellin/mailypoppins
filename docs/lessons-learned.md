@@ -2181,3 +2181,12 @@ The scheduler (#0134) waits until the last completed tick plus the interval, so 
 Only a tick that ran a body moves that record: a refused one (a blocked or retiring runtime) moves nothing, and a scheduler that only read the record would find its deadline still in the past and fire again at once, forever.
 The scheduler therefore also remembers when it last fired and waits an interval from the later of the two.
 When a timer is re-armed from a fact that the fired action is supposed to update, check what happens when the action fails to update it.
+
+## A dated log file is not a rotating one
+
+`init_logging` opened `mailypoppins-<date>.log` once, at process start, and nothing ever deleted a log file.
+The daemon runs for weeks, so it kept appending to the file of the day it started (the home server's `2026-09-11` file was still growing on the 23rd), and `latest_log_file`, which picks the newest name, pointed `mp daemon logs` and `sf` at a CLI call's file instead of the daemon's.
+The volume came from a dependency: the logger ran at `DEBUG` for every target, and html5ever writes a `DEBUG` line per token of every message it renders, which was over 95 % of a 1.7 GB day.
+`crates/mp-core/src/logfile.rs` now rolls on the UTC date and at 20 MB, prunes the directory to 200 MB on every open, and keeps `DEBUG` only for the workspace's own crate targets.
+The writer rolls only between records: `simplelog` writes a record in several `write` calls, so it tracks whether the last byte was a newline.
+When a process's lifetime can outrun the name its output file was given, the name has to be re-evaluated on write, not on open.

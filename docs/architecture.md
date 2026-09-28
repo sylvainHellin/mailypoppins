@@ -624,7 +624,7 @@ Layout under the data dir:
   accounts/<name>/contacts-cache.json
   tokens/<name>.enc                      # OAuth2 / Graph encrypted refresh tokens
   state.json                             # app state (#0107): per-account default signature
-  logs/mailypoppins-YYYY-MM-DD.log
+  logs/mailypoppins-YYYY-MM-DD.log       # capped at 200 MB in total (crates/mp-core/src/logfile.rs)
 ```
 
 Nothing under `accounts/<name>/` is created eagerly: `mp config init` makes the account directory, the first sync makes the store and its blob directory, and the first draft makes `drafts/`.

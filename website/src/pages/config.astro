@@ -206,7 +206,7 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
   accounts/<name>/contacts-cache.json    # contacts index
   tokens/<name>.enc                      # OAuth2 tokens
   state.json                             # app state: each account's default signature
-  logs/mailypoppins-YYYY-MM-DD.log`} />
+  logs/mailypoppins-YYYY-MM-DD.log       # daily logs, 200 MB at most in total`} />
       <p>
         <code>mp config show</code> prints the first three paths for every configured account.
         Synced mail is not a file tree: a message is a row in <code>store.sqlite3</code> plus
