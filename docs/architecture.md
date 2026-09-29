@@ -41,7 +41,7 @@ The one place the old spelling survives is the keyring service fallback below.
 
 ## Daemon and crate boundaries
 
-mp is being restructured around a local daemon that owns every store read, every network call and every durable operation, with the CLI, the TUI and a later GUI as clients of it (`.agents/workflow/native-gui-daemon/plan.md`).
+mp is being restructured around a local daemon that owns every store read, every network call and every durable operation, with the CLI, the TUI and a later GUI as clients of it ([native-gui.md](plans/native-gui.md)).
 The wire contract is [daemon-protocol.md](daemon-protocol.md) and the operator's half is [daemon-operations.md](daemon-operations.md).
 What follows is the shape that migration imposes on the tree today, which is all that is built.
 

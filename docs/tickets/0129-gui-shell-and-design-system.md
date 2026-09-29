@@ -1,18 +1,19 @@
 ---
 id: 0129
-title: Phase 7 of the native GUI, the shell and the design system
+title: M1 of the native GUI, the read-only shell and the design system
 type: feature
 priority: next
 status: open
 created: 2026-09-25
 ---
 
-Second ticket of the GUI half of the [native GUI plan](../plans/native-gui.md), sections "GUI architecture" and "Phase 7: GUI shell and design system".
-Blocked on #0128, the Phase 1b spikes.
+Second ticket of the [native GUI plan](../plans/native-gui.md), milestone "M1: read-only shell", designed in the sections "The GUI is a third daemon client", "Visual system", "Layout" and "Interaction".
+The read slices of #0131 land in the same milestone.
+Blocked on #0128, the M0 spike.
 
 ## Work
 
-- Scaffold `desktop/` with Tauri 2, React, TypeScript, Vite, Tailwind and the selected shadcn components, using the dependencies #0128 recorded.
+- Scaffold `clients/desktop/` with Tauri 2, React, TypeScript, Vite, Tailwind and the selected shadcn components, using the dependencies #0128 recorded.
 - The Tauri Rust layer talks to the daemon through `mp-client` only, announcing `ClientKind::Gui`, and holds one connection and one ordered subscription.
 - Generate the TypeScript protocol types from `mp-protocol`; the `schemars` question #0119 deferred reopens here, with dependency due diligence before adoption.
 - Generate key help and command-palette data from the same `KEYMAP` source as `mp dump-keys --json`.
@@ -22,7 +23,7 @@ Blocked on #0128, the Phase 1b spikes.
 
 ## Carried from the daemon phases
 
-Each of these makes the GUI the second consumer of something only the CLI or the TUI uses today, so each is settled here rather than reinvented in `desktop/`:
+Each of these makes the GUI the second consumer of something only the CLI or the TUI uses today, so each is settled here rather than reinvented in `clients/desktop/`:
 
 - The connect, bootstrap, call and settle sequence is `mp_client::operation` (`Connection::open`, `subscribe_within`, `run_operation`, `settle`, `await_operation`); the socket path, the on-demand start and the exit-4 diagnostic stay the binary's (`src/daemon/client.rs`).
 - The per-call timeout is `mp_client::Connection::call_within` and `Session::call_within` (default 30 s on a session); the budget per method is the caller's, and the CLI's are `DAEMON_TIMEOUT` and its two 300 s siblings in `src/main.rs`.

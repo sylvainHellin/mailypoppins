@@ -1,14 +1,14 @@
 ---
 id: 0132
-title: Phase 10 of the native GUI, distribution and release
+title: M6 of the native GUI, distribution and release
 type: chore
 priority: next
 status: open
 created: 2026-09-25
 ---
 
-Last ticket of the GUI half of the [native GUI plan](../plans/native-gui.md), section "Phase 10: Distribution and release".
-Blocked on #0131.
+Last ticket of the [native GUI plan](../plans/native-gui.md), milestone "M6: signing, notarisation and bundling".
+Blocked on #0130, since M6 follows M5.
 
 ## Work
 

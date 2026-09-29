@@ -1,20 +1,20 @@
 ---
 id: 0128
-title: Phase 1b of the native GUI, the Tauri, PTY and Neovim risk spikes
+title: M0 of the native GUI, the Tauri, PTY and Neovim risk spikes
 type: idea
 priority: next
 status: open
 created: 2026-09-25
 ---
 
-First ticket of the GUI half of the [native GUI plan](../plans/native-gui.md), sections "Embedded Neovim / Feasibility spike" and "Phase 1b: GUI risk spikes".
-It gates Phase 7 (#0129) and nothing else.
+First ticket of the [native GUI plan](../plans/native-gui.md), milestone "M0: spike".
+It gates M1 (#0129), and the later milestones follow M1 in order.
 It runs on the Mac: the first GUI release is macOS-only, and Finder launch, signing and a real Neovim under a signed app cannot be exercised on the headless Linux server.
 
 ## Work
 
 - Prototype a Tauri 2 shell, a native PTY, a terminal component in the webview and a real Neovim process, in a disposable directory outside the product tree (`spikes/gui-neovim/`, excluded from the workspace like `spikes/ipc-bench`).
-- Validate every row of the plan's feasibility list: startup from a signed app, user config and plugins, Finder PATH resolution, PTY input, output, resize, clipboard, Unicode, IME, mouse and colour, keyboard routing between app and terminal, clean child termination on window close and on crash, a save reaching the daemon's draft watcher and coming back through the subscription, cold-start and typing latency.
+- Validate every row of the plan's M0 list: a `state.bootstrap` connection listing accounts and mailboxes, `message.html` in a sandboxed iframe with link interception, and on the Neovim half startup from a signed app, user config and plugins, Finder PATH resolution, PTY input, output, resize, clipboard, Unicode, IME, mouse and colour, keyboard routing between app and terminal, clean child termination on window close and on crash, a save reaching the daemon's draft watcher and coming back through the subscription, cold-start and typing latency.
 - Dependency due diligence for the PTY crate, the terminal component, and the frontend stack (Tauri 2, React, Vite, shadcn/ui, Tailwind): current versions, maintenance, licence, platform evidence, recorded as a decision record under `docs/baselines/decisions/`, the format #0119 used.
 - Nothing is installed before Sylvain approves the due-diligence record.
 

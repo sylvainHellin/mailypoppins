@@ -1,6 +1,6 @@
 # Feature-parity matrix
 
-Every capability the current CLI and TUI deliver, one entry per stable identifier, carried from the verified capability inventory of the native-GUI/daemon plan (`.agents/workflow/native-gui-daemon/plan.md`, phase 0, ticket #0118).
+Every capability the current CLI and TUI deliver, one entry per stable identifier, carried from the verified capability inventory of phase 0 of the daemon migration (ticket #0118).
 The identifiers are stable: they carry into the phase checklists, the protocol fixtures, and the test names, and a retired capability keeps its identifier reserved so an older document cannot silently rebind it.
 
 Built at `f8af44b` (the `pre-daemon` tag), from the artifacts in `docs/baselines/pre-daemon/` and from the source tree itself.
@@ -22,7 +22,7 @@ The matrix is a list rather than a table because eight columns over 131 rows is 
 
 ### Classification vocabulary
 
-- GUI parity: a user-facing capability that Phase 9 must deliver in the GUI.
+- GUI parity: a user-facing capability the GUI must deliver, in milestones M1 to M4 of the [native GUI plan](plans/native-gui.md).
 - CLI automation: a machine-facing surface whose consumers are scripts, agents, and other tools.
 - Diagnostics and maintenance: an operator surface for inspecting or repairing local state.
 - Daemon administration: lifecycle, locking, watching, and queue operation of the daemon itself.
@@ -37,12 +37,14 @@ A "client-side" entry needs no method at all and stays in the client process.
 
 ### GUI location
 
-Phase 0 does not design the GUI, so every entry reads `TBD (Phase 9)`.
+Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129's shell plus #0131's read slices, and M2 to M4 are #0131.
+An entry with another classification reads `not required`, since the plan puts no GUI-parity obligation on it.
+The ticket that ships an entry replaces the milestone with the surface and interaction it built.
 
 ### Validation
 
 Each entry names the coverage that exists today.
-On top of that, and not repeated per entry: every daemon-served capability gains a protocol contract test in Phase 2 or later, and every GUI-parity capability gains a GUI and an end-to-end check in Phase 9.
+On top of that, and not repeated per entry: every daemon-served capability gains a protocol contract test in Phase 2 or later, and every GUI-parity capability gains a GUI and an end-to-end check in the milestone that delivers it.
 
 ### Status vocabulary
 
@@ -58,7 +60,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config init`, `src/main.rs`, `src/config_cmd/init.rs`
 - Daemon surface: `config.get` before the first prompt, then `config.reload` once the wizard has written; `config.init`, `config.set_password`, `operation.*` for the multi-step pass, `state.event` once the account exists
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_init_prompts_in_the_client`), otherwise manual
 - Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15)
 - Note: the wizard writes `config.toml` and one secret in a single pass, so the GUI drives it through `config.*` rather than spawning the CLI.
@@ -70,7 +72,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config add-account`, `src/config_cmd/init.rs`
 - Daemon surface: `config.get` before the first prompt, then `config.reload`; `config.add_account`, `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_add_account_refuses_without_a_configuration`), otherwise manual
 - Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15)
 - Note: the refusal when there is no configuration to add to is the daemon's answer, rendered here; the wizard past it is `ACC-01`'s note.
@@ -80,7 +82,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config show`, `src/config_cmd/show.rs`
 - Daemon surface: `config.get`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_show_matches_the_oracle`)
 - Status: routed (P4-U14) for the configuration; three probes stay client-side, recorded (P4-U15)
 - Note: the output is redacted, and after the cutover the daemon is the only reader of the underlying `config.toml`.
@@ -93,7 +95,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config path`, `src/config_cmd/mod.rs`
 - Daemon surface: client-side; the path is computed, so the command must keep running with no daemon
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_path_never_contacts_a_daemon`)
 - Status: client-side, confirmed (P4-U14)
 - Note: on `needs_daemon`'s no-daemon list for good, and from P4-U14 the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`: it is the only *whole command* a daemon-era binary answers in process. The startup preamble every command runs, and the server leg of `mp search` (`LST-06`), are the other in-process code paths; both are rows of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs`.
@@ -103,7 +105,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config set-password <smtp|imap> [--account]`, `src/main.rs`, `src/config_cmd/password.rs`
 - Daemon surface: `config.set_password`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/secrets_integration.rs` for the backend, `tests/daemon_admin_slice.rs` (`mp_config_set_password_reads_the_password_in_the_client`)
 - Status: routed (P4-U14)
 - Note: secret values travel only on the local socket and never appear in logs, diagnostics, or protocol errors.
@@ -113,7 +115,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config oauth2-login [--account]`, `src/config_cmd/oauth2.rs`, `src/oauth2.rs`
 - Daemon surface: `config.oauth2_login` as an `operation.*` with the user code and verification URL on `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/daemon_admin_slice.rs` pins the three refusals and the rendering; the flow itself is manual and requires a live provider
 - Status: routed (P4-U14)
 - Note: the client renders the code and opens the browser as a client-side integration (`INT-04`).
@@ -125,7 +127,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config reset-secrets`, `src/config_cmd/reset.rs`
 - Daemon surface: `config.reset_secrets`, then one `config.set_password` per re-entered credential
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/daemon_admin_slice.rs` (declined and confirmed)
 - Status: routed (P4-U14)
 - Note: the recovery path after a restore onto a new machine, where the machine-uid derived key no longer decrypts the file.
@@ -136,7 +138,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: daemon administration
 - Source anchor: `src/secrets.rs`, `tests/secrets_integration.rs`
 - Daemon surface: daemon-internal; only the daemon opens the backend after the cutover
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/secrets_integration.rs`
 - Status: not started
 
@@ -145,7 +147,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the global arguments `-A/--account`, `-s/--signature`, `--no-signature` in `src/main.rs` (`no_signature`, `src/main.rs:41`), `src/signatures.rs`
 - Daemon surface: an account parameter on every domain method, `signature.list`, `state.bootstrap`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1 for the account selector, M3 for the signature choice, #0131)
 - Validation: `tests/cli_help_snapshot.rs` pins the global arguments
 - Status: not started
 - Note: the GUI equivalent is the active-account selector plus a per-composition signature choice.
@@ -155,7 +157,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs:588`), `src/signatures.rs`, the per-account default recorded in `state.json`
 - Daemon surface: `signature.list`, `signature.read`, `signature.write`, `signature.create`, `signature.rename`, `signature.delete`, `signature.set_default`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: manual
 - Status: not started
 - Note: there is no CLI equivalent, so the GUI takes this capability from the TUI, and inline-text signatures are edited through a temporary copy.
@@ -165,7 +167,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the `{{SIGNATURE}}` marker handling in `src/send.rs:185-268`, the file and default lookup in `src/signatures.rs`
 - Daemon surface: `draft.create`, `draft.reply`, `draft.forward`, and `draft.set_recipients` all re-splice
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, plus the marker assertions in `clients/tui/src/actions.rs` unit tests
 - Status: not started
 - Note: editing recipients re-splices the block, which is what makes this its own capability.
@@ -175,7 +177,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the per-command account resolution and `--all-accounts` in `src/main.rs`
 - Daemon surface: `account.list`, `state.bootstrap` per account, `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: manual
 - Status: not started
 - Note: account switching preserves per-account list and selection state.
@@ -187,7 +189,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp list-mailboxes`, `src/main.rs`, `src/imap_client/mod.rs`
 - Daemon surface: `mailbox.list_server`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: manual, requires a live server; refusals and routing in `tests/daemon_sync_slice.rs`
 - Status: routed (P4-U10); GUI not started
 - Note: a live server call, distinct from the mailbox hierarchy the store already holds. The result carries `source` (`imap` or `graph`) because the two transports report different things about a mailbox: Graph's folder list has the item counts this listing prints and IMAP's `LIST` has the attributes and the delimiter instead.
@@ -197,7 +199,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:636`), `gm` (`clients/tui/src/app/keymap.rs:590`), `clients/tui/src/ui/sidebar.rs`
 - Daemon surface: `state.bootstrap` mailbox summaries, `message.list` on selection
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames under `clients/tui/src/`
 - Status: not started
 
@@ -206,7 +208,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/app/keymap.rs:558`
 - Daemon surface: client-side over the bootstrap mailbox list, then `message.list`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -215,7 +217,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ga` (`clients/tui/src/app/keymap.rs:591`), guarded by `Guard::MultiAccount` so it appears only with more than one configured account
 - Daemon surface: `account.list`, a second `state.bootstrap`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -224,7 +226,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Space m`, `Space c`, `Space a` (`clients/tui/src/app/keymap.rs:601-603`)
 - Daemon surface: client-side; the view switch reads data already bootstrapped
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -233,7 +235,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Tab` (`clients/tui/src/app/keymap.rs:559`), `Shift+Tab` (`clients/tui/src/app/keymap.rs:560`), `z` (`clients/tui/src/app/keymap.rs:569`)
 - Daemon surface: client-side
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: TUI golden frames
 - Status: not started
 - Note: purely presentation state, so it never enters the canonical snapshot.
@@ -243,7 +245,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/ui/sidebar.rs` over the store's mailbox rows
 - Daemon surface: `state.bootstrap`, then `state.event` for count changes
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: not started
 - Note: delivered through the bootstrap snapshot rather than a query.
@@ -255,7 +257,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp list-messages [--mailbox] [-n]`, `src/main.rs`, `list_mailbox` (`src/store/read.rs:178`)
 - Daemon surface: `message.list`, one call per listed mailbox
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
 - Status: routed (P4-U4); GUI not started
 - Note: the mailbox argument accepts a role, a slug, or the sidebar label, and the default lists every mailbox of the account. The name is resolved client-side against the configuration, so an unknown one is refused without a round trip and in the words it has always been refused in.
@@ -265,7 +267,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k`, `gg/G`, `Ctrl+d`, `Ctrl+u` in the EMAIL LIST and BODY keymap sections (`clients/tui/src/app/keymap.rs`)
 - Daemon surface: client-side over the list `message.list` returned
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -274,7 +276,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `gt` (`clients/tui/src/app/keymap.rs:652`), `clients/tui/src/app/jump_date.rs`
 - Daemon surface: client-side while the list is whole; `message.jump_to_date` if paging lands
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `clients/tui/src/app/jump_date.rs`
 - Status: not started
 - Note: accepts relative expressions such as "last week" alongside absolute dates.
@@ -284,7 +286,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `fm` (`clients/tui/src/app/keymap.rs:624`)
 - Daemon surface: client-side while the list is whole; `message.filter` if paging lands
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -293,7 +295,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `fF` (`clients/tui/src/app/keymap.rs:673`)
 - Daemon surface: client-side while the list is whole; `message.filter` if paging lands
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -302,7 +304,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp search [query] [--mailbox] [field flags] [-n] [--full]`, `SEARCH_LONG_ABOUT` (`src/main.rs:49`), `src/search.rs`, `src/imap_client/search.rs`
 - Daemon surface: `message.search` as an `operation.*` for the server leg
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/search.rs`, `tests/cli_help_snapshot.rs` for the grammar's help text
 - Status: the method exists (P5-U10c-I1), the CLI leg is not routed to it
 - Note: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, so the server leg still opens its own IMAP session or Graph client in `src/main.rs`, and the plain-IMAP `has:attachment` post-filter still reads the local index there. It is the largest of the four groups in `CLI_ENGINE_RESIDUE`. `message.search_server` `{account, query, mailboxes?, limit?, exclude_message_ids?}` is served since P5-U10c-I1 and the TUI's overlay runs on it; three user-visible behaviours stand between this leg and it, which is why routing it is a unit of its own. `mp search` prints `Search in <mailbox> failed` to stderr per mailbox as it goes, where the operation reports `unreachable` at the settle; `mp search --mailbox` names the server mailbox directly, so a name the account does not configure is searched rather than refused; and the plain-IMAP `has:attachment` warning is a sentence about a post-filter the daemon now applies itself.
@@ -313,7 +315,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp search --local`, `src/store/search.rs`, `tests/store_search_integration.rs`
 - Daemon surface: `message.search`, whose params mirror the command's flags and whose hits come back in the store's ranking order
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: `tests/store_search_integration.rs`, `tests/daemon_read_slice.rs`
 - Status: routed (P4-U4); GUI not started
 - Note: `--body` is `body_query` on the wire, because `body` is already the `--full` switch; the client sends what the user typed and the daemon builds the query with `search::from_cli`, so one parser still serves every backend.
@@ -323,7 +325,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ff` (`clients/tui/src/app/keymap.rs:581`), `Action::ServerSearch` (`clients/tui/src/app/types.rs:1619`)
 - Daemon surface: `message.search` local first, then `message.search_server` as a durable `operation.*` streaming hits on `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui_tests/commands.rs`)
 - Status: routed (P5-U6 local, P5-U10c-I1 server); GUI not started
 - Note: `message.search_server`, deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s one-mailbox query. The TUI's background thread is gone: the overlay appends each hit as its `message.server_hit` event arrives, matched by operation id because a fast retype leaves two searches in flight.
@@ -337,7 +339,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the SERVER SEARCH keymap section (`clients/tui/src/app/keymap.rs`): `Enter`, `e`, `y`, `f`, `r`, `R`, `w`, `a`, `b`, `o`, `O`
 - Daemon surface: `message.get`, `message.materialise_html`, `message.materialise_attachment`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1 for open and copy, M2 for archive, M3 for reply, forward and attachments, #0131)
 - Validation: TUI golden frames
 - Status: routed (P5-U6, completed by P5-U10c-I1); GUI not started
 - Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6; `f` and the three rendition keys joined them in P5-U10c-I1.
@@ -350,7 +352,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `tt` (`clients/tui/src/app/keymap.rs:630`), the thread overlay in `clients/tui/src/ui/overlays.rs`
 - Daemon surface: `message.thread`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames, `tests/daemon_thread_slice.rs`
 - Status: routed (P5-U10d-I); GUI not started
 - Note: `open_thread_overlay` asked `message.thread` on the session the `App` holds since P5-U10d-I, where it opened the store, read the row and folded `read::thread_messages` over it; it was the last read in `clients/tui/src/app/` that no method answered.
@@ -362,7 +364,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp fetch [--from --to --cc --subject --body --since --before -n --full --mailbox]`, `src/main.rs`
 - Daemon surface: `message.list_server`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/cli_help_snapshot.rs`
 - Status: routed (P4-U10); GUI not started
 - Note: superseded by `sync` plus `search`, kept because the migration preserves command surfaces; the deprecation decision is deferred to `BACKLOG.md` (`ANO-3`).
@@ -372,7 +374,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: CLI automation
 - Source anchor: `mp dump-mailbox --json [--mailbox ...]`, `src/dump.rs`, `docs/dump-allow-list.md`, `tests/dump_mailbox_integration.rs`
 - Daemon surface: `message.list` with `projection: "envelope"`, whose output must stay byte-identical to the direct read
-- GUI location: TBD (Phase 9)
+- GUI location: not required (CLI automation)
 - Validation: `tests/dump_mailbox_integration.rs`, `tests/daemon_read_slice.rs`
 - Status: routed (P4-U4); GUI not started
 - Note: three contracts survive the move to an RPC data source: two runs over an unchanged store are byte-identical, `--json` stays required, and no filesystem path appears in the output. P4-U4 shipped the dump as a projection of `message.list` rather than the `message.dump` this row first proposed: the records answer the same question a listing does, one answer per account covers every selected mailbox in the dump's own sort order, and the client re-serialises `dump::EnvelopeRecord` with `dump::to_ndjson`, so the ordering contract and the field order stay in the module that owns them.
@@ -382,7 +384,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `MAX_COALESCED_EVENTS` (`clients/tui/src/lib.rs:47`), `COALESCE_BUDGET` (`clients/tui/src/lib.rs:55`) and the drain in `clients/tui/src/lib.rs`, `poll_pending_event` (`clients/tui/src/event.rs:32`), `Action::suspends_terminal` (`clients/tui/src/app/types.rs:1716`)
 - Daemon surface: client-side; the obligation is that a held key does not produce one round trip per repeat
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: unit tests in `clients/tui/src/lib.rs`
 - Status: not started
 - Note: event order is preserved, so leader keys and resizes are unaffected; the drain stops when the app is no longer running or an action hands the terminal to `$EDITOR`, whose GUI counterpart is the handoff into the Neovim PTY.
@@ -394,7 +396,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp show <selector> [--mailbox]`, `src/read_cmd.rs`, `tests/cli_read_surface_integration.rs`
 - Daemon surface: `message.get`, addressed by `"<mailbox>/<uid>"` or by the selector the daemon resolves
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
 - Status: routed (P4-U4); GUI not started
 - Note: the selector crosses the socket unresolved, because resolving one needs the store the client no longer has; which account it names stays a client-side decision.
@@ -404,7 +406,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: CLI automation
 - Source anchor: `mp show --json`, `src/main.rs`, `src/read_cmd.rs`
 - Daemon surface: `message.get`, whose result *is* this record
-- GUI location: TBD (Phase 9)
+- GUI location: not required (CLI automation)
 - Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
 - Status: routed (P4-U4); GUI not started
 - Note: there is no second JSON projection. `message.get` returns `read_cmd::ShownMessage` field for field and `--json` prints it re-serialised, so the machine-facing answer cannot drift from the one the text layout renders.
@@ -414,17 +416,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `wrap_and_style_body` (`clients/tui/src/ui/preview.rs:522`) over the body `parse::html_to_plain` (`src/parse.rs:199`) produced at ingest
 - Daemon surface: `message.get` returns the flattened body
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `clients/tui/src/ui/preview.rs`, `src/parse.rs`, `tests/daemon_read_slice.rs`
 - Status: routed for `mp show` (P4-U4); GUI not started
-- Note: #0111 retired the html2text rich render #0091 had added, so links, emphasis, tables, and lists arrive as a wrapped block and `b` / `tb` is the styled view; a richer GUI rendering stays derived content rather than an embedded raw remote HTML document.
+- Note: #0111 retired the html2text rich render #0091 had added, so links, emphasis, tables, and lists arrive as a wrapped block and `b` / `tb` is the styled view.
+  The GUI reader shows the `message.html` rendition in a sandboxed frame instead, and falls back to this plain text for a message without markup.
 
 ### RD-04 Headers pane with Bcc, Reply-To, the attachment marker, and clamped scrolling
 
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/ui/headers.rs`, the HEADERS keymap section
 - Daemon surface: `message.get` header block
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `clients/tui/src/ui/headers.rs`, TUI golden frames
 - Status: not started
 
@@ -432,18 +435,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: none; `clients/tui/src/images.rs` was deleted with the `ratatui-image` and `image` dependencies and the startup graphics-capability probe
-- Daemon surface: none
-- GUI location: none
-- Validation: none
-- Status: retired by #0109, no parity obligation
-- Note: `parse::inline_images` (`src/parse.rs:1078`) and `parse::embed_inline_images` (`src/parse.rs:1037`) remain, feeding the browser view and the `.html` companion, which is where the images are seen at full size.
+- Daemon surface: `message.html`, whose rendition inlines `cid:` images as `data:` URIs
+- GUI location: clients/desktop (M1, #0131 read slice), inside the sandboxed `message.html` frame
+- Validation: `the_browser_rendition_inlines_cid_images_as_data_uris` (`src/tui_tests/actions_store.rs`) covers the inlining; no GUI test yet
+- Status: retired from the TUI by #0109; GUI not started
+- Note: `parse::inline_images` (`src/parse.rs:1078`) and `parse::embed_inline_images` (`src/parse.rs:1037`) remain, feeding the browser view, the `.html` companion and the `message.html` rendition the GUI reader loads.
 
 ### RD-06 Open a message read-only in `$EDITOR` as a Markdown rendition
 
 - Classification: GUI parity
 - Source anchor: TUI `Enter / e` (`clients/tui/src/app/keymap.rs:611`), search overlay `e`
 - Daemon surface: `message.materialise_markdown` `{account, row_id|id|selector, mailbox?}`, the third member of the handle family
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: TUI golden frames
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the handle keeps its blob alive until release or expiry (`ANO-6`), and the file is written 0444 so `$EDITOR` opens it read-only (#0075).
@@ -457,7 +460,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `y` (`clients/tui/src/app/keymap.rs:618`)
 - Daemon surface: `selector` on the `message.list` row and on the `message.search` hit, then a client-side clipboard write
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: `tests/cli_selector_contract.rs` for the selector shape
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the row carries it rather than a `message.selector` query answering it, because the daemon already had the string in hand when it built the row.
@@ -471,7 +474,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the search overlay `y`, the action set in `clients/tui/src/app/types.rs`
 - Daemon surface: `message.materialise_markdown`, then a client-side clipboard write
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the path a `y` copies now names a file inside a handle directory, which the family releases after ten minutes: nothing reads a yanked path back, so what changed is how long a pasted one resolves.
@@ -483,7 +486,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:613`)
 - Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false` it queues the pair for the next sync tick, which is the TUI's contract (P5-U6)
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames
 - Status: routed (P4-U8, TUI P5-U6); GUI not started
 - Note: over an account with no credentials the backend refuses before the store is touched, which is the half the fixture reaches; the successful drain and its rollback wait on a fake IMAP backend.
@@ -493,7 +496,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp delete <selector> [--mailbox] [--force]`, `mp delete --sent` (`src/main.rs`), TUI `d`
 - Daemon surface: `message.delete` for received mail, `draft.discard` for a draft and for the `--sent` sweep, which is a parameter of the same method rather than one of its own
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`
 - Status: routed (P4-U8, TUI P5-U6); GUI not started
 - Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
@@ -504,7 +507,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `u` (`clients/tui/src/app/keymap.rs:615`)
 - Daemon surface: `message.set_read` `{account, row_id, read, settle}`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames
 - Status: routed (P5-U6); GUI not started
 - Note: the daemon takes the new state rather than a toggle, and the TUI sends `settle: false`, so the row change and the owed `SetRead` commit together and the next sync tick drains them (#0039).
@@ -514,7 +517,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `*` (`clients/tui/src/app/keymap.rs:616`)
 - Daemon surface: `message.set_flag` `{account, row_id, flagged, settle}`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames
 - Status: routed (P5-U6); GUI not started
 - Note: on a batch, flagging wins whenever any selected message is unflagged; the decision stays client-side, because it is a property of the selection the user can see.
@@ -525,7 +528,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `M`, `Action::MoveToMailbox` (`clients/tui/src/app/types.rs:1571`)
 - Daemon surface: `message.move` `{account, row_id, destination, settle}`, plus the mailbox list from `state.bootstrap`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames
 - Status: routed (P5-U6); GUI not started
 - Note: `destination` is a role, slug or sidebar label, resolved by the daemon; the client no longer checks the sidebar's `server_name`, because `find_server_name_for_role` is the same mapping read on the side that owns it.
@@ -535,7 +538,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `v` (`clients/tui/src/app/keymap.rs:653`), `Ctrl+a` (`clients/tui/src/app/keymap.rs:654`), the batch actions in `clients/tui/src/app/types.rs`
 - Daemon surface: one call per selected message, in the selection's order, over `message.set_read`, `message.set_flag`, `message.archive`, `message.delete`, `draft.discard`, `draft.approve` and `draft.demote`; selection stays client-side
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames
 - Status: routed (P5-U6); GUI not started
 - Note: the plain form rather than the plural address this row sketched: a reference to a row that is gone is skipped with a log line while the rest of the selection proceeds, which one call per row gives for free and a plural address would have to re-invent as a partial-failure shape. A plural address is worth taking the day a selection's round trips show up in a measurement.
@@ -545,7 +548,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the confirm variants in `clients/tui/src/app/types.rs`, covering approve, demote, archive, delete, send, send-approved, and signature deletion
 - Daemon surface: client-side, over the same methods
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -554,7 +557,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mark_open_read` (`clients/tui/src/actions.rs:3339`), reached from the received-row branch of `Action::EditCurrent` and from `Action::MarkAsRead`, which `queue_mark_open_read` (defined at `clients/tui/src/app/mod.rs:1179`, pushed from `clients/tui/src/app/keys.rs:305`) queues on a focus move into the body pane
 - Daemon surface: `message.set_read` carrying the opened `MessageRef` as `row_id`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `clients/tui/src/commands.rs` unit tests, `src/tui_tests/actions.rs`
 - Status: routed (P5-U6); GUI not started
 - Note: #0110 retired the #0087 trigger that fired on every cursor move, so walking the list marks nothing and the GUI marks on the open rather than on selection; the action carries the `MessageRef` the open resolved, so a coalesced key batch marks the row that was opened.
@@ -564,7 +567,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/pending_ops.rs`, `src/ops.rs`
 - Daemon surface: `state.event` carrying pending and reconciled states
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: unit tests in `src/pending_ops.rs`, `src/ops.rs`
 - Status: not started
 
@@ -575,7 +578,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp new <name>` (`src/main.rs`), TUI `cn` (`clients/tui/src/app/keymap.rs:583`)
 - Daemon surface: `draft.create`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
 - Status: routed (P4-U6); GUI not started
 
@@ -584,7 +587,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp list [--status]`, `src/main.rs`
 - Daemon surface: `draft.list`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
 - Status: routed (P4-U6); GUI not started
 
@@ -593,7 +596,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp validate [selector]`, `src/draft.rs`
 - Daemon surface: `draft.validate`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, unit tests in `src/draft.rs`
 - Status: routed (P4-U6); GUI not started
 - Note: an invalid draft stays editable and cannot be approved or sent.
@@ -603,7 +606,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp mark-approved`, `mp mark-draft` (`src/main.rs`), TUI `cA` and `cD` (`clients/tui/src/app/keymap.rs:667-668`)
 - Daemon surface: `draft.approve`, `draft.demote`, resolved through `draft.path` first so the client knows the previous status
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
 - Status: routed (P4-U6); GUI not started
 
@@ -612,7 +615,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the top-level positional `[SELECTOR]` argument in `src/main.rs`
 - Daemon surface: `draft.preview`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`
 - Status: routed (P4-U6); GUI not started
 
@@ -621,7 +624,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: CLI automation
 - Source anchor: `mp path <selector>`, `src/main.rs`, `src/selector.rs`
 - Daemon surface: `draft.path`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (CLI automation)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_draft_slice.rs`
 - Status: routed (P5-U6); GUI not started
 - Note: the only selector-to-path edge, and the handle external editors and agents use, so it stays supported under the filesystem boundary.
@@ -634,7 +637,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp edit <selector>`, `src/main.rs`
 - Daemon surface: `draft.path`, then a client-side editor session on the canonical file
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/daemon_draft_slice.rs`, with a stub editor that records the path it was handed
 - Status: routed (P4-U6); GUI not started
 - Note: the GUI equivalent is the embedded Neovim session on the same file.
@@ -644,7 +647,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp reply <selector> [--all] [--mailbox]` (`src/main.rs`), TUI `r`, `cr` (`clients/tui/src/app/keymap.rs:626`), `ca`, search overlay `r` and `R`
 - Daemon surface: `draft.reply`, and `draft.create_from_message` for a hit with no local row
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`
 - Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI not started
 - Note: the TUI's four reply keys went through it in P5-U6, addressed by the `row_id` the method gained for them.
@@ -655,7 +658,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp forward <selector> [--mailbox]` (`src/main.rs`), TUI `cf`, search overlay `w`
 - Daemon surface: `draft.forward`, and `draft.create_from_message` for a hit with no local row
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`
 - Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI not started
 - Note: the forward carries the original attachments, which the GUI must reproduce rather than dropping.
@@ -667,7 +670,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the compose wizard variants in `clients/tui/src/app/types.rs`, `clients/tui/src/ui/compose.rs`
 - Daemon surface: `draft.create`, `draft.forward` with `headers`, `signature.list`; the wizard itself is client-side
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: TUI golden frames
 - Status: routed (P5-U6) for its forward mode; GUI not started
 - Note: an inline body field, a signature picker, and a submit chord; the overlay-internal keys go into `docs/baselines/pre-daemon/manual-keys.md`, the P0-U2 inventory (`ANO-2`).
@@ -677,7 +680,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ce` in the drafts mailbox (`clients/tui/src/app/keymap.rs:656`)
 - Daemon surface: `draft.set_recipients`, which re-splices the signature block
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui_tests/actions_store.rs`)
 - Status: not started
 - Note: `draft.set_recipients` is not built and the rewrite is still a client-side write to the file `draft.path` resolved (P5-U6 routed the resolution, not the write).
@@ -688,7 +691,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: implicit workflow, no command; the drafts index refresh in `clients/tui/src/`
 - Daemon surface: daemon-owned watcher emitting `state.event`, plus `draft.list`'s fresh directory scan
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/daemon_draft_watch.rs`, `tests/daemon_draft_index_slice.rs`
 - Status: routed (P3b-U10 served it, P5-U10d-I dropped the client's poll); GUI not started
 - Note: the mechanism that keeps the GUI correct while Neovim writes the file.
@@ -702,7 +705,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp open <selector> [--mailbox]` (`src/main.rs`), TUI `to`, search overlay `o`
 - Daemon surface: `message.materialise_attachment`, one call per part, opened client-side through `parse::open_file_with_system`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `the_cursor_row_materialises_its_blobs_into_daemon_handles` (`src/tui_tests/actions_store.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: the printed path is the one row of the slice that is not byte-identical to the pre-daemon binary and cannot be: a materialised file lives under `<data_dir>/runtime/handles/<handle>/` with a lifetime attached, rather than in the client's own temp directory. The handle is deliberately not released, because the viewer just launched is holding the file.
@@ -712,7 +715,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp save <selector> [-o dir] [--mailbox]`, the option at `src/main.rs:301` and the handler in `src/main.rs`
 - Daemon surface: `message.materialise_attachment`, one call per part, plus a client-side copy into the destination and a `message.release_handle` per part
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`
 - Status: routed (P4-U8); GUI not started
 - Note: the destination defaults to the current directory and only the client knows what that means (`ANO-15`), so the client resolves it twice over: the absolute form anchors the writes, and the spelling the user typed is what the `✓` lines print. The result is a permanent user artifact rather than a daemon-owned handle with a lifetime, which is what separates this entry from `ATT-01`, `ATT-04`, and `ATT-05`. The daemon never renames a part, so the `_1` rule for two parts sharing a name is applied client-side, within one call.
@@ -722,7 +725,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ta` in the drafts mailbox (`clients/tui/src/app/keymap.rs:659`), `resolve_attachment_paths` (`src/send.rs:1964`)
 - Daemon surface: `draft.attach` with an absolute path
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/draft_integration.rs`
 - Status: not started
 - Note: appends to the `attachments:` frontmatter list and verifies the path at the prompt, so the GUI file picker applies the same verification.
@@ -733,7 +736,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/selector.rs`
 - Daemon surface: `draft.materialize_attachment`, opened client-side
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/cli_selector_contract.rs`
 - Status: not started
 
@@ -742,7 +745,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `tb` (`clients/tui/src/app/keymap.rs:633`), search overlay `b`
 - Daemon surface: `message.materialise_html`, opened client-side through `parse::open_file_with_system`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file` and `the_browser_rendition_inlines_cid_images_as_data_uris` (`src/tui_tests/actions_store.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: the daemon writes the rendition rather than the markup: the charset meta, the CSP tag and the `cid:` inlining are three #0037 fixes, and serving unhardened markup through a new door would undo them.
@@ -756,7 +759,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp send <selector> [-y]`, `src/main.rs`, `src/send.rs`
 - Daemon surface: `send.draft`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/outbox_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P4-U12); GUI not started
 - Note: the preview and the `[y/N]` prompt stay in the client, which renders them from `draft.preview`: a daemon has no stdin, and a run without `-y` prints `Cancelled.` and exits 0 without a single `send.*` call.
@@ -766,7 +769,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp send-approved [-y] [--all-accounts]` (`src/main.rs`), TUI `cX` (`clients/tui/src/app/keymap.rs:669`)
 - Daemon surface: `send.approved`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P5-U6); GUI not started
 - Note: `--all-accounts` is a loop in the client over `global_config.accounts` in configuration order, so `send.approved` names one account and a caller that sends `all_accounts` is refused.
@@ -778,7 +781,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `x` (`clients/tui/src/app/keymap.rs:573`)
 - Daemon surface: `draft.approve` then `send.draft`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -787,7 +790,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `email.send_hold_secs` with a 20 second default, resolved daemon-side in `src/daemon/hold.rs`
 - Daemon surface: `send.hold_status`, `send.cancel_hold`, `hold: true` on `send.draft` / `send.approved`, and the countdown on `state.event` as `send.hold_started` / `send.hold_tick` / `send.hold_fired` / `send.hold_cancelled`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: `src/tui_tests/hold.rs`, `tests/daemon_send_hold.rs`, `tests/phase5_undo_send_hold.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U1)
 - Status: routed (P6-U2); GUI not started
 - Note: the hold is the daemon's, and the TUI keeps only what it renders: the status line, the `u` key and the `App::hold` the events fill.
@@ -800,7 +803,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp send --invite --to --cc --subject --start --end|--duration --location --description`, `src/main.rs`, `src/calendar.rs`
 - Daemon surface: `send.invite`, refused on Microsoft Graph with the reason in the error
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/imip_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P4-U12); GUI not started
 - Note: start and end accept local time or RFC3339, duration accepts ISO8601 or the short form, and Graph accounts are refused by `mailypoppins::invite::plan_invite`, which both the client and `send.invite` validate through, so the GUI shows a disabled action with its reason rather than a late failure (`ANO-4`); `send.invite` makes that refusal before it looks at anything else about the invitation.
@@ -811,7 +814,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/outbox.rs`, surfaced as a TUI badge and status entry
 - Daemon surface: `state.bootstrap` outbox summary, then `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P4-U12) for the `mp outbox list` surface; the TUI badge and GUI not started
 - Note: covers queued, retrying, failed, and partly delivered submissions.
@@ -821,7 +824,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: daemon administration
 - Source anchor: `mp outbox list`, `mp outbox retry <id>`, `mp outbox discard <id>`, `src/main.rs`, `src/outbox.rs`, `tests/outbox_integration.rs`
 - Daemon surface: `send.outbox_list`, `send.outbox_retry`, `send.outbox_discard`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P4-U12); GUI not started
 - Note: deliberately manual, because a submission that died without a verdict may or may not have been delivered, so the GUI shows the blocked state and names the command instead of guessing.
@@ -832,7 +835,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity for the surfacing
 - Source anchor: `src/outbox.rs`, `src/send.rs`
 - Daemon surface: `state.event` carrying the partly delivered state
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P4-U12) for the CLI surface; the `state.event` half and the GUI not started
 - Note: only a human can close this state, and the GUI must not present it as a plain failure.
@@ -842,7 +845,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/imap_client/sent.rs`
 - Daemon surface: daemon-internal, reported on `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
 - Status: routed (P4-U12) for the CLI surface; the `state.event` half and the GUI not started
 - Note: implicit workflow driven on the next startup or sync, which is how the outbox drives itself.
@@ -854,7 +857,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ss` (`clients/tui/src/app/keymap.rs:593`) and `sS` (`clients/tui/src/app/keymap.rs:594`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui_tests/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui_tests/events.rs`)
 - Status: routed (P5-U6); GUI not started
 - Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
@@ -866,7 +869,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: CLI automation
 - Source anchor: `mp sync [-n] [--mailbox ...] [--dry-run] [--all-accounts]`, `src/main.rs`, `src/sync/engine.rs`
 - Daemon surface: `sync.quick` carrying `limit`, `mailbox` and `dry_run`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (CLI automation)
 - Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_sync_slice.rs`
 - Status: routed (P4-U10); GUI not started
 - Note: `--all-accounts` conflicts with `-A` by construction so a cron line cannot silently sync accounts it never named, and that conflict is a contract to preserve (`ANO-9`). `--all-accounts` itself is not on the wire: the client issues one operation per account in configuration order, because the per-account header, the failure denominator and the exit code are all rendering of a per-account result. `mp sync` always calls `sync.quick`, since `-n` has a default and the command has no unbounded form.
@@ -876,7 +879,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: daemon administration
 - Source anchor: `mp watch [--mailbox] [--timeout N]` with exit code 2 on timeout, `src/main.rs`, `src/imap_client/watch.rs`, `imap_watch` (`clients/tui/src/helpers.rs:45`)
 - Daemon surface: `sync.watch` as a client-scoped operation over the daemon's watcher
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: manual, requires a live server; validation and narrowing in `tests/daemon_sync_slice.rs`; `tests/tui_daemon_recovery.rs` for the runtime's own watch
 - Status: routed (P5-U8); GUI not started
 - Note: P5-U8 moved `imap_watch` and the Graph poller out of `clients/tui/src/` and into the account runtime (`src/daemon/runtime/watcher.rs`), so the watch runs once per account beside the engine rather than once per client: a round that sees the mailbox move runs a quick tick and publishes `sync.completed`, and no client holds a server connection of its own any more. `sync.watch` is unchanged and is still the one-shot a `mp watch` asks for.
@@ -887,7 +890,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the `Fetch`, `FetchAccount`, and `LoadMailbox` actions in `clients/tui/src/app/types.rs` (`LoadMailbox` at `clients/tui/src/app/types.rs:1611`)
 - Daemon surface: `state.bootstrap` returning zeroed counts for an `opening` account, filled by `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames; `src/tui_tests/golden_frames_daemon.rs`
 - Status: routed (P5-U8); GUI not started
 - Note: implicit workflow with no command, and the reason a client shows content before sync completes.
@@ -900,7 +903,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/sync_health.rs`
 - Daemon surface: `state.bootstrap` health summary, then `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/sync_health.rs`
 - Status: not started
 
@@ -909,7 +912,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/pending_ops.rs`, `src/ops.rs`
 - Daemon surface: `state.event` for queue depth and outcomes; the drains of a `sync.*` pass as `operation.progress`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M2, #0131)
 - Validation: unit tests in `src/pending_ops.rs`
 - Status: routed (P4-U10) for the sync tick's drains; GUI not started
 
@@ -918,7 +921,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `src/ingest.rs`, `src/reconcile.rs`, `src/store/rebuild.rs`, `tests/store_ingest_integration.rs`
 - Daemon surface: daemon-internal, reported through `diagnostic.*`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/store_ingest_integration.rs`
 - Status: not started
 - Note: the durable outbox survives a rebuild, which is the invariant this capability must not break.
@@ -928,7 +931,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp store gc [--dry-run] [--force] [--all-accounts]`, `src/main.rs`, `src/store/sweep.rs`
 - Daemon surface: `diagnostic.store_gc`, for `mp store gc` and for the automatic sweep after every sync alike
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: unit tests in `src/store/sweep.rs`, `tests/daemon_admin_slice.rs` (`mp_store_gc_matches_the_oracle`)
 - Status: routed (P4-U14 for `mp store gc`, P4-U15 for the post-sync sweep)
 - Note: two safety rules a daemon or GUI port reproduces rather than relaxing (`ANO-5`): the first over-cap run warns and records a marker while the second evicts, and a plan reclaiming more than half the store's blob bytes is refused without `--force`.
@@ -939,7 +942,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: daemon administration
 - Source anchor: `src/engine_lock.rs`, acquired by `drain_account` (`src/pending_ops.rs:567`) for the mutation queue, by `drain_guarded_at` (`src/outbox.rs:1422`) for the outbox and by `run_sync_guarded_at` (`src/sync/engine.rs`) for the IMAP sync ingest
 - Daemon surface: daemon-internal; the account runtime holds it for its lifetime
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/outbox_integration.rs`, `tests/engine_lock_ingest.rs`, unit tests in `src/engine_lock.rs`
 - Status: not started
 - Note: the outbox acquisition is #0116, where a refused drain reports nothing done and opens no session and the holder re-sweeps against a re-read clock.
@@ -951,7 +954,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity as a backend variant
 - Source anchor: `src/graph.rs`
 - Daemon surface: the same `sync.*` and `send.*` families over the Graph backend
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1 onward, #0131), the same surfaces over a Graph account
 - Validation: unit tests in `src/graph.rs`
 - Status: not started
 - Note: delta cursors replace IMAP UID state, and invitation send is unavailable on this backend as recorded in `SND-05`.
@@ -961,7 +964,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the store read paths and the draft editing paths, which do not require a server
 - Daemon surface: `state.event` carrying connectivity; the GUI reaches this state through events rather than by falling back to direct store access
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: `tests/cli_read_surface_integration.rs`, which runs offline
 - Status: not started
 
@@ -970,7 +973,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity for its surfacing
 - Source anchor: `[imap] body_fetch_deadline_secs` (`src/config.rs:240`), clamped to 600 at load (`src/config.rs:958`), documented at `website/src/pages/config.astro`; `BODY_CHUNK_SIZE` (`src/imap_client/fetch.rs:525`); `bodies_complete` (`src/sync/mod.rs:167`); the TUI message at `clients/tui/src/helpers.rs:411`
 - Daemon surface: `state.event` progress carrying the deadline stop
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/imap_client/fetch.rs`, `clients/tui/src/helpers.rs`
 - Status: routed (P4-U10) for `mp sync`, which passes no deadline; GUI not started
 - Note: default 30, `0` unbounded; bodies go out newest-first in chunks of 20 with the deadline checked between chunks and never inside a command, and the first chunk always goes out so an expired deadline still makes progress.
@@ -981,7 +984,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity for its surfacing
 - Source anchor: `run_tick_with_drains` (`src/sync/tick.rs:25`), driven by both TUI tick paths and by `mp sync` (`src/main.rs:1405`); the non-fatal head-drain error at `src/main.rs:1348`
 - Daemon surface: one `operation.progress` per phase, its `phase` naming which of the five slots reported
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/sync/tick.rs`; the wordings and the label in `tests/daemon_sync_slice.rs`
 - Status: routed (P4-U10); GUI not started
 - Note: tail report lines carry an " (after sync)" label so they cannot be read as the head's, and a head-drain error prints a warning and continues instead of aborting the sync; the daemon owns the tick after the cutover, so this ordering and this non-fatal error are contracts (#0114). The label is the client's and is derived from the phase name alone (`Phase::as_str`), so the daemon publishes facts and `mp_client::format` decides the words.
@@ -991,7 +994,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity for its surfacing
 - Source anchor: `NONCONVERGING_PREFIX` (`src/sync/engine.rs:34`) over a `nonconverging:{role}` row in the store's meta table; the `mp sync` line at `src/main.rs:1506`; `NON_CONVERGING_MARKER` (`clients/tui/src/helpers.rs:326`) and the status downgrade in `clients/tui/src/bg.rs:12`
 - Daemon surface: `state.event` warning carrying the marker
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/sync/engine.rs`
 - Status: not started
 - Note: the meta row holds `hash:count:streak` for the pass's UID set and warns at streak 2, at 3, and every tenth thereafter, on a still-zero exit code.
@@ -1002,7 +1005,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: daemon administration
 - Source anchor: `drain_guarded` (`src/outbox.rs:1401`) and `drain_guarded_at` (`src/outbox.rs:1414`), `send::drain_account` (`src/send.rs:2197`), `tests/outbox_integration.rs`
 - Daemon surface: daemon-internal
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/outbox_integration.rs`
 - Status: not started
 - Note: a drain refused the lock does nothing, opens no session, and is a success rather than an error, and the holder re-sweeps up to four times against a clock re-read per sweep (#0116).
@@ -1012,7 +1015,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `unbind_rows_on_uids` (`src/ingest.rs:822`), run after the ingest loop of a pass that reported a reset
 - Daemon surface: daemon-internal, reported in the `sync.*` result
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/store_ingest_integration.rs`, unit tests in `src/ingest.rs`
 - Status: not started
 - Note: every row still parked on a listed UID the pass did not itself ingest moves to the `-id` sentinel, which frees the UID for the message that now wears it and leaves the row rebindable; rows on UIDs the server does not list are left alone, and recovery completes on the next full sync because the download window is positional and the repaired rows sit below it (#0117).
@@ -1024,7 +1027,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp contacts search [query] [-n] [--account]` (`src/main.rs`), the TUI contacts view `/`, `src/contacts/matcher.rs`
 - Daemon surface: `contact.search`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: unit tests in `src/contacts/matcher.rs`, `tests/daemon_admin_slice.rs`
 - Status: routed (P4-U14)
 
@@ -1033,7 +1036,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: CLI automation
 - Source anchor: `mp contacts search --parsable`, `src/main.rs`
 - Daemon surface: `contact.search` with the parsable projection
-- GUI location: TBD (Phase 9)
+- GUI location: not required (CLI automation)
 - Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_admin_slice.rs` (`mp_contacts_search_parsable_is_tab_delimited`)
 - Status: routed (P4-U14)
 - Note: a stable shape other tools already consume, so the daemon migration must not reformat it (`ANO-8`).
@@ -1044,7 +1047,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp contacts rebuild [--account]` (`src/main.rs`), the TUI contacts view `r`
 - Daemon surface: `contact.rebuild` as an `operation.*`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: unit tests in `src/contacts/`, `tests/daemon_admin_slice.rs`
 - Status: routed (P4-U14)
 - Note: the all-accounts default of the CLI form is automation, while the single-account refresh is the user-facing capability.
@@ -1056,7 +1059,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp contacts stats [--account]`, `src/main.rs`
 - Daemon surface: `contact.stats`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_admin_slice.rs`
 - Status: routed (P4-U14)
 
@@ -1065,7 +1068,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Enter` and `n` in the CONTACTS keymap section
 - Daemon surface: `draft.create` seeded from the contact
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -1074,7 +1077,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `v` in the contacts view, `src/contacts/vcard.rs`
 - Daemon surface: `contact.vcard`, then `draft.create`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: unit tests in `src/contacts/vcard.rs`
 - Status: not started
 
@@ -1083,7 +1086,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `c` in the CONTACTS keymap section
 - Daemon surface: client-side clipboard write
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -1092,7 +1095,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/contacts/extractor.rs`, `src/contacts/rank.rs`, `src/contacts/hooks.rs`
 - Daemon surface: daemon-internal, with `state.event` when the index changes
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: unit tests in `src/contacts/rank.rs`, `src/contacts/extractor.rs`
 - Status: routed (P4-U14)
 - Note: implicit workflow that keeps the index current as mail arrives.
@@ -1105,7 +1108,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp invite accept|tentative|decline <selector> [--mailbox]` (`src/main.rs`), TUI `tv` in the message context and `V` in the calendar view, `src/invite.rs`, `tests/imip_integration.rs`
 - Daemon surface: `calendar.rsvp` as an `operation.*`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, and the successful reply through the daemon's fake transport)
 - Status: routed (P5-U6)
 - Note: whole-series only in v1, the reply travels as iMIP over SMTP, and the target message must carry an `invite.ics` blob.
@@ -1118,7 +1121,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `t` and `r` in the calendar view, `src/agenda.rs`, `clients/tui/src/ui/calendar.rs`
 - Daemon surface: `calendar.events` (the name `calendar.agenda` this row carried until P5-U10; the served method is `calendar.events`)
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: unit tests in `src/agenda.rs`, TUI golden frames, `src/tui_tests/invites.rs`
 - Status: routed (P5-U10) - the TUI's agenda is built by the daemon; the view itself is still GUI-parity work
 
@@ -1127,7 +1130,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Enter` and `e` in the calendar view
 - Daemon surface: `message.ics`, whose bytes the client writes to a temp file for the editor session
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: TUI golden frames, `src/tui_tests/invites.rs`
 - Status: routed (P5-U10c-I2) - what `$EDITOR` gets is the row's `invite.ics` blob and not the message (#0052 scope item 10), so the method is the invitation read rather than a rendition
 
@@ -1136,7 +1139,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `mp calendar rebuild [--account]`, `src/main.rs`, `src/calendar_cmd.rs`
 - Daemon surface: `calendar.rebuild`, which reports and writes nothing
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_calendar_rebuild_matches_the_oracle`)
 - Status: routed (P4-U14)
 - Note: attendee status is derived from the `invite.ics` payloads wherever it is displayed, so there is no cached copy to rebuild.
@@ -1146,7 +1149,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/invite.rs`
 - Daemon surface: `calendar.events` and `message.invite` carry the derived statuses; `message.ics` hands out the raw payload an RSVP is built from
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`, `src/tui_tests/invites.rs`
 - Status: routed (P5-U10) - the fold crosses the socket; the rendering is still GUI-parity work
 
@@ -1155,7 +1158,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: implicit workflow driven by newly synced iMIP messages
 - Daemon surface: `state.event`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/imip_integration.rs`
 - Status: not started
 
@@ -1166,7 +1169,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `sc` (`clients/tui/src/app/keymap.rs:596`)
 - Daemon surface: `config.path` for the location; the daemon reloads the file either way
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: manual
 - Status: not started
 - Note: the GUI equivalent is the settings surface plus an explicit reveal or open action.
@@ -1176,7 +1179,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `sf` (`clients/tui/src/app/keymap.rs:597`), the `OpenLogFile` action (`clients/tui/src/app/types.rs:1597`)
 - Daemon surface: `diagnostic.log_path`, which answers the dated file the daemon is writing (`<data_dir>/logs/mailypoppins-<date>.log`), the same file the TUI's `sf` opens
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: `tests/daemon_diagnostics.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
 - Status: routed (P6-U8)
 - Note: the GUI provides a log view plus an explicit reveal or open-in-editor action; `mp daemon logs` is the same file paged over the socket.
@@ -1186,7 +1189,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the clipboard actions in `clients/tui/src/actions.rs`
 - Daemon surface: client-side in every client
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: manual
 - Status: not started
 
@@ -1195,7 +1198,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the browser actions in `clients/tui/src/actions.rs`, `src/config_cmd/oauth2.rs`
 - Daemon surface: client-side in every client
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1 for reader links, M4 for the OAuth verification URL, #0131)
 - Validation: manual
 - Status: not started
 
@@ -1204,7 +1207,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/notify.rs`, using osascript on macOS and notify-send on Linux with sanitized payloads
 - Daemon surface: the daemon decides a notification is warranted and emits `state.event`; the client holding the entitlement presents it
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: unit tests in `src/notify.rs`; `a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list` (`src/tui_tests/events.rs`), `a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals` (`tests/tui_daemon_recovery.rs`)
 - Status: routed (P5-U8); GUI not started
 - Note: the daemon decides *what arrived* and the client decides whether to notify. `sync.completed` carries `new_inbox_mail`, `[{from, subject}]` per ingested inbox message, and the TUI reads `notifications = true` on the way to `crate::notify` exactly where it always did (#0009). A client that dropped the event for that setting would drop the status line and the reload with it, so the opt-in is at the notifier and not at the stream.
@@ -1214,7 +1217,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `Action::suspends_terminal` (`clients/tui/src/app/types.rs:1716`) and the suspend path in `clients/tui/src/lib.rs`
 - Daemon surface: client-side
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M3, #0131)
 - Validation: unit tests in `clients/tui/src/app/types.rs`
 - Status: not started
 - Note: the GUI replaces suspension with the embedded PTY session.
@@ -1226,7 +1229,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `!` (`clients/tui/src/app/keymap.rs:570`), `sl` (`clients/tui/src/app/keymap.rs:595`), and `/` inside the overlay (ACTIVITY LOG keymap section)
 - Daemon surface: `state.event` activity stream; the overlay itself is client-side
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: TUI golden frames
 - Status: not started
 
@@ -1235,7 +1238,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `:` (`clients/tui/src/app/keymap.rs:564`) and `Ctrl+p` (`clients/tui/src/app/keymap.rs:565`), `palette_actions()` (`clients/tui/src/app/keymap.rs:841`)
 - Daemon surface: client-side, derived from `KEYMAP` so it cannot drift from the bindings
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames
 - Status: not started
 
@@ -1244,7 +1247,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `?` (`clients/tui/src/app/keymap.rs:561`), `help_sections()` (`clients/tui/src/app/keymap.rs:787`)
 - Daemon surface: client-side, generated from the same `KEYMAP`
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames
 - Status: not started
 
@@ -1253,7 +1256,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/ui/status.rs`
 - Daemon surface: `state.bootstrap` summaries, then `state.event` and `operation.*` progress
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: unit tests in `clients/tui/src/ui/status.rs`, TUI golden frames
 - Status: not started
 
@@ -1262,7 +1265,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: diagnostics and maintenance
 - Source anchor: `src/timing.rs`, the `OpenLogFile` action (`clients/tui/src/app/types.rs:1597`)
 - Daemon surface: `diagnostic.log_path` and `diagnostic.logs`; the daemon writes its own log, the dated `<data_dir>/logs/mailypoppins-<date>.log` that `src/config.rs` installs and `src/timing.rs` writes its `[TIMING]` lines into
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: unit tests in `src/timing.rs`; the wire surface in `tests/daemon_diagnostics.rs`, contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
 - Status: routed (P6-U8)
 - Note: `<data_dir>/logs/daemon.log` is a different file, the stdio of a detached `mp daemon start`, and is empty for a daemon started in the foreground.
@@ -1272,7 +1275,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: CLI automation
 - Source anchor: `mp dump-keys [--json]`, `clients/tui/src/app/keymap.rs`, `scripts/regen-website-keys.sh` feeding `website/src/data/tui-keys.json`
 - Daemon surface: none; it needs no daemon
-- GUI location: TBD (Phase 9)
+- GUI location: not required (CLI automation)
 - Validation: `docs/baselines/pre-daemon/tui-keys.json`, byte-identical to the website copy
 - Status: not started
 - Note: the data feed the GUI key help reuses rather than duplicating (`ANO-8`), and the artifact that goes stale against a newer `keymap.rs` unless it is regenerated after `cargo install --path .` (`ANO-1`).
@@ -1282,7 +1285,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity with a recorded deferral
 - Source anchor: the top-level `theme` key in `config.toml` (`src/config.rs:25`), `clients/tui/src/theme.rs`, `docs/tickets/0023-enable-theme-config.md`
 - Daemon surface: client-side; the client reads the theme at startup
-- GUI location: TBD (Phase 9)
+- GUI location: deferred for the light theme; the dark theme is M1 (#0129)
 - Validation: `test_parse_config_with_theme` (`src/config.rs:1602`)
 - Status: deferred, with the light theme in the deferred backlog
 - Note: read once at startup, so a change needs a restart; the first GUI release is dark-only by settled decision.
@@ -1292,7 +1295,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `q` (`clients/tui/src/app/keymap.rs:557`)
 - Daemon surface: client disconnect; the daemon keeps running
-- GUI location: TBD (Phase 9)
+- GUI location: clients/desktop (M1, #0129)
 - Validation: TUI golden frames
 - Status: not started
 - Note: in the GUI, closing the window exits the client and leaves the daemon running.
@@ -1307,7 +1310,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry point `mp daemon run`
 - Daemon surface: the process itself, binding `<data_dir>/runtime/daemon.sock`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_lifecycle.rs`, `tests/daemon_runtime_paths.rs`
 - Status: shipped (P2-U7, ticket #0120)
 
@@ -1316,7 +1319,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry point `mp daemon start`
 - Daemon surface: `daemon.start.lock` for startup exclusion, then a handshake on the socket
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_lifecycle.rs`, `tests/daemon_runtime_paths.rs`
 - Status: shipped (P2-U7, ticket #0120)
 
@@ -1325,7 +1328,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry point `mp daemon status`
 - Daemon surface: `daemon.status` over `daemon.json`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_lifecycle.rs` (the `--json` key set exactly)
 - Status: shipped (P2-U7, ticket #0120)
 
@@ -1334,7 +1337,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry point `mp daemon stop`
 - Daemon surface: `daemon.stop {grace_secs?}`, answering with what is still in flight and reporting through a `daemon.stopped` notification what did not settle
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_shutdown.rs` (12 rows over a real socket), `tests/daemon_lifecycle.rs`
 - Status: shipped (P2-U7, ticket #0120); made graceful by P6-U4, ticket #0125
 - Note: the eight shutdown steps and the `--grace-secs` flag are P6-U4's; `mp daemon stop` exits 0 whether or not everything settled.
@@ -1344,7 +1347,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry point `mp daemon restart`
 - Daemon surface: `daemon.stop` then a fresh start; exit code 3 names this command on an incompatible daemon
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_lifecycle.rs` (`restart_yields_a_new_instance_id`)
 - Status: shipped (P2-U7, ticket #0120)
 - Note: also invoked by the GUI mismatch screen after user confirmation.
@@ -1354,7 +1357,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan; entry points `mp daemon install-service` and `mp daemon uninstall-service`
 - Daemon surface: none, and deliberately so: the commands write a systemd user unit or a launchd user agent themselves, and the file they write is what starts a daemon, so there is nobody to ask
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_service.rs` over `tests/fixtures/service/`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U5)
 - Status: routed (P6-U6)
 - Note: the launchd half cannot be smoke-tested on the machine this project is developed on; the plist is pinned as a fixture and the live check is owner action on macOS, still outstanding.
@@ -1364,7 +1367,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: diagnostics and maintenance
 - Source anchor: none, new in this plan
 - Daemon surface: `diagnostic.health`, `diagnostic.logs`, `diagnostic.log_path` and `diagnostic.support_bundle`, fronted by `mp daemon health`, `mp daemon logs` and `mp daemon support-bundle` under the `daemon` subtree; the non-`ok` checks also fill `state.bootstrap`'s `diagnostics` array and travel as the `diagnostic.check_changed` event
-- GUI location: TBD (Phase 9)
+- GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/daemon_diagnostics.rs` and `clients/tui/src/diagnostics_tests.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
 - Status: routed (P6-U8)
 - Note: the support bundle is a directory of five files rather than an archive, because this tree links neither `tar` nor `flate2`, and every secret value the configuration carries is struck from every file in it.
@@ -1374,7 +1377,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: daemon administration
 - Source anchor: none, new in this plan
 - Daemon surface: the client spawns `mp daemon run` and waits for readiness; exit code 4 on failure
-- GUI location: TBD (Phase 9)
+- GUI location: not required (daemon administration)
 - Validation: `tests/daemon_autostart.rs`
 - Status: shipped (P4-U2, ticket #0123)
 - Note: excludes the lifecycle commands themselves and the commands that read no domain state (`ACC-04`, `OBS-06`).
@@ -1386,7 +1389,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: migration-only
 - Source anchor: `mp cutover [--account] [--dry-run]`, `src/main.rs`, `src/cutover.rs`
 - Daemon surface: `config.cutover` as an `operation.*`
-- GUI location: TBD (Phase 9)
+- GUI location: not required (migration-only)
 - Validation: unit tests in `src/cutover.rs`, `tests/daemon_admin_slice.rs` (`mp_cutover_matches_the_oracle`)
 - Status: routed (P4-U14)
 - Note: P4-U14 took the first of the two options this row offered; the client-side one is gone, because after the cutover the daemon owns the data directory and the drafts index the import writes into.
@@ -1397,7 +1400,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: migration-only
 - Source anchor: `migrate_config_signatures` (`src/signatures.rs:265`), with the default recorded in `state.json`
 - Daemon surface: runs in the daemon startup sequence after the cutover
-- GUI location: TBD (Phase 9)
+- GUI location: not required (migration-only)
 - Validation: unit tests in `src/signatures.rs`
 - Status: not started
 
@@ -1406,7 +1409,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: migration-only
 - Source anchor: `src/store/schema.rs`
 - Daemon surface: runs inside the daemon at account-runtime start, so no client performs it
-- GUI location: TBD (Phase 9)
+- GUI location: not required (migration-only)
 - Validation: `tests/store_ingest_integration.rs`
 - Status: not started
 
@@ -1415,7 +1418,7 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: migration-only
 - Source anchor: `migrate_legacy_config_dir` (`src/config.rs:668`), called from `src/main.rs:1672` on every command
 - Daemon surface: runs once in the daemon startup sequence, before the first configuration load
-- GUI location: TBD (Phase 9)
+- GUI location: not required (migration-only)
 - Validation: unit tests in `src/config.rs`
 - Status: not started
 - Note: an explicit `MAILYPOPPINS_CONFIG_DIR` (`src/config.rs:606`) suppresses the fallback, which is why it belongs to daemon identity and not only to startup; identity is the pair with `MAILYPOPPINS_DATA_DIR` (`src/config.rs:1099`) and a mismatch is refused at the handshake (`ANO-14`).

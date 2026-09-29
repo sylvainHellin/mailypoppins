@@ -1,14 +1,14 @@
 ---
 id: 0130
-title: Phase 8 of the native GUI, embedded Neovim composition
+title: M5 of the native GUI, embedded Neovim composition
 type: feature
 priority: next
 status: open
 created: 2026-09-25
 ---
 
-Third ticket of the GUI half of the [native GUI plan](../plans/native-gui.md), sections "Embedded Neovim" and "Phase 8: Embedded Neovim".
-Blocked on #0129, the shell.
+Fourth ticket of the [native GUI plan](../plans/native-gui.md), milestone "M5: embedded Neovim", designed in the section "Embedded Neovim".
+Blocked on #0131: the milestones run in order, so M5 starts after the read-only shell (M1), the mutations (M2), the external-editor compose it replaces (M3), and M4.
 
 ## Work
 

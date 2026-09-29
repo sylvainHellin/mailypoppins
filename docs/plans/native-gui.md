@@ -196,7 +196,7 @@ This section is the design for #0130, which follows the read-only shell and the 
 ## Milestones
 
 The milestones run in order.
-Each one names the parity-matrix identifiers it closes and fills their `GUI location` column, which reads `TBD (Phase 9)` today.
+Each one names the parity-matrix identifiers it closes, and replaces the milestone their `GUI location` column plans today with the surface it built.
 
 ### M0: spike (#0128)
 
