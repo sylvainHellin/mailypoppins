@@ -536,7 +536,13 @@ pub fn html_to_markdown(html: &str) -> String {
 }
 
 /// Recursively collect the first text/plain and text/html parts from a parsed email.
+/// A part that is an attachment is never a body candidate: an HTML-only message
+/// carrying a `.txt` attachment would otherwise show the attachment as its body.
 pub fn extract_body_parts(parsed: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
+    if is_attachment_part(parsed) {
+        return (None, None);
+    }
+
     if parsed.ctype.mimetype == "text/plain" {
         let body = parsed.get_body().unwrap_or_default();
         if !body.is_empty() {
@@ -1896,6 +1902,18 @@ mod tests {
         let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
         assert!(email.html_body.is_some());
         assert!(email.body_text.contains("Hello"));
+    }
+
+    #[test]
+    fn test_parse_rfc822_html_body_with_text_attachment() {
+        // HTML-only body plus a text/plain attachment: the attachment must not
+        // be taken as the plain-text body.
+        let raw = b"From: a@x.com\r\nTo: b@x.com\r\nSubject: Script\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/html; charset=\"utf-8\"\r\n\r\n<p>See the script attached.</p>\r\n--B\r\nContent-Type: text/plain; name=\"example.txt\"\r\nContent-Disposition: attachment; filename=\"example.txt\"\r\n\r\nimport pandas as pd\r\n--B--\r\n";
+        let email = parse_rfc822_to_fetched_email(raw).expect("should parse");
+        assert!(email.body_text.contains("See the script attached."));
+        assert!(!email.body_text.contains("import pandas"));
+        assert!(email.html_body.is_some());
+        assert_eq!(email.attachments.len(), 1);
     }
 
     #[test]
