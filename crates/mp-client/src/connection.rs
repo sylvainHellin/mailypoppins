@@ -15,6 +15,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -120,6 +121,35 @@ impl Connection {
         reply.get("result").cloned().ok_or_else(|| {
             ClientError::Protocol(format!("the answer to {method} carried no result"))
         })
+    }
+
+    /// [`Connection::call`] under a budget of the caller's choosing:
+    /// [`ClientError::Timeout`] when the answer has not arrived within
+    /// `budget`.
+    ///
+    /// [`Connection::call`] itself waits as long as the daemon takes, which is
+    /// right for nothing a user is waiting on, so every interactive caller
+    /// wants this one; the budget is the caller's because it depends on the
+    /// method (a store read answers in milliseconds, a mutation spans a round
+    /// trip to the mail server).
+    ///
+    /// A timed-out call leaves its answer owed: if the daemon answers late,
+    /// the next call on this connection refuses that frame as an answer to
+    /// another id. A caller that times out should therefore drop the
+    /// connection, as the CLI does by exiting.
+    pub async fn call_within(
+        &mut self,
+        method: &str,
+        params: Value,
+        budget: Duration,
+    ) -> Result<Value, ClientError> {
+        match tokio::time::timeout(budget, self.call(method, params)).await {
+            Ok(answer) => answer,
+            Err(_) => Err(ClientError::Timeout {
+                method: method.to_string(),
+                after: budget,
+            }),
+        }
     }
 
     /// The next server-initiated notification, or `None` when the daemon closed
@@ -370,6 +400,38 @@ mod tests {
                 message: "line 4: bad backend".to_string()
             }
         );
+    }
+
+    /// A daemon that accepts the call and never answers is a typed timeout
+    /// after the caller's budget, not a hang.
+    #[tokio::test]
+    async fn a_call_that_goes_unanswered_times_out_at_the_callers_budget() {
+        let dir = std::env::temp_dir().join(format!("mp-client-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let socket = dir.join("silent.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        let silent = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            // Hold the connection open and say nothing.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(stream);
+        });
+
+        let mut conn = Connection::connect(&socket).await.expect("connect");
+        let started = std::time::Instant::now();
+        let error = conn
+            .call_within("account.list", json!({}), Duration::from_millis(100))
+            .await
+            .expect_err("nothing answers");
+        assert!(
+            matches!(&error, ClientError::Timeout { method, after }
+                if method == "account.list" && *after == Duration::from_millis(100)),
+            "got {error:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(error.to_string(), "account.list went unanswered for 0s");
+        silent.abort();
     }
 
     #[test]

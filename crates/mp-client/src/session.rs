@@ -93,8 +93,9 @@ use crate::events::{Incoming, Subscription};
 /// TUI starts without a session instead of never starting at all.
 const CONNECT_CEILING: Duration = Duration::from_secs(30);
 
-/// How long a blocking [`Session::call`] waits for its answer.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a blocking [`Session::call`] waits for its answer; a caller with
+/// another budget uses [`Session::call_within`].
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// First gap between reconnect attempts after the daemon went away.
 ///
@@ -303,8 +304,17 @@ impl Session {
     /// off-frame belongs in [`Session::dispatch`] or on a [`QueryHandle`] of a
     /// worker thread instead.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
+        self.call_within(method, params, DEFAULT_CALL_TIMEOUT)
+    }
+
+    /// [`Session::call`] under a budget of the caller's choosing.
+    ///
+    /// The budget bounds how long this thread waits, not the call: a call that
+    /// outlives it still runs to its end on the session thread, and its answer
+    /// is dropped.
+    pub fn call_within(&self, method: &str, params: Value, budget: Duration) -> Result<Value> {
         match self.calls.as_ref() {
-            Some(calls) => call_on(calls, method, params),
+            Some(calls) => call_on(calls, method, params, budget),
             None => Err(anyhow!("{method}: the daemon session is closed")),
         }
     }
@@ -401,8 +411,14 @@ impl QueryHandle {
     /// refusal as no session at all, which is what lets a worker's poll loop
     /// end on a quit rather than outlive the process's terminal.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
+        self.call_within(method, params, DEFAULT_CALL_TIMEOUT)
+    }
+
+    /// [`QueryHandle::call`] under a budget of the caller's choosing, with
+    /// [`Session::call_within`]'s meaning.
+    pub fn call_within(&self, method: &str, params: Value, budget: Duration) -> Result<Value> {
         match self.calls.as_ref().and_then(|calls| calls.upgrade()) {
-            Some(calls) => call_on(&calls, method, params),
+            Some(calls) => call_on(&calls, method, params, budget),
             None => Err(anyhow!("{method}: the daemon session is closed")),
         }
     }
@@ -519,6 +535,7 @@ fn call_on(
     calls: &async_mpsc::UnboundedSender<Call>,
     method: &str,
     params: Value,
+    budget: Duration,
 ) -> Result<Value> {
     let (answer, wait) = sync_mpsc::sync_channel::<Result<Value, String>>(1);
     let call = Call {
@@ -531,7 +548,7 @@ fn call_on(
     if calls.send(call).is_err() {
         return Err(anyhow!("{method}: the daemon session is closed"));
     }
-    match wait.recv_timeout(CALL_TIMEOUT) {
+    match wait.recv_timeout(budget) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => Err(anyhow!("{method}: {e}")),
         Err(e) => Err(anyhow!("{method}: no answer from the daemon ({e})")),

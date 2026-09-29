@@ -1273,14 +1273,13 @@ async fn daemon_try_call_within(
     params: serde_json::Value,
     budget: std::time::Duration,
 ) -> std::result::Result<serde_json::Value, mp_protocol::RpcError> {
-    match tokio::time::timeout(budget, connection.call(method, params)).await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(mp_client::ClientError::Rpc(error))) => Err(error),
-        Ok(Err(e)) => daemon_unavailable(&format!("{method}: {e}")),
-        Err(_) => daemon_unavailable(&format!(
-            "{method} went unanswered for {}s",
-            budget.as_secs()
-        )),
+    match connection.call_within(method, params, budget).await {
+        Ok(result) => Ok(result),
+        Err(mp_client::ClientError::Rpc(error)) => Err(error),
+        // `ClientError::Timeout` renders as "<method> went unanswered for Ns",
+        // the sentence this path has always printed.
+        Err(e @ mp_client::ClientError::Timeout { .. }) => daemon_unavailable(&e.to_string()),
+        Err(e) => daemon_unavailable(&format!("{method}: {e}")),
     }
 }
 

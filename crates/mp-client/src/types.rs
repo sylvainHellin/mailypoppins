@@ -127,6 +127,15 @@ pub enum ClientError {
     /// The daemon answered, but not with something this protocol allows.
     #[error("the daemon broke the protocol: {0}")]
     Protocol(String),
+    /// A call went unanswered for the budget the caller gave it
+    /// ([`crate::Connection::call_within`]).
+    #[error("{method} went unanswered for {}s", .after.as_secs())]
+    Timeout {
+        /// The method that was called.
+        method: String,
+        /// The budget it was given.
+        after: std::time::Duration,
+    },
 }
 
 #[cfg(test)]
