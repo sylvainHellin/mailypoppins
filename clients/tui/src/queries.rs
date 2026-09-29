@@ -1,76 +1,62 @@
-//! The TUI's query layer (P5-U4, #0124): the three reads a frame needs, typed
-//! in the TUI's own vocabulary and answered by the daemon.
+//! The TUI's query layer (P5-U4, #0124): the reads a frame needs, in the TUI's
+//! own vocabulary.
 //!
-//! The contract is P5-U3's (`src/tui/app/queries_tests.rs`): a [`Queries`]
-//! trait with one blocking `call`, implemented for
-//! [`Session`](crate::session::Session), three free functions over
-//! `&dyn Queries`, and the [`MessageRowDelta`] half of the whole-list transfer
-//! `docs/baselines/decisions/list-transfer.md` chose. A trait rather than three
-//! methods on `Session` because it makes the layer testable over an in-process
-//! `Dispatcher`, so the answers below are pinned against the daemon's real
-//! method bodies and not against a JSON mock.
+//! The reads themselves are `mp_client::queries`, typed over the protocol's
+//! rows (`MessageListRow`, `MailboxRow`, `AgendaEvent`, ...) so the desktop
+//! client shares them. What is left here is the mapping from those rows into
+//! this client's model ([`EmailEntry`], [`MailboxInfo`], [`CalendarEvent`],
+//! [`MessageRef`]), the degrade-on-refusal policy (a refused preview is an
+//! empty pane and a line in the log), the Drafts branch and its file parse, and
+//! the uid index below.
 //!
-//! # Why the wire row becomes a [`MessageRow`] first
+//! # Why the wire row goes through `entry_from_row`
 //!
-//! A listed row is decoded into the store row it came from and handed to
-//! [`entry_from_row`](crate::app::entry_from_row), the same mapper the
-//! store-backed listing uses. That is what makes the two paths equal by
-//! construction rather than by inspection: every derivation (the display name,
-//! the `(no subject)` fallback, `resolve_date`'s two strings, the four flag
-//! axes) stays in the one function that already owns it, and a change to it
-//! moves both paths together. The two `MessageRow` fields no listing carries,
-//! `body_blob` and `thread_id`, are the two an [`EmailEntry`] does not read.
-//!
-//! The drafts branch does the same through
+//! A listed row is handed to [`entry_from_row`](crate::app::entry_from_row),
+//! the same mapper the store-backed oracle in `src/tui_tests/oracle.rs` feeds.
+//! That is what makes the two paths equal by construction rather than by
+//! inspection: every derivation (the display name, the `(no subject)`
+//! fallback, `resolve_date`'s two strings, the four flag axes) stays in the one
+//! function that owns it. The drafts branch does the same through
 //! [`entry_from_draft`](crate::app::entry_from_draft) and
 //! [`entry_from_skip`](crate::app::entry_from_skip).
 //!
 //! # The uid index
 //!
 //! A held list is keyed by `messages.id` (`MessageRef`, #0050) and the daemon
-//! removes a row by `message:<account>/<mailbox>/<uid>`, which is the resource
-//! its mutation methods already invalidate. Nothing in an [`EmailEntry`] is a
-//! uid, so the correspondence has to be remembered where both are seen: every
-//! listing and every row replace records `(account, mailbox, uid) -> id` here,
-//! and a remove resolves through it. A listing replaces its mailbox's table
-//! whole, so the memory is one entry per row of the mailboxes this session has
-//! opened, and a uid the table does not know owes a refetch rather than a
-//! guess.
+//! removes a row by `message:<account>/<mailbox>/<uid>`. `MessageListRow`
+//! carries the uid, so `mp_client::queries::apply_row_delta` needs no index,
+//! but an [`EmailEntry`] does not, so the correspondence has to be remembered
+//! where both are seen: every listing and every row replace records
+//! `(account, mailbox, uid) -> id` here, and a remove resolves through it. A
+//! listing replaces its mailbox's table whole, so the memory is one entry per
+//! row of the mailboxes this session has opened, and a uid the table does not
+//! know owes a refetch rather than a guess.
 //!
-//! The alternative was a `uid` field on `EmailEntry`, which is 31 struct
-//! literals across seven files, two of them the frozen golden-frame fixtures
-//! of P5-U1. The day the TUI becomes a crate (P5-U10) is the day to revisit
-//! it.
+//! The alternative is a `uid` field on `EmailEntry`, which is 31 struct
+//! literals across seven files, two of them the frozen golden-frame fixtures.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use mp_protocol::draft::DraftListing;
+use mp_client::queries as wire;
 use mp_protocol::listing::{MessageListRow, ThreadListing};
-use mp_protocol::EventEnvelope;
 
-use mp_core::selector::DRAFTS_MAILBOX;
-pub use mp_client::queries::Queries;
 use crate::app::{
     entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox,
     CalendarEvent, EmailEntry, MailboxInfo, MessageRef,
 };
+pub use mp_client::queries::{MessageRowDelta, Queries};
+use mp_core::selector::DRAFTS_MAILBOX;
 
 // ---------------------------------------------------------------------------
 // The mailbox listing
 // ---------------------------------------------------------------------------
 
 /// One mailbox of one account, newest first: the whole list, in one call.
-///
-/// The whole-list half of `docs/baselines/decisions/list-transfer.md`. There is
-/// no `offset` and no paging parameter: an offset is the option that was not
-/// chosen, and the deltas below are what keep the list current afterwards.
 ///
 /// The Drafts mailbox is the one branch that is not `message.list`: a draft is
 /// a local file with no `messages` row, so it is `draft.list` instead, and the
@@ -82,17 +68,11 @@ pub fn list_emails(q: &dyn Queries, account: &str, mailbox: &str) -> Result<Vec<
 }
 
 /// The call [`list_emails`] makes, for a caller that dispatches it itself.
-///
-/// Split out so the background mailbox load posts the same request the
-/// blocking path sends, rather than a second spelling of it.
 pub fn list_request(account: &str, mailbox: &str) -> (&'static str, Value) {
     if mailbox == DRAFTS_MAILBOX {
-        ("draft.list", json!({"account": account, "status": null}))
+        wire::draft_list_request(account)
     } else {
-        (
-            "message.list",
-            json!({"account": account, "mailbox": mailbox, "limit": null}),
-        )
+        wire::message_list_request(account, mailbox)
     }
 }
 
@@ -107,10 +87,7 @@ pub fn decode_list(account: &str, mailbox: &str, answer: &Value) -> Result<Vec<E
 
 /// The `messages` array of a `message.list` answer, as list rows.
 fn decode_messages(account: &str, mailbox: &str, answer: &Value) -> Vec<EmailEntry> {
-    let rows: Vec<MessageListRow> = answer["messages"]
-        .as_array()
-        .map(|rows| rows.iter().map(row_from_wire).collect())
-        .unwrap_or_default();
+    let rows = wire::decode_message_rows(answer);
     remember_mailbox(account, mailbox, &rows);
     let status = status_for_mailbox(mailbox);
     rows.into_iter()
@@ -122,25 +99,10 @@ fn decode_messages(account: &str, mailbox: &str, answer: &Value) -> Vec<EmailEnt
 /// them: the files that would not parse first (#0080), then the index's own
 /// order (`mtime DESC, id ASC`).
 fn decode_drafts(answer: &Value) -> Result<Vec<EmailEntry>> {
-    let listing: DraftListing = serde_json::from_value(answer.clone())?;
+    let listing = wire::decode_draft_listing(answer)?;
     let skipped = listing.skipped.into_iter().map(entry_from_skip);
     let rows = listing.drafts.into_iter().map(entry_from_draft);
     Ok(skipped.chain(rows).collect())
-}
-
-/// One listed row as the typed wire row it is.
-///
-/// Decoded with [`MessageListRow`]'s own `serde` derive rather than indexed
-/// key by key, so a row a daemon older than P5-U10c produced still decodes:
-/// every field but the identity defaults, and a client that refused a row over
-/// a field it would have rendered as empty would turn an additive protocol
-/// change into a list that will not paint.
-fn row_from_wire(row: &Value) -> MessageListRow {
-    // `&Value` is a `Deserializer`: no per-row clone of the whole object.
-    <MessageListRow as serde::Deserialize>::deserialize(row).unwrap_or_else(|e| {
-        log::warn!("[queries] a listed row did not decode: {e}");
-        MessageListRow::default()
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -150,26 +112,21 @@ fn row_from_wire(row: &Value) -> MessageListRow {
 /// The `hits` array of a `message.search` answer, as the search overlay's rows
 /// (#0105, P5-U6).
 ///
-/// A hit carries its own `mailbox`, which a mailbox listing does not: the
-/// All-scope column says where the row lives, and the overlay's `source_label`
-/// is that key. The body travels with the row (`body: true`), because the
-/// overlay renders a hit out of the [`mp_core::parse::FetchedEmail`] it holds
-/// rather than out of a second read.
-///
-/// The row is decoded into a [`MessageListRow`] and handed to `entry_from_row`,
-/// which is the same construction `decode_messages` uses and for the same
-/// reason: one mapper, so the overlay row and the list row cannot drift.
+/// A hit carries its own `mailbox`, which the overlay's `source_label` is, and
+/// its body (`body: true`), because the overlay renders a hit out of the
+/// [`mp_core::parse::FetchedEmail`] it holds rather than out of a second read.
+/// The row goes through `entry_from_row`, the same construction a listing
+/// uses, so the overlay row and the list row cannot drift.
 pub fn decode_search_hits(answer: &Value) -> Vec<crate::app::SearchResultEntry> {
-    answer["hits"]
-        .as_array()
-        .map(|hits| hits.iter().map(search_hit).collect())
-        .unwrap_or_default()
+    wire::decode_search_hits(answer)
+        .into_iter()
+        .map(search_hit)
+        .collect()
 }
 
 /// One `message.search` hit as an overlay row.
-fn search_hit(hit: &Value) -> crate::app::SearchResultEntry {
-    let mailbox = hit["mailbox"].as_str().unwrap_or_default().to_string();
-    let row = row_from_wire(hit);
+fn search_hit(hit: wire::SearchHit) -> crate::app::SearchResultEntry {
+    let wire::SearchHit { mailbox, row, body } = hit;
     let fetched = mp_core::parse::FetchedEmail {
         from: row.from.clone(),
         to: row.to.clone(),
@@ -178,7 +135,7 @@ fn search_hit(hit: &Value) -> crate::app::SearchResultEntry {
         bcc: row.bcc.clone(),
         subject: row.subject.clone(),
         date: row.date_display.clone(),
-        body_text: hit["body"].as_str().unwrap_or_default().to_string(),
+        body_text: body.unwrap_or_default(),
         html_body: None,
         has_attachments: row.has_attachments,
         message_id: Some(row.message_id.clone()),
@@ -206,11 +163,9 @@ fn search_hit(hit: &Value) -> crate::app::SearchResultEntry {
 
 /// The per-mailbox totals the sidebar prints, index-aligned with `mailboxes`.
 ///
-/// One `mailbox.list`, whose hierarchy is derived from `build_mailboxes` and is
-/// therefore the sidebar's own: a mailbox the daemon does not name counts zero
-/// and keeps its slot rather than shifting every count after it. The Drafts
-/// total comes from the draft index on the daemon's side, the same exception
-/// the store-backed count makes.
+/// One `mailbox.list`: a mailbox the daemon does not name counts zero and
+/// keeps its slot rather than shifting every count after it. The Drafts total
+/// comes from the draft index on the daemon's side.
 pub fn mailbox_counts(
     q: &dyn Queries,
     account: &str,
@@ -222,22 +177,16 @@ pub fn mailbox_counts(
 
 /// The params [`mailbox_counts`] sends.
 pub fn counts_params(account: &str) -> Value {
-    json!({"account": account})
+    wire::mailbox_list_params(account)
 }
 
 /// A `mailbox.list` answer as the sidebar's count column.
 pub fn decode_counts(mailboxes: &[MailboxInfo], answer: &Value) -> Vec<usize> {
-    let mut totals: HashMap<&str, usize> = HashMap::new();
-    if let Some(rows) = answer["mailboxes"].as_array() {
-        for row in rows {
-            if let Some(slug) = row["slug"].as_str() {
-                totals.insert(slug, row["total"].as_u64().unwrap_or(0) as usize);
-            }
-        }
-    }
+    let rows = wire::decode_mailbox_rows(answer);
+    let totals = wire::totals_by_slug(&rows);
     mailboxes
         .iter()
-        .map(|mb| totals.get(mailbox_key(mb).as_str()).copied().unwrap_or(0))
+        .map(|mb| totals.get(mailbox_key(mb).as_str()).copied().unwrap_or(0) as usize)
         .collect()
 }
 
@@ -247,56 +196,41 @@ pub fn decode_counts(mailboxes: &[MailboxInfo], answer: &Value) -> Vec<usize> {
 
 /// The stored body of one row, for the preview memo.
 ///
-/// Addressed by `row_id`, which is the `id` the listing carried: the preview
-/// holds a [`MessageRef`] and nothing else (#0050), and re-deriving a
-/// `"<mailbox>/<uid>"` on every cursor move would make the client carry a
-/// second identity for the same row.
-///
 /// A refusal is an empty preview and a line in the log, which is what the
-/// store-backed path does with a stale reference and with a store it could not
-/// open: the pane goes blank and the log says why. The `Err` arm is therefore
-/// unreachable today and is kept because a body that is a transport failure
-/// rather than a missing row is a distinction a later unit may want to make.
+/// store-backed path did with a stale reference: the pane goes blank and the
+/// log says why. The `Err` arm is therefore unreachable today and is kept
+/// because a transport failure rather than a missing row is a distinction a
+/// later unit may want to make.
 pub fn message_body(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<Option<String>> {
-    let params = json!({"account": account, "row_id": msg.row_id(), "body": true});
-    match q.call("message.get", params) {
-        Ok(answer) => Ok(answer["body"].as_str().map(str::to_string)),
-        Err(e) => {
+    Ok(
+        wire::message_body(q, account, msg.row_id()).unwrap_or_else(|e| {
             log::warn!("[queries] {msg} of {account} has no body to preview: {e:#}");
-            Ok(None)
-        }
-    }
+            None
+        }),
+    )
 }
 
 /// The body of one draft, through `draft.path` plus a client-side parse.
 ///
-/// The daemon answers where the file is, not what is in it: a draft is a
-/// local Markdown file, its format is [`mp_core::draft`]'s and both ends of
-/// the socket read it with the same parser, so shipping the body through the
-/// wire would be a second answer to "what is the body of this file" and a
-/// second place for the signature sentinels to be stripped. What the client
-/// cannot do without the daemon is turn an `id:` into a path, which is an
-/// index read, and that is exactly what this call asks for.
+/// The daemon answers where the file is, not what is in it: a draft is a local
+/// Markdown file, both ends of the socket read it with `mp_core::draft`'s
+/// parser, and shipping the body through the wire would be a second place for
+/// the signature sentinels to be stripped.
 ///
 /// `None` degrades to an empty pane, which is what a stale index has always
-/// looked like: the row names a file that has been moved, retired by a send,
-/// or rewritten into something that no longer parses.
+/// looked like.
 pub fn draft_body(q: &dyn Queries, account: &str, id: &str) -> Result<Option<String>> {
-    let params = json!({"account": account, "id": id});
-    let answer = match q.call("draft.path", params) {
-        Ok(answer) => answer,
+    let location = match wire::draft_path(q, account, id) {
+        Ok(location) => location,
         Err(e) => {
             log::warn!("[queries] {id} of {account} is no longer indexed: {e:#}");
             return Ok(None);
         }
     };
-    let Some(path) = answer.get("path").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    match mp_core::draft::parse_email_draft(&PathBuf::from(path)) {
+    match mp_core::draft::parse_email_draft(&PathBuf::from(&location.path)) {
         Ok(draft) => Ok(Some(draft.body_markdown)),
         Err(e) => {
-            log::warn!("[queries] reading {path}: {e:#}");
+            log::warn!("[queries] reading {}: {e:#}", location.path);
             Ok(None)
         }
     }
@@ -304,16 +238,8 @@ pub fn draft_body(q: &dyn Queries, account: &str, id: &str) -> Result<Option<Str
 
 /// The conversation one message belongs to, through `message.thread`
 /// (`LST-10`, P5-U10d).
-///
-/// The whole fold, done where the store is: which messages share a `thread_id`
-/// is a query over every mailbox of the account, keyed on a column ingest
-/// wrote, and a client holds one mailbox's listing at a time. The answer is
-/// ordered oldest first and already deduped by `Message-ID`, and it marks the
-/// message the conversation was opened from, so the overlay renders it without
-/// deciding anything.
 pub fn thread(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<ThreadListing> {
-    let params = json!({"account": account, "row_id": msg.row_id()});
-    Ok(serde_json::from_value(q.call("message.thread", params)?)?)
+    wire::thread(q, account, msg.row_id())
 }
 
 // ---------------------------------------------------------------------------
@@ -322,187 +248,89 @@ pub fn thread(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<ThreadL
 
 /// The active account's agenda, through `calendar.events`.
 ///
-/// The daemon does the dedup, the reply fold and the sort, which is what a
-/// client with no store cannot do: every derived column of a row is a fold over
-/// the account's *other* rows (#0031).
-///
 /// An empty agenda on a refusal, which is what an account with no store, no
-/// invites or no readable blob always looked like.
+/// invites or no readable blob always looked like; a malformed answer
+/// degrades the same way.
 pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<CalendarEvent>> {
-    let answer = match q.call("calendar.events", json!({"account": account})) {
-        Ok(answer) => answer,
+    match wire::calendar_events(q, account) {
+        Ok(rows) => Ok(rows.into_iter().map(CalendarEvent::from_wire).collect()),
         Err(e) => {
             log::warn!("[queries] the agenda of {account}: {e:#}");
-            return Ok(Vec::new());
+            Ok(Vec::new())
         }
-    };
-    let rows: Vec<mp_protocol::calendar::AgendaEvent> =
-        serde_json::from_value(answer["events"].clone())?;
-    Ok(rows.into_iter().map(CalendarEvent::from_wire).collect())
+    }
 }
 
-/// One message's invitation card, through `message.invite`.
-///
-/// `None` when the row is gone, carries no iMIP payload, or the payload does
-/// not parse; the preview then shows no card, which is what a non-invite looks
-/// like.
+/// One message's invitation card, through `message.invite`; `None` on a
+/// refusal, which renders as no card.
 pub fn message_invite(
     q: &dyn Queries,
     account: &str,
     msg: MessageRef,
 ) -> Result<Option<mp_core::types::EventFrontmatter>> {
-    let params = json!({"account": account, "row_id": msg.row_id()});
-    let answer = match q.call("message.invite", params) {
-        Ok(answer) => answer,
+    match wire::message_invite(q, account, msg.row_id()) {
+        Ok(event) => Ok(event),
         Err(e) => {
             log::warn!("[queries] the invitation on {msg} of {account}: {e:#}");
-            return Ok(None);
+            Ok(None)
         }
-    };
-    match answer.get("event") {
-        None | Some(Value::Null) => Ok(None),
-        Some(event) => Ok(Some(serde_json::from_value(event.clone())?)),
     }
 }
 
-/// One message's raw `invite.ics` bytes, through `message.ics`.
-///
-/// Base64 on the wire, because a blob is bytes and a JSON string is not.
+/// One message's raw `invite.ics` bytes, through `message.ics`; `None` on a
+/// refusal.
 pub fn message_ics(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<Option<Vec<u8>>> {
-    let params = json!({"account": account, "row_id": msg.row_id()});
-    let answer = match q.call("message.ics", params) {
-        Ok(answer) => answer,
+    match wire::message_ics(q, account, msg.row_id()) {
+        Ok(bytes) => Ok(bytes),
         Err(e) => {
             log::warn!("[queries] the ics of {msg} of {account}: {e:#}");
-            return Ok(None);
+            Ok(None)
         }
-    };
-    let Some(encoded) = answer.get("ics").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    Ok(Some(BASE64.decode(encoded)?))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Row deltas
 // ---------------------------------------------------------------------------
 
-/// One change to a held mailbox list, decoded from one event.
-///
-/// The three shapes the daemon publishes, in its own vocabulary rather than the
-/// decision's prose: `message.row` for an inserted or updated row, and
-/// `state.remove` / `state.invalidate` over the `message:` and `mailbox:`
-/// resources the mutation methods and the count changes already name.
-#[derive(Debug, Clone)]
-pub enum MessageRowDelta {
-    /// One row, as a fresh listing would carry it.
-    Replace {
-        /// The account it belongs to.
-        account: String,
-        /// The mailbox it belongs to.
-        mailbox: String,
-        /// The row itself, boxed because it is much the largest variant.
-        entry: Box<EmailEntry>,
-    },
-    /// One row is gone, named the way the daemon names it.
-    Remove {
-        /// The account it belonged to.
-        account: String,
-        /// The mailbox it belonged to.
-        mailbox: String,
-        /// Its uid, which the uid index turns back into a row id.
-        uid: i64,
-    },
-    /// A whole listing went stale and owes a `message.list`.
-    Invalidate {
-        /// The account whose listing it is.
-        account: String,
-        /// The mailbox whose listing it is.
-        mailbox: String,
-    },
-}
-
-impl MessageRowDelta {
-    /// Decode one event, or `None` for an event that is not about a row.
-    ///
-    /// An unrelated kind is not a delta and may not become one: letting a sync
-    /// tick or a draft change decode into something applicable would let it
-    /// silently rewrite a message list.
-    pub fn decode(event: &EventEnvelope) -> Option<MessageRowDelta> {
-        match event.kind.as_str() {
-            "message.row" => {
-                let account = event.payload["account"].as_str()?.to_string();
-                let mailbox = event.payload["mailbox"].as_str()?.to_string();
-                let row = row_from_wire(&event.payload["message"]);
-                remember_row(&account, &mailbox, &row);
-                let entry = entry_from_row(row, &status_for_mailbox(&mailbox));
-                Some(MessageRowDelta::Replace {
-                    account,
-                    mailbox,
-                    entry: Box::new(entry),
-                })
-            }
-            "state.remove" => {
-                let (account, mailbox, uid) = message_resource(&event.payload)?;
-                Some(MessageRowDelta::Remove {
-                    account,
-                    mailbox,
-                    uid,
-                })
-            }
-            "state.invalidate" => {
-                // The counts scope is the sidebar's, not the list's: a hundred
-                // count changes for one mailbox must not each refetch the open
-                // list.
-                if event.payload["scope"]["query"].as_str() == Some("counts") {
-                    return None;
-                }
-                let (account, mailbox) = mailbox_resource(&event.payload)?;
-                Some(MessageRowDelta::Invalidate { account, mailbox })
-            }
-            _ => None,
-        }
-    }
-
-    /// The mailbox this delta is about.
-    fn mailbox(&self) -> &str {
-        match self {
-            MessageRowDelta::Replace { mailbox, .. }
-            | MessageRowDelta::Remove { mailbox, .. }
-            | MessageRowDelta::Invalidate { mailbox, .. } => mailbox,
-        }
-    }
-}
-
-/// Fold one delta into a held list, answering whether nothing is owed.
+/// Fold one delta into a held list of [`EmailEntry`], answering whether
+/// nothing is owed; the TUI's twin of `mp_client::queries::apply_row_delta`.
 ///
 /// `true` means the list is current again, `false` means the caller must
 /// re-issue `message.list`. A delta about another mailbox folds as a no-op and
-/// answers `true`: the sidebar's other mailboxes move constantly, and
-/// refetching the open list on each of them would put back exactly the
-/// per-event whole-list transfer the deltas exist to avoid.
+/// answers `true`. A replace records its uid first, whichever mailbox it is
+/// about, so a later remove of that row resolves.
 pub fn apply_row_delta(held: &mut Vec<EmailEntry>, mailbox: &str, delta: &MessageRowDelta) -> bool {
+    if let MessageRowDelta::Replace {
+        account,
+        mailbox: of,
+        row,
+    } = delta
+    {
+        remember_row(account, of, row);
+    }
     if delta.mailbox() != mailbox {
         return true;
     }
     match delta {
-        MessageRowDelta::Replace { entry, .. } => {
+        MessageRowDelta::Replace { mailbox, row, .. } => {
+            let entry = entry_from_row((**row).clone(), &status_for_mailbox(mailbox));
             match entry
                 .msg
                 .and_then(|msg| held.iter().position(|row| row.msg == Some(msg)))
             {
                 // The row is one the client already holds: replace it where it
                 // stands, so the list keeps its length and its order.
-                Some(at) => held[at] = (**entry).clone(),
+                Some(at) => held[at] = entry,
                 // A row the client has not seen goes where a fresh listing
                 // would have put it, which is the store's order,
                 // `date_sort DESC, id DESC`.
                 None => {
                     let at = held
                         .iter()
-                        .position(|row| sort_key(row) < sort_key(entry))
+                        .position(|row| sort_key(row) < sort_key(&entry))
                         .unwrap_or(held.len());
-                    held.insert(at, (**entry).clone());
+                    held.insert(at, entry);
                 }
             }
             true
@@ -533,23 +361,6 @@ fn sort_key(entry: &EmailEntry) -> (&str, i64) {
         entry.date_sort.as_str(),
         entry.msg.map(MessageRef::row_id).unwrap_or_default(),
     )
-}
-
-/// The `(account, mailbox, uid)` of a `message:<account>/<mailbox>/<uid>`
-/// resource, or `None` for a resource about anything else.
-fn message_resource(payload: &Value) -> Option<(String, String, i64)> {
-    let resource = payload["resource"].as_str()?;
-    let path = resource.strip_prefix("message:")?;
-    let (account, rest) = path.split_once('/')?;
-    let (mailbox, uid) = rest.rsplit_once('/')?;
-    Some((account.to_string(), mailbox.to_string(), uid.parse().ok()?))
-}
-
-/// The `(account, mailbox)` of a `mailbox:<account>/<mailbox>` resource.
-fn mailbox_resource(payload: &Value) -> Option<(String, String)> {
-    let resource = payload["resource"].as_str()?;
-    let (account, mailbox) = resource.strip_prefix("mailbox:")?.split_once('/')?;
-    Some((account.to_string(), mailbox.to_string()))
 }
 
 // ---------------------------------------------------------------------------

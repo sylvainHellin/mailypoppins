@@ -10,7 +10,8 @@
 //! `clients/tui`: [`session`] (the dedicated session thread, its call and
 //! dispatch channels, the reconnect backoff, the injected [`session::Connector`]),
 //! [`events`] (what that thread posts to its client) and [`queries`] (the
-//! object-safe blocking door the typed reads go through).
+//! object-safe blocking door, and the typed reads over it in the protocol's
+//! own row types, with the row deltas that keep a held listing current).
 //!
 //! ```no_run
 //! # async fn demo(socket: &std::path::Path) -> Result<(), mp_client::ClientError> {

@@ -1387,49 +1387,42 @@ async fn routed_list_messages(
 
 /// One `message.list` entry as the row the renderer takes.
 ///
+/// Decoded by `mp_client::queries::row_from_wire`, the one wire-row decoder
+/// every client shares, and mapped onto the store row `render_list` takes.
 /// Everything a listing prints comes off the wire, `date_display` included, so
-/// the routed path opens no store of its own. The fields the wire does not
-/// carry are the ones nothing in a listing reads: the store id, the other
+/// the routed path opens no store of its own. The fields the mapping leaves
+/// empty are the ones nothing in a listing reads: the store id, the other
 /// recipients, the body blob, the thread. `flags` is rebuilt as the token
 /// string the store holds, so `MessageRow::flags` parses it back into the same
-/// three bits.
+/// three bits; the star is left off, as it always was on this path.
 fn row_from_wire(
     message: &serde_json::Value,
     mailbox: &str,
 ) -> mailypoppins::store::read::MessageRow {
-    let uid = message["uid"].as_i64().unwrap_or_default();
-    let text = |key: &str| {
-        message[key]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    let flag = |key: &str| message["flags"][key].as_bool().unwrap_or(false);
+    let row = mp_client::queries::row_from_wire(message);
+    let text = |value: String| Some(value).filter(|value| !value.is_empty());
     mailypoppins::store::read::MessageRow {
         id: 0,
         mailbox: mailbox.to_string(),
-        uid,
-        message_id: message["message_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        from: text("from"),
+        uid: row.uid,
+        message_id: row.message_id,
+        from: text(row.from),
         to: None,
         cc: None,
         reply_to: None,
         bcc: None,
-        subject: text("subject"),
-        date_display: text("date_display"),
+        subject: text(row.subject),
+        date_display: text(row.date_display),
         flags: Some(
             MessageFlags {
-                seen: flag("seen"),
-                answered: flag("answered"),
-                forwarded: flag("forwarded"),
+                seen: row.flags.seen,
+                answered: row.flags.answered,
+                forwarded: row.flags.forwarded,
                 flagged: false,
             }
             .to_flag_string(),
         ),
-        has_attachments: message["has_attachments"].as_bool().unwrap_or(false),
+        has_attachments: row.has_attachments,
         body_blob: None,
         thread_id: None,
         is_invite: false,

@@ -71,9 +71,6 @@ const KIND_INVALIDATE: &str = "state.invalidate";
 /// The `kind` a resource that is gone travels as.
 const KIND_REMOVE: &str = "state.remove";
 
-/// The prefix of the resource a removed draft is named by.
-const DRAFT_RESOURCE: &str = "draft:";
-
 /// The `kind` one hit of a live `message.search_server` travels as
 /// (`LST-08`, #0126).
 const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
@@ -657,11 +654,7 @@ pub(super) fn land_check(app: &mut App, check: &HealthCheck) {
 /// The account of a `draft:<account>/<id>` resource, or `None` for a resource
 /// that names something else.
 fn draft_resource_account(event: &EventEnvelope) -> Option<&str> {
-    event.payload["resource"]
-        .as_str()?
-        .strip_prefix(DRAFT_RESOURCE)?
-        .split('/')
-        .next()
+    mp_client::queries::draft_resource_account(event.payload["resource"].as_str()?)
 }
 
 /// The notifier's shape for the arrivals a tick reported.

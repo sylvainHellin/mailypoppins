@@ -24,6 +24,9 @@ log = "0.4"
 # formatting decision and therefore the client's (`outbox_cli_lines`). Same
 # version as the root crate, so the workspace resolves one chrono.
 chrono = "0.4"
+# `queries::message_ics` decodes the base64 the wire carries a blob in. Same
+# version as the root crate and `mp-core`, so the lock file does not move.
+base64 = "0.22"
 
 [features]
 # `Session::serving`, the in-process session a test drives over a dispatcher.
