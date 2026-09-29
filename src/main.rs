@@ -1276,10 +1276,18 @@ async fn daemon_try_call_within(
     match connection.call_within(method, params, budget).await {
         Ok(result) => Ok(result),
         Err(mp_client::ClientError::Rpc(error)) => Err(error),
-        // `ClientError::Timeout` renders as "<method> went unanswered for Ns",
-        // the sentence this path has always printed.
-        Err(e @ mp_client::ClientError::Timeout { .. }) => daemon_unavailable(&e.to_string()),
-        Err(e) => daemon_unavailable(&format!("{method}: {e}")),
+        Err(e) => unanswered(method, e),
+    }
+}
+
+/// The exit-4 diagnostic for a call that got no answer at all, as opposed to a
+/// refusal: `ClientError::Timeout` renders as "<method> went unanswered for
+/// Ns", the sentence this path has always printed, and anything else is the
+/// transport's own words after the method.
+fn unanswered(method: &str, error: mp_client::ClientError) -> ! {
+    match error {
+        e @ mp_client::ClientError::Timeout { .. } => daemon_unavailable(&e.to_string()),
+        e => daemon_unavailable(&format!("{method}: {e}")),
     }
 }
 
@@ -1876,12 +1884,7 @@ fn resolve_body_signature(
 const WATCHED_MAILBOX: &str = mailypoppins::daemon::methods::sync::WATCHED_MAILBOX;
 
 /// What one operation settled as.
-enum Settled {
-    /// The `result` a succeeded operation produced.
-    Done(serde_json::Value),
-    /// The message a failed or cancelled operation stopped with.
-    Failed(String),
-}
+use mp_client::operation::Settled;
 
 /// How one account's sync ended, which is all the caller's summary needs.
 enum Synced {
@@ -1894,37 +1897,20 @@ enum Synced {
 }
 
 /// Follow one operation to its end, rendering the reports it publishes on the
-/// way.
+/// way: `mp_client`'s [`Connection::await_operation`](mp_client::Connection::await_operation),
+/// with a daemon that goes away first ending the run with exit 4.
 ///
-/// Events rather than polling: a drain report lives on `operation.progress`, and
-/// a poll of `operation.status` only ever sees the newest one. Both kinds are
-/// lifecycle events, so neither is coalesced away nor dropped when a slow client
-/// overflows its queue. There is no budget: a full sync takes as long as the
-/// mailbox does, exactly as it did in process.
+/// There is no budget: a full sync takes as long as the mailbox does, exactly
+/// as it did in process.
 async fn await_operation(
     connection: &mut mp_client::Connection,
     id: &str,
-    mut on_progress: impl FnMut(&serde_json::Value),
+    on_progress: impl FnMut(&serde_json::Value),
 ) -> Settled {
-    use mailypoppins::daemon::operations::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
-    loop {
-        let Some(notification) = connection.next_notification().await else {
+    match connection.await_operation(id, on_progress).await {
+        Ok(settled) => settled,
+        Err(_) => {
             daemon_unavailable("the daemon closed the connection with an operation still running")
-        };
-        let params = notification.params;
-        if params["payload"]["operation_id"].as_str() != Some(id) {
-            continue;
-        }
-        match params["kind"].as_str() {
-            Some(KIND_OPERATION_PROGRESS) => on_progress(&params["payload"]),
-            Some(KIND_OPERATION_FINISHED) => {
-                let payload = &params["payload"];
-                return match payload["state"].as_str() {
-                    Some("succeeded") => Settled::Done(payload["result"].clone()),
-                    _ => Settled::Failed(wire_str(&payload["error"]["message"]).to_string()),
-                };
-            }
-            _ => {}
         }
     }
 }
@@ -2996,8 +2982,14 @@ async fn routed_oauth2_login(global: &GlobalConfig, account: Option<&str>) -> Re
 /// waits forever for a notification nobody addressed to it.
 async fn operation_session() -> mp_client::Connection {
     let mut connection = daemon_connection().await;
-    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
-    connection
+    match connection.subscribe_within(DAEMON_TIMEOUT).await {
+        Ok(_) => connection,
+        Err(mp_client::ClientError::Rpc(error)) => {
+            eprintln!("{} {}", "\u{2717}".red(), error.message);
+            std::process::exit(1);
+        }
+        Err(e) => unanswered("state.bootstrap", e),
+    }
 }
 
 /// Start one operation of the admin slice and wait for its result, raising the
@@ -3008,10 +3000,18 @@ async fn run_admin_operation(
     params: serde_json::Value,
     account: &str,
 ) -> Result<serde_json::Value> {
-    let started = daemon_try_call(connection, method, params)
+    match connection
+        .run_operation(method, params, DAEMON_TIMEOUT, |_| {})
         .await
-        .map_err(|error| refusal(account, error))?;
-    settle(connection, &started).await
+    {
+        Ok(Settled::Done(result)) => Ok(result),
+        Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
+        Err(mp_client::ClientError::Rpc(error)) => Err(refusal(account, error)),
+        Err(mp_client::ClientError::Closed) => {
+            daemon_unavailable("the daemon closed the connection with an operation still running")
+        }
+        Err(e) => unanswered(method, e),
+    }
 }
 
 /// Wait for an operation this slice started, with no progress to render.
@@ -3019,10 +3019,12 @@ async fn settle(
     connection: &mut mp_client::Connection,
     started: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let id = wire_str(&started["operation_id"]).to_string();
-    match await_operation(connection, &id, |_| {}).await {
-        Settled::Done(result) => Ok(result),
-        Settled::Failed(message) => Err(anyhow!("{message}")),
+    match connection.settle(started).await {
+        Ok(Settled::Done(result)) => Ok(result),
+        Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
+        Err(_) => {
+            daemon_unavailable("the daemon closed the connection with an operation still running")
+        }
     }
 }
 

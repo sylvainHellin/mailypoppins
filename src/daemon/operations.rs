@@ -79,11 +79,9 @@ use super::state::{CanonicalState, ConnectionId};
 /// `docs/daemon-operations.md` beside the other hooks.
 pub const FAKE_OPERATIONS_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_OPERATIONS";
 
-/// The kind one progress report travels as.
-pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";
-
-/// The kind a terminal transition travels as.
-pub const KIND_OPERATION_FINISHED: &str = "operation.finished";
+/// The kinds one progress report and a terminal transition travel as, which
+/// are the protocol's so a client names them without linking the daemon.
+pub use mp_protocol::events::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
 
 /// The method that reports one operation.
 pub const METHOD_OPERATION_STATUS: &str = "operation.status";

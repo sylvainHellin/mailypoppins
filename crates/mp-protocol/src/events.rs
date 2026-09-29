@@ -180,6 +180,14 @@ pub const KIND_DRAFT_INVALID: &str = "draft.invalid";
 /// The `kind` a watched signature file travels as.
 pub const KIND_SIGNATURE_CHANGED: &str = "signature.changed";
 
+/// The `kind` one progress report of an operation travels as, with a payload
+/// carrying its `operation_id`.
+pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";
+
+/// The `kind` an operation's terminal transition travels as, with a payload of
+/// `{operation_id, state, result?, error?}`.
+pub const KIND_OPERATION_FINISHED: &str = "operation.finished";
+
 /// The `kind` a health check whose status moved travels as (P6-U8).
 ///
 /// The payload is one check, `{name, status, detail}`, the same three keys

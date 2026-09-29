@@ -49,7 +49,7 @@ use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
     Arrival, MutationsRolledBack, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN,
     KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
-    KIND_MUTATIONS_ROLLED_BACK, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
     KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
@@ -62,9 +62,6 @@ use mp_client::{Observe, StateTracker};
 use super::app::{App, MailboxKind, StatusLevel};
 use super::queries::{MessageRowDelta, Queries};
 use super::{COALESCE_BUDGET, MAX_COALESCED_EVENTS};
-
-/// The `kind` a finished operation travels as.
-const KIND_OPERATION_FINISHED: &str = "operation.finished";
 
 /// The `kind` an invalidation travels as.
 const KIND_INVALIDATE: &str = "state.invalidate";

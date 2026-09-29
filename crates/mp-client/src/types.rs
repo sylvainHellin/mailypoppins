@@ -127,6 +127,10 @@ pub enum ClientError {
     /// The daemon answered, but not with something this protocol allows.
     #[error("the daemon broke the protocol: {0}")]
     Protocol(String),
+    /// The daemon closed the connection while this client was waiting for a
+    /// notification ([`crate::Connection::await_operation`]).
+    #[error("the daemon closed the connection")]
+    Closed,
     /// A call went unanswered for the budget the caller gave it
     /// ([`crate::Connection::call_within`]).
     #[error("{method} went unanswered for {}s", .after.as_secs())]

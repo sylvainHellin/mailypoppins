@@ -12,6 +12,8 @@
 //! [`events`] (what that thread posts to its client) and [`queries`] (the
 //! object-safe blocking door, and the typed reads over it in the protocol's
 //! own row types, with the row deltas that keep a held listing current).
+//! [`operation`] is the one-shot client's half: connect and handshake under a
+//! budget, subscribe, start an operation and settle it on one [`Connection`].
 //!
 //! ```no_run
 //! # async fn demo(socket: &std::path::Path) -> Result<(), mp_client::ClientError> {
@@ -27,6 +29,7 @@
 
 pub mod events;
 pub mod format;
+pub mod operation;
 pub mod queries;
 pub mod session;
 

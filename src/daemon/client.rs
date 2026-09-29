@@ -334,30 +334,26 @@ async fn open_session() -> Result<(Connection, String), String> {
 /// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
 /// `instance_id` the handshake reported.
 async fn connect(socket: &Path) -> Result<(Connection, String), ClientError> {
-    let handshake = async {
-        let mut connection = Connection::connect(socket).await?;
-        let result = connection
-            .initialize(
-                ClientInfo {
-                    kind: ClientKind::Cli,
-                    app_version: env!("CARGO_PKG_VERSION").to_string(),
-                },
-                Identity {
-                    data_dir: crate::config::mailypoppins_data_dir(),
-                    config_dir: crate::config::config_dir(),
-                },
-                &[],
-                &[],
-            )
-            .await?;
-        Ok::<(Connection, String), ClientError>((connection, result.instance_id))
-    };
-    match tokio::time::timeout(CONNECT_TIMEOUT, handshake).await {
-        Ok(result) => result,
-        Err(_) => Err(ClientError::Protocol(format!(
+    let opened = Connection::open(
+        socket,
+        ClientInfo {
+            kind: ClientKind::Cli,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        Identity {
+            data_dir: crate::config::mailypoppins_data_dir(),
+            config_dir: crate::config::config_dir(),
+        },
+        CONNECT_TIMEOUT,
+    )
+    .await;
+    match opened {
+        Ok((connection, hello)) => Ok((connection, hello.instance_id)),
+        Err(ClientError::Timeout { .. }) => Err(ClientError::Protocol(format!(
             "it did not complete the handshake within {}s",
             CONNECT_TIMEOUT.as_secs()
         ))),
+        Err(e) => Err(e),
     }
 }
 
