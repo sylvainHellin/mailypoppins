@@ -1073,6 +1073,7 @@ A poisoned queue accepts no further domain event until the client calls `state.b
 Lifecycle events are the exception and survive both the discard and the poison, because no snapshot carries them and a re-bootstrap would not bring them back.
 They do not survive the re-bootstrap itself: a second `state.bootstrap` empties the whole queue, lifecycle events included, so a progress report queued behind a resync is lost where the same report queued behind an overflow is kept.
 A client therefore re-queries after every re-bootstrap rather than waiting for a replay (#0121): the undo-send holds come back in the snapshot's `holds`, and each operation it still awaits comes back through `operation.status`.
+Keeping them instead would need every client to apply a lifecycle event at or below its watermark without moving it, a change to `StateTracker` and to each client's event application that the re-query makes unnecessary.
 A terminal answer is settled exactly as the lost `operation.finished` would have been, a live one stays awaited because its finish now arrives above the watermark, and an id the daemon refuses (forgotten past the 256-operation window) is dropped.
 After a daemon restart every awaited id is dropped without asking, since operation ids are only ever the issuing instance's; the TUI does all of this in `requery_operations` (`clients/tui/src/events.rs`).
 If the control notification itself cannot be written, the daemon closes that connection and keeps serving every other one.
