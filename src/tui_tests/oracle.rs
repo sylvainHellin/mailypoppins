@@ -17,7 +17,7 @@
 //!
 //! What they are no longer is a fallback. An `App` with no session answers an
 //! empty list, zeroed counts and no card, which is what P5-U8's "no direct
-//! fallback" asked for and what `crates/mp-tui` makes true by construction: a
+//! fallback" asked for and what `clients/tui` makes true by construction: a
 //! client crate that cannot link the store cannot read one behind the daemon's
 //! back. The store reads live on this side of the boundary, in the crate that
 //! owns the store, and they are reached by tests only.

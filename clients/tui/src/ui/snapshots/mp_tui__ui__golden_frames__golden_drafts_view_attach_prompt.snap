@@ -1,24 +1,24 @@
 ---
-source: crates/mp-tui/src/ui/golden_frames.rs
+source: clients/tui/src/ui/golden_frames.rs
 expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 ---
 == text 120x40 (trailing spaces trimmed) ==
 00 |╭ Mail ──────────────────────────────────╮╭ Headers ───────────────────────────────────────────────────────────────────╮
 01 |│  󰅲 Inbox  5                            ││ From:                                                                      │
-02 |│> 󰏫 Drafts  2                           ││ To:                                                                        │
-03 |│  󰑫 Sent 41                             ││ Subj: 2026-07-30-reply-to-anna.md                                          │
-04 |│  󰄼 Archive 128                         ││ Date: 2026-07-30  [error]                                                  │
+02 |│> 󰏫 Drafts  2                           ││ To: anna.weber@example.com                                                 │
+03 |│  󰑫 Sent 41                             ││ Subj: Re: Statusbericht KW31                                               │
+04 |│  󰄼 Archive 128                         ││ Date: 2026-07-29  [draft]                                                  │
 05 |│                                        ││                                                                            │
 06 |╰────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────╯
 07 |╭ Drafts ────────────────────────────────╮╭ Body ──────────────────────────────────────────────────────────────────────╮
-08 |│   DATE       SUBJECT                   ││This draft could not be parsed, so it is not listed.                        │
-09 |│   2026-07-30  2026-07-30-reply-to-an… ││                                                                            │
-10 |│   2026-07-29 Re: Statusbericht KW31    ││/home/u/.local/share/mailypoppins/work/drafts/2026-07-30-reply-to-anna.md   │
-11 |│                                        ││                                                                            │
-12 |│                                        ││Parse error:                                                                │
-13 |│                                        ││Failed to parse frontmatter: attachments[0]: invalid type: string "/x"      │
+08 |│attach: ~/Documents/report.pdf█         ││                                                                            │
+09 |│   DATE       SUBJECT                   ││                                                                            │
+10 |│   2026-07-30  2026-07-30-reply-to-an… ││                                                                            │
+11 |│   2026-07-29 Re: Statusbericht KW31    ││                                                                            │
+12 |│                                        ││                                                                            │
+13 |│                                        ││                                                                            │
 14 |│                                        ││                                                                            │
-15 |│                                        ││Press Enter/e to open the raw file in $EDITOR and fix its frontmatter.      │
+15 |│                                        ││                                                                            │
 16 |│                                        ││                                                                            │
 17 |│                                        ││                                                                            │
 18 |│                                        ││                                                                            │
@@ -48,6 +48,7 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 02 |bold@43..48
 03 |bold@43..50
 04 |bold@43..50
-09 |bg:surface+fg:selection+bold@1..41
+10 |fg:error@1..41
+11 |bg:surface+fg:selection+bold@1..41
 35 |bold@5..11
 38 |bold@1..7 bold@9..12 bold@23..24 bold@33..38 bold@50..59 bold@78..79 bold@87..88 bold@98..99 bold@108..111

@@ -1,6 +1,6 @@
 //! The TUI tests the root crate owns (#0126, P5-U10e).
 //!
-//! `src/tui/` is about to become `crates/mp-tui`, a client crate that links
+//! `src/tui/` is about to become `clients/tui`, a client crate that links
 //! `mp-core`, `mp-client` and `mp-protocol` and nothing else. Most of what the
 //! TUI tests is the TUI's own and moves with it; what could not is here, in the
 //! crate that owns what each of these reaches:

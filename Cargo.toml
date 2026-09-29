@@ -1,8 +1,8 @@
 [workspace]
-members = [".", "crates/mp-core", "crates/mp-protocol", "crates/mp-client", "crates/mp-tui"]
+members = [".", "crates/mp-core", "crates/mp-protocol", "crates/mp-client", "clients/tui"]
 # The Phase 1a spike carries its own `[workspace]` and its own lock file; the
 # desktop shell (Phase 6) will be a separate build system.
-exclude = ["spikes/*", "desktop"]
+exclude = ["spikes/*", "clients/desktop"]
 
 [package]
 name = "mailypoppins"
@@ -92,7 +92,7 @@ mp-core = { path = "crates/mp-core" }
 # way and only this way: `mp-tui` names no crate of this workspace but
 # `mp-core`, `mp-client` and `mp-protocol`, so the binary can launch the TUI and
 # the TUI cannot reach the engine.
-mp-tui = { path = "crates/mp-tui" }
+mp-tui = { path = "clients/tui" }
 
 [features]
 # Statically link OpenSSL (built from source). Required for the
@@ -111,7 +111,7 @@ mp-core = { path = "crates/mp-core", features = ["test-support"] }
 # The same seam over the TUI: `src/tui_tests/` builds sessionless `App`s, primes
 # previews and renders the golden-frame fixtures, all of which were
 # `#[cfg(test)]` while the TUI was a module of this crate.
-mp-tui = { path = "crates/mp-tui", features = ["test-support"] }
+mp-tui = { path = "clients/tui", features = ["test-support"] }
 
 # Line tables keep file:line in backtraces but drop full debug info: test binaries
 # shrink several-fold, and cargo never deletes stale ones from target/debug.

@@ -8,7 +8,7 @@
 //! was shrinking was to have written down what it was. The first half walks the
 //! TUI's sources, collects every `use` of an engine module, and compares the
 //! result against `tests/fixtures/tui-engine-imports.txt`. **The fixture is
-//! empty since #0126 (P5-U10e)**, and the scan roots at `crates/mp-tui/src`
+//! empty since #0126 (P5-U10e)**, and the scan roots at `clients/tui/src`
 //! since P5-U10f, where the answer is structural: that crate's manifest names
 //! `mp-core`, `mp-client` and `mp-protocol` and no `mailypoppins`, so an engine
 //! import does not compile. The scan stays as the belt to that braces: it fails
@@ -27,7 +27,7 @@
 //!
 //! **The TUI's engine calls.** The import scan above reads `use` statements,
 //! and P5-U10c-I2 measured what that misses: most of what stands between
-//! `src/tui/` and `crates/mp-tui` is spelled as a fully-qualified path
+//! `src/tui/` and `clients/tui` is spelled as a fully-qualified path
 //! (`crate::outbox::counts_for_account(…)`, `crate::store::read::thread_messages(…)`),
 //! which no `use` line mentions, so the import allow-list read six while the
 //! work was six *groups* of call sites it could not see. The third half walks
@@ -38,7 +38,7 @@
 //!
 //! Nothing here is feature-gated: it passes on the pre-daemon tree, which is
 //! the point. `engine_imports` takes the client source root as an argument,
-//! which is what let P5-U10f re-point it at `crates/mp-tui/src` without a
+//! which is what let P5-U10f re-point it at `clients/tui/src` without a
 //! rewrite.
 //!
 //! To re-record the TUI allow-lists after a deliberate change, run
@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 /// P5-U10a and were carried on this list unchanged for four units, because no
 /// file under `src/tui/` imported either and striking them was never the unit's
 /// brief. P5-U10f is the unit where keeping them would have been wrong rather
-/// than merely untidy: `crates/mp-tui` depends on `mp-core`, so a `use
+/// than merely untidy: `clients/tui` depends on `mp-core`, so a `use
 /// mp_core::secrets::…` in the TUI would be a real engine reach that this
 /// scan - which looks for `crate::` and `mailypoppins::` - could not see, and a
 /// list naming two modules the scan cannot reach reads as coverage it does not
@@ -99,7 +99,7 @@ pub const MP_CORE_ENGINE_MODULES: [&str; 2] = ["oauth2", "secrets"];
 /// for on the `crate::` side.
 pub const MP_CORE_ENGINE_PATHS: [&str; 2] = ["mp_core::oauth2", "mp_core::secrets"];
 
-const CLIENT_ROOT: &str = "crates/mp-tui/src";
+const CLIENT_ROOT: &str = "clients/tui/src";
 const ALLOW_LIST: &str = "tests/fixtures/tui-engine-imports.txt";
 const PATH_ALLOW_LIST: &str = "tests/fixtures/tui-engine-paths.txt";
 
@@ -416,7 +416,7 @@ fn engine_imports_reads_every_use_form_and_ignores_shared_modules() {
 // The TUI's engine calls (#0126, P5-U10d)
 // ---------------------------------------------------------------------------
 
-/// The paths a `crates/mp-tui` could not resolve, as they are spelled in the
+/// The paths a `clients/tui` could not resolve, as they are spelled in the
 /// tree, and what each group is about.
 ///
 /// Prefixes rather than a parse, for the reason [`ENGINE_SYMBOLS`] is a list of

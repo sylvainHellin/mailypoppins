@@ -275,7 +275,7 @@ pub async fn reopen_session() -> Option<(Connection, String)> {
 
 /// The two routines above, as the TUI takes them (#0126, P5-U10f).
 ///
-/// `crates/mp-tui` links neither this module nor the lifecycle it calls: the
+/// `clients/tui` links neither this module nor the lifecycle it calls: the
 /// socket path comes from the data directory, the on-demand start spawns
 /// `mp daemon run`, and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping is this
 /// process's. So the binary hands the TUI the two routines and the TUI calls

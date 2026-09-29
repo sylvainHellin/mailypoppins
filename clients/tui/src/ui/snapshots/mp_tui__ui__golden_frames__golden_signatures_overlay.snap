@@ -1,5 +1,5 @@
 ---
-source: crates/mp-tui/src/ui/golden_frames.rs
+source: clients/tui/src/ui/golden_frames.rs
 expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 ---
 == text 120x40 (trailing spaces trimmed) ==

@@ -9,7 +9,7 @@
 //! exists so the numbers below are a true "before".
 //!
 //! Counting is by **source scan**, not by what the harness selected: the guard
-//! reads the `.rs` files under `crates/mp-tui/src/`, `src/tui_tests/` and
+//! reads the `.rs` files under `clients/tui/src/`, `src/tui_tests/` and
 //! `crates/mp-core/src/` and counts `#[test]` /
 //! `#[tokio::test]` attributes, so it reports the same numbers whether or not
 //! those tests are part of the current selection. A guard that counted
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// Every `.rs` file below here is scanned for test attributes. The TUI is a
 /// crate of its own since #0126 (P5-U10f), which is precisely the layout change
 /// this guard was landed ahead of in P2-U1a.
-const TUI_ROOT: &str = "crates/mp-tui/src";
+const TUI_ROOT: &str = "clients/tui/src";
 /// The TUI tests the root crate owns (#0126, P5-U10e): the sessionless oracles
 /// and every test that compares a served answer against one. They are the
 /// other half of [`MIN_TUI_TESTS`]'s arithmetic, and a floor here is what says
@@ -43,9 +43,9 @@ const TUI_TESTS_ROOT: &str = "src/tui_tests";
 const CORE_ROOT: &str = "crates/mp-core/src";
 /// The golden-frame suite: the TUI's only end-to-end rendering coverage, and
 /// the first thing a bad workspace layout drops.
-const GOLDEN_FRAMES: &str = "crates/mp-tui/src/ui/golden_frames.rs";
+const GOLDEN_FRAMES: &str = "clients/tui/src/ui/golden_frames.rs";
 /// `insta` snapshots backing the golden frames and the widget tests.
-const SNAPSHOT_DIR: &str = "crates/mp-tui/src/ui/snapshots";
+const SNAPSHOT_DIR: &str = "clients/tui/src/ui/snapshots";
 
 /// `#[test]` / `#[tokio::test]` attributes under [`TUI_ROOT`].
 ///
@@ -55,10 +55,10 @@ const SNAPSHOT_DIR: &str = "crates/mp-tui/src/ui/snapshots";
 /// It went through 492 and 467: the agenda loader and its 25 tests left
 /// `src/tui/` for `src/agenda.rs` in P5-U10c-I2, and P5-U10e moved 165 more to
 /// `src/tui_tests/` (#0126), every one of them a test that reaches something
-/// `crates/mp-tui` may not link: the store, the ingest path, or the daemon's
+/// `clients/tui` may not link: the store, the ingest path, or the daemon's
 /// own dispatcher. 467 = 302 + 165, and the 302 are what `git mv src/tui
-/// crates/mp-tui/src` carried into the new crate in P5-U10f, where this root
-/// points now.
+/// crates/mp-tui/src` carried into the new crate in P5-U10f, which has lived
+/// at `clients/tui` since, where this root points now.
 const MIN_TUI_TESTS: usize = 302;
 /// `#[test]` / `#[tokio::test]` attributes under [`TUI_TESTS_ROOT`].
 ///

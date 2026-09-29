@@ -43,11 +43,11 @@ unicode-width = "0.2"
 # `[dependencies]` or in `[dev-dependencies]`: the root crate holds the engine
 # and the daemon, and a client that could reach either would be back where
 # #0118 started. `cargo tree -p mp-tui -e normal` is the proof.
-mp-client = { path = "../mp-client" }
-mp-core = { path = "../mp-core" }
-mp-protocol = { path = "../mp-protocol" }
+mp-client = { path = "../../crates/mp-client" }
+mp-core = { path = "../../crates/mp-core" }
+mp-protocol = { path = "../../crates/mp-protocol" }
 
 [dev-dependencies]
 insta = "1.39"
 tempfile = "3"
-mp-core = { path = "../mp-core", features = ["test-support"] }
+mp-core = { path = "../../crates/mp-core", features = ["test-support"] }

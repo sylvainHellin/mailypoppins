@@ -42,7 +42,7 @@ pub mod daemon;
 /// P5-U10e).
 ///
 /// They live here rather than under `src/tui/` because each of them reaches
-/// something `crates/mp-tui` may not link - the store, the ingest path, the
+/// something `clients/tui` may not link - the store, the ingest path, the
 /// daemon's own dispatcher - and the crate move is what they are clearing the
 /// way for.
 #[cfg(test)]

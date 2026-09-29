@@ -22,7 +22,7 @@
 //! that answer: a conversation is a query over every mailbox of the account,
 //! keyed on a column ingest wrote, and the client holds one mailbox's listing
 //! at a time. It is the last read in `src/tui/app/` that no method answers,
-//! and it is what keeps `crates/mp-tui` linked to the store.
+//! and it is what keeps `clients/tui` linked to the store.
 //!
 //! # Why a row type of its own
 //!

@@ -1,11 +1,11 @@
 # mailypoppins
 
-Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Cargo workspace: the root crate (library + binary, which owns the engine and the daemon) plus `crates/mp-core` (the engine-free modules a client and the engine both read, re-exported from the root crate under their old paths), `crates/mp-protocol`, `crates/mp-client` and `crates/mp-tui` (the terminal client, re-exported as `mailypoppins::tui`). The CLI and the TUI are clients of the daemon over a Unix socket and spawn no subprocess; no crate under `crates/` depends on the root crate, which is what keeps the engine out of a client.
+Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Cargo workspace: the root crate (library + binary, which owns the engine and the daemon) plus `crates/mp-core` (the engine-free modules a client and the engine both read, re-exported from the root crate under their old paths), `crates/mp-protocol`, `crates/mp-client` and `clients/tui` (the terminal client, re-exported as `mailypoppins::tui`); every client crate lives under `clients/`. The CLI and the TUI are clients of the daemon over a Unix socket and spawn no subprocess; no crate under `crates/` or `clients/` depends on the root crate, which is what keeps the engine out of a client.
 
 ## Repo layout
 
 - Rust crate at the root (`src/`, `Cargo.toml`, `tests/`), workspace members under `crates/`. All build / test commands run from the root.
-- `spikes/` and `desktop/` are excluded from the workspace (the spike carries its own `Cargo.lock`).
+- `spikes/` and `clients/desktop/` are excluded from the workspace (the spike carries its own `Cargo.lock`).
 - Marketing + docs site under [website/](website/) (Astro + Svelte, pnpm). Deployed to <https://mailypoppins.dev> by [scripts/deploy-website.sh](scripts/deploy-website.sh) (rsync to OVH). Colocated so CLI changes and the docs that describe them ship in one commit.
 - `.gitignore` files are kept local-only by convention (the root `.gitignore` self-ignores). Edit them as needed but do not `git add -f` them.
 

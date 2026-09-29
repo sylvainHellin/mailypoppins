@@ -590,13 +590,13 @@ fn send_approved_from_the_tui_asks_for_the_hold() {
 /// only ones left.
 const HOLD_RESIDUE: [(&str, &[&str]); 5] = [
     (
-        "crates/mp-tui/src/actions.rs",
+        "clients/tui/src/actions.rs",
         &["HeldSend", "held_send", "fire_held_send", "send_one_draft"],
     ),
-    ("crates/mp-tui/src/lib.rs", &["held_send", "fire_held_send"]),
-    ("crates/mp-tui/src/app/mod.rs", &["HeldSend", "held_send"]),
-    ("crates/mp-tui/src/app/types.rs", &["HeldSend", "held_send"]),
-    ("crates/mp-tui/src/app/keys.rs", &["held_send"]),
+    ("clients/tui/src/lib.rs", &["held_send", "fire_held_send"]),
+    ("clients/tui/src/app/mod.rs", &["HeldSend", "held_send"]),
+    ("clients/tui/src/app/types.rs", &["HeldSend", "held_send"]),
+    ("clients/tui/src/app/keys.rs", &["held_send"]),
 ];
 
 /// The hold's machinery is gone from the TUI, which keeps only the rendered

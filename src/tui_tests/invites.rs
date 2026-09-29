@@ -249,7 +249,7 @@ fn the_app_reads_all_three_through_the_daemon() {
 
 /// An `App` with no session answers nothing rather than reading the store
 /// behind the daemon's back, which is the P5-U8 rule ("no direct fallback")
-/// made structural: `crates/mp-tui` cannot link the store at all.
+/// made structural: `clients/tui` cannot link the store at all.
 #[test]
 fn an_app_without_a_session_reads_none_of_them() {
     let fx = AmbientFixture::new(ACCOUNT);

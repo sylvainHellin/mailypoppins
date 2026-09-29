@@ -1915,7 +1915,7 @@ Putting the fixture in the module the *engine* side owns fixes it: `reconcile::t
 
 ## The daemon migration's hard part is the modules the engine allow-list does not scan
 
-`ENGINE_MODULES` is eleven names (`store`, `sync`, `send`, `imap_client`, …) and the file says the shared modules are "deliberately absent". That is right for measuring the *engine* boundary and misleading about the cost of a crate move: `src/tui/` reaches twenty root-crate modules, and the fourteen the gate does not scan (`config`, `parse`, `types`, `selector`, `search`, `draft`, `contacts`, …) are the ones that stop `crates/mp-tui` compiling. Their closure is ~15 000 lines across sixteen modules, six of which need splitting (`selector` and `reconcile` read the store, `search` calls `imap_client`, `draft` writes through `outbox`).
+`ENGINE_MODULES` is eleven names (`store`, `sync`, `send`, `imap_client`, …) and the file says the shared modules are "deliberately absent". That is right for measuring the *engine* boundary and misleading about the cost of a crate move: `src/tui/` reaches twenty root-crate modules, and the fourteen the gate does not scan (`config`, `parse`, `types`, `selector`, `search`, `draft`, `contacts`, …) are the ones that stop `clients/tui` compiling. Their closure is ~15 000 lines across sixteen modules, six of which need splitting (`selector` and `reconcile` read the store, `search` calls `imap_client`, `draft` writes through `outbox`).
 
 An allow-list at zero therefore does not mean a crate can be extracted. If a plan unit says "move X to its own crate", price the *whole* `crate::` reference set of X first, not the subset a boundary test happens to record.
 
@@ -2067,7 +2067,7 @@ Do it in the same commit, with the contents untouched and the `source:` header c
 
 ## A crate boundary refuses a dependency, not a module of one the crate still needs
 
-`crates/mp-tui` cannot reach `crate::store::` because its manifest names no `mailypoppins`: that is the whole of the proof for the eleven engine modules, and no scan is needed for it.
+`clients/tui` cannot reach `crate::store::` because its manifest names no `mailypoppins`: that is the whole of the proof for the eleven engine modules, and no scan is needed for it.
 It is not the proof for `secrets` and `oauth2`, which moved into the shared `mp-core` five units earlier and which the TUI crate *does* link (#0126, P5-U10f).
 A textual allow-list that kept naming them read as coverage it did not have, because it scanned for `crate::` and they are spelled `mp_core::` now.
 
@@ -2110,7 +2110,7 @@ Cancelling a future that waits on `off_thread` stops the waiting, not the work; 
 
 ## The TUI's daemon door flattens an RPC error to a string
 
-`Session::call` and `QueryHandle::call` in `crates/mp-tui/src/session.rs` hand back `anyhow` errors built from `ClientError`'s `Display`, so the JSON-RPC code (`-32602` for an unknown operation id) is only a substring of the message by the time TUI code sees it.
+`Session::call` and `QueryHandle::call` in `clients/tui/src/session.rs` hand back `anyhow` errors built from `ClientError`'s `Display`, so the JSON-RPC code (`-32602` for an unknown operation id) is only a substring of the message by the time TUI code sees it.
 The #0121 re-query therefore drops an await on any `operation.status` failure rather than matching on the code: an await nothing can settle is a spinner that never stops, which is worse than a lost result line.
 
 ## An email carries its font on every element or it carries it nowhere

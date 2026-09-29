@@ -22,7 +22,7 @@ No native-Windows code paths (registry, Credential Manager).
 
 ## Crate shape
 
-A Cargo workspace: the root package is the library plus the binary, and `crates/mp-core`, `crates/mp-protocol`, `crates/mp-client` and `crates/mp-tui` are the four crates beside it (see "Daemon and crate boundaries" below).
+A Cargo workspace: the root package is the library plus the binary, and `crates/mp-core`, `crates/mp-protocol`, `crates/mp-client` and `clients/tui` are the four crates beside it (see "Daemon and crate boundaries" below).
 The engine lives in the root package's `src/lib.rs` modules, the shared engine-free modules in `mp-core` (re-exported from the root crate under their old paths), the terminal client in `mp-tui` (re-exported as `mailypoppins::tui`), and the daemon in `src/daemon/` drives the engine; the CLI and the TUI are clients of it over a Unix socket and spawn no subprocess of their own.
 
 | crate | what it owns | what it may link |
@@ -31,7 +31,7 @@ The engine lives in the root package's `src/lib.rs` modules, the shared engine-f
 | `crates/mp-core` | the engine-free shared modules | `mp-protocol` |
 | `crates/mp-protocol` | the wire types, the framing, the fixtures | nothing of this workspace |
 | `crates/mp-client` | the socket transport and the handshake | `mp-protocol` |
-| `crates/mp-tui` | the terminal client: model, keys, views, session | `mp-core`, `mp-client`, `mp-protocol` |
+| `clients/tui` | the terminal client: model, keys, views, session | `mp-core`, `mp-client`, `mp-protocol` |
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).
@@ -48,7 +48,7 @@ What follows is the shape that migration imposes on the tree today, which is all
 ### The shared crate
 
 `crates/mp-core` owns what a client and the engine both need and neither owns: configuration and the data-directory layout, secrets and the OAuth2 token cache, signature files and `app_state`, RFC822 parsing, the shared types, iCalendar parsing and building, the search grammar, the `mp://` selector grammar, the draft file format, the contact index, the iMIP reply fold, desktop notifications, `TimingSpan` and `SyncHealth`.
-It reaches no store, no IMAP session, no outbox and no sending transport, which is the whole of its definition; P5-U10a (#0126) moved it out of the root package so that a future `crates/mp-tui` has somewhere to depend on, and P5-U10b finished the closure.
+It reaches no store, no IMAP session, no outbox and no sending transport, which is the whole of its definition; P5-U10a (#0126) moved it out of the root package so that a future `clients/tui` has somewhere to depend on, and P5-U10b finished the closure.
 
 Every module it holds is re-exported from `src/lib.rs` under the path it had inside the root package, so `crate::config::…` and `mailypoppins::parse::…` resolve unchanged everywhere: the CLI, the daemon, the TUI and the integration tests.
 Six modules are split rather than moved whole, and in each case the root crate keeps the half that reads an engine and re-exports the rest with `pub use mp_core::<module>::*`:
@@ -80,7 +80,7 @@ The daemon builds those three from the protocol types too (`OperationStatus::to_
 `crates/mp-client` owns the transport: one `Connection` is one Unix-socket connection, and the crate carries the `initialize` handshake and the typed errors a caller branches on.
 It owns no policy, no paths and no configuration.
 
-`crates/mp-tui` is the terminal client itself since P5-U10f (#0126): the model, the key handlers, the views, the query layer, the command layer and the session thread, re-exported from `src/lib.rs` as `mailypoppins::tui` so every old path still resolves.
+`clients/tui` is the terminal client itself since P5-U10f (#0126): the model, the key handlers, the views, the query layer, the command layer and the session thread, re-exported from `src/lib.rs` as `mailypoppins::tui` so every old path still resolves.
 It reaches a daemon through a `session::Connector` the binary hands it, two function pointers onto `daemon::client::{client_session, reopen_session}`, because the socket path, the on-demand start and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping are the binary's and this crate links neither the daemon nor the lifecycle.
 
 None of the four depends on `mailypoppins`; that is the boundary that matters, and it is a resolver error rather than a guard's opinion: a GUI links `mp-client` alone, the TUI links three client crates, and neither can reach the engine by accident.
@@ -101,7 +101,7 @@ cargo test --workspace   # the whole tree, daemon included
 The help surface evolves past `docs/baselines/pre-daemon/cli-help.txt` since the cutover shipped (its README lists the post-cutover divergences), with `tests/cli_help_snapshot.rs` as the living pin: `mp daemon` and `mp account` are listed in `mp --help`, and only the global `--daemon` flag keeps `hide = true`.
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
-It counts `#[test]` attributes by scanning `crates/mp-tui/src/**/*.rs`, `src/tui_tests/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
+It counts `#[test]` attributes by scanning `clients/tui/src/**/*.rs`, `src/tui_tests/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
 The five floors are 302 TUI tests, 166 root-crate TUI tests, 416 `mp-core` tests, 20 golden-frame tests and 18 snapshot files, and they track the tree rather than the pre-workspace commit: a floor a hundred tests below the tree lets three whole test modules vanish together without failing.
 The TUI floor came down twice, 492 -> 467 when P5-U10c-I2 moved the agenda loader and its 25 tests to `src/agenda.rs`, and 467 -> 302 when P5-U10e moved 165 more to `src/tui_tests/`, which is the second floor: 302 + 165 is 467, and neither move left the root package until P5-U10f moved the 302 with the crate.
 The `mp-core` floor is #0126's and its arithmetic is the same proof: the root package's `--lib` run went from 1 398 to 982 across P5-U10a and P5-U10b while `mp-core` runs 416, and 982 + 416 is 1 398.
@@ -141,12 +141,12 @@ The operator's half of all five - the commands, their stdout, the environment ho
 
 `tests/architecture_boundaries.rs` holds all three halves of the client/engine boundary.
 
-The first walks `crates/mp-tui/src/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
+The first walks `clients/tui/src/`, collects every `use` of an engine module, and asserts the set equals `tests/fixtures/tui-engine-imports.txt`.
 The second (P5-U10d-T) is what the import scan could not see: most of the calls that blocked the crate move were spelled as fully-qualified paths no `use` line mentions, so the import list read six while the work was six *groups* of call sites.
 It walks the same tree for those paths, over production code only, and asserts the set equals `tests/fixtures/tui-engine-paths.txt`.
 Test modules are stripped, whole test files are stripped by deriving them from the `#[cfg(test)] mod x;` lines that declare them, and `use` lines are stripped so nothing is counted by both guards.
 
-**Both fixtures are empty since P5-U10f**, and both scans are now a belt over the braces the manifest provides: `crates/mp-tui/Cargo.toml` names `mp-core`, `mp-client` and `mp-protocol` and no `mailypoppins`, so an engine import does not resolve.
+**Both fixtures are empty since P5-U10f**, and both scans are now a belt over the braces the manifest provides: `clients/tui/Cargo.toml` names `mp-core`, `mp-client` and `mp-protocol` and no `mailypoppins`, so an engine import does not resolve.
 They are kept because a fixture that reached zero and was deleted would have to be written again from memory the day someone adds the dependency back, and because a row appearing names the file and the module where a hundred lines of resolver error would not.
 
 `ENGINE_MODULES` is nine names rather than eleven: `secrets` and `oauth2` moved to `mp-core` in P5-U10a and were carried on the list unchanged for four units, which was untidy while the TUI could not link `mp-core` and wrong the moment it could.
@@ -156,11 +156,11 @@ Matching substrings alone was the defect the P5-U10 review found: `use mp_core::
 
 Both allow-lists are records, not ceilings: a removed import or a removed call fails the test as loudly as a new one, because the counts were the migration's progress bar.
 Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`, which rewrites both fixtures.
-Neither is feature-gated and both pass on the pre-daemon tree, and `engine_imports` takes the client source root as an argument, which is what let P5-U10f re-point it at `crates/mp-tui/src` without a rewrite.
+Neither is feature-gated and both pass on the pre-daemon tree, and `engine_imports` takes the client source root as an argument, which is what let P5-U10f re-point it at `clients/tui/src` without a rewrite.
 
 The third (P4-U15) walks the client-side sources - `src/main.rs`, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
 Seventeen rows in four groups: the server leg of `mp search` (`docs/parity-matrix.md` LST-06, which no Phase 4 slice contracted), the startup preamble (which runs before any socket and on the no-daemon list too), `mp config show`'s secret and token probes (`config.get` is contracted *not* to look a secret up), and the two `config.toml` wizards (one interactive transaction).
-The TUI is outside this list because it is outside this crate: `crates/mp-tui` cannot reach any of the 23 symbols, which is what the first two halves record.
+The TUI is outside this list because it is outside this crate: `clients/tui` cannot reach any of the 23 symbols, which is what the first two halves record.
 There is no `UPDATE_` switch for it: an entry is added by hand, with its reason, or it is not added.
 
 `docs/baselines/phase4-gate-evidence.md` is the long form.
@@ -411,7 +411,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `fake_transport.rs` | The daemon-side transport fake (P4-U12): `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` serves the SMTP submission and the Sent APPEND in process and logs each event, so the success half of the send slice is pinned without TLS |
 | `methods/message_server.rs` | `message.search_server` and `message.fetch` (P5-U10c): the TUI search overlay's server leg and its `f` ingest, moved off the client's own thread |
 | `state/revision.rs` | The newtypes the canonical state is addressed by: `Revision` (dense, monotonic per instance), `InstanceId`, `ConnectionId` |
-| **`crates/mp-tui/src/`** | |
+| **`clients/tui/src/`** | |
 | `lib.rs` | Event loop (`run_loop`), the session and event-stream drain, background result drain. One iteration drains the queued terminal events and the queued daemon events into the model and then paints once (#0108), both bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
 | `session.rs` | The one daemon connection: a thread with a current-thread runtime on it, `call` / `dispatch` / `events`, `handle()` (the weak-sender door a worker thread owns), and `Connector`, the two function pointers the binary hands in |
 | `queries.rs` | Every read, as typed functions over the object-safe `Queries` trait, plus the uid index and the row-delta decoder |
@@ -424,14 +424,14 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `theme.rs` | Named themes, semantic colour slots |
 | `diagnostics_tests.rs` | The activity overlay's half of the daemon diagnostics contract (P6-U7); the socket half is `tests/daemon_diagnostics.rs` |
 | `events_resync_tests.rs` | What an `Incoming::Resync` costs an account that had already opened (Phase 5 review): the bootstrap must still correct its mailboxes, counts and cached listings |
-| **`crates/mp-tui/src/app/`** | |
+| **`clients/tui/src/app/`** | |
 | `mod.rs` | `App` struct, `new()`, `update()`, account sync, core state helpers |
 | `bootstrap.rs` | `App::shell`, `App::from_bootstrap` and the two `apply_bootstrap` entries (startup, which skips an account that already opened, and resync, which does not) |
 | `types.rs` | `EmailEntry`, `AccountState`, `BgResult`, `Action`, `Focus`, `MailboxKind`, mailbox builders, and the three wire-row mappers (`entry_from_row`, `entry_from_draft`, `entry_from_skip`) |
 | `keys.rs` | `handle_key()` dispatch and all `handle_*_key()` methods |
 | `keymap.rs` | The single `KEYMAP` table behind the help overlay, the hint bar and `mp dump-keys` |
 | `jump_date.rs` | The closed date grammar behind jump-to-date (`g t`, #0017): pure, clock-free, `parse_jump_date(input, today)` |
-| **`crates/mp-tui/src/ui/`** | |
+| **`clients/tui/src/ui/`** | |
 | `mod.rs` | `view()`, the top-level layout dispatch, including the #TKT-0044 pane zoom (one pane over the whole content area, hint and status bars kept) and the shared overlay dispatch |
 | `views.rs` | View switcher chrome |
 | `sidebar.rs`, `list.rs`, `headers.rs`, `preview.rs`, `compose.rs`, `status.rs`, `activity.rs` | Mail view panes |
@@ -441,7 +441,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 
 ## TUI layering
 
-Since Phase 5 of the daemon migration (#0124) the TUI is a client of the daemon rather than a caller of the engine, and since P5-U10f (#0126) it is a crate of its own, `crates/mp-tui`, which links `mp-core`, `mp-client` and `mp-protocol` and cannot name the engine at all.
+Since Phase 5 of the daemon migration (#0124) the TUI is a client of the daemon rather than a caller of the engine, and since P5-U10f (#0126) it is a crate of its own, `clients/tui`, which links `mp-core`, `mp-client` and `mp-protocol` and cannot name the engine at all.
 `src/lib.rs` re-exports it as `mailypoppins::tui`, so every path in this document and in the tests resolves where it did.
 
 ### The shape
@@ -461,7 +461,7 @@ The runtime drains the op once the account's mutations go quiet for 1.5 s, one d
 
 ### The session thread
 
-`crates/mp-tui/src/session.rs` owns the one connection.
+`clients/tui/src/session.rs` owns the one connection.
 It is a thread of its own with a current-thread tokio runtime on it, because `mp`'s `main` is already inside a runtime that `run_loop` cannot block on, and a `Connection` holds a `UnixStream` registered with the runtime that created it.
 The UI thread talks to it over channels: `dispatch` posts and forgets, `call` blocks for the answer, and `Session::handle()` hands a worker thread a `QueryHandle` holding a weak sender, so quitting closes the channel under every worker instead of joining on one.
 
@@ -477,7 +477,7 @@ A closed socket refuses every in-flight call at once rather than waiting out the
 
 ### Queries
 
-`crates/mp-tui/src/queries.rs` is every read.
+`clients/tui/src/queries.rs` is every read.
 `Queries` is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
 Over it sit the typed readers the call sites need: `list_emails` (`message.list`), `mailbox_counts` (`mailbox.list`), `message_body` (`message.get`), `thread` (`message.thread`, P5-U10d), and the three invitation reads P5-U10 added (`calendar.events`, `message.ics`, `message.invite`).
 
@@ -486,7 +486,7 @@ A held list is keyed by `messages.id` and the daemon removes a row by `(mailbox,
 
 ### Commands
 
-`crates/mp-tui/src/commands.rs` is every write.
+`clients/tui/src/commands.rs` is every write.
 `route()` classifies all fifty `Action` variants exhaustively, with no wildcard arm, into `Daemon` (the methods it issues, in issue order), `ClientOnly` (editor, browser, clipboard, file picker, terminal suspend) and `Local` (pure UI state).
 `dispatch()` returns `true` when it handled the action and `false` when `handle_action` still owns it; a refusal from the daemon is not a `false`, it lands on the status line exactly as a refused store mutation did.
 
@@ -495,7 +495,7 @@ The arm records the id against what it is awaiting and returns; there is no work
 
 ### Events
 
-`crates/mp-tui/src/events.rs` replaced the two watcher threads.
+`clients/tui/src/events.rs` replaced the two watcher threads.
 `Incoming` carries the decoded events *and* the connection's own state (`Resync`, `Disconnected`, `Reconnected`) on one channel, which is what keeps a reconnect from overtaking the last event of the dead instance.
 `drain()` runs in the same pre-draw pass as the terminal drain and is held to the same two bounds, `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, so a first sync of a large mailbox publishing a row per message cannot starve the paint.
 
@@ -511,7 +511,7 @@ One IDLE round of 300 s per IMAP account and one 60 s enumeration per Graph acco
 ### No sessionless fallback, and the oracle that replaced it
 
 An `App` with no session reads nothing: an empty list, zeroed counts, no preview, no agenda and no invitation card, each with a line in the log.
-That is P5-U8's "no direct fallback" made structural in P5-U10e, and P5-U10f makes it unfalsifiable: `crates/mp-tui` cannot open a store, because it cannot name one.
+That is P5-U8's "no direct fallback" made structural in P5-U10e, and P5-U10f makes it unfalsifiable: `clients/tui` cannot open a store, because it cannot name one.
 
 The store-backed readers the query layer replaced are `src/tui_tests/oracle.rs` now, in the crate that owns the store, and they have one caller: the equality suites.
 `src/tui_tests/queries.rs`, `invites.rs` and `types.rs` compare every daemon-backed answer field for field against the answer the oracle produces over the same seeded store, in the same process, which is what makes each served method a *move* rather than a second implementation whose drift nobody would notice.
@@ -525,12 +525,12 @@ The TUI crate carries 302 tests and the root crate's `src/tui_tests/` carries 16
 Everything that drives the model, the keys, the views and the query layer against hand-built rows stayed with the code it tests.
 What moved in P5-U10e is every test that reaches something a client crate may not: the store, the ingest path, and the daemon's own `Dispatcher`, which is what `TestDaemon` builds a fixture on and which is how a client test can be pinned against the daemon's real method bodies rather than a JSON mock.
 
-The daemon-backed golden frames are the clearest case of the split: the twenty hand-built frames and their fixtures are `crates/mp-tui/src/ui/golden_frames.rs`, and the twenty-three frames built from a real `state.bootstrap` are `src/tui_tests/golden_frames_daemon.rs`, which renders the same fixtures through `mp-tui`'s `test-support` feature and asserts each frame byte-identical to its hand-built twin.
+The daemon-backed golden frames are the clearest case of the split: the twenty hand-built frames and their fixtures are `clients/tui/src/ui/golden_frames.rs`, and the twenty-three frames built from a real `state.bootstrap` are `src/tui_tests/golden_frames_daemon.rs`, which renders the same fixtures through `mp-tui`'s `test-support` feature and asserts each frame byte-identical to its hand-built twin.
 Two families, two snapshot directories, one set of fixtures.
 
 ### The crate move, done
 
-The plan's shape was `crates/mp-tui` depending on the client crates and on nothing else, and it took eleven units because the obstacle was never the engine residue the allow-list recorded.
+The plan's shape was `clients/tui` depending on the client crates and on nothing else, and it took eleven units because the obstacle was never the engine residue the allow-list recorded.
 It was the shared modules the allow-list deliberately does not scan: the TUI reached twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure was about 15 000 lines across sixteen modules.
 `docs/tickets/0126-tui-crate-move.md` carries the unit table and what each one measured; the order it went in:
 
@@ -640,7 +640,7 @@ It was `email-cli` before #0022, and `get` falls back to that name so a user who
 - **2446 tests**, run by `cargo test --workspace`, the parity harness, the six daemon slice suites and the soak file included.
 All of them run offline, the plain selection in a few seconds.
 - Unit tests are inline `#[cfg(test)] mod tests` in each module; integration tests live in `tests/` and use `tempfile::tempdir()` plus `MAILYPOPPINS_CONFIG_DIR` and `MAILYPOPPINS_DATA_DIR` for isolation.
-- `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`crates/mp-tui/src/ui/golden_frames.rs`).
+- `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`clients/tui/src/ui/golden_frames.rs`).
 `cargo insta review` approves changes; a diff there is a decision, not an approval reflex.
 - The store side is fixture-driven: `tests/store_ingest_integration.rs` ingests real RFC822 bytes and asserts rows, blobs, refcounts and FTS state; `tests/store_search_integration.rs` asserts the search itself (ranking, phrases, prefixes, unicode, mailbox and account scope) and that the index does not drift across re-ingest, a UIDVALIDITY rebind, a move, a delete and a prune; `tests/outbox_integration.rs` drives the state machine against a fake Sent mailbox.
 - The sync engine (`src/sync/engine.rs`) is tested offline against a fake `SyncBackend` (#0059): ingest and cursor advance, the #0074 arrival mark and its give-up bound, the UIDVALIDITY reset, the deferred prune pass and its account-wide coverage gate, `dry_run`, and the flag application.

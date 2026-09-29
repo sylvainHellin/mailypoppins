@@ -822,13 +822,13 @@ fn the_watcher_threads_are_gone_from_the_tui() {
 /// The one call site allowed is the re-query rule of #0121 in `events.rs`:
 /// after a re-bootstrap, each operation still awaited is asked about once,
 /// because the `operation.finished` published in the gap is never replayed
-/// (`crates/mp-tui/src/events_resync_tests.rs` pins that behaviour).
+/// (`clients/tui/src/events_resync_tests.rs` pins that behaviour).
 #[test]
 fn the_tui_never_asks_for_an_operations_status() {
     assert_eq!(
         needles_under(TUI_CRATE, &["\"operation.status\""]),
         BTreeSet::from([(
-            "crates/mp-tui/src/events.rs".to_string(),
+            "clients/tui/src/events.rs".to_string(),
             "\"operation.status\"".to_string()
         )]),
         "an operation finishes by event now, so nothing polls it; only the \
@@ -908,7 +908,7 @@ const WATCHER_NEEDLES: [&str; 5] = [
 ];
 
 /// Where the TUI's production sources live since #0126 (P5-U10f).
-const TUI_CRATE: &str = "crates/mp-tui/src";
+const TUI_CRATE: &str = "clients/tui/src";
 
 /// Both spellings of the pre-Phase-5 account-runtimes opt-in.
 const RUNTIME_OPT_IN_NEEDLES: [&str; 2] = [
