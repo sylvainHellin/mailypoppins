@@ -57,6 +57,7 @@ use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
 pub use mp_client::events::{Incoming, Subscription};
+use mp_client::{Observe, StateTracker};
 
 use super::app::{App, MailboxKind, StatusLevel};
 use super::queries::{MessageRowDelta, Queries};
@@ -104,14 +105,17 @@ pub enum Applied {
 // ---------------------------------------------------------------------------
 
 /// What an [`App`] remembers about the stream it is reading.
+///
+/// The watermark is `mp_client`'s [`StateTracker`], the one every client
+/// shares; what stays here is the TUI's own bookkeeping of the operations it
+/// started and the holds it saw end.
 #[derive(Debug, Default)]
 pub struct EventState {
-    /// The instance whose revisions are comparable, `None` before the first
-    /// bootstrap and after a refusal.
-    instance: Option<String>,
-    /// The highest revision applied, which the bootstrap sets and every
-    /// applied event moves.
-    revision: u64,
+    /// The instance and the revision this client applies against, `None`
+    /// before the first bootstrap. The bootstrap sets it and every applied
+    /// event moves it; an event from another instance marks it refused until
+    /// the next bootstrap.
+    tracker: Option<StateTracker>,
     /// The operations this client started and has not seen finish, by id.
     started: HashMap<String, Awaited>,
     /// The holds this session saw fire or be cancelled, newest last and at
@@ -218,7 +222,12 @@ impl EventState {
     /// Whether a bootstrap from `instance_id` is a daemon this client has not
     /// adopted, which after the first bootstrap means one that restarted.
     pub(super) fn is_new_instance(&self, instance_id: &str) -> bool {
-        self.instance.as_deref() != Some(instance_id)
+        match &self.tracker {
+            None => true,
+            // A refusal forgets the instance, so the next bootstrap starts
+            // afresh even when it names the same one.
+            Some(tracker) => tracker.instance_changed() || tracker.instance_id() != instance_id,
+        }
     }
 
     /// Adopt an instance and a revision, which only a bootstrap may do.
@@ -229,8 +238,10 @@ impl EventState {
     /// run for the rest of the session.
     pub(super) fn watermark(&mut self, instance_id: &str, revision: u64) -> usize {
         let restarted = self.is_new_instance(instance_id);
-        self.instance = Some(instance_id.to_string());
-        self.revision = revision;
+        match &mut self.tracker {
+            Some(tracker) => tracker.rebootstrap(revision, instance_id),
+            None => self.tracker = Some(StateTracker::new(revision, instance_id)),
+        }
         if !restarted {
             return 0;
         }
@@ -238,19 +249,21 @@ impl EventState {
     }
 
     /// Whether `event` may be applied, moving the watermark when it may.
+    ///
+    /// A revision more than one above the watermark is applied: coalescing
+    /// merges queued events and the older number never travels, so a jump is
+    /// no evidence of a loss (`docs/daemon-protocol.md`).
     fn admit(&mut self, event: &EventEnvelope) -> Admission {
-        match self.instance.as_deref() {
-            None => Admission::Refused,
-            Some(known) if known != event.instance_id => {
-                // Sticky: only a fresh bootstrap admits anything again.
-                self.instance = None;
-                Admission::Refused
-            }
-            Some(_) if event.revision <= self.revision => Admission::Duplicate,
-            Some(_) => {
-                self.revision = event.revision;
-                Admission::Apply
-            }
+        let Some(tracker) = self.tracker.as_mut() else {
+            return Admission::Refused;
+        };
+        match tracker.observe(event.revision, &event.instance_id) {
+            Observe::Apply => Admission::Apply,
+            Observe::Duplicate => Admission::Duplicate,
+            // Sticky in the tracker: only a fresh bootstrap admits anything
+            // again. `Gap` is unreachable, since this client re-bootstraps on
+            // a resync rather than poisoning its tracker, and is refused alike.
+            Observe::InstanceChanged | Observe::Gap => Admission::Refused,
         }
     }
 

@@ -5,21 +5,29 @@
 //! decides what to do with each one: apply it, ignore it, or stop and bootstrap
 //! again.
 //!
-//! The three rules, in the order they are checked:
+//! The rules, in the order they are checked (`docs/daemon-protocol.md`,
+//! "Event semantics"):
 //!
 //! - **A revision from another instance is meaningless**, whatever its number,
 //!   because revisions are only comparable within the daemon process that
 //!   issued them. That is checked first and is sticky: only a re-bootstrap
 //!   against the new instance clears it.
+//! - **A poisoned stream applies nothing.** `state.resync_required`
+//!   ([`StateTracker::invalidate`]) poisons it, and only
+//!   [`StateTracker::rebootstrap`] clears it: a client that kept applying past
+//!   it would build a state nothing on the daemon's side corresponds to.
 //! - **A revision at or below the watermark is a duplicate** and is dropped
 //!   silently. The daemon queues events from the moment a connection registers,
 //!   which is before it captures the snapshot, so an event for a change the
 //!   snapshot already carries is normal rather than a fault.
-//! - **A revision more than one above the watermark is a gap**, which poisons
-//!   the stream: nothing is applied, the watermark does not move, and every
-//!   later event is refused until [`StateTracker::rebootstrap`]. A client that
-//!   kept applying past a gap would build a state nothing on the daemon's side
-//!   corresponds to.
+//! - **Any revision above the watermark is applied**, however far above.
+//!   The daemon's counter is dense, but what one connection receives is not:
+//!   coalescing merges two queued events into one carrying the newer revision,
+//!   and the older number never travels. A jump is therefore no evidence of a
+//!   loss, and the daemon says so itself when something was lost, with a
+//!   `state.resync_required` rather than a hole a client has to infer. An
+//!   earlier tracker treated any jump above `watermark + 1` as a gap and
+//!   re-bootstrapped for nothing on every coalesce.
 
 /// What a client does with one observed event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +36,8 @@ pub enum Observe {
     Apply,
     /// At or below the watermark: the snapshot already carries it.
     Duplicate,
-    /// A revision was missed; bootstrap again.
+    /// The stream is poisoned (a `state.resync_required` was seen and no
+    /// bootstrap has followed yet); bootstrap again.
     Gap,
     /// It came from a daemon this client never bootstrapped against.
     InstanceChanged,
@@ -39,8 +48,7 @@ pub enum Observe {
 pub struct StateTracker {
     revision: u64,
     instance_id: String,
-    /// A gap or a `state.resync_required`: nothing is applied until a fresh
-    /// bootstrap.
+    /// A `state.resync_required`: nothing is applied until a fresh bootstrap.
     poisoned: bool,
     /// An event from another instance was seen; sticky, and reported ahead of
     /// any revision arithmetic.
@@ -71,10 +79,6 @@ impl StateTracker {
         if revision <= self.revision {
             return Observe::Duplicate;
         }
-        if revision > self.revision + 1 {
-            self.poisoned = true;
-            return Observe::Gap;
-        }
         self.revision = revision;
         Observe::Apply
     }
@@ -90,18 +94,24 @@ impl StateTracker {
         &self.instance_id
     }
 
+    /// Whether an event from another instance has been seen since the last
+    /// bootstrap, which is sticky until [`StateTracker::rebootstrap`].
+    pub fn instance_changed(&self) -> bool {
+        self.instance_changed
+    }
+
     /// Whether the only way forward is a fresh `state.bootstrap`.
     pub fn needs_bootstrap(&self) -> bool {
         self.poisoned || self.instance_changed
     }
 
     /// Discard the tracked state, as a `state.resync_required` notification
-    /// asks: the same poisoning a gap causes, applied on the daemon's word.
+    /// asks: nothing is applied until [`StateTracker::rebootstrap`].
     pub fn invalidate(&mut self) {
         self.poisoned = true;
     }
 
-    /// Resume from a fresh bootstrap, clearing a gap and an instance change
+    /// Resume from a fresh bootstrap, clearing a poison and an instance change
     /// alike.
     pub fn rebootstrap(&mut self, revision: u64, instance_id: impl Into<String>) {
         self.revision = revision;
@@ -127,12 +137,42 @@ mod tests {
         assert!(!tracker.needs_bootstrap());
     }
 
+    /// A coalesced stream skips revisions (two queued events merged into one
+    /// carrying the newer number), and the protocol permits it: the jump is
+    /// applied, not reported as a gap, and the watermark follows it.
+    #[test]
+    fn a_jump_over_coalesced_revisions_is_applied_not_a_gap() {
+        let mut tracker = StateTracker::new(10, "one");
+        assert_eq!(tracker.observe(11, "one"), Observe::Apply);
+        assert_eq!(tracker.observe(14, "one"), Observe::Apply);
+        assert_eq!(tracker.revision(), 14);
+        assert!(!tracker.needs_bootstrap());
+        assert_eq!(tracker.observe(13, "one"), Observe::Duplicate);
+        assert_eq!(tracker.observe(100, "one"), Observe::Apply);
+    }
+
+    /// The only gap is the one the daemon announces: after
+    /// `state.resync_required` nothing applies, in order or not, until a
+    /// fresh bootstrap.
+    #[test]
+    fn only_a_resync_poisons_the_stream() {
+        let mut tracker = StateTracker::new(10, "one");
+        tracker.invalidate();
+        assert!(tracker.needs_bootstrap());
+        assert_eq!(tracker.observe(11, "one"), Observe::Gap);
+        assert_eq!(tracker.revision(), 10);
+        tracker.rebootstrap(20, "one");
+        assert_eq!(tracker.observe(20, "one"), Observe::Duplicate);
+        assert_eq!(tracker.observe(22, "one"), Observe::Apply);
+    }
+
     /// An instance change beats the arithmetic, even for a revision that would
     /// otherwise be exactly in order.
     #[test]
     fn an_instance_change_is_checked_before_the_revision() {
         let mut tracker = StateTracker::new(10, "one");
         assert_eq!(tracker.observe(11, "two"), Observe::InstanceChanged);
+        assert!(tracker.instance_changed());
         assert_eq!(tracker.revision(), 10);
         assert_eq!(tracker.instance_id(), "one");
         assert_eq!(tracker.observe(11, "one"), Observe::InstanceChanged);

@@ -143,10 +143,12 @@
 //!   daemon does not mark it, because a correct daemon queues it in the first
 //!   place and a `Duplicate` signal on the wire would be a shape carried for
 //!   nothing.
-//! - **A gap poisons the stream.** After `Observe::Gap` the tracker's watermark
-//!   does not move and every later `observe` returns `Gap` until `rebootstrap`,
-//!   which is what makes "bootstrap again" the only exit. `invalidate` is the
-//!   same poisoning applied on a `state.resync_required` notification.
+//! - **A revision jump is applied, and only a resync poisons the stream.**
+//!   Coalescing merges queued events and the older number never travels, so a
+//!   jump above `watermark + 1` is no loss and moves the watermark. After
+//!   `invalidate` (a `state.resync_required`) the watermark does not move and
+//!   every later `observe` returns `Gap` until `rebootstrap`, which is what
+//!   makes "bootstrap again" the only exit.
 //! - **A changed `instance_id` wins over the revision arithmetic.** It is
 //!   checked first, it is sticky, and only `rebootstrap` with the new instance
 //!   clears it: a revision from a daemon the client has never bootstrapped
@@ -1228,39 +1230,53 @@ fn a_duplicate_or_older_revision_is_ignored_and_leaves_the_watermark() {
 }
 
 #[test]
-fn a_revision_gap_requires_a_resync_and_poisons_the_stream() {
+fn a_revision_jump_is_applied_because_coalescing_skips_numbers() {
+    // What one connection receives is strictly increasing but not dense: two
+    // queued events merge into one carrying the newer revision, and the older
+    // number never travels (docs/daemon-protocol.md, "Event semantics").
     let mut tracker = StateTracker::new(10, INSTANCE);
     assert_eq!(
         tracker.observe(12, INSTANCE),
-        Observe::Gap,
-        "11 was missed, so 12 cannot be applied"
+        Observe::Apply,
+        "11 was merged into 12 in the queue, which is not a loss"
     );
-    assert_eq!(tracker.revision(), 10, "a gap does not move the watermark");
+    assert_eq!(tracker.revision(), 12, "the watermark follows the jump");
+    assert!(
+        !tracker.needs_bootstrap(),
+        "only the daemon's own resync_required asks for a fresh bootstrap"
+    );
+    assert_eq!(
+        tracker.observe(11, INSTANCE),
+        Observe::Duplicate,
+        "a number below the jump is at or below the watermark"
+    );
+}
+
+#[test]
+fn a_resync_poisons_the_stream_until_a_fresh_bootstrap() {
+    let mut tracker = StateTracker::new(10, INSTANCE);
+    tracker.invalidate();
     assert!(
         tracker.needs_bootstrap(),
-        "the only exit from a gap is a fresh bootstrap"
+        "the only exit from a resync is a fresh bootstrap"
     );
     assert_eq!(
         tracker.observe(11, INSTANCE),
         Observe::Gap,
-        "the stream stays poisoned: even the missing revision is refused"
+        "the stream stays poisoned: even the next revision is refused"
     );
     assert_eq!(
-        tracker.observe(13, INSTANCE),
-        Observe::Gap,
-        "and so is every later one"
+        tracker.revision(),
+        10,
+        "a refused event does not move the watermark"
     );
-    assert_eq!(tracker.revision(), 10);
-}
-
-#[test]
-fn a_fresh_bootstrap_clears_a_gap_and_resumes_the_stream() {
-    let mut tracker = StateTracker::new(10, INSTANCE);
-    assert_eq!(tracker.observe(12, INSTANCE), Observe::Gap);
 
     tracker.rebootstrap(40, INSTANCE);
     assert_eq!(tracker.revision(), 40);
-    assert!(!tracker.needs_bootstrap(), "the resync cleared the poison");
+    assert!(
+        !tracker.needs_bootstrap(),
+        "the bootstrap cleared the poison"
+    );
     assert_eq!(tracker.observe(41, INSTANCE), Observe::Apply);
     assert_eq!(
         tracker.observe(39, INSTANCE),

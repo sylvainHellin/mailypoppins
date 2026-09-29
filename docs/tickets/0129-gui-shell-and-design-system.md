@@ -26,7 +26,7 @@ Each of these makes the GUI the second consumer of something only the CLI or the
 
 - The connect, bootstrap, call and settle sequence lives in `src/main.rs` (`daemon_connection`, `operation_session`, `run_admin_operation`, `settle`); it belongs in an `mp-client` session helper.
 - The per-call daemon timeout (`DAEMON_TIMEOUT`) lives in `src/main.rs` rather than in `mp-client`.
-- `mp_client::StateTracker` treats any revision above `watermark + 1` as a gap, which is wrong on a coalesced stream; the TUI sidesteps it by applying the watermark itself, and the GUI would be the first client to rely on the tracker.
+- `mp_client::StateTracker` applies any revision above the watermark and poisons only on `state.resync_required`, which is what a coalesced stream needs; the TUI watermarks through it, so the GUI inherits a tracker already in use.
 - `Outbound::rebootstrap` drops lifecycle events (`config.changed`, `daemon.shutting_down`) at or below the snapshot revision; keeping them needs a protocol decision.
 - The TUI announces itself as `ClientKind::Cli`, so the daemon cannot tell clients apart, which matters for the last-client-exits rule of the undo-send hold once a GUI joins.
 

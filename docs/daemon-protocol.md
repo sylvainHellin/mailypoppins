@@ -917,12 +917,8 @@ Delivery order is therefore the contract, and the daemon says so itself when som
 A client compares each event against its watermark and does one of four things: an event above it is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one from an unfamiliar instance is refused whatever its number, because revisions are only comparable within the daemon process that issued them; and a `state.resync_required` poisons the stream until a fresh `state.bootstrap` clears it.
 An instance change poisons it the same way: a client that kept applying past either would build a state nothing on the daemon's side corresponds to.
 
-`mp-client`'s `StateTracker` is stricter than that today and treats any jump above `watermark + 1` as a gap, which is exact only on a stream that coalesced nothing.
-The two disagree in this build, because coalescing Replace and Invalidate producers exist: `draft.changed`, `draft.invalid`, `account.state_changed`, and the mailbox-count invalidates the watcher emits.
-Each coalesce removes a revision from what one connection receives, so `StateTracker::observe` reports a `Gap` where nothing was lost and the client re-bootstraps for nothing.
-The lifecycle events (`sync.completed` among them) merge with nothing and reach a client dense, so the tracker applies every one of them.
-The TUI keeps its own watermark rather than going through `StateTracker`, and is unaffected.
-Reconciling the two, by having the daemon carry the highest revision a merged entry superseded or by dropping the arithmetic in favour of the daemon's own control message, is tracked under #0121 and in `BACKLOG.md`.
+`mp-client`'s `StateTracker` implements exactly these four rules, and the TUI watermarks through it.
+It applies any revision above the watermark however far above, because a coalesced stream skips numbers and a skipped number is not a loss; the only gap it acts on is the one the daemon announces with `state.resync_required`.
 
 ### Event kinds
 
