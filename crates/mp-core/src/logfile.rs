@@ -282,6 +282,16 @@ mod tests {
         Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
     }
 
+    /// Write all of `buf` as of `now`, the way `Write::write_all` would at
+    /// that moment instead of at the real clock.
+    fn put(log: &mut RotatingLog, buf: &[u8], now: DateTime<Utc>) {
+        let mut rest = buf;
+        while !rest.is_empty() {
+            let n = log.write_at(rest, now).unwrap();
+            rest = &rest[n..];
+        }
+    }
+
     fn names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = log_files(dir)
             .unwrap()
@@ -307,11 +317,11 @@ mod tests {
     fn opens_the_dated_file_and_appends_to_it() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 10)).unwrap();
-        writeln!(log, "one").unwrap();
+        put(&mut log, b"one\n", at(2026, 9, 28, 10));
         assert_eq!(names(tmp.path()), ["mailypoppins-2026-09-28.log"]);
         drop(log);
         let mut log = RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 11)).unwrap();
-        writeln!(log, "two").unwrap();
+        put(&mut log, b"two\n", at(2026, 9, 28, 11));
         let text = fs::read_to_string(tmp.path().join("mailypoppins-2026-09-28.log")).unwrap();
         assert_eq!(text, "one\ntwo\n");
     }
@@ -320,8 +330,8 @@ mod tests {
     fn a_full_file_rolls_to_a_later_sorting_name() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = RotatingLog::with_caps(tmp.path(), 10, 10_000, at(2026, 9, 28, 10)).unwrap();
-        log.write_all(b"0123456789ab\n").unwrap();
-        log.write_all(b"next\n").unwrap();
+        put(&mut log, b"0123456789ab\n", at(2026, 9, 28, 10));
+        put(&mut log, b"next\n", at(2026, 9, 28, 10));
         let names = names(tmp.path());
         assert_eq!(names.len(), 2, "{names:?}");
         assert_eq!(names[0], "mailypoppins-2026-09-28.log");
@@ -348,9 +358,9 @@ mod tests {
     fn a_record_split_across_writes_is_not_split_across_files() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = RotatingLog::with_caps(tmp.path(), 4, 10_000, at(2026, 9, 28, 10)).unwrap();
-        log.write_all(b"2026 ").unwrap();
-        log.write_all(b"[INFO] ").unwrap();
-        log.write_all(b"message\n").unwrap();
+        put(&mut log, b"2026 ", at(2026, 9, 28, 10));
+        put(&mut log, b"[INFO] ", at(2026, 9, 28, 10));
+        put(&mut log, b"message\n", at(2026, 9, 28, 10));
         let text = fs::read_to_string(tmp.path().join("mailypoppins-2026-09-28.log")).unwrap();
         assert_eq!(text, "2026 [INFO] message\n");
     }
