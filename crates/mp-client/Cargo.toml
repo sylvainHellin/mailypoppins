@@ -14,8 +14,19 @@ mp-protocol = { path = "../mp-protocol" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "net"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time", "macros"] }
+# The session kernel lifted from `clients/tui` (`session`, `events`,
+# `queries`): its public API answers `anyhow::Result` and logs its connect and
+# reconnect, as it did in the TUI. Same versions as the root crate.
+anyhow = "1.0"
+log = "0.4"
 # The outbox listing renders a unix timestamp in local time, which is a
 # formatting decision and therefore the client's (`outbox_cli_lines`). Same
 # version as the root crate, so the workspace resolves one chrono.
 chrono = "0.4"
+
+[features]
+# `Session::serving`, the in-process session a test drives over a dispatcher.
+# `#[cfg(test)]` does not cross a crate boundary, so `mp-tui`'s own
+# `test-support` turns this on; resolver v2 keeps it out of a shipped `mp`.
+test-support = []

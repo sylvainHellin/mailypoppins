@@ -56,34 +56,11 @@ use mp_protocol::listing::{MessageListRow, ThreadListing};
 use mp_protocol::EventEnvelope;
 
 use mp_core::selector::DRAFTS_MAILBOX;
+pub use mp_client::queries::Queries;
 use crate::app::{
     entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox,
     CalendarEvent, EmailEntry, MailboxInfo, MessageRef,
 };
-
-/// Something that answers a daemon method call and blocks for the answer.
-///
-/// One method, with exactly the signature
-/// [`Session::call`](crate::session::Session::call) already had, so the
-/// implementation for a session is a delegation and no second connect path
-/// exists. Object safe on purpose: the functions below take `&dyn Queries` so
-/// a test can drive them over a dispatcher in the same process.
-pub trait Queries {
-    /// Call `method` with `params` and hand back its `result`.
-    fn call(&self, method: &str, params: Value) -> Result<Value>;
-}
-
-impl Queries for crate::session::Session {
-    fn call(&self, method: &str, params: Value) -> Result<Value> {
-        crate::session::Session::call(self, method, params)
-    }
-}
-
-impl Queries for crate::session::QueryHandle {
-    fn call(&self, method: &str, params: Value) -> Result<Value> {
-        crate::session::QueryHandle::call(self, method, params)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The mailbox listing

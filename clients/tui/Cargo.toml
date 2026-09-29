@@ -19,7 +19,7 @@ path = "src/lib.rs"
 # crate turns the feature on through its `[dev-dependencies]` entry, which
 # resolver v2 keeps out of a plain `cargo build` / `cargo install`, so the
 # shipped binary compiles exactly the code `#[cfg(test)]` used to leave out.
-test-support = []
+test-support = ["mp-client/test-support"]
 
 [dependencies]
 # Versions are the root crate's, unchanged: the workspace resolves one copy of

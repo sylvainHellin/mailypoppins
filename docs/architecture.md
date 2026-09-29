@@ -30,8 +30,8 @@ The engine lives in the root package's `src/lib.rs` modules, the shared engine-f
 | `mailypoppins` (root) | the engine, the daemon, the CLI | everything |
 | `crates/mp-core` | the engine-free shared modules | `mp-protocol` |
 | `crates/mp-protocol` | the wire types, the framing, the fixtures | nothing of this workspace |
-| `crates/mp-client` | the socket transport and the handshake | `mp-protocol` |
-| `clients/tui` | the terminal client: model, keys, views, session | `mp-core`, `mp-client`, `mp-protocol` |
+| `crates/mp-client` | the socket transport, the handshake, and the client kernel every client shares: the session thread, its event stream, the `Queries` door | `mp-protocol` |
+| `clients/tui` | the terminal client: model, keys, views, the typed reads and the event application | `mp-core`, `mp-client`, `mp-protocol` |
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).
@@ -79,8 +79,9 @@ The daemon builds those three from the protocol types too (`OperationStatus::to_
 
 `crates/mp-client` owns the transport: one `Connection` is one Unix-socket connection, and the crate carries the `initialize` handshake and the typed errors a caller branches on.
 It owns no policy, no paths and no configuration.
+It also owns the client kernel lifted out of the TUI so the desktop client can share it: `session` (the session thread, `Session`, `QueryHandle`, the injected `Connector`), `events` (`Incoming`, `Subscription`) and `queries` (the `Queries` trait); `mp_tui` re-exports all three under their old paths.
 
-`clients/tui` is the terminal client itself since P5-U10f (#0126): the model, the key handlers, the views, the query layer, the command layer and the session thread, re-exported from `src/lib.rs` as `mailypoppins::tui` so every old path still resolves.
+`clients/tui` is the terminal client itself since P5-U10f (#0126): the model, the key handlers, the views, the typed reads, the command layer and the event application, re-exported from `src/lib.rs` as `mailypoppins::tui` so every old path still resolves.
 It reaches a daemon through a `session::Connector` the binary hands it, two function pointers onto `daemon::client::{client_session, reopen_session}`, because the socket path, the on-demand start and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping are the binary's and this crate links neither the daemon nor the lifecycle.
 
 None of the four depends on `mailypoppins`; that is the boundary that matters, and it is a resolver error rather than a guard's opinion: a GUI links `mp-client` alone, the TUI links three client crates, and neither can reach the engine by accident.
@@ -413,10 +414,10 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `state/revision.rs` | The newtypes the canonical state is addressed by: `Revision` (dense, monotonic per instance), `InstanceId`, `ConnectionId` |
 | **`clients/tui/src/`** | |
 | `lib.rs` | Event loop (`run_loop`), the session and event-stream drain, background result drain. One iteration drains the queued terminal events and the queued daemon events into the model and then paints once (#0108), both bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
-| `session.rs` | The one daemon connection: a thread with a current-thread runtime on it, `call` / `dispatch` / `events`, `handle()` (the weak-sender door a worker thread owns), and `Connector`, the two function pointers the binary hands in |
-| `queries.rs` | Every read, as typed functions over the object-safe `Queries` trait, plus the uid index and the row-delta decoder |
+| `session.rs` | A re-export of `mp_client::session`: the one daemon connection, a thread with a current-thread runtime on it, `call` / `dispatch` / `events`, `handle()` (the weak-sender door a worker thread owns), and `Connector`, the two function pointers the binary hands in |
+| `queries.rs` | Every read, as typed functions over the object-safe `Queries` trait (`mp_client::queries`, re-exported), plus the uid index and the row-delta decoder |
 | `commands.rs` | `route()`, the exhaustive `Action` classification table, and `dispatch()`, which turns a daemon-routed action into its calls |
-| `events.rs` | `Incoming`, the subscription drain, `App::apply_event` and the watermark, and the rebootstrap a resync or a reconnect costs |
+| `events.rs` | `Incoming` (re-exported from `mp_client::events`), the subscription drain, `App::apply_event` and the watermark, and the rebootstrap a resync or a reconnect costs |
 | `actions.rs` | `handle_action()`, the side-effect dispatch for the `Action` variants `commands::dispatch` hands back: the client-only ones and the overlays |
 | `bg.rs` | `handle_bg_result()`, processing background task completions, and `land_sync`, shared by a tick this client asked for and one it heard about |
 | `helpers.rs` | Terminal suspend and resume, editor, clipboard, `resolve_send_account`, and the server search leg (`LST-08`) that is still client-side |
@@ -461,7 +462,7 @@ The runtime drains the op once the account's mutations go quiet for 1.5 s, one d
 
 ### The session thread
 
-`clients/tui/src/session.rs` owns the one connection.
+`crates/mp-client/src/session.rs` owns the one connection (re-exported as `mp_tui::session`).
 It is a thread of its own with a current-thread tokio runtime on it, because `mp`'s `main` is already inside a runtime that `run_loop` cannot block on, and a `Connection` holds a `UnixStream` registered with the runtime that created it.
 The UI thread talks to it over channels: `dispatch` posts and forgets, `call` blocks for the answer, and `Session::handle()` hands a worker thread a `QueryHandle` holding a weak sender, so quitting closes the channel under every worker instead of joining on one.
 
@@ -478,7 +479,7 @@ A closed socket refuses every in-flight call at once rather than waiting out the
 ### Queries
 
 `clients/tui/src/queries.rs` is every read.
-`Queries` is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
+`Queries` (`mp_client::queries`) is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
 Over it sit the typed readers the call sites need: `list_emails` (`message.list`), `mailbox_counts` (`mailbox.list`), `message_body` (`message.get`), `thread` (`message.thread`, P5-U10d), and the three invitation reads P5-U10 added (`calendar.events`, `message.ics`, `message.invite`).
 
 A wire row becomes a `MessageListRow` and goes through `entry_from_row`, the same mapper the store-backed oracle in `src/tui_tests/oracle.rs` feeds, so the two are equal by construction rather than by inspection.
@@ -496,7 +497,7 @@ The arm records the id against what it is awaiting and returns; there is no work
 ### Events
 
 `clients/tui/src/events.rs` replaced the two watcher threads.
-`Incoming` carries the decoded events *and* the connection's own state (`Resync`, `Disconnected`, `Reconnected`) on one channel, which is what keeps a reconnect from overtaking the last event of the dead instance.
+`Incoming` (`mp_client::events`) carries the decoded events *and* the connection's own state (`Resync`, `Disconnected`, `Reconnected`) on one channel, which is what keeps a reconnect from overtaking the last event of the dead instance.
 `drain()` runs in the same pre-draw pass as the terminal drain and is held to the same two bounds, `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, so a first sync of a large mailbox publishing a row per message cannot starve the paint.
 
 `App::apply_event` consults the watermark before it looks at a kind: an event above it is applied and moves it, one at or below it is a duplicate the snapshot already carries, and one from an instance this client never bootstrapped against is refused, stickily.

@@ -6,6 +6,12 @@
 //! caller branches on; it owns no policy, no paths, and no configuration, and
 //! it never depends on the `mailypoppins` crate, so a GUI can link it alone.
 //!
+//! Above the wire sits the client kernel every client shares, lifted from
+//! `clients/tui`: [`session`] (the dedicated session thread, its call and
+//! dispatch channels, the reconnect backoff, the injected [`session::Connector`]),
+//! [`events`] (what that thread posts to its client) and [`queries`] (the
+//! object-safe blocking door the typed reads go through).
+//!
 //! ```no_run
 //! # async fn demo(socket: &std::path::Path) -> Result<(), mp_client::ClientError> {
 //! use mp_client::{ClientInfo, ClientKind, Connection, Identity};
@@ -18,7 +24,10 @@
 //! # }
 //! ```
 
+pub mod events;
 pub mod format;
+pub mod queries;
+pub mod session;
 
 mod connection;
 mod state;

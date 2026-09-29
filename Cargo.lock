@@ -2127,7 +2127,9 @@ dependencies = [
 name = "mp-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
+ "log",
  "mp-protocol",
  "serde",
  "serde_json",

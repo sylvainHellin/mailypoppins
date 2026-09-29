@@ -40,7 +40,7 @@
 //! the paint any more than a bracketed paste may.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use serde_json::json;
@@ -55,6 +55,8 @@ use mp_protocol::events::{
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
+
+pub use mp_client::events::{Incoming, Subscription};
 
 use super::app::{App, MailboxKind, StatusLevel};
 use super::queries::{MessageRowDelta, Queries};
@@ -75,39 +77,6 @@ const DRAFT_RESOURCE: &str = "draft:";
 /// The `kind` one hit of a live `message.search_server` travels as
 /// (`LST-08`, #0126).
 const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
-
-/// One thing the session thread has to tell the UI thread.
-#[derive(Debug)]
-pub enum Incoming {
-    /// One decoded `state.event`.
-    Event(EventEnvelope),
-    /// `state.resync_required`: this connection's queue was poisoned and
-    /// accepts no further domain event until it bootstraps again.
-    Resync {
-        /// The instance that gave up on the queue.
-        instance_id: String,
-        /// Why, in the daemon's own word (`event_queue_overflow`).
-        reason: String,
-    },
-    /// The daemon went away.
-    Disconnected {
-        /// What the transport said, for the log and the status line.
-        reason: String,
-    },
-    /// A daemon answers again, and it may not be the same one.
-    Reconnected {
-        /// The instance the handshake reported.
-        instance_id: String,
-    },
-}
-
-/// The UI thread's end of the session's event stream.
-///
-/// A plain `Receiver`, which is what `run_loop` already holds three of and what
-/// a `try_recv` drain reads without a second vocabulary. It is also what lets a
-/// test feed the drain without a socket: whether the far end is a session
-/// thread or a `Sender` in a test is not a property the drain may observe.
-pub type Subscription = Receiver<Incoming>;
 
 /// What one event did to the model.
 #[derive(Debug, PartialEq)]
