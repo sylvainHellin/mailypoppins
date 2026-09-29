@@ -30,8 +30,8 @@ The engine lives in the root package's `src/lib.rs` modules, the shared engine-f
 | `mailypoppins` (root) | the engine, the daemon, the CLI | everything |
 | `crates/mp-core` | the engine-free shared modules | `mp-protocol` |
 | `crates/mp-protocol` | the wire types, the framing, the fixtures | nothing of this workspace |
-| `crates/mp-client` | the socket transport, the handshake, and the client kernel every client shares: the session thread, its event stream, the `Queries` door | `mp-protocol` |
-| `clients/tui` | the terminal client: model, keys, views, the typed reads and the event application | `mp-core`, `mp-client`, `mp-protocol` |
+| `crates/mp-client` | the socket transport, the handshake, and the client kernel every client shares: the session thread, its event stream, the `Queries` door and the typed reads over it, the row deltas, the `StateTracker` watermark, the connect-subscribe-settle helper | `mp-protocol` |
+| `clients/tui` | the terminal client: model, keys, views, the mapping of the typed reads onto its model, and the event application | `mp-core`, `mp-client`, `mp-protocol` |
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).
@@ -79,7 +79,20 @@ The daemon builds those three from the protocol types too (`OperationStatus::to_
 
 `crates/mp-client` owns the transport: one `Connection` is one Unix-socket connection, and the crate carries the `initialize` handshake and the typed errors a caller branches on.
 It owns no policy, no paths and no configuration.
-It also owns the client kernel lifted out of the TUI so the desktop client can share it: `session` (the session thread, `Session`, `QueryHandle`, the injected `Connector`), `events` (`Incoming`, `Subscription`) and `queries` (the `Queries` trait); `mp_tui` re-exports all three under their old paths.
+It also owns the client kernel lifted out of the TUI so the desktop client can share it, everything a client needs that is not rendering:
+
+| module | what it holds |
+|---|---|
+| `session` | the session thread, `Session`, `QueryHandle`, the injected `Connector`, `call_within` and `DEFAULT_CALL_TIMEOUT` (30 s) |
+| `events` | `Incoming`, `Subscription` |
+| `queries` | the `Queries` trait and the typed reads over it in `mp_protocol` types: `list_messages` / `decode_message_rows` / `row_from_wire` (`MessageListRow`), `list_drafts` (`DraftListing`), `decode_search_hits` (`SearchHit`, the one result struct the protocol lacked), `mailbox_rows` (`MailboxRow`), `message_body`, `thread`, `message_invite`, `message_ics`, `draft_path`, `calendar_events`, the resource parsers, and `MessageRowDelta` with an `apply_row_delta` over a held `Vec<MessageListRow>` |
+| `state` | `StateTracker`, the watermark over one instance's revision stream: another instance is refused stickily, at-or-below is a duplicate, any jump above is applied (a coalesced stream skips numbers), and only `state.resync_required` poisons it |
+| `operation` | the one-shot client's sequence on a `Connection`: `open` (connect and handshake under a budget), `subscribe_within` (`state.bootstrap`), `run_operation`, `settle`, `await_operation`, and `Settled` |
+| `connection` | `Connection::call` and `call_within`, the per-call budget, with `ClientError::Timeout` and `ClientError::Closed` |
+
+`mp-client` links `mp-protocol` alone, not `mp-core`: the two reads that need `mp-core` (the Drafts branch of the listing, which needs `DRAFTS_MAILBOX`, and the draft body, which is `draft.path` plus `mp_core::draft::parse_email_draft`) stay in the TUI, because a string constant and one parse call do not earn the transport crate `mp-core`'s keyring, HTTP and TLS dependencies.
+The policy stays with its owner: the socket path, the on-demand start and the exit-4 diagnostic are the binary's (`src/daemon/client.rs`), the per-method budgets are the CLI's (`DAEMON_TIMEOUT` and its two 300 s siblings in `src/main.rs`), and what a refused read looks like on screen is each client's.
+`mp_tui` re-exports `session`, `events` and the `Queries` trait under their old paths.
 
 `clients/tui` is the terminal client itself since P5-U10f (#0126): the model, the key handlers, the views, the typed reads, the command layer and the event application, re-exported from `src/lib.rs` as `mailypoppins::tui` so every old path still resolves.
 It reaches a daemon through a `session::Connector` the binary hands it, two function pointers onto `daemon::client::{client_session, reopen_session}`, because the socket path, the on-demand start and the `MAILYPOPPINS_DAEMON_REQUIRE` bookkeeping are the binary's and this crate links neither the daemon nor the lifecycle.
@@ -478,12 +491,14 @@ A closed socket refuses every in-flight call at once rather than waiting out the
 
 ### Queries
 
-`clients/tui/src/queries.rs` is every read.
-`Queries` (`mp_client::queries`) is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
-Over it sit the typed readers the call sites need: `list_emails` (`message.list`), `mailbox_counts` (`mailbox.list`), `message_body` (`message.get`), `thread` (`message.thread`, P5-U10d), and the three invitation reads P5-U10 added (`calendar.events`, `message.ics`, `message.invite`).
+`clients/tui/src/queries.rs` is every read, as a thin layer over `mp_client::queries`.
+`Queries` is an object-safe trait with one method, `call`, implemented for `Session` and for `QueryHandle`, so a query layer is testable against an in-process `Dispatcher` without a socket.
+The typed reads are `mp-client`'s and answer protocol types; the TUI's own `list_emails`, `mailbox_counts`, `message_body`, `draft_body`, `thread`, `calendar_events`, `message_invite` and `message_ics` map those onto `EmailEntry`, `MailboxInfo`, `CalendarEvent` and `MessageRef`, and turn a refusal into an empty pane and a line in the log, which is presentation and therefore the client's.
 
-A wire row becomes a `MessageListRow` and goes through `entry_from_row`, the same mapper the store-backed oracle in `src/tui_tests/oracle.rs` feeds, so the two are equal by construction rather than by inspection.
-A held list is keyed by `messages.id` and the daemon removes a row by `(mailbox, uid)`, so the query layer keeps a process-wide `(account, mailbox) -> (uid -> id)` table; a uid it does not know owes a refetch rather than a guess.
+A wire row is a `MessageListRow` and goes through `entry_from_row`, the same mapper the store-backed oracle in `src/tui_tests/oracle.rs` feeds, so the two are equal by construction rather than by inspection; `mp list-messages` and `mp search` decode through the same `mp_client::queries::row_from_wire`.
+`MessageRowDelta` is `mp-client`'s and carries the protocol row; the TUI's `apply_row_delta` folds it into a `Vec<EmailEntry>`.
+A held `EmailEntry` list is keyed by `messages.id`, carries no uid, and the daemon removes a row by `(mailbox, uid)`, so the TUI keeps a process-wide `(account, mailbox) -> (uid -> id)` table; a uid it does not know owes a refetch rather than a guess.
+`mp-client`'s own `apply_row_delta` over `Vec<MessageListRow>` needs no such table, because the protocol row carries the uid.
 
 ### Commands
 
@@ -500,7 +515,8 @@ The arm records the id against what it is awaiting and returns; there is no work
 `Incoming` (`mp_client::events`) carries the decoded events *and* the connection's own state (`Resync`, `Disconnected`, `Reconnected`) on one channel, which is what keeps a reconnect from overtaking the last event of the dead instance.
 `drain()` runs in the same pre-draw pass as the terminal drain and is held to the same two bounds, `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, so a first sync of a large mailbox publishing a row per message cannot starve the paint.
 
-`App::apply_event` consults the watermark before it looks at a kind: an event above it is applied and moves it, one at or below it is a duplicate the snapshot already carries, and one from an instance this client never bootstrapped against is refused, stickily.
+`App::apply_event` consults the watermark before it looks at a kind: an event above it is applied and moves it, however far above (a coalesced stream skips numbers), one at or below it is a duplicate the snapshot already carries, and one from an instance this client never bootstrapped against is refused, stickily.
+The watermark is `mp_client::StateTracker`; `EventState` wraps it with what is the TUI's own, the `Awaited` table of operations this client started (its variants name account indices and search generations, which are the TUI's model) and the ended-hold ring.
 `App::apply_bootstrap` is the only thing that sets the watermark, which is why a resync and a reconnect are both spelled "bootstrap again"; `App::apply_resync_bootstrap` is the recovery entry and, unlike the startup one, it replaces the mailboxes, the counts and the listing caches of an account that had already opened.
 
 ### The watchers are the daemon's
