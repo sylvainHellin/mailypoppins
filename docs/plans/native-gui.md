@@ -89,6 +89,20 @@ Composition replaces the reader pane.
 - Once #0130 lands, each composition session starts one real Neovim process in a PTY-backed terminal, using the user's configuration and plugins.
 - Exiting the editor preserves the draft, and draft deletion requires an explicit discard action through `draft.discard`.
 
+## Performance targets
+
+The GUI has to feel snappy, and these numbers make that testable on Sylvain's Mac:
+
+- Cold start to a painted message list takes under 1 s, and a warm start under 500 ms.
+- Keyboard navigation in the list and between panes responds within one frame, 16 ms.
+- A plain-text message opens in under 100 ms and an HTML message in under 250 ms, excluding the first webview warm-up.
+- Local search returns results in under 200 ms on a 50k-message account.
+- Resident memory stays under 300 MB, webview processes included, with one account open and the reader showing HTML.
+- Neovim in the embedded terminal (M5) starts cold in under 300 ms and echoes a keystroke in under 30 ms.
+
+M0 measures each target and records the baseline next to it in this section, and the targets are revised against what Tauri delivers.
+A target still missed by more than a factor of two at the end of M1 becomes a plan decision recorded here, and never slips silently.
+
 ## Location and build
 
 The GUI lives at `clients/desktop/`, beside the TUI at `clients/tui`.
@@ -207,8 +221,9 @@ Each one names the parity-matrix identifiers it closes, and replaces the milesto
 - `message.html` rendered in a sandboxed iframe, with link interception.
 - xterm.js on a PTY running a real Neovim against a draft path.
 - Timeboxed: a row that fails inside the box is recorded as a finding rather than chased.
+- The spike runs on the Mac only, since the headless Linux server cannot answer the webview or latency questions.
 
-The Neovim half validates startup from a signed app, user config and plugin loading, Finder `PATH` resolution, PTY input, output, resize, clipboard, Unicode, IME, mouse and colour, keyboard routing between app and terminal, clean child termination on window close and after a crash, a save reaching the draft watcher and coming back through the subscription, and cold-start and typing latency.
+The Neovim half validates startup from a signed app, user config and plugin loading, Finder `PATH` resolution, PTY input, output, resize, clipboard, Unicode, IME, mouse and colour, keyboard routing between app and terminal, clean child termination on window close and after a crash, a save reaching the draft watcher and coming back through the subscription, and cold-start and keystroke-echo latency against the performance targets.
 No spike code is carried into `clients/desktop/`.
 
 ### M1: read-only shell (#0129, and the read slices of #0131)
@@ -240,7 +255,8 @@ No spike code is carried into `clients/desktop/`.
 - Contacts, ranking, copy actions, vCard send, rebuild, and handoff into composition.
 - Signature management and per-account defaults.
 - Settings, account setup, authentication and secret updates through `config.*`.
-- Activity, logs, notifications and help.
+- Clipboard copies of the sender address, the message link as the row's `mp://` selector, and the subject, through the Tauri clipboard-manager plugin, with its permission declared in the app capability file.
+- Activity, logs and help.
 
 ### M5: embedded Neovim (#0130)
 
@@ -252,6 +268,7 @@ No spike code is carried into `clients/desktop/`.
 
 - Signed and notarised macOS app bundles and DMGs in the release workflow; the Developer ID account and CI secrets are #0012.
 - The matching `mp` executable bundled inside `Mailypoppins.app`, with a supported way to expose it on `PATH`.
+- Desktop notifications for new mail and for finished or failed sends, through the Tauri notification plugin; macOS delivers them only from a signed bundle, so they ship with signing.
 - Standalone macOS and Linux CLI archives and the Homebrew installation keep working.
 - Clean-install, upgrade, restart after a version mismatch, uninstall and quarantine smoke tests on the signed bundle.
 - `docs/release-process.md`, the website and the installation instructions updated.
@@ -262,6 +279,7 @@ GUI work runs beside TUI and daemon work on `main` under one rule.
 The GUI never edits `clients/tui`.
 It only adds to `mp-protocol` and `mp-client`, additively and with a protocol changelog entry where a wire shape is new.
 A conflict in `BACKLOG.md` or `CHANGELOG.md` is resolved by rebasing.
+Rust-only GUI work, such as the connector, the pending-operations tracker and the `mp-client` and `mp-protocol` additions, can run on the Linux server in a separate session.
 
 ## Tests
 
