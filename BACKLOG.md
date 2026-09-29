@@ -125,6 +125,8 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 > **`daemon.stop`'s `pending` and the `daemon.shutting_down` / `daemon.stopped` `unsettled` lists still travel as untyped values** (`src/daemon/shutdown.rs` `live_operations`), where `OperationStatus` now types the same entry everywhere else.
 > **`reseed` never clears `last_sync`**, so an account removed by a config reload and added back later reports its old last pass in `sync_health` and in `diagnostic.health`.
 > **`state.bootstrap.response.json`'s draft row lacks `path`, `to` and `ready`**, so of the two bootstrap fixtures only the diagnostics one survives an exact typed round trip.
+> **`tests/daemon_bootstrap.rs::the_snapshot_of_a_converged_daemon_still_has_the_documented_shape` is flaky.** It failed once on an `assert_eq` near line 1913 and passed on rerun (2026-09-29, during an unrelated test-only change to `mp-core`); the cause is not diagnosed.
+> **`tests/daemon_events.rs::a_reading_client_receives_the_whole_burst_in_revision_order` and `::a_stalled_reader_is_told_to_resync_and_sees_no_domain_event_after_it` are flaky.** Both failed once because an unexpected `diagnostic.check_changed` event arrived inside the burst, and were clean on six reruns. The likely cause is the diagnostics projection racing the test's burst, so the fixture should filter that kind out or await it before the burst starts.
 
 Settled deferrals for the daemon migration, recorded here because the Phase 0 gate points at this list:
 
