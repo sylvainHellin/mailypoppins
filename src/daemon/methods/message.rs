@@ -3,6 +3,10 @@
 //! `message.materialise_attachment`, `message.materialise_html` and
 //! `message.release_handle` (P3b-U12).
 //!
+//! `message.html`: the rendition `message.materialise_html` writes, answered
+//! inline instead of as a file, for a webview that has no use for a path. Both
+//! are built by one function, [`html_rendition`], so their bytes are the same.
+//!
 //! `message.get`: one message, addressed by `id` (`"<mailbox>/<uid>"`) or by the
 //! selector grammar `mp show` takes from a user, which the daemon resolves
 //! because resolving one needs the store the client no longer has. The result is
@@ -83,14 +87,28 @@ pub const MESSAGE_READ_METHOD_SPECS: [MethodSpec; 3] = [
 pub const MESSAGE_THREAD_METHOD_SPECS: [MethodSpec; 1] =
     [MethodSpec::new("message.thread", MethodKind::Query, 1)];
 
-/// One of the four, selected by its own [`MethodSpec`].
+/// The inline HTML rendition, declared on its own for the reason
+/// [`MESSAGE_THREAD_METHOD_SPECS`] is.
 ///
-/// One type for four methods because they share their one dependency and
-/// differ only in which of the four bodies below they run; the dispatcher
-/// registers four instances, so each still declares itself separately.
+/// A query rather than `ClientIntegration`, unlike `message.materialise_html`
+/// whose bytes it answers: it writes no file, mints no handle and leaves the
+/// client nothing to release, so the answer is a read like `message.get`'s.
+/// Durable, as every read is: it finishes in the time the store read takes.
+pub const MESSAGE_HTML_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    mp_protocol::rendition::METHOD_MESSAGE_HTML,
+    MethodKind::Query,
+    1,
+)];
+
+/// One of the five, selected by its own [`MethodSpec`].
+///
+/// One type for five methods because they share their one dependency and
+/// differ only in which of the five bodies below they run; the dispatcher
+/// registers five instances, so each still declares itself separately.
 pub struct MessageReadMethod {
-    /// Which of [`MESSAGE_READ_METHOD_SPECS`] or
-    /// [`MESSAGE_THREAD_METHOD_SPECS`] this instance serves.
+    /// Which of [`MESSAGE_READ_METHOD_SPECS`],
+    /// [`MESSAGE_THREAD_METHOD_SPECS`] or [`MESSAGE_HTML_METHOD_SPECS`] this
+    /// instance serves.
     pub spec: MethodSpec,
     /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
@@ -117,6 +135,7 @@ impl Method for MessageReadMethod {
                 "message.get" => get(&params, &accounts),
                 "message.list" => list(&params, &accounts),
                 "message.thread" => thread(&params, &accounts),
+                mp_protocol::rendition::METHOD_MESSAGE_HTML => html(&params, &accounts),
                 _ => search(&params, &accounts),
             };
             result.map(Outcome::query).map_err(DomainError::from)
@@ -124,11 +143,12 @@ impl Method for MessageReadMethod {
     }
 }
 
-/// Register the four read methods on `dispatcher`.
+/// Register the five read methods on `dispatcher`.
 pub fn register_reads(dispatcher: &mut Dispatcher, config: Arc<super::super::config::ConfigStore>) {
     for spec in MESSAGE_READ_METHOD_SPECS
         .into_iter()
         .chain(MESSAGE_THREAD_METHOD_SPECS)
+        .chain(MESSAGE_HTML_METHOD_SPECS)
     {
         dispatcher.register(Arc::new(MessageReadMethod {
             spec,
@@ -1378,18 +1398,37 @@ fn attachment_file(
     ))
 }
 
+/// The browser rendition of one message as the file `message.materialise_html`
+/// writes, and the blobs it read.
+///
+/// The bytes are [`html_rendition`]'s, unchanged: this adds the file name and
+/// nothing else, so the file and `message.html`'s inline string cannot drift.
+fn html_file(
+    store: &Store,
+    blobs: &BlobStore,
+    row: i64,
+) -> Result<(String, Vec<u8>, Vec<String>), RpcError> {
+    let (rendition, pinned) = html_rendition(store, blobs, row)?;
+    Ok(("message.html".to_string(), rendition.into_bytes(), pinned))
+}
+
 /// The browser rendition of one message, and the blobs it read.
 ///
 /// The rendition, not the raw markup: the charset and the CSP tag the TUI's `b`
 /// binding injects before it hands a `file://` URL to a browser (#0037), and the
 /// `cid:` inlining that makes the referenced parts visible without a message to
 /// resolve them against. Serving unhardened markup through a new door would undo
-/// that fix at the moment the GUI starts using it.
-fn html_file(
+/// that fix at the moment the GUI starts using it, which is why both doors,
+/// the file of `message.materialise_html` and the string of `message.html`, are
+/// built here and nowhere else.
+///
+/// The pinned hashes matter only to a caller that holds the rendition past the
+/// call, which is the file path's handle; the inline path drops them.
+fn html_rendition(
     store: &Store,
     blobs: &BlobStore,
     row: i64,
-) -> Result<(String, Vec<u8>, Vec<String>), RpcError> {
+) -> Result<(String, Vec<String>), RpcError> {
     let markup = read::load_html(store, blobs, row)
         .ok_or_else(|| invalid_params("this message carries no HTML to render"))?;
     let raw_hash = read::blob_hash_of_kind(store, row, "raw");
@@ -1416,7 +1455,69 @@ fn html_file(
         markup
     };
     let rendition = crate::parse::inject_csp_meta(&crate::parse::ensure_utf8_charset(&markup));
-    Ok(("message.html".to_string(), rendition.into_bytes(), pinned))
+    Ok((rendition, pinned))
+}
+
+/// The `result` of `message.html`: [`html_rendition`]'s string inline, with
+/// no file and no handle (`mp_protocol::rendition`).
+///
+/// The message is addressed as [`get`] addresses one. A message with no
+/// markup is `-32602`, the refusal `message.materialise_html` answers for the
+/// same row. The rendition's blobs are not pinned: nothing outlives the call,
+/// so there is nothing for a retention sweep to pull out from under.
+pub fn html(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    super::account::ready_account(accounts, &name)?;
+
+    let store = Store::open(crate::config::store_path(&name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let blobs = BlobStore::new(crate::config::blobs_dir(&name));
+    let row = address(params, &store, &name)?;
+    let (rendition, _pinned) = html_rendition(&store, &blobs, row.id)?;
+    inline_html(&name, row.id, rendition)
+}
+
+/// Wrap a rendition as `message.html`'s answer, or refuse one over
+/// [`mp_protocol::rendition::MAX_INLINE_HTML_BYTES`].
+///
+/// The refusal is `frame_too_large` (`-32004`) rather than a code of its own:
+/// the condition is the one that code names, an answer too large for the frame
+/// it would travel in, measured against this method's own lower limit. Its
+/// `data` is the `{limit, seen}` every `frame_too_large` carries plus
+/// `fallback`, the method that serves the same bytes as a file, which is what
+/// tells a client this refusal apart from one the transport made.
+fn inline_html(account: &str, row_id: i64, rendition: String) -> Result<Value, RpcError> {
+    use mp_protocol::rendition::{
+        InlineHtmlRefusal, MessageHtml, HTML_FALLBACK_METHOD, MAX_INLINE_HTML_BYTES,
+    };
+
+    let bytes = rendition.len();
+    if bytes > MAX_INLINE_HTML_BYTES {
+        let data = InlineHtmlRefusal {
+            limit: MAX_INLINE_HTML_BYTES as u64,
+            seen: bytes as u64,
+            fallback: HTML_FALLBACK_METHOD.to_string(),
+        };
+        return Err(RpcError {
+            code: mp_protocol::ErrorCode::FrameTooLarge.code(),
+            message: format!(
+                "the HTML rendition is {bytes} bytes, over the {MAX_INLINE_HTML_BYTES}-byte \
+                 inline limit; {HTML_FALLBACK_METHOD} serves it as a file"
+            ),
+            data: Some(
+                serde_json::to_value(data)
+                    .map_err(|e| internal(format!("serialising the inline-limit refusal: {e}")))?,
+            ),
+        });
+    }
+    let answer = MessageHtml {
+        account: account.to_string(),
+        row_id,
+        bytes: bytes as u64,
+        html: rendition,
+    };
+    serde_json::to_value(answer)
+        .map_err(|e| internal(format!("serialising the rendition of {account}: {e}")))
 }
 
 /// A sanitised name that is still a name: `.` and `..` are directory entries
@@ -1592,6 +1693,29 @@ mod tests {
         let refused = resolve_mailbox(&account(), "drafts").expect_err("drafts is not listable");
         assert_eq!(refused.code, -32602);
         assert!(refused.message.contains("inbox"), "{}", refused.message);
+    }
+
+    /// A rendition at the inline limit is answered whole; one byte over it is
+    /// `frame_too_large` naming the file path to fall back to.
+    #[test]
+    fn an_inline_rendition_over_the_limit_names_the_file_path() {
+        use mp_protocol::rendition::{InlineHtmlRefusal, MessageHtml, MAX_INLINE_HTML_BYTES};
+
+        let at_limit = "a".repeat(MAX_INLINE_HTML_BYTES);
+        let answer = inline_html("alpha", 7, at_limit.clone()).expect("at the limit is inline");
+        let answer: MessageHtml = serde_json::from_value(answer).expect("decodes");
+        assert_eq!(answer.bytes, MAX_INLINE_HTML_BYTES as u64);
+        assert_eq!(answer.row_id, 7);
+        assert!(answer.html == at_limit);
+
+        let over = "a".repeat(MAX_INLINE_HTML_BYTES + 1);
+        let refused = inline_html("alpha", 7, over).expect_err("one byte over is refused");
+        assert_eq!(refused.code, mp_protocol::ErrorCode::FrameTooLarge.code());
+        let data: InlineHtmlRefusal =
+            serde_json::from_value(refused.data.expect("carries data")).expect("decodes");
+        assert_eq!(data.limit, MAX_INLINE_HTML_BYTES as u64);
+        assert_eq!(data.seen, MAX_INLINE_HTML_BYTES as u64 + 1);
+        assert_eq!(data.fallback, "message.materialise_html");
     }
 
     /// `null`, absent, `0` and a number are four different answers.

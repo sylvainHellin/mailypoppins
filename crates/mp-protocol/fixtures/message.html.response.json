@@ -1,0 +1,10 @@
+{
+  "id": 47,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "work",
+    "bytes": 381,
+    "html": "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\"><html><head><meta charset=\"UTF-8\"></head><body><p>Guten Tag</p><p><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==\"></p></body></html>",
+    "row_id": 3141
+  }
+}

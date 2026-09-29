@@ -50,6 +50,7 @@ use serde_json::{json, Value};
 use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::listing::{MessageListRow, ThreadListing};
+use mp_protocol::rendition::{MessageHtml, MessageHtmlParams, METHOD_MESSAGE_HTML};
 use mp_protocol::state::MailboxRow;
 use mp_protocol::EventEnvelope;
 
@@ -234,6 +235,25 @@ pub fn message_body(q: &dyn Queries, account: &str, row_id: i64) -> Result<Optio
     let params = json!({"account": account, "row_id": row_id, "body": true});
     let answer = q.call("message.get", params)?;
     Ok(answer["body"].as_str().map(str::to_string))
+}
+
+/// The browser rendition of one row, inline, through `message.html`: the same
+/// bytes `message.materialise_html` writes to a file, with no handle to
+/// release.
+///
+/// A rendition over [`mp_protocol::rendition::MAX_INLINE_HTML_BYTES`] is a
+/// `frame_too_large` refusal whose `data` is an
+/// [`InlineHtmlRefusal`](mp_protocol::rendition::InlineHtmlRefusal) naming
+/// `message.materialise_html`, and a row with no markup is `-32602`; both come
+/// back as the `Err` they are, for the client to fall back or say so.
+pub fn message_html(q: &dyn Queries, account: &str, row_id: i64) -> Result<MessageHtml> {
+    let params = MessageHtmlParams {
+        account: account.to_string(),
+        row_id: Some(row_id),
+        ..MessageHtmlParams::default()
+    };
+    let answer = q.call(METHOD_MESSAGE_HTML, serde_json::to_value(params)?)?;
+    Ok(serde_json::from_value(answer)?)
 }
 
 /// The conversation one message belongs to, through `message.thread`
@@ -502,6 +522,21 @@ mod tests {
             rows[1].selector,
             "mp://work/inbox/Invoice-2025-114@example.com"
         );
+    }
+
+    /// `message_html` addresses the row by `row_id` alone and decodes the
+    /// committed answer.
+    #[test]
+    fn message_html_asks_by_row_id_and_decodes_the_rendition() {
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/message.html.response.json"
+        )));
+        let answer = message_html(&door, "work", 3141).expect("a rendition");
+        assert_eq!(answer.row_id, 3141);
+        assert_eq!(answer.bytes, answer.html.len() as u64);
+        let seen = door.seen.borrow();
+        assert_eq!(seen[0].0, "message.html");
+        assert_eq!(seen[0].1, json!({"account": "work", "row_id": 3141}));
     }
 
     #[test]

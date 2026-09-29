@@ -17,6 +17,7 @@ pub mod events;
 pub mod frame;
 pub mod listing;
 pub mod operation;
+pub mod rendition;
 pub mod send;
 pub mod state;
 

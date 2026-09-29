@@ -517,6 +517,7 @@ mod tests {
                 "message.delete".to_string(),
                 "message.fetch".to_string(),
                 "message.get".to_string(),
+                "message.html".to_string(),
                 "message.ics".to_string(),
                 "message.invite".to_string(),
                 "message.list".to_string(),

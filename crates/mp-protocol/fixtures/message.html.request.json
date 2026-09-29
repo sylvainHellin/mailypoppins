@@ -1,0 +1,9 @@
+{
+  "id": 47,
+  "jsonrpc": "2.0",
+  "method": "message.html",
+  "params": {
+    "account": "work",
+    "row_id": 3141
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": -32004,
+    "data": {
+      "fallback": "message.materialise_html",
+      "limit": 8388608,
+      "seen": 9437184
+    },
+    "message": "the HTML rendition is 9437184 bytes, over the 8388608-byte inline limit; message.materialise_html serves it as a file"
+  },
+  "id": 48,
+  "jsonrpc": "2.0"
+}

@@ -112,7 +112,7 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the seven `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
@@ -524,6 +524,10 @@ It is the index of the row a client is looking at; addressing by the store's raw
 **`message.materialise_html` writes the browser rendition, not the raw markup**: the charset and the `Content-Security-Policy` meta tag the TUI's `b` binding injects before it hands a `file://` URL to a browser (#0037), with `cid:` references inlined as `data:` URIs.
 A sender who wrote no markup is `-32602`, not a daemon failure.
 
+**`message.html` answers the same rendition inline** ([below](#inline-html-rendition)), built by the same function, so the string it returns and the file this method writes are one byte sequence.
+A client that hands a `file://` URL to a browser or another process wants the file; a client that renders into its own webview wants the string and has no handle to release.
+The inline answer is capped at 8 MiB, and a rendition over it is refused with a `fallback` naming this method, which serves it at any size.
+
 **`message.materialise_markdown` writes the store's own view of a message**, which is `store::read::render_markdown`: YAML frontmatter built from the `messages` row, then the stored plain text, which is either the sender's `text/plain` or the `html_to_plain` of their markup (#0075, `RD-06`).
 It is the third member of this family rather than a method of its own, because the store keeps no Markdown file per message: the file era's `.md` files died with #0037, and what replaced them is a rendition built on every open, which is exactly what a handle is for.
 It is not `message.materialise_html`, which renders the sender's markup for a browser where this renders the store's own view for an editor.
@@ -559,6 +563,24 @@ It holds back candidates and nothing else: the store's size, the warn-then-evict
 An unknown account is `-32005` with `{account}` and a configured account with no readable store is `-32006`, the two refusals every read method makes.
 Everything else a caller can get wrong is `-32602`: an id that is not `"<mailbox>/<uid>"`, a message the account does not hold, a `part` that is not one of the message's attachments or is absent, a message with no markup, and an unknown, already released or expired handle.
 Those last three are one answer on purpose: all of them mean "you are not holding that", and which of the three it was is not a distinction a client can act on.
+
+### Inline HTML rendition
+
+| method | kind | params | result |
+|---|---|---|---|
+| `message.html` | query | `{account, row_id\|id\|selector, mailbox?}` | `{account, row_id, html, bytes}` |
+
+`html` is the browser rendition `message.materialise_html` writes to its file, byte for byte: the sender's markup with its charset forced to UTF-8, the `Content-Security-Policy` meta tag prepended, `<meta http-equiv="refresh">` stripped, and every `cid:` image the raw message resolves inlined as a `data:` URI.
+The daemon builds both answers with one function, and `tests/daemon_html_inline.rs` compares them on a message with a `cid:` image.
+`bytes` is the UTF-8 length of `html`, which is the `bytes` the file path reports for the same row; `row_id` is the row the address resolved to, so a caller that sent a selector learns which row it rendered.
+
+A separate method rather than `message.get { html: true }`, because `message.get` answers the `mp show --json` record and its `body` is the stored plain text a terminal prints; the rendition is another artefact of the message, with its own refusal (no markup is `-32602`) and its own size limit, and folding both into one record would give `message.get` two refusals for one flag.
+A *query* rather than *client_integration*, because nothing is written, no handle is minted and nothing outlives the call; it is `durable`, like every read, and the blobs it reads are not pinned, since the retention sweep has nothing to pull out from under once the answer is sent.
+The types are `mp_protocol::rendition::{MessageHtmlParams, MessageHtml, InlineHtmlRefusal}`, and `mp_client::queries::message_html` is the typed read.
+
+**A rendition over 8 MiB (`mp_protocol::rendition::MAX_INLINE_HTML_BYTES`) is `frame_too_large` (`-32004`)** with `data` `{limit, seen, fallback: "message.materialise_html"}`: the answer would not fit the frame a client should be made to hold, and `fallback` is what tells this refusal apart from one the transport made.
+The limit is half the 16 MiB response cap, which leaves the JSON escaping of the string room inside one frame; a pathological rendition whose escaping still breaches the cap is the transport's own `frame_too_large`, without `fallback`, and the same fallback applies.
+The address refusals are `message.get`'s, and the account refusals are `-32005` and `-32006`, as for every read.
 
 ### The `config.*` family
 
@@ -879,7 +901,7 @@ The daemon's conditions occupy `-32010` to `-32000`.
 | -32001 | `identity_mismatch` | `{daemon: {data_dir, config_dir}, client: {data_dir, config_dir}}` |
 | -32002 | `protocol_incompatible` | `{daemon: {min, max}, client: {min, max}}` |
 | -32003 | `capability_missing` | `{missing: [..]}` |
-| -32004 | `frame_too_large` | `{limit, seen}` |
+| -32004 | `frame_too_large` | `{limit, seen, fallback?}` |
 | -32005 | `account_unknown` | `{account}` |
 | -32006 | `account_not_ready` | `{account, state}` |
 | -32007 | `config_invalid` | `{path, line?, message}` |
@@ -889,6 +911,7 @@ The daemon's conditions occupy `-32010` to `-32000`.
 
 `identity_mismatch` names both directories on both sides so the client can print all four and tell the user which override to drop.
 `frame_too_large` reports the cap that was breached and the byte count that breached it, the same pair the decoder produces.
+`message.html` answers it for a rendition over its own 8 MiB inline limit, with `fallback` naming the method that serves the same bytes as a file.
 `message` is a human-readable line for the log and the CLI, and clients match on the code, never on the message text.
 
 `draft_invalid` is its own code rather than an overloaded `-32602`, because "you asked for a draft that does not exist" and "the draft you asked for will not parse" may not be the same answer on one connection, and its `data` is the `draft.invalid` payload, so a client renders the caller's refusal and the watcher's event with one piece of code.
@@ -1232,3 +1255,9 @@ The #0125 follow-ups typed the snapshot's three projections, which moves nothing
 The existing fixtures decode into them unchanged; what a client gains is a decode error where it used to skip an entry it could not read.
 The same follow-ups filled an account's `sync_health`, which every bootstrap had reported as `unknown` whatever the last pass did; it now reports the last completed pass's verdict at bootstrap time, as described above, and stays `unknown` only until a pass finishes.
 `crates/mp-protocol/fixtures/state.bootstrap.diagnostics.response.json` is the fixture for a snapshot whose `diagnostics` is not empty, which nothing pinned before.
+
+The desktop-client groundwork added one query, additively, and no existing shape moved.
+`message.html` `{account, row_id|id|selector, mailbox?}` -> `{account, row_id, html, bytes}` answers the browser rendition `message.materialise_html` writes, inline and byte-identical, for a webview that has no use for a file or a handle.
+A rendition over 8 MiB is `-32004 frame_too_large` with `{limit, seen, fallback}`, `fallback` naming `message.materialise_html`; `fallback` is a new optional member of that code's `data`, which every other `frame_too_large` still answers without.
+It is declared in `MESSAGE_HTML_METHOD_SPECS`, an array of its own for the reason `MESSAGE_THREAD_METHOD_SPECS` is one, and the capability list grew by its name.
+The types are `mp_protocol::rendition`, and the fixtures are `crates/mp-protocol/fixtures/message.html.{request,response}.json` and `error.message_html_too_large.json`.
