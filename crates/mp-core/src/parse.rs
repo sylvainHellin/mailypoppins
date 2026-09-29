@@ -162,44 +162,140 @@ pub fn inject_csp_meta(html: &str) -> String {
 }
 
 /// Remove every `<meta http-equiv="refresh" ...>` tag, case-insensitively and
-/// whatever the attribute order or quoting. Attribute values are matched as
-/// quoted units, so a `>` inside one does not end the tag early. The
-/// `http-equiv` value is compared after decoding character references, as a
-/// browser does, so `&#114;efresh` or `&#x52;efresh` is caught too. Applied
+/// whatever the attribute order or quoting.
+///
+/// Each tag is consumed the way the HTML tokenizer does (see
+/// [`scan_meta_attrs`]), never with a regex: a pattern that treats every quote
+/// as opening a value matches nothing when an unquoted value carries a stray
+/// quote (`content=0;url=x?a"b http-equiv=refresh`), while a browser reads
+/// that quote as an ordinary character and honours the refresh.
+///
+/// Every `<meta` occurrence is examined, even one inside a comment, a
+/// `<noscript>`/`<template>`, raw text or another tag's attribute value: the
+/// scanner does not know the surrounding context, and skipping past a benign
+/// "tag" that was really comment text (`<!-- <meta a=" --> <meta
+/// http-equiv=refresh> " -->`) would hide the real one after it. Removing a
+/// refresh tag the browser would not have honoured is harmless.
+///
+/// The `http-equiv` value is compared after decoding character references, as
+/// a browser does, so `&#114;efresh` or `&#x52;efresh` is caught too. Applied
 /// until nothing changes, so a tag split around another one
 /// (`<me<meta http-equiv=refresh>ta ...>`) cannot reassemble after a pass.
 fn strip_meta_refresh(html: &str) -> String {
-    use regex::Regex;
-    use std::sync::OnceLock;
-
-    static TAG: OnceLock<Regex> = OnceLock::new();
-    static EQUIV: OnceLock<Regex> = OnceLock::new();
-    let tag = TAG.get_or_init(|| {
-        Regex::new(r#"(?i)<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>"#).expect("static meta regex")
-    });
-    let equiv = EQUIV.get_or_init(|| {
-        Regex::new(r#"(?i)\bhttp-equiv\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#)
-            .expect("static http-equiv regex")
-    });
-    let is_refresh = |meta: &str| {
-        equiv.captures_iter(meta).any(|caps| {
-            let raw = caps.get(1).or(caps.get(2)).or(caps.get(3)).map_or("", |m| m.as_str());
-            decode_char_refs(raw).trim().eq_ignore_ascii_case("refresh")
-        })
-    };
     let mut out = html.to_string();
     loop {
-        let next = tag
-            .replace_all(&out, |caps: &regex::Captures| {
-                let meta = &caps[0];
-                if is_refresh(meta) { String::new() } else { meta.to_string() }
-            })
-            .into_owned();
-        if next == out {
+        let b = out.as_bytes();
+        // Scan results per attribute-start position (see `scan_meta_attrs`):
+        // overlapping scans converge, so each pass stays linear.
+        let mut memo = std::collections::HashMap::new();
+        let mut next = String::with_capacity(out.len());
+        let (mut copied, mut i) = (0, 0);
+        while let Some(off) = find_ascii_ci(&out[i..], "<meta") {
+            let start = i + off;
+            i = start + "<meta".len();
+            // The tag name must end here, or this is `<metafoo>`.
+            if !matches!(b.get(i), None | Some(b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'/' | b'>'))
+            {
+                continue;
+            }
+            let (end, refresh) = scan_meta_attrs(&out, i, &mut memo);
+            if refresh {
+                next.push_str(&out[copied..start]);
+                (copied, i) = (end, end);
+            }
+        }
+        if copied == 0 {
             return out;
         }
+        next.push_str(&out[copied..]);
         out = next;
     }
+}
+
+/// Walk the attributes of a start tag from `i` (just past its name) with the
+/// HTML tokenizer's states and return the index one past the closing `>` (the
+/// input length if the tag never closes) and whether an `http-equiv`
+/// attribute reads `refresh`.
+///
+/// The states that matter: a name or an unquoted value ends at whitespace,
+/// `/` (names only) or `>`, and any quote inside it is an ordinary character;
+/// only a quote at the very start of a value opens a quoted value, which runs
+/// to its matching quote whatever it contains; the tag ends at the first `>`
+/// outside a quoted value. Duplicate attributes all count (a browser keeps
+/// the first), which only ever removes more.
+///
+/// `memo` maps an attribute-start position to the (end, refresh-from-here)
+/// result of an earlier scan through it: from that position on, the scan is
+/// identical, so a document of many overlapping unclosed `<meta a="` scans
+/// in linear time rather than quadratic.
+fn scan_meta_attrs(
+    html: &str,
+    mut i: usize,
+    memo: &mut std::collections::HashMap<usize, (usize, bool)>,
+) -> (usize, bool) {
+    let b = html.as_bytes();
+    let ws = |c: u8| matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ');
+    let skip_ws = |mut i: usize| {
+        while i < b.len() && ws(b[i]) {
+            i += 1;
+        }
+        i
+    };
+    // Attribute-start positions on this path, and the index in `path` of the
+    // last attribute that read `refresh`.
+    let mut path = Vec::new();
+    let mut last_refresh = None;
+    let (end, tail_refresh) = loop {
+        // Before attribute name: whitespace and `/` separate attributes.
+        while i < b.len() && (ws(b[i]) || b[i] == b'/') {
+            i += 1;
+        }
+        if let Some(&hit) = memo.get(&i) {
+            break hit;
+        }
+        match b.get(i) {
+            None => break (b.len(), false),
+            Some(b'>') => break (i + 1, false),
+            _ => path.push(i),
+        }
+        // Attribute name: the first character may be `=`, quotes are ordinary.
+        let name_start = i;
+        i += 1;
+        while i < b.len() && !ws(b[i]) && !matches!(b[i], b'/' | b'>' | b'=') {
+            i += 1;
+        }
+        let name = &html[name_start..i];
+        i = skip_ws(i);
+        if b.get(i) != Some(&b'=') {
+            continue; // a valueless attribute; `/`, `>` or the next name follows
+        }
+        i = skip_ws(i + 1);
+        let value = match b.get(i) {
+            Some(&q @ (b'"' | b'\'')) => {
+                let start = i + 1;
+                let close = b[start..].iter().position(|&c| c == q).map_or(b.len(), |p| start + p);
+                i = (close + 1).min(b.len());
+                &html[start..close]
+            }
+            _ => {
+                // Unquoted (empty if `>` or the end comes first).
+                let start = i;
+                while i < b.len() && !ws(b[i]) && b[i] != b'>' {
+                    i += 1;
+                }
+                &html[start..i]
+            }
+        };
+        if name.eq_ignore_ascii_case("http-equiv")
+            && decode_char_refs(value).trim().eq_ignore_ascii_case("refresh")
+        {
+            last_refresh = Some(path.len() - 1);
+        }
+    };
+    for (idx, &pos) in path.iter().enumerate() {
+        memo.insert(pos, (end, tail_refresh || last_refresh.is_some_and(|r| r >= idx)));
+    }
+    (end, tail_refresh || last_refresh.is_some())
 }
 
 /// Decode the character references an HTML attribute value may carry: numeric
@@ -2082,6 +2178,85 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         // Other meta tags, and the word in body text, are left alone.
         let benign = r#"<meta charset="utf-8"><meta name="x" content="refresh"><p>refresh me</p>"#;
         assert!(inject_csp_meta(benign).ends_with(benign));
+    }
+
+    /// Assert `tag`, embedded in a document, leaves no trace of its refresh.
+    fn assert_refresh_stripped(tag: &str) {
+        let html = format!("<html><head>{tag}<title>t</title></head><body>hi</body></html>");
+        let result = inject_csp_meta(&html);
+        assert!(!result.contains("evil.example"), "{tag} -> {result}");
+        assert!(!result.to_lowercase().contains("refresh"), "{tag} -> {result}");
+        assert!(result.contains("<title>t</title></head><body>hi</body></html>"), "{result}");
+    }
+
+    #[test]
+    fn test_strip_meta_refresh_stray_quote_in_unquoted_value() {
+        // A regex that reads every quote as opening a value matched nothing
+        // here; a browser treats the quote as an ordinary character.
+        assert_refresh_stripped(r#"<meta content=0;url=https://evil.example/?a"b http-equiv=refresh>"#);
+        assert_refresh_stripped(r#"<meta content=0;url=https://evil.example/?a'b http-equiv=refresh>"#);
+        // A stray quote inside an attribute name is ordinary too.
+        assert_refresh_stripped(r#"<meta a"b http-equiv=refresh content=0;url=https://evil.example/>"#);
+    }
+
+    #[test]
+    fn test_strip_meta_refresh_quoting_and_order_variants() {
+        for tag in [
+            r#"<META HTTP-EQUIV="REFRESH" CONTENT="0;url=https://evil.example/">"#,
+            r#"<meta http-equiv='refresh' content='0;url=https://evil.example/'>"#,
+            r#"<meta http-equiv=refresh content=0;url=https://evil.example/>"#,
+            "<meta http-equiv \t=\n refresh content = \"0;url=https://evil.example/\">",
+            r#"<meta content="0;url=https://evil.example/" http-equiv="refresh">"#,
+        ] {
+            assert_refresh_stripped(tag);
+        }
+    }
+
+    #[test]
+    fn test_strip_meta_refresh_unclosed_at_end_of_document() {
+        let html = "<p>hi</p><meta http-equiv=refresh content=0;url=https://evil.example/";
+        let result = inject_csp_meta(html);
+        assert!(result.ends_with("<p>hi</p>"), "{result}");
+    }
+
+    #[test]
+    fn test_strip_meta_refresh_in_any_context() {
+        // A comment ends at its first `-->`, so the refresh after it is live
+        // even though a naive tag scan from the commented `<meta` swallows it.
+        let comment = r#"<!-- <meta name="x --> <meta http-equiv=refresh content=0;url=https://evil.example/> " -->"#;
+        assert!(!inject_csp_meta(comment).contains("evil.example"), "{comment}");
+        for wrapped in [
+            "<noscript><meta http-equiv=refresh content=0;url=https://evil.example/></noscript>",
+            "<template><meta http-equiv=refresh content=0;url=https://evil.example/></template>",
+            r#"<div title="<meta a='"> <meta http-equiv=refresh content=0;url=https://evil.example/>"#,
+        ] {
+            assert!(!inject_csp_meta(wrapped).contains("evil.example"), "{wrapped}");
+        }
+    }
+
+    #[test]
+    fn test_strip_meta_refresh_keeps_other_meta() {
+        for tag in [
+            r#"<meta name="viewport" content="width=device-width">"#,
+            r#"<meta http-equiv="content-type" content="text/html; charset=utf-8">"#,
+            r#"<metadata http-equiv=refresh>"#,
+            r#"<meta http-equiv/=refresh>"#,
+            // Decodes to `"refresh"`, which is not the keyword.
+            r#"<meta http-equiv=&quot;refresh&quot;>"#,
+        ] {
+            let html = format!("<head>{tag}</head>");
+            assert!(inject_csp_meta(&html).ends_with(&html), "{tag}");
+        }
+    }
+
+    #[test]
+    fn test_strip_meta_refresh_overlapping_unclosed_scans_stay_linear() {
+        // Every `<meta` scan runs to the end of input; without the memo this
+        // is quadratic and takes seconds.
+        let html = "<meta a=\"".repeat(50_000);
+        let started = std::time::Instant::now();
+        assert_eq!(strip_meta_refresh(&html), html);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]

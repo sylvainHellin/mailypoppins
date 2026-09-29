@@ -2194,3 +2194,12 @@ Two things went wrong on the first run of it.
 `tests/cli_help_snapshot.rs` ran `mp --help` with no `MAILYPOPPINS_DATA_DIR`, so every run had been appending to the developer's real log, and with pruning in `init_logging` a dozen of those processes pruned the real directory at once.
 They raced, and a process that found the oldest file already deleted did not subtract it, so it kept deleting newer files until only the current one was left: `delete_oldest` now counts `NotFound` as deleted, and the snapshot test sets a temporary data dir.
 Any test that execs `mp` needs its own data dir, even for `--help`, because `init_logging` runs before argument parsing.
+
+## A regex that finds HTML tags disagrees with the tokenizer on malformed quoting
+
+`strip_meta_refresh` found `<meta>` tags with `<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>`, which reads every quote as opening a quoted value.
+The HTML tokenizer only opens a quoted value at the very start of a value; inside an attribute name or an unquoted value a quote is an ordinary character.
+So `<meta content=0;url=https://evil.example/?a"b http-equiv=refresh>` matched nothing (the lone quote has no partner) and survived, while a browser honours the refresh, and CSP does not govern meta refresh.
+`crates/mp-core/src/parse.rs` now walks each tag with the tokenizer's states (`scan_meta_attrs`) and examines every `<meta` occurrence, since a scanner that skipped past a "tag" that was really comment text would hide the live tag after it.
+Examining every occurrence makes overlapping unclosed tags quadratic, so scans are memoized by attribute-start position, where two scans that reach the same byte are in the same state.
+When a sanitizer has to agree with a browser about where a tag ends, follow the tokenizer's state machine, and test it with the malformed input the tokenizer tolerates rather than with well-formed markup.

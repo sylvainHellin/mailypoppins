@@ -571,6 +571,7 @@ Those last three are one answer on purpose: all of them mean "you are not holdin
 | `message.html` | query | `{account, row_id\|id\|selector, mailbox?}` | `{account, row_id, html, bytes}` |
 
 `html` is the browser rendition `message.materialise_html` writes to its file, byte for byte: the sender's markup with its charset forced to UTF-8, the `Content-Security-Policy` meta tag prepended, `<meta http-equiv="refresh">` stripped, and every `cid:` image the raw message resolves inlined as a `data:` URI.
+The refresh stripping is a defence in depth, not a guarantee: CSP has no directive that governs navigation, so a client that displays `html` must still refuse any top-level navigation away from it itself.
 The daemon builds both answers with one function, and `tests/daemon_html_inline.rs` compares them on a message with a `cid:` image.
 `bytes` is the UTF-8 length of `html`, which is the `bytes` the file path reports for the same row; `row_id` is the row the address resolved to, so a caller that sent a selector learns which row it rendered.
 
