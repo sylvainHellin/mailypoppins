@@ -12,6 +12,17 @@
 //! [`Connection::next_notification`] hands them over in arrival order. A method
 //! rather than a subscription receiver, so the borrowed-reader design stays
 //! intact: an owned reader task would have to undo it.
+//!
+//! # A timed-out connection is closed
+//!
+//! A call abandoned before its answer arrived leaves the connection in a state
+//! no later call can recover from: the answer is still owed, and it may land
+//! in the middle of the next call's wait, or the request itself may have been
+//! cut off half written. So the first call abandoned that way closes the
+//! connection, and every call after it answers [`ClientError::Closed`] without
+//! touching the socket. A long-lived client that sees a
+//! [`ClientError::Timeout`] or a [`ClientError::Closed`] opens a new
+//! connection; it never retries on the old one.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -47,6 +58,13 @@ pub struct Connection {
     notifications: VecDeque<Value>,
     /// The id of the next request; monotonic for the connection's lifetime.
     next_id: i64,
+    /// A call is between writing its request and reading its answer. Still
+    /// set when the next call starts means the last one was abandoned (its
+    /// future dropped by a timeout) and the connection is out of step.
+    in_flight: bool,
+    /// The connection was abandoned by a timed-out call and answers
+    /// [`ClientError::Closed`] from now on.
+    closed: bool,
 }
 
 impl Connection {
@@ -67,7 +85,15 @@ impl Connection {
             pending: VecDeque::new(),
             notifications: VecDeque::new(),
             next_id: 1,
+            in_flight: false,
+            closed: false,
         })
+    }
+
+    /// Whether a timed-out call closed this connection, after which every call
+    /// answers [`ClientError::Closed`] and the caller reopens.
+    pub fn is_closed(&self) -> bool {
+        self.closed || self.in_flight
     }
 
     /// Perform the handshake. `required` capabilities the daemon does not offer are refused with
@@ -96,7 +122,29 @@ impl Connection {
     }
 
     /// Call one method and return its `result`.
+    ///
+    /// [`ClientError::Closed`] without a write when an earlier call on this
+    /// connection timed out or was otherwise abandoned mid-call (see the module
+    /// docs): its answer is still owed, so this one could not be told apart
+    /// from it.
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+        if self.in_flight {
+            // The last call's future was dropped between its write and its
+            // answer, by a timeout the caller wrapped around it. Close rather
+            // than read what may be that call's reply as this one's.
+            self.closed = true;
+        }
+        if self.closed {
+            return Err(ClientError::Closed);
+        }
+        self.in_flight = true;
+        let answer = self.call_unguarded(method, params).await;
+        self.in_flight = false;
+        answer
+    }
+
+    /// [`Connection::call`] without the abandoned-call guard.
+    async fn call_unguarded(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -133,10 +181,15 @@ impl Connection {
     /// method (a store read answers in milliseconds, a mutation spans a round
     /// trip to the mail server).
     ///
-    /// A timed-out call leaves its answer owed: if the daemon answers late,
-    /// the next call on this connection refuses that frame as an answer to
-    /// another id. A caller that times out should therefore drop the
-    /// connection, as the CLI does by exiting.
+    /// **A timeout closes the connection.** The answer is still owed, and the
+    /// budget may have run out in the middle of writing the request, so the
+    /// daemon may be holding half a frame: neither is something a later call
+    /// could recover from. The connection is therefore marked closed and its
+    /// write half shut down, which the daemon reads as a disconnect (a partial
+    /// frame is discarded with the connection, never executed). Every later
+    /// call answers [`ClientError::Closed`] and [`Connection::next_notification`]
+    /// answers `None`; a caller that wants to keep talking to the daemon opens
+    /// a new connection.
     pub async fn call_within(
         &mut self,
         method: &str,
@@ -145,11 +198,23 @@ impl Connection {
     ) -> Result<Value, ClientError> {
         match tokio::time::timeout(budget, self.call(method, params)).await {
             Ok(answer) => answer,
-            Err(_) => Err(ClientError::Timeout {
-                method: method.to_string(),
-                after: budget,
-            }),
+            Err(_) => {
+                self.close().await;
+                Err(ClientError::Timeout {
+                    method: method.to_string(),
+                    after: budget,
+                })
+            }
         }
+    }
+
+    /// Mark the connection closed and shut its write half, so the daemon sees
+    /// the disconnect now rather than when the value is dropped. Best effort:
+    /// a socket that is already gone is the state being asked for.
+    async fn close(&mut self) {
+        self.closed = true;
+        self.pending.clear();
+        let _ = self.stream.shutdown().await;
     }
 
     /// The next server-initiated notification, or `None` when the daemon closed
@@ -161,6 +226,11 @@ impl Connection {
     /// to refuse by id rather than swallowed.
     pub async fn next_notification(&mut self) -> Option<Notification> {
         loop {
+            // A closed connection is one the caller has to reopen; reading on
+            // would hand out events past a call whose answer never came.
+            if self.is_closed() {
+                return None;
+            }
             if let Some(value) = self.notifications.pop_front() {
                 match serde_json::from_value(value) {
                     Ok(notification) => return Some(notification),
@@ -432,6 +502,110 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(error.to_string(), "account.list went unanswered for 0s");
         silent.abort();
+    }
+
+    /// A listener at a fresh socket path, for one test.
+    fn listener(name: &str) -> (tokio::net::UnixListener, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("mp-client-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let socket = dir.join("d.sock");
+        let _ = std::fs::remove_file(&socket);
+        (
+            tokio::net::UnixListener::bind(&socket).expect("bind"),
+            socket,
+        )
+    }
+
+    /// A daemon that answers the first request late: after the caller's budget
+    /// ran out, and with the id that call was given. The timed-out connection
+    /// is closed, so the next call is `Closed` rather than a protocol error
+    /// over the stale reply, and the daemon sees the disconnect at once.
+    #[tokio::test]
+    async fn a_timed_out_call_closes_the_connection_instead_of_leaving_the_reply_owed() {
+        let (listener, socket) = listener("poison");
+        let (saw_eof_tx, saw_eof_rx) = tokio::sync::oneshot::channel();
+        let late = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let read = stream.read(&mut buf).await.expect("the request");
+            assert!(read > 0, "the request arrived");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // The late reply to id 1; the client has shut its write half, so
+            // the write may or may not land, and either is fine.
+            let _ = stream
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n")
+                .await;
+            // What the daemon sees next is the end of the stream, not a
+            // second request.
+            let next = stream.read(&mut buf).await.unwrap_or(0);
+            let _ = saw_eof_tx.send(next);
+        });
+
+        let mut conn = Connection::connect(&socket).await.expect("connect");
+        let error = conn
+            .call_within("account.list", json!({}), Duration::from_millis(50))
+            .await
+            .expect_err("the answer is late");
+        assert!(
+            matches!(error, ClientError::Timeout { .. }),
+            "got {error:?}"
+        );
+        assert!(conn.is_closed());
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let error = conn
+            .call("account.list", json!({}))
+            .await
+            .expect_err("a closed connection answers nothing");
+        assert!(matches!(error, ClientError::Closed), "got {error:?}");
+        let error = conn
+            .call_within("account.list", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("and keeps answering nothing");
+        assert!(matches!(error, ClientError::Closed), "got {error:?}");
+        assert!(conn.next_notification().await.is_none());
+
+        let next = tokio::time::timeout(Duration::from_secs(2), saw_eof_rx)
+            .await
+            .expect("the daemon side finished")
+            .expect("it reported");
+        assert_eq!(next, 0, "the daemon read end-of-stream after the timeout");
+        late.await.expect("the fake daemon did not panic");
+    }
+
+    /// A plain `call` whose future the caller dropped under its own timeout
+    /// poisons the connection the same way: the next call is `Closed` and
+    /// never reads the abandoned call's reply as its own.
+    #[tokio::test]
+    async fn a_call_abandoned_by_an_outer_timeout_closes_the_connection() {
+        let (listener, socket) = listener("abandon");
+        let late = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = stream
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n")
+                .await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let mut conn = Connection::connect(&socket).await.expect("connect");
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(30),
+            conn.call("account.list", json!({})),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the outer timeout fired");
+        assert!(conn.is_closed());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let error = conn
+            .call("account.list", json!({}))
+            .await
+            .expect_err("the abandoned call poisoned the connection");
+        assert!(matches!(error, ClientError::Closed), "got {error:?}");
+        late.abort();
     }
 
     #[test]
