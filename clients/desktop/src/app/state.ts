@@ -1,7 +1,7 @@
 // The desktop shell's model: connection, bootstrap, the fetched lists, the
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
-import type { Bootstrap, DraftEntry, MessageFlags, MessageListRow } from "@/protocol/types";
+import type { Bootstrap, DraftEntry, HoldStatus, MessageFlags, MessageListRow } from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
@@ -10,6 +10,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  SyncMode,
   VersionInfo,
 } from "@/lib/gui-types";
 
@@ -150,6 +151,93 @@ export type SearchState = {
   restore: { selection: Selection; focus: Pane };
 };
 
+/** What a mutation does to a row: leave the list, or change a flag in place. */
+export type MutationKind = "archive" | "delete" | "move" | "flag" | "read" | "discard";
+
+/** A message row or a local draft a mutation names. */
+export type Target = { account: string; row_id: number } | { account: string; draft: string };
+
+/** A message row a mutation names. */
+export type MessageTarget = { account: string; row_id: number };
+
+/**
+ * The key a row goes by in `pending` and `marked`: `<account>#<row_id>`, or
+ * `<account>#draft:<id>` for a draft. Row ids are per daemon instance, so a
+ * key does not outlive a daemon restart.
+ */
+export function targetKey(t: Target): string {
+  return "row_id" in t ? `${t.account}#${t.row_id}` : `${t.account}#draft:${t.draft}`;
+}
+
+/** A count change a mutation made to one mailbox of the sidebar, to reverse on a restore. */
+export type CountDelta = { account: string; mailbox: string; total: number; unread: number };
+
+/**
+ * One row's optimistic change, from the moment the user acted until the
+ * command's answer confirms or refuses it. `batch` is the dispatch that owns
+ * it: a second mutation of the same row takes the entry over and keeps the
+ * first one's `prev*`, so the restore is always to what the daemon holds.
+ */
+export type PendingChange = {
+  batch: number;
+  kind: MutationKind;
+  target: Target;
+  /** The mailbox slug an archive or a move puts the row in. */
+  destination: string | null;
+  /** The state a flag or read change set. */
+  value: boolean | null;
+  /** The row as the shown list had it, and where. */
+  prevRow: { key: string; row: MessageListRow; index: number } | null;
+  /** The search hit as the shown search (`seq`) had it, and where. */
+  prevHit: { hit: SearchHit; index: number; seq: number } | null;
+  /** The draft as the shown Drafts list had it, and where. */
+  prevDraft: { key: string; entry: DraftEntry; index: number } | null;
+  /** The flag or read state before the change, when it was known. */
+  prevValue: boolean | null;
+  /** The mailbox slug the row was in, when it was known. */
+  source: string | null;
+  counts: CountDelta[];
+};
+
+/** Where a hold stands, from the `send.hold_*` event that last moved it. */
+export type HoldPhase = "started" | "tick" | "cancelled" | "fired";
+
+/**
+ * A send waiting out its undo window. `remaining_secs` is always the
+ * daemon's, never counted down locally. `cancelling` is set while this
+ * window's `send_cancel_hold` is in flight.
+ */
+export type HoldEntry = HoldStatus & { state: HoldPhase; cancelling: boolean };
+
+export type ActivityKind =
+  | "applied"
+  | "failed"
+  | "rolled_back"
+  | "hold_cancelled"
+  | "hold_cancel_failed"
+  | "sync_failed";
+
+/** One line of the activity area, dismissed by `id`. */
+export type ActivityNotice = {
+  id: number;
+  kind: ActivityKind;
+  account: string | null;
+  text: string;
+  /** The rows a failed batch put back, each with the daemon's reason. */
+  rows: { key: string; label: string; reason: string }[];
+};
+
+/** The list's multi-select: row keys (`targetKey`) and the range anchor. */
+export type Marked = { keys: ReadonlySet<string>; anchor: string | null };
+
+export const NO_MARKS: Marked = { keys: new Set<string>(), anchor: null };
+
+/** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
+export type RunningSync = { account: string; mode: SyncMode };
+
+/** How an operation ended, as `operation.finished` or `operation_settled` says. */
+export type OperationEnd = { operation_id: string; state: string; error: string | null } | { operation_id: string; dropped: string };
+
 export type AppState = {
   connection: ConnectionStatus;
   /** The reason of the last `disconnected`, until `reconnected` or a bootstrap. */
@@ -188,6 +276,25 @@ export type AppState = {
   intercepted: InterceptedUrl[];
   /** The last refused link, shown in the reader footer until dismissed. */
   interceptNotice: InterceptedUrl | null;
+  /** Optimistic changes awaiting their command's answer, by `targetKey`. */
+  pending: Record<string, PendingChange>;
+  /**
+   * Per list key, moved by every optimistic change and every answer that
+   * settles one: a list answer requested at an older value is dropped, so a
+   * reload that started before a mutation cannot bring its row back.
+   */
+  listGen: Record<string, number>;
+  /** Send holds by `operation_id`, from the bootstrap and the `send.hold_*` events. */
+  holds: Record<string, HoldEntry>;
+  marked: Marked;
+  activity: ActivityNotice[];
+  activitySeq: number;
+  /** Syncs this window started, by `operation_id`. */
+  syncs: Record<string, RunningSync>;
+  /** `sync_trigger` calls not answered yet. */
+  syncStarting: number;
+  /** Operation ends that arrived while a `sync_trigger` was unanswered, for its id. */
+  syncEarly: OperationEnd[];
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -218,7 +325,21 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     lastError: null,
     intercepted: [],
     interceptNotice: null,
+    pending: {},
+    listGen: {},
+    holds: {},
+    marked: NO_MARKS,
+    activity: [],
+    activitySeq: 0,
+    syncs: {},
+    syncStarting: 0,
+    syncEarly: [],
   };
+}
+
+/** The holds still counting down, in arm order. */
+export function liveHolds(s: AppState): HoldEntry[] {
+  return Object.values(s.holds).filter((h) => h.state === "started" || h.state === "tick");
 }
 
 export const listKey = (account: string, mailbox: string): string => `${account}/${mailbox}`;

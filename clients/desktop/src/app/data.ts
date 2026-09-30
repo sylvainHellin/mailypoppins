@@ -92,16 +92,21 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
   }, [hasBootstrap, names, mailboxes, dispatch]);
 
   // The selected mailbox's list.
+  // The answer carries the list generation it was asked at, so a reload that
+  // started before an optimistic mutation is dropped when it lands.
   const { account, mailbox } = state.selection;
   const messages = state.messages;
+  const listGenRef = useRef(state.listGen);
+  listGenRef.current = state.listGen;
   useEffect(() => {
     if (!hasBootstrap || !account || !mailbox || messages.key === null || !isStale(messages)) return;
     const key = messages.key;
     const gen = messages.gen;
+    const lgen = listGenRef.current[key] ?? 0;
     run(`messages:${key}@${gen}`, () =>
       cmd
         .listMessages(account, mailbox)
-        .then((list) => dispatch({ type: "messages_loaded", key, gen, list }))
+        .then((list) => dispatch({ type: "messages_loaded", key, gen, lgen, list }))
         .catch((e: unknown) => dispatch({ type: "messages_failed", key, gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, account, mailbox, messages, dispatch]);

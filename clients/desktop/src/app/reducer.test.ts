@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reducer, type Action } from "@/app/reducer";
+import { actionTargets, reducer, type Action } from "@/app/reducer";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
 import { openableHits } from "@/app/search";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
@@ -300,5 +300,262 @@ describe("the search reducer", () => {
     s = run(s, { type: "jump_mailbox", index: 2 });
     expect(s.search).toBeNull();
     expect(s.selection.mailbox).toBe("sent");
+  });
+});
+
+describe("mutations and pending state", () => {
+  const key = listKey("work", "inbox");
+  const row = (id: number) => ({ account: "work", row_id: id });
+  const rows = (s: AppState) => (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows.map((r) => r.id);
+  const box = (s: AppState, slug: string) => s.mailboxes.work.data!.mailboxes.find((m) => m.slug === slug)!;
+  const pick = (s: AppState, id: number) => {
+    const r = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows.find((x) => x.id === id)!;
+    return run(s, { type: "select_message", message: { row_id: r.id, message_id: r.message_id, selector: r.selector } });
+  };
+  const envelope = (kind: string, payload: unknown, revision = 500): Action => ({
+    type: "gui_event",
+    event: { type: "event", event: { instance_id: "fixture-instance-1", revision, kind, payload } },
+  });
+  const last = (s: AppState) => s.activity[s.activity.length - 1];
+  const archive = (batch: number, ...ids: number[]): Action => ({ type: "mutation_apply", batch, kind: "archive", targets: ids.map(row) });
+
+  it("archives at once, moves the counts and the cursor, and keeps the row gone once confirmed", () => {
+    let s = pick(booted(), 1002);
+    s = run(s, archive(1, 1002));
+    expect(rows(s)).toEqual([1001, 1003, 1004, 1005, 1006, 1007, 1008]);
+    expect(s.pending["work#1002"]).toMatchObject({ batch: 1, kind: "archive", destination: "archive", source: "inbox" });
+    expect(box(s, "inbox")).toMatchObject({ total: 7, unread: 3 });
+    expect(box(s, "archive")).toMatchObject({ total: 4, unread: 1 });
+    expect(s.selection.message?.row_id).toBe(1003);
+
+    s = run(s, { type: "mutation_settled", batch: 1, kind: "archive", account: "work", done: [row(1002)], failed: [], moved_to: { mailbox: "archive", selector: "mp://work/archive/x" } });
+    expect(s.pending).toEqual({});
+    expect(rows(s)).not.toContain(1002);
+    expect(box(s, "inbox").total).toBe(7);
+    expect(s.activity.map((n) => [n.kind, n.text])).toEqual([["applied", "Archived 1 message"]]);
+  });
+
+  it("puts back each refused row of a batch where it was, with the daemon's reason", () => {
+    let s = run(booted(), archive(1, 1002, 1003));
+    s = run(s, {
+      type: "mutation_settled",
+      batch: 1,
+      kind: "archive",
+      account: "work",
+      done: [row(1002)],
+      failed: [{ target: row(1003), reason: "work holds no message with row id 1003" }],
+    });
+    expect(rows(s)).toEqual([1001, 1003, 1004, 1005, 1006, 1007, 1008]);
+    expect(s.pending).toEqual({});
+    expect(box(s, "inbox")).toMatchObject({ total: 7, unread: 3 });
+    expect(isStale(s.mailboxes.work)).toBe(true);
+    const failed = s.activity.find((n) => n.kind === "failed");
+    expect(failed?.rows).toEqual([{ key: "work#1003", label: "This week in type: variable fonts", reason: "work holds no message with row id 1003" }]);
+  });
+
+  it("puts back every row of a batch whose command threw", () => {
+    let s = run(booted(), archive(1, 1001, 1008));
+    s = run(s, { type: "mutation_failed", batch: 1, kind: "archive", account: "work", targets: [row(1001), row(1008)], error: { kind: "timeout", message: "slow" } });
+    expect(rows(s)).toEqual([1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008]);
+    expect(box(s, "inbox")).toMatchObject({ total: 8, unread: 4 });
+    expect(last(s)?.rows.map((r) => r.reason)).toEqual(["slow", "slow"]);
+  });
+
+  it("flags in place, and a refusal puts the old flag back", () => {
+    let s = run(booted(), { type: "mutation_apply", batch: 3, kind: "flag", targets: [row(1001)], value: true });
+    const flagged = (x: AppState) => (x.messages.data as Extract<MessageList, { kind: "messages" }>).rows.find((r) => r.id === 1001)!.flags.flagged;
+    expect(flagged(s)).toBe(true);
+    s = run(s, { type: "mutation_settled", batch: 3, kind: "flag", account: "work", done: [], failed: [{ target: row(1001), reason: "no" }] });
+    expect(flagged(s)).toBe(false);
+  });
+
+  it("marks read in place and moves the unread count", () => {
+    const s = run(booted(), { type: "mutation_apply", batch: 4, kind: "read", targets: [row(1002), row(1001)], value: true });
+    expect(box(s, "inbox").unread).toBe(3);
+  });
+
+  it("a later batch owns a row it took over: the earlier batch's answer leaves it alone", () => {
+    let s = run(booted(), { type: "mutation_apply", batch: 1, kind: "flag", targets: [row(1001)], value: true });
+    s = run(s, { type: "mutation_apply", batch: 2, kind: "flag", targets: [row(1001)], value: false });
+    s = run(s, { type: "mutation_settled", batch: 1, kind: "flag", account: "work", done: [row(1001)], failed: [] });
+    expect(s.pending["work#1001"]).toMatchObject({ batch: 2, prevValue: false });
+  });
+
+  it("restores the rolled-back account's pending rows only, and re-reads its lists", () => {
+    let s = run(booted(), archive(1, 1002));
+    s = run(s, { type: "mutation_apply", batch: 2, kind: "archive", targets: [{ account: "home", row_id: 1015 }] });
+    s = run(s, envelope("mutations.rolled_back", { account: "work", failed: 1 }));
+    expect(rows(s)).toContain(1002);
+    expect(Object.keys(s.pending)).toEqual(["home#1015"]);
+    expect(isStale(s.messages)).toBe(true);
+    expect(last(s)).toMatchObject({ kind: "rolled_back", account: "work", text: "work: 1 mutation(s) failed and were rolled back (see the log)" });
+  });
+
+  it("drops a list reload from before the mutation, takes a newer one, and hides rows still pending", () => {
+    let s = booted();
+    s = run(s, envelope("state.invalidate", { resource: "mailbox:work/inbox", scope: {} }));
+    const staleAt = { gen: s.messages.gen, lgen: s.listGen[key] ?? 0 };
+    s = run(s, archive(1, 1002));
+    expect(s.listGen[key]).toBe(staleAt.lgen + 1);
+
+    // Requested before the archive: it still has the row, and is dropped.
+    s = run(s, { type: "messages_loaded", key, ...staleAt, list: inbox("work", "inbox") });
+    expect(rows(s)).not.toContain(1002);
+    expect(s.messages.gen).toBe(staleAt.gen + 1);
+    expect(isStale(s.messages)).toBe(true);
+
+    // The refetch may predate the daemon's commit: the pending row stays hidden.
+    s = run(s, { type: "messages_loaded", key, gen: s.messages.gen, lgen: s.listGen[key], list: inbox("work", "inbox") });
+    expect(isStale(s.messages)).toBe(false);
+    expect(rows(s)).not.toContain(1002);
+    expect((s.messages.data as Extract<MessageList, { kind: "messages" }>).total).toBe(7);
+
+    // Of two reloads, the older answer never replaces the newer one.
+    const newer = s.messages.loadedGen;
+    const before = s;
+    s = run(s, { type: "messages_loaded", key, gen: newer - 1, lgen: s.listGen[key], list: inbox("work", "inbox") });
+    expect(s).toBe(before);
+  });
+
+  it("clears pending and reseeds the holds on a re-bootstrap", () => {
+    let s = run(booted(), archive(1, 1002));
+    expect(Object.keys(s.holds)).toEqual(["fixture-hold-seed"]);
+    s = run(s, envelope("send.hold_fired", { ...fixtures.bootstrap.snapshot.holds[0], remaining_secs: 0 }));
+    s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "resync", bootstrap: fixtures.bootstrap } });
+    expect(s.pending).toEqual({});
+    expect(s.holds["fixture-hold-seed"]).toMatchObject({ state: "started", remaining_secs: 60 });
+  });
+
+  describe("send holds", () => {
+    const hold = { operation_id: "op-h", account: "work", draft_id: "d", subject: "Hi", hold_secs: 10, remaining_secs: 10, fires_at: "2026-09-30T12:00:10Z", origin: "tui" };
+
+    it("follows started, tick and cancelled, and ignores a tick after the end", () => {
+      let s = run(booted(), envelope("send.hold_started", hold, 501));
+      expect(s.holds["op-h"]).toMatchObject({ state: "started", remaining_secs: 10 });
+      s = run(s, envelope("send.hold_tick", { ...hold, remaining_secs: 7 }, 502));
+      expect(s.holds["op-h"]).toMatchObject({ state: "tick", remaining_secs: 7 });
+      s = run(s, envelope("send.hold_cancelled", { ...hold, remaining_secs: 0 }, 503));
+      expect(s.holds["op-h"]).toMatchObject({ state: "cancelled", remaining_secs: 0 });
+      s = run(s, envelope("send.hold_tick", { ...hold, remaining_secs: 6 }, 504));
+      expect(s.holds["op-h"].state).toBe("cancelled");
+      expect(s.activity.filter((n) => n.kind === "hold_cancelled").map((n) => n.text)).toEqual(['Send of "Hi" cancelled']);
+    });
+
+    it("follows a hold to fired, and counts the notice of a cancel once whichever lands first", () => {
+      let s = run(booted(), envelope("send.hold_started", hold, 501), envelope("send.hold_fired", { ...hold, remaining_secs: 0 }, 502));
+      expect(s.holds["op-h"].state).toBe("fired");
+      s = run(s, { type: "hold_cancel_requested", operation_id: "fixture-hold-seed" });
+      expect(s.holds["fixture-hold-seed"].cancelling).toBe(true);
+      s = run(s, { type: "hold_cancel_answered", operation_id: "fixture-hold-seed", cancelled: true });
+      s = run(s, envelope("send.hold_cancelled", { ...fixtures.bootstrap.snapshot.holds[0], remaining_secs: 0 }, 503));
+      expect(s.holds["fixture-hold-seed"]).toMatchObject({ state: "cancelled", cancelling: false });
+      expect(s.activity.filter((n) => n.kind === "hold_cancelled")).toHaveLength(1);
+      s = run(s, { type: "dismiss_hold", operation_id: "op-h" });
+      expect(s.holds["op-h"]).toBeUndefined();
+    });
+
+    it("reports a cancel the daemon refused", () => {
+      let s = run(booted(), { type: "hold_cancel_requested", operation_id: "fixture-hold-seed" });
+      s = run(s, { type: "hold_cancel_failed", operation_id: "fixture-hold-seed", error: { kind: "not_found", message: "no hold", code: -32602 } });
+      expect(s.holds["fixture-hold-seed"].cancelling).toBe(false);
+      expect(last(s)?.kind).toBe("hold_cancel_failed");
+      s = run(s, { type: "dismiss_notice", id: last(s)!.id });
+      expect(s.activity).toEqual([]);
+    });
+  });
+
+  describe("the multi-select", () => {
+    it("marks a range from the anchor, adds a second range, and acts in list order", () => {
+      let s = booted();
+      s = run(s, { type: "mark_toggle", key: "work#1002" });
+      s = run(s, { type: "mark_range", key: "work#1005" });
+      expect([...s.marked.keys].sort()).toEqual(["work#1002", "work#1003", "work#1004", "work#1005"]);
+      expect(s.marked.anchor).toBe("work#1002");
+      s = run(s, { type: "mark_range", key: "work#1001" });
+      expect(s.marked.keys.size).toBe(5);
+      s = run(s, { type: "mark_toggle", key: "work#1003" });
+      expect(actionTargets(s)).toEqual([1001, 1002, 1004, 1005].map(row));
+      s = run(s, { type: "mark_clear" });
+      expect(s.marked.keys.size).toBe(0);
+    });
+
+    it("starts a range at the cursor with no anchor, and marks everything shown", () => {
+      let s = pick(booted(), 1007);
+      s = run(s, { type: "mark_range", key: "work#1008" });
+      expect([...s.marked.keys]).toEqual(["work#1007", "work#1008"]);
+      s = run(s, { type: "mark_all" });
+      expect(s.marked.keys.size).toBe(8);
+      expect(run(s, { type: "mark_set", keys: ["work#1001", "work#1002"], on: false }).marked.keys.size).toBe(6);
+    });
+
+    it("drops marks of rows that left, and those a reload no longer lists", () => {
+      let s = run(booted(), { type: "mark_set", keys: ["work#1002", "work#1003", "work#1004"], on: true });
+      s = run(s, archive(1, 1002));
+      expect([...s.marked.keys]).toEqual(["work#1003", "work#1004"]);
+      s = run(s, envelope("state.remove", { resource: "message:work/inbox/x" }));
+      const reloaded = inbox("work", "inbox");
+      if (reloaded.kind !== "messages") throw new Error("unreachable");
+      reloaded.rows = reloaded.rows.filter((r) => r.id !== 1004);
+      s = run(s, { type: "messages_loaded", key, gen: s.messages.gen, lgen: s.listGen[key], list: reloaded });
+      expect([...s.marked.keys]).toEqual(["work#1003"]);
+    });
+
+    it("clears the marks when another mailbox is shown", () => {
+      const s = run(booted(), { type: "mark_toggle", key: "work#1002" }, { type: "select_mailbox", account: "work", slug: "sent" });
+      expect(s.marked.keys.size).toBe(0);
+    });
+  });
+
+  describe("where the cursor goes when its row leaves", () => {
+    it("goes to the next row that stays", () => {
+      const s = run(pick(booted(), 1003), archive(1, 1003, 1004));
+      expect(s.selection.message?.row_id).toBe(1005);
+    });
+
+    it("goes to the previous row when none follows", () => {
+      const s = run(pick(booted(), 1008), archive(1, 1007, 1008));
+      expect(s.selection.message?.row_id).toBe(1006);
+    });
+
+    it("goes nowhere when the list empties, and stays put when its row stays", () => {
+      let s = run(pick(booted(), 1004), archive(1, 1001, 1002));
+      expect(s.selection.message?.row_id).toBe(1004);
+      s = run(s, archive(2, 1003, 1004, 1005, 1006, 1007, 1008));
+      expect(s.selection.message).toBeNull();
+      expect(s.reader.meta).toBeNull();
+    });
+
+    it("moves among search hits the same way", () => {
+      let s = run(booted(), { type: "search_local", query: "x" });
+      const hits = inbox("work", "inbox");
+      if (hits.kind !== "messages") throw new Error("unreachable");
+      s = run(s, { type: "search_local_loaded", seq: s.search!.seq, hits: hits.rows.slice(0, 3).map((r) => ({ ...r, mailbox: "inbox" })) });
+      s = run(s, { type: "move_selection", to: 1, relative: false });
+      expect(s.selection.message?.row_id).toBe(1002);
+      s = run(s, archive(1, 1002));
+      expect(s.search?.hits.map((h) => h.row_id)).toEqual([1001, 1003]);
+      expect(s.selection.message?.row_id).toBe(1003);
+    });
+  });
+
+  describe("syncs", () => {
+    it("reports a failed sync, even when its end overtook the start answer", () => {
+      let s = run(booted(), { type: "sync_requested" });
+      s = run(s, envelope("operation.finished", { operation_id: "fixture-op-1", state: "failed", error: { code: -32000, message: "login refused" } }));
+      expect(s.syncEarly).toHaveLength(1);
+      s = run(s, { type: "sync_started", operation_id: "fixture-op-1", account: "home", mode: "quick" });
+      expect(s.syncs).toEqual({});
+      expect(last(s)).toMatchObject({ kind: "sync_failed", text: "Sync of home failed: login refused" });
+    });
+
+    it("settles quietly on success and reports a dropped sync", () => {
+      let s = run(booted(), { type: "sync_requested" }, { type: "sync_started", operation_id: "op-1", account: "work", mode: "full" });
+      s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "succeeded", result: {} }));
+      expect(s.syncs).toEqual({});
+      expect(s.activity).toEqual([]);
+      s = run(s, { type: "sync_requested" }, { type: "sync_started", operation_id: "op-2", account: "work", mode: "quick" });
+      s = run(s, { type: "gui_event", event: { type: "operation_dropped", operation_id: "op-2", kind: "sync", reason: "the daemon restarted" } });
+      expect(last(s)?.text).toBe("Sync of work was dropped: the daemon restarted");
+    });
   });
 });

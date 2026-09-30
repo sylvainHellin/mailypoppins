@@ -3,6 +3,8 @@
 import type {
   AccountStateChangedPayload,
   Bootstrap,
+  HoldStatus,
+  MutationsRolledBackPayload,
   StateInvalidatePayload,
   StateRemovePayload,
   SyncCompletedPayload,
@@ -17,6 +19,8 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  MovedTo,
+  SyncMode,
   VersionInfo,
 } from "@/lib/gui-types";
 import {
@@ -30,6 +34,28 @@ import {
   startSearch,
 } from "@/app/search";
 import {
+  applyMutation,
+  dismissHold,
+  dropListAnswer,
+  holdCancelAnswered,
+  holdCancelFailed,
+  holdCancelRequested,
+  holdEvent,
+  isSyncOperation,
+  leaves,
+  listAnswerIsStale,
+  overlayPending,
+  rolledBack,
+  seedHolds,
+  settledEnd,
+  settleMutation,
+  syncRequested,
+  syncSignal,
+  syncStarted,
+  syncStartFailed,
+  type Refusal,
+} from "@/app/pending";
+import {
   accountNames,
   emptyLoadable,
   emptyReader,
@@ -41,15 +67,19 @@ import {
   listKey,
   mailboxSlugs,
   markStale,
+  NO_MARKS,
   PANES,
   readerKey,
+  targetKey,
   type AppState,
   type Layout,
   type Loadable,
   type MessageRef,
+  type MutationKind,
   type Overlay,
   type Pane,
   type Selection,
+  type Target,
 } from "@/app/state";
 
 export type Action =
@@ -60,7 +90,12 @@ export type Action =
   | { type: "accounts_failed"; gen: number; error: GuiError }
   | { type: "mailboxes_loaded"; account: string; gen: number; listing: MailboxListing }
   | { type: "mailboxes_failed"; account: string; gen: number; error: GuiError }
-  | { type: "messages_loaded"; key: string; gen: number; list: MessageList }
+  /**
+   * `lgen` is `listGen[key]` when the list was requested; an answer from
+   * before the list's last optimistic change is dropped. Absent, the answer
+   * is taken as current.
+   */
+  | { type: "messages_loaded"; key: string; gen: number; lgen?: number; list: MessageList }
   | { type: "messages_failed"; key: string; gen: number; error: GuiError }
   | { type: "reader_loaded"; key: string; gen: number; meta: MessageMeta }
   | { type: "reader_failed"; key: string; gen: number; error: GuiError }
@@ -97,7 +132,41 @@ export type Action =
   | { type: "search_server_cancelled"; operation_id: string; outcome: "cancelled" | "already_settled" }
   | { type: "exit_search" }
   | { type: "intercepted_fetched"; urls: InterceptedUrl[] }
-  | { type: "dismiss_intercept" };
+  | { type: "dismiss_intercept" }
+  // Mutations (app/mutations.ts dispatches these around each command).
+  | {
+      type: "mutation_apply";
+      batch: number;
+      kind: MutationKind;
+      targets: Target[];
+      destination?: string | null;
+      value?: boolean | null;
+    }
+  | {
+      type: "mutation_settled";
+      batch: number;
+      kind: MutationKind;
+      account: string;
+      done: Target[];
+      failed: Refusal[];
+      value?: boolean | null;
+      moved_to?: MovedTo | null;
+    }
+  | { type: "mutation_failed"; batch: number; kind: MutationKind; account: string; targets: Target[]; error: GuiError }
+  | { type: "hold_cancel_requested"; operation_id: string }
+  | { type: "hold_cancel_answered"; operation_id: string; cancelled: boolean }
+  | { type: "hold_cancel_failed"; operation_id: string; error: GuiError }
+  | { type: "dismiss_hold"; operation_id: string }
+  | { type: "sync_requested" }
+  | { type: "sync_started"; operation_id: string; account: string; mode: SyncMode }
+  | { type: "sync_failed"; account: string; error: GuiError }
+  | { type: "dismiss_notice"; id: number }
+  // The list's multi-select, by `targetKey`.
+  | { type: "mark_toggle"; key: string }
+  | { type: "mark_set"; keys: string[]; on: boolean }
+  | { type: "mark_range"; key: string }
+  | { type: "mark_all" }
+  | { type: "mark_clear" };
 
 const HISTORY_CAP = 32;
 const INTERCEPT_CAP = 100;
@@ -132,7 +201,8 @@ function retarget(s: AppState, sel: Selection): AppState {
   const messages = key === s.messages.key ? s.messages : { ...emptyLoadable<MessageList>(), key };
   const cursor =
     sel.account && sel.mailbox ? { account: sel.account, slug: sel.mailbox } : s.sidebarCursor;
-  return { ...s, selection: sel, messages, sidebarCursor: cursor, filter: key === s.messages.key ? s.filter : "" };
+  const same = key === s.messages.key;
+  return { ...s, selection: sel, messages, sidebarCursor: cursor, filter: same ? s.filter : "", marked: same ? s.marked : NO_MARKS };
 }
 
 /**
@@ -152,7 +222,7 @@ function setListSelection(s: AppState, sel: Selection): AppState {
 function endSearch(s: AppState): AppState {
   const search = s.search;
   if (!search) return s;
-  let next: AppState = { ...s, search: null, filter: "", selection: search.restore.selection };
+  let next: AppState = { ...s, search: null, filter: "", selection: search.restore.selection, marked: NO_MARKS };
   const list = next.messages.data;
   if (next.selection.message && !next.selection.message.verified && list && !isStale(next.messages)) {
     next = reverify(next, list);
@@ -192,6 +262,103 @@ function currentIndex(s: AppState, items: ListItem[]): number {
       : sel.message !== null && sel.message.message_id === it.ref.message_id &&
         sel.message.selector === it.ref.selector,
   );
+}
+
+/** The account the shown list or search belongs to. */
+function shownAccount(s: AppState): string {
+  return s.search?.account ?? s.selection.account ?? "";
+}
+
+/** A list item's `targetKey`. */
+function itemKey(account: string, it: ListItem): string {
+  return it.kind === "draft" ? targetKey({ account, draft: it.id }) : targetKey({ account, row_id: it.ref.row_id });
+}
+
+function itemTarget(account: string, it: ListItem): Target {
+  return it.kind === "draft" ? { account, draft: it.id } : { account, row_id: it.ref.row_id };
+}
+
+/**
+ * What a mutation acts on: the marked rows in list order, or else the
+ * selected one. A mark the list no longer shows is not acted on.
+ */
+export function actionTargets(s: AppState): Target[] {
+  const account = shownAccount(s);
+  const items = visibleItems(s);
+  if (s.marked.keys.size > 0) {
+    return items.filter((it) => s.marked.keys.has(itemKey(account, it))).map((it) => itemTarget(account, it));
+  }
+  const cur = currentIndex(s, items);
+  return cur >= 0 ? [itemTarget(account, items[cur])] : [];
+}
+
+/**
+ * Where the cursor goes when the rows it sits on leave the list: the next
+ * row that stays, else the previous one, else nowhere (the TUI's rule).
+ */
+function cursorAfterLeave(s: AppState, before: ListItem[], gone: ReadonlySet<string>): AppState {
+  const account = shownAccount(s);
+  const cur = currentIndex(s, before);
+  const m = s.selection.message;
+  const hidden = cur < 0 && m !== null && gone.has(targetKey({ account, row_id: m.row_id }));
+  if (!hidden && (cur < 0 || !gone.has(itemKey(account, before[cur])))) return s;
+  const stays = (it: ListItem) => !gone.has(itemKey(account, it));
+  const to = cur < 0 ? undefined : (before.slice(cur + 1).find(stays) ?? before.slice(0, cur).reverse().find(stays));
+  const next: AppState = to
+    ? selectItem(s, to)
+    : { ...s, selection: { ...s.selection, message: null, draft: null }, reader: emptyReader() };
+  return { ...next, focusSeq: next.focusSeq + 1 };
+}
+
+/** Drop a list's marks that its reloaded rows no longer have. */
+function pruneMarks(s: AppState, list: MessageList): AppState {
+  if (s.marked.keys.size === 0 || s.search) return s;
+  const present = new Set(
+    list.kind === "drafts"
+      ? list.listing.drafts.map((d) => targetKey({ account: list.account, draft: d.id }))
+      : list.rows.map((r) => targetKey({ account: list.account, row_id: r.id })),
+  );
+  const keys = new Set([...s.marked.keys].filter((k) => present.has(k)));
+  if (keys.size === s.marked.keys.size) return s;
+  const anchor = s.marked.anchor !== null && present.has(s.marked.anchor) ? s.marked.anchor : null;
+  return { ...s, marked: { keys, anchor } };
+}
+
+function marks(s: AppState, a: Extract<Action, { type: `mark_${string}` }>): AppState {
+  const account = shownAccount(s);
+  const keys = new Set(s.marked.keys);
+  switch (a.type) {
+    case "mark_toggle":
+      if (!keys.delete(a.key)) keys.add(a.key);
+      return { ...s, marked: { keys, anchor: a.key } };
+    case "mark_set":
+      for (const k of a.keys) {
+        if (a.on) keys.add(k);
+        else keys.delete(k);
+      }
+      return { ...s, marked: { keys, anchor: a.on && a.keys.length > 0 ? a.keys[a.keys.length - 1] : s.marked.anchor } };
+    case "mark_range": {
+      // From the anchor (else the cursor) to the key, both included, added
+      // to what is marked; the anchor stays for the next range.
+      const items = visibleItems(s);
+      const order = items.map((it) => itemKey(account, it));
+      const cur = currentIndex(s, items);
+      const anchor = s.marked.anchor ?? (cur >= 0 ? order[cur] : a.key);
+      const i = order.indexOf(anchor);
+      const j = order.indexOf(a.key);
+      if (i < 0 || j < 0) {
+        keys.add(a.key);
+        return { ...s, marked: { keys, anchor: a.key } };
+      }
+      for (const k of order.slice(Math.min(i, j), Math.max(i, j) + 1)) keys.add(k);
+      return { ...s, marked: { keys, anchor } };
+    }
+    case "mark_all":
+      for (const it of visibleItems(s)) keys.add(itemKey(account, it));
+      return { ...s, marked: { keys, anchor: s.marked.anchor } };
+    case "mark_clear":
+      return s.marked.keys.size === 0 && s.marked.anchor === null ? s : { ...s, marked: NO_MARKS };
+  }
 }
 
 function selectItem(s: AppState, it: ListItem): AppState {
@@ -417,15 +584,27 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
     }
     case "mutations.rolled_back": {
-      const account = (payload as { account: string }).account;
-      return staleListIf(staleMailboxes(s, account), (a) => a === account);
+      const p = payload as MutationsRolledBackPayload;
+      return staleListIf(staleMailboxes(rolledBack(s, p), p.account), (a) => a === p.account);
     }
+    case "send.hold_started":
+    case "send.hold_tick":
+    case "send.hold_cancelled":
+    case "send.hold_fired":
+      return holdEvent(s, kind, payload as HoldStatus);
     case "daemon.shutting_down":
       return { ...s, shuttingDown: true };
     case "message.server_hit":
       return signal(s, serverHitSignal(payload));
-    case "operation.finished":
-      return signal(s, finishedSignal(payload));
+    case "operation.finished": {
+      const sig = finishedSignal(payload);
+      if (sig.kind !== "finish") return s;
+      const end = { operation_id: sig.operation_id, state: sig.state, error: sig.error };
+      if (isSyncOperation(s, sig.operation_id)) return syncSignal(s, end);
+      // An unknown id may be a sync whose start has not answered yet, or the
+      // search's: both hold it until their id is known.
+      return signal(s.syncStarting > 0 ? syncSignal(s, end) : s, sig);
+    }
     default:
       return s;
   }
@@ -443,8 +622,18 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       return { ...s, disconnected: null, resync: s.resync ?? "reconnected" };
     case "resync":
       return { ...s, resync: e.reason };
-    case "rebootstrapped":
-      return applyBootstrap(s, e.bootstrap);
+    case "rebootstrapped": {
+      // Row ids are per daemon instance, and the reloaded lists are the
+      // truth: nothing stays pending, and marks survive only the same instance.
+      const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
+      const next = applyBootstrap(s, e.bootstrap);
+      return {
+        ...next,
+        pending: {},
+        holds: seedHolds(e.bootstrap.snapshot.holds),
+        marked: sameInstance ? next.marked : NO_MARKS,
+      };
+    }
     case "event":
       if (s.bootstrap && e.event.instance_id !== s.bootstrap.instance_id) return s;
       return applyEnvelope(s, e.event.kind, e.event.payload);
@@ -455,8 +644,10 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         interceptNotice: e.url.source === "open_external_stub" ? s.interceptNotice : e.url,
       };
     case "operation_settled":
+      if (e.kind === "sync") return syncSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
+      if (e.kind === "sync") return syncSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -551,8 +742,10 @@ export function reducer(s: AppState, a: Action): AppState {
     }
     case "messages_loaded": {
       if (a.key !== s.messages.key) return s;
-      const next = { ...s, messages: { ...loaded(s.messages, a.gen, a.list), key: s.messages.key } };
-      return reverify(next, a.list);
+      if (listAnswerIsStale(s, a.key, a.lgen, a.gen)) return dropListAnswer(s, a.gen);
+      const list = overlayPending(s, a.list);
+      const next = { ...s, messages: { ...loaded(s.messages, a.gen, list), key: s.messages.key } };
+      return pruneMarks(reverify(next, list), list);
     }
     case "messages_failed":
       if (a.key !== s.messages.key) return s;
@@ -683,11 +876,18 @@ export function reducer(s: AppState, a: Action): AppState {
       return { ...s, lastError: a.error };
 
     case "search_local":
-      return withFocus(startSearch(s, "local", a.query), "list");
+      return withFocus({ ...startSearch(s, "local", a.query), marked: NO_MARKS }, "list");
     case "search_local_loaded": {
       const search = s.search;
       if (!search || search.seq !== a.seq || search.mode !== "local") return s;
-      return { ...s, search: { ...search, status: "done", hits: a.hits.map((h) => localHit(search.account, h)) } };
+      // A hit whose row is on its way out of its mailbox is not shown again.
+      const hits = a.hits
+        .map((h) => localHit(search.account, h))
+        .filter((h) => {
+          const e = h.row_id === null ? undefined : s.pending[targetKey({ account: h.account, row_id: h.row_id })];
+          return !(e && leaves(e.kind));
+        });
+      return { ...s, search: { ...search, status: "done", hits } };
     }
     case "search_local_failed": {
       const search = s.search;
@@ -695,7 +895,7 @@ export function reducer(s: AppState, a: Action): AppState {
       return { ...s, search: { ...search, status: "failed", error: a.error.message } };
     }
     case "search_server":
-      return withFocus(startSearch(s, "server", a.query), "list");
+      return withFocus({ ...startSearch(s, "server", a.query), marked: NO_MARKS }, "list");
     case "search_server_started":
       return serverStarted(s, a.seq, a.operation_id);
     case "search_server_failed": {
@@ -719,6 +919,48 @@ export function reducer(s: AppState, a: Action): AppState {
     }
     case "dismiss_intercept":
       return { ...s, interceptNotice: null };
+
+    case "mutation_apply": {
+      const before = visibleItems(s);
+      let next = applyMutation(s, a.batch, a.kind, a.targets, a.destination ?? null, a.value ?? null);
+      if (!leaves(a.kind)) return next;
+      const gone = new Set(a.targets.map(targetKey));
+      next = cursorAfterLeave(next, before, gone);
+      // The mailbox list's own selection, kept under a search, lets go too.
+      const kept = next.search?.restore.selection;
+      if (kept?.message && kept.account && gone.has(targetKey({ account: kept.account, row_id: kept.message.row_id }))) {
+        next = setListSelection(next, { ...kept, message: null });
+      }
+      return next;
+    }
+    case "mutation_settled":
+      return settleMutation(s, a.batch, a.kind, a.account, a.done, a.failed, a.value ?? null, a.moved_to ?? null);
+    case "mutation_failed": {
+      const failed = a.targets.map((target) => ({ target, reason: a.error.message }));
+      return settleMutation(s, a.batch, a.kind, a.account, [], failed, null, null);
+    }
+    case "hold_cancel_requested":
+      return holdCancelRequested(s, a.operation_id);
+    case "hold_cancel_answered":
+      return holdCancelAnswered(s, a.operation_id, a.cancelled);
+    case "hold_cancel_failed":
+      return holdCancelFailed(s, a.operation_id, a.error.message);
+    case "dismiss_hold":
+      return dismissHold(s, a.operation_id);
+    case "sync_requested":
+      return syncRequested(s);
+    case "sync_started":
+      return syncStarted(s, a.operation_id, a.account, a.mode);
+    case "sync_failed":
+      return syncStartFailed(s, a.account, a.error.message);
+    case "dismiss_notice":
+      return s.activity.some((n) => n.id === a.id) ? { ...s, activity: s.activity.filter((n) => n.id !== a.id) } : s;
+    case "mark_toggle":
+    case "mark_set":
+    case "mark_range":
+    case "mark_all":
+    case "mark_clear":
+      return marks(s, a);
   }
 }
 
