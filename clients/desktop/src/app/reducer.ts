@@ -85,6 +85,7 @@ import {
   targetKey,
   type AppState,
   type ActivityKind,
+  type ActivityLevel,
   type AttachmentDialog,
   type ComposeDialog,
   type Layout,
@@ -101,6 +102,7 @@ import {
   type View,
 } from "@/app/state";
 import { viewPanes } from "@/app/views";
+import { logEvent, withNotice } from "@/app/activity";
 import {
   closeOutbox,
   isOutboxOperation,
@@ -241,7 +243,10 @@ export type Action =
   /** A notice of the activity area from outside a mutation batch. */
   | { type: "activity"; kind: ActivityKind; account: string | null; text: string; rows?: { key: string; label: string; reason: string }[] }
   | { type: "filter"; text: string }
-  | { type: "notice"; text: string | null }
+  /** The notice line; the activity log keeps every text, at `level` (info when absent). */
+  | { type: "notice"; text: string | null; level?: ActivityLevel }
+  /** `!`: hide or show the activity area's notices. */
+  | { type: "toggle_activity_hidden" }
   | { type: "error"; error: GuiError | null }
   | { type: "search_local"; query: string }
   | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[] }
@@ -747,6 +752,8 @@ function endProgress(s: AppState, operationId: string): AppState {
 }
 
 function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
+  // `sync.completed`, `config.changed` and `config.invalid` get a line in the activity log.
+  s = logEvent(s, kind, payload);
   switch (kind) {
     case "state.invalidate": {
       const { resource } = payload as StateInvalidatePayload;
@@ -1265,7 +1272,9 @@ function reduce(s: AppState, a: Action): AppState {
     case "filter":
       return { ...s, filter: a.text };
     case "notice":
-      return { ...s, notice: a.text };
+      return withNotice(s, a.text, a.level);
+    case "toggle_activity_hidden":
+      return { ...s, prefs: { ...s.prefs, activityHidden: !s.prefs.activityHidden } };
     case "error":
       return { ...s, lastError: a.error };
 

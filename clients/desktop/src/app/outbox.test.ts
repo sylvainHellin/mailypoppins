@@ -248,7 +248,10 @@ describe("what the outbox view hides", () => {
         "approve",
         "archive",
         "attach_file",
+        "copy_link",
         "copy_selector",
+        "copy_sender",
+        "copy_subject",
         "delete",
         "demote",
         "edit_recipients",
@@ -274,7 +277,19 @@ describe("what the outbox view hides", () => {
     );
     // Enter's action, which has no palette row.
     expect(hiddenByOutbox(open, "open_message")).toBe(true);
-    for (const id of ["new_draft", "focus_filter", "open_outbox", "outbox_retry", "outbox_discard", "clear_selection", "next_message"] as const) {
+    for (const id of [
+      "new_draft",
+      "focus_filter",
+      "open_outbox",
+      "outbox_retry",
+      "outbox_discard",
+      "clear_selection",
+      "next_message",
+      "toggle_activity",
+      "activity_log",
+      "open_config",
+      "open_log",
+    ] as const) {
       expect(hiddenByOutbox(open, id)).toBe(false);
     }
     expect(paletteIds().some((id) => hiddenByOutbox(shut, id))).toBe(false);

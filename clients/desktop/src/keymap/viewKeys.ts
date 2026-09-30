@@ -19,11 +19,15 @@ export type ViewKeyTable = {
 
 /**
  * The prefix continuations that run in every view, Mail included: the
- * syncs and the view switch. U6's `sl`, `sc` and `sf` belong here too.
+ * syncs, the activity log, config.toml and the daemon log in the editor, and
+ * the view switch (the TUI's `is_view_agnostic`).
  */
 export const VIEW_AGNOSTIC_COMBOS: Readonly<Record<string, ActionId>> = {
   ss: "quick_sync",
   sS: "full_sync",
+  sl: "activity_log",
+  sc: "open_config",
+  sf: "open_log",
   "Space m": "view_mail",
   "Space c": "view_contacts",
   "Space a": "view_calendar",
@@ -31,7 +35,8 @@ export const VIEW_AGNOSTIC_COMBOS: Readonly<Record<string, ActionId>> = {
 
 /**
  * The keys a view leaves to the shared routing: pane cycling, the palette,
- * key help, the notice key and the moves, which reach the view's cursor
+ * key help, the notice keys (`X`, and `!`, which hides the notices in every
+ * view as the TUI's toggles its log) and the moves, which reach the view's cursor
  * through `move_selection`. Every other printable key does nothing unless
  * the view's table binds it.
  */
@@ -40,6 +45,7 @@ export const VIEW_SHARED_KEYS: ReadonlySet<string> = new Set([
   ":",
   "?",
   "X",
+  "!",
   "j",
   "k",
   "G",

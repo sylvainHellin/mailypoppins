@@ -23,10 +23,10 @@ describe("the command palette", () => {
     await shellReady();
     await user.keyboard(":");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    // The config editor handoff, until it lands (U6).
-    const config = within(dialog).getAllByText("Open config.toml in $EDITOR")[0].closest("[data-testid='palette-item']");
-    expect(config).toHaveAttribute("data-disabled", "true");
-    expect(config).toHaveTextContent("M4");
+    // Account setup, until the Settings view's unit brings it (U7).
+    const setup = within(dialog).getAllByText("Add account")[0].closest("[data-testid='palette-item']");
+    expect(setup).toHaveAttribute("data-disabled", "true");
+    expect(setup).toHaveTextContent("M4");
   });
 
   it("runs every mutation action and no row is left for M2", () => {

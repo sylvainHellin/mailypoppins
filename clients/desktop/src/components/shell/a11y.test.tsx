@@ -86,7 +86,11 @@ describe("accessibility primitives", () => {
       expect(entry).toBeEnabled();
       expect(entry).toHaveAttribute("tabindex", "-1");
     }
-    expect(within(views).getByRole("button", { name: "Activity" })).toHaveAttribute("aria-disabled", "true");
+    // Activity is no view: it opens the activity log dialog, and is never the current page.
+    const activity = within(views).getByRole("button", { name: "Activity log, key s l" });
+    expect(activity).toBeEnabled();
+    expect(activity).toHaveAttribute("tabindex", "-1");
+    expect(activity).not.toHaveAttribute("aria-current");
     expect(current()).toEqual([expect.stringMatching(/^Inbox, /)]);
     for (const [entry, region] of [
       [/^Contacts, key/, "Contacts"],

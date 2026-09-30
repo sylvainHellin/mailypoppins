@@ -10,6 +10,7 @@ import { asGuiError, type GuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
 import { emptyLoadable, markStale, type AppState, type CalendarView, type Loadable } from "@/app/state";
+import { withNotice } from "@/app/activity";
 
 /**
  * Now as the agenda's sort keys spell it, UTC `YYYY-MM-DDTHH:MM:SS`
@@ -104,7 +105,7 @@ export function calendarLoaded(s: AppState, account: string, gen: number, events
   const view = next.calendarView;
   if (view?.refreshing && view.account === account && gen === next.calendar[account].gen) {
     const count = visibleEvents(events, view.showPast).length;
-    next = { ...next, calendarView: { ...view, refreshing: false }, notice: `Calendar refreshed (${count} events)` };
+    next = withNotice({ ...next, calendarView: { ...view, refreshing: false } }, `Calendar refreshed (${count} events)`);
   }
   return next;
 }
@@ -182,7 +183,7 @@ export function toggleCalendarPast(s: AppState): AppState {
   const view = s.calendarView;
   if (!view) return s;
   const showPast = !view.showPast;
-  return { ...s, calendarView: { ...view, showPast, cursor: null }, notice: scopeNotice(showPast) };
+  return withNotice({ ...s, calendarView: { ...view, showPast, cursor: null } }, scopeNotice(showPast));
 }
 
 /**

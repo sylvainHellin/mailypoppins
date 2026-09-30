@@ -52,6 +52,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
   );
   const onOpenOutbox = useCallback((account: string) => dispatch({ type: "open_outbox", account }), [dispatch]);
   const onOpenView = useCallback((view: Exclude<View, "mail">) => dispatch({ type: "switch_view", view }), [dispatch]);
+  const onActivity = useCallback(() => dispatch({ type: "overlay", overlay: "activity" }), [dispatch]);
   // Outside Mail no mailbox is the current page, and the digits jump nowhere.
   const mail = s.view === "mail";
   const cursor =
@@ -91,7 +92,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               onSelect={onSelect}
             />
           ))}
-          <ViewEntries current={s.view} onOpen={onOpenView} />
+          <ViewEntries current={s.view} onOpen={onOpenView} onActivity={onActivity} />
         </nav>
       </SidebarContent>
     </Sidebar>

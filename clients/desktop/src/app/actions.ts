@@ -13,6 +13,7 @@ import { newInvitation } from "@/app/invite";
 import { manageSignatures } from "@/app/signatures";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
+import { copyFromMessage, openConfig, openLog, openMeta } from "@/app/interop";
 import { hiddenNotice, viewPanes } from "@/app/views";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
@@ -23,7 +24,7 @@ import {
   LIST_WIDTH_STEP,
   readerKey,
   sendingRefusal,
-  shownNotices,
+  visibleNotices,
   targetKey,
   type AppState,
   type MessageTarget,
@@ -204,13 +205,32 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return;
     }
     case "dismiss_notice": {
-      const shown = shownNotices(s);
+      // What the area draws: nothing while `!` hides the notices.
+      const shown = visibleNotices(s);
       const newest = shown[shown.length - 1];
       if (newest) dispatch({ type: "dismiss_notice", id: newest.id });
       return;
     }
     case "dismiss_all_notices":
       return dispatch({ type: "dismiss_all_notices" });
+    case "toggle_activity": {
+      const hidden = !s.prefs.activityHidden;
+      dispatch({ type: "toggle_activity_hidden" });
+      dispatch({ type: "notice", text: hidden ? "Notices hidden; ! shows them, s l lists them" : "Notices shown" });
+      return;
+    }
+    case "activity_log":
+      return dispatch({ type: "overlay", overlay: "activity" });
+    case "open_config":
+      return void openConfig(dispatch);
+    case "open_log":
+      return void openLog(dispatch);
+    case "copy_sender":
+      return copyFromMessage(openMeta(s), "sender", dispatch);
+    case "copy_link":
+      return copyFromMessage(openMeta(s), "link", dispatch);
+    case "copy_subject":
+      return copyFromMessage(openMeta(s), "subject", dispatch);
     case "new_draft":
       return compose.newDraft(s, dispatch);
     case "manage_signatures":

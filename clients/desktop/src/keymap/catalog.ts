@@ -86,7 +86,14 @@ export type ActionId =
   | "contacts_compose"
   | "contacts_vcard"
   | "contacts_copy"
-  | "contacts_rebuild";
+  | "contacts_rebuild"
+  | "toggle_activity"
+  | "activity_log"
+  | "open_config"
+  | "open_log"
+  | "copy_sender"
+  | "copy_link"
+  | "copy_subject";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -107,7 +114,9 @@ const BY_ACTION: Record<string, Binding> = {
   "Toggle this help": { id: "toggle_help" },
   "Command palette (run an action by name)": { badge: "key" },
   "Zoom / unzoom the focused pane": { id: "toggle_zoom" },
-  "Toggle activity log": { badge: "M4" },
+  // The desktop has no bottom log pane: `!` hides or shows the activity
+  // area's notices, never a live hold card (D12).
+  "Toggle activity log": { id: "toggle_activity" },
   "Send current draft (approve + send)": { id: "send" },
   "Search all mail (sender, subject, body)": { id: "search_server" },
   "New draft": { id: "new_draft" },
@@ -116,9 +125,9 @@ const BY_ACTION: Record<string, Binding> = {
   "Switch account": { id: "next_account" },
   "Quick sync": { id: "quick_sync" },
   "Full sync": { id: "full_sync" },
-  "Activity log overlay": { badge: "M4" },
-  "Open config.toml in $EDITOR": { badge: "M4" },
-  "Open log file in $EDITOR": { badge: "M4" },
+  "Activity log overlay": { id: "activity_log" },
+  "Open config.toml in $EDITOR": { id: "open_config" },
+  "Open log file in $EDITOR": { id: "open_log" },
   "Switch to Mail view": { id: "view_mail" },
   "Switch to Contacts view": { id: "view_contacts" },
   "Switch to Calendar view": { id: "view_calendar" },
@@ -159,14 +168,21 @@ const BY_ACTION: Record<string, Binding> = {
   "Scroll line by line": { badge: "key" },
 };
 
-/** A section none of whose rows run in M1 yet. */
-const BY_SECTION: Record<string, Badge> = {
-  "ACTIVITY LOG": "M4",
-};
+/** A section none of whose rows run from the palette. */
+const BY_SECTION: Record<string, Badge> = {};
 
 /** A section's own reading of a shared description. */
 const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   BODY: { "Half-page down / up": { badge: "key" } },
+  // The activity log dialog's own keys (ActivityLogDialog.tsx), which act
+  // inside the open dialog only.
+  "ACTIVITY LOG": {
+    "Scroll line by line": { badge: "key" },
+    "Half-page down / up": { badge: "key" },
+    "Jump to top / bottom": { badge: "key" },
+    "Filter entries": { badge: "key" },
+    "Close overlay": { badge: "key" },
+  },
   // The Calendar view's own keys (src/keymap/viewKeys.ts); its moves are
   // the list's, which reach the view's cursor.
   CALENDAR: {
@@ -266,9 +282,16 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
   // The TUI has no settings view, and no key for one (D11): palette and sidebar only.
   { section: "APP", label: "Open settings", keys: [], id: "open_settings", badge: null },
+  // Account setup arrives with the Settings view's own unit (U7).
+  { section: "APP", label: "Add account", keys: [], id: null, badge: "M4" },
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
+  // The reader toolbar's Copy menu (INT-03); no key of their own (D14), `y`
+  // stays the selection's selector, which is the open message's link.
+  { section: "READER", label: "Copy sender address", keys: [], id: "copy_sender", badge: null },
+  { section: "READER", label: "Copy link (mp://)", keys: ["y"], id: "copy_link", badge: null },
+  { section: "READER", label: "Copy subject", keys: [], id: "copy_subject", badge: null },
   { section: "EMAIL LIST", label: "Mark range (from the last mark to the cursor)", keys: ["Shift+click"], id: "mark_range", badge: null },
   { section: "EMAIL LIST", label: "Clear marks", keys: ["Esc"], id: "mark_clear", badge: null },
   { section: "EMAIL LIST", label: "Discard draft (Drafts only)", keys: ["d"], id: "delete", badge: null },

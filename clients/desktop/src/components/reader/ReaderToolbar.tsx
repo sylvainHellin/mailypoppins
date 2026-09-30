@@ -1,5 +1,7 @@
-import { Archive, FolderInput, Forward, Globe, Mail, MailOpen, Reply, ReplyAll, Star, StarOff, Trash2 } from "lucide-react";
+import { Archive, ChevronDown, Copy, FolderInput, Forward, Globe, Mail, MailOpen, Reply, ReplyAll, Star, StarOff, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { copyFromMessage } from "@/app/interop";
 import { openMessageTarget, runMutation, type MutationActionId } from "@/app/actions";
 import * as compose from "@/app/compose";
 import { openHtml } from "@/app/attachments";
@@ -12,7 +14,8 @@ import type { MessageMeta } from "@/lib/gui-types";
  * open the editor on the new draft, Forward asks for the recipients first,
  * Archive and Delete ask first, Move opens the picker. They act on this
  * message only, whatever the list has marked. Open in browser hands the
- * daemon's rendition to the default browser.
+ * daemon's rendition to the default browser. Copy is a menu of the sender's
+ * address, the `mp://` link (what `y` copies) and the subject.
  */
 export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
   const s = useAppState();
@@ -66,6 +69,18 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
         <Globe aria-hidden="true" />
         Open in browser
       </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger render={<Button size="sm" variant="ghost" title="Copy from this message" />}>
+          <Copy aria-hidden="true" />
+          Copy
+          <ChevronDown aria-hidden="true" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-auto">
+          <DropdownMenuItem onClick={() => copyFromMessage(meta, "sender", dispatch)}>Copy sender address</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => copyFromMessage(meta, "link", dispatch)}>Copy link (mp://)</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => copyFromMessage(meta, "subject", dispatch)}>Copy subject</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

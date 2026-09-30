@@ -1,5 +1,4 @@
 import { Activity, CalendarDays, Settings, Users, type LucideIcon } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -21,10 +20,18 @@ const ENTRIES: Entry[] = [
  * The views beside Mail, at the foot of the sidebar: each entry shows its
  * view, and the one shown is the current page. Like the outbox line they are
  * pointer entries out of the pane's tab order; their keys are `Space c` and
- * `Space a`, and the palette opens all three. Activity stays disabled until
- * its unit brings the log.
+ * `Space a`, and the palette opens all three. Activity is no view: it opens
+ * the activity log dialog, as `s l` does.
  */
-export function ViewEntries({ current, onOpen }: { current: View; onOpen: (view: Exclude<View, "mail">) => void }) {
+export function ViewEntries({
+  current,
+  onOpen,
+  onActivity,
+}: {
+  current: View;
+  onOpen: (view: Exclude<View, "mail">) => void;
+  onActivity: () => void;
+}) {
   return (
     <SidebarGroup className="mt-auto">
       <SidebarGroupContent>
@@ -50,20 +57,15 @@ export function ViewEntries({ current, onOpen }: { current: View; onOpen: (view:
           })}
           <SidebarMenuItem>
             <SidebarMenuButton
-              aria-disabled="true"
               tabIndex={-1}
-              tooltip="Activity (M4)"
-              className="text-disabled-foreground aria-disabled:opacity-100"
+              tooltip="Activity log (s l)"
+              aria-label="Activity log, key s l"
+              data-view-entry="activity"
+              onClick={onActivity}
             >
               <Activity aria-hidden="true" />
               <span>Activity</span>
             </SidebarMenuButton>
-            <Badge
-              variant="outline"
-              className="pointer-events-none absolute top-1.5 right-1 h-5 text-disabled-foreground group-data-[collapsible=icon]:hidden"
-            >
-              M4
-            </Badge>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroupContent>

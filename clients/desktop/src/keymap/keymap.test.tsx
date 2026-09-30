@@ -113,9 +113,9 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    // `sc` until the config editor handoff lands (U6).
-    await user.keyboard("sc");
-    expect(await screen.findByText(/Open config.toml in \$EDITOR arrives in M4/)).toBeInTheDocument();
+    // `tt`, the TUI's thread view, which the desktop client does not have yet.
+    await user.keyboard("tt");
+    expect(await screen.findByText(/Show conversation \(thread\) is not in the desktop client yet/)).toBeInTheDocument();
   });
 });
 

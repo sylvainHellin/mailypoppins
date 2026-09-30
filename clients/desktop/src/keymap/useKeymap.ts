@@ -106,6 +106,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
       if (s.overlay !== null) return;
       if (screenFor(s) !== "shell") return;
+      // An open menu (the reader's Copy) owns its keys, as a dialog does.
+      if (e.target instanceof Element && e.target.closest('[role="menu"]')) return;
 
       if (isEditable(e.target)) {
         if (e.key === "Escape") {
@@ -227,7 +229,7 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       // The outbox view owns the list pane's letter keys: `d` discards and
       // `R` retries the cursor row, Enter opens nothing, and the MESSAGE and
       // List keys have no row of theirs to act on.
-      if (!view && s.outboxView && s.focus === "list" && e.key.length === 1 && !/^[jkJKG:?z/xX1-9 ]$/.test(e.key)) {
+      if (!view && s.outboxView && s.focus === "list" && e.key.length === 1 && !/^[jkJKG:?z/xX!1-9 ]$/.test(e.key)) {
         handled();
         if (e.key === "d") return run("outbox_discard");
         if (e.key === "R") return run("outbox_retry");
@@ -270,6 +272,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         // Desktop only: the activity area sits outside every pane, so Tab never reaches it.
         case "X":
           return handled(), run("dismiss_notice");
+        // The TUI's toggle of its log pane: here the activity area's notices.
+        case "!":
+          return handled(), run("toggle_activity");
         case "Escape":
           handled();
           // The view hides the marks, so it closes before they clear.

@@ -14,6 +14,7 @@ import { AttachmentsDialog } from "@/components/attachments/AttachmentsDialog";
 import { RsvpDialog } from "@/components/calendar/RsvpDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
+import { ActivityLogDialog } from "@/components/activity/ActivityLogDialog";
 import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
@@ -96,6 +97,7 @@ export function AppShell() {
       <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
       <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
       <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
+      <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />
     </>
   );
 }

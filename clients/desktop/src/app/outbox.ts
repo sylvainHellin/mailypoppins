@@ -220,6 +220,9 @@ export const SELECTION_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   "attach_file",
   "fetch_hit",
   "rsvp",
+  "copy_sender",
+  "copy_link",
+  "copy_subject",
 ]);
 
 export const CLOSE_OUTBOX_FIRST = "Close the outbox first (Escape): this acts on the mailbox selection";

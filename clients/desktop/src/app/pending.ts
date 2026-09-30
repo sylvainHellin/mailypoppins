@@ -37,6 +37,7 @@ import {
   type SendRun,
   type Target,
 } from "@/app/state";
+import { holdFiredLine, logActivity, noticeLevel, noticeLine } from "@/app/activity";
 
 /** The notices `state.activity` keeps; a newer one drops the oldest, failure or not. */
 export const ACTIVITY_CAP = 20;
@@ -168,8 +169,10 @@ function setFlagEverywhere(s: AppState, account: string, rowId: number, axis: Fl
 
 export function pushNotice(s: AppState, notice: Omit<ActivityNotice, "id" | "rows"> & { rows?: ActivityNotice["rows"] }): AppState {
   const id = s.activitySeq + 1;
-  const activity = [...s.activity, { rows: [], ...notice, id }].slice(-ACTIVITY_CAP);
-  return { ...s, activity, activitySeq: id };
+  const entry: ActivityNotice = { rows: [], ...notice, id };
+  const activity = [...s.activity, entry].slice(-ACTIVITY_CAP);
+  // The log keeps the line after the notice is dismissed or dropped.
+  return logActivity({ ...s, activity, activitySeq: id }, noticeLevel(entry.kind), noticeLine(entry));
 }
 
 function plural(n: number, one: string): string {
@@ -664,6 +667,7 @@ export function holdEvent(s: AppState, kind: string, status: HoldStatus): AppSta
   if (prev && terminal(prev.state)) return s;
   const entry: HoldEntry = { ...status, state: phase, cancelling: terminal(phase) ? false : (prev?.cancelling ?? false) };
   const next = { ...s, holds: { ...s.holds, [status.operation_id]: entry } };
+  if (phase === "fired") return logActivity(next, "info", holdFiredLine(status));
   return phase === "cancelled" ? holdCancelledNotice(next, status) : next;
 }
 

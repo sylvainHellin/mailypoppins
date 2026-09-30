@@ -91,9 +91,11 @@ export type Prefs = {
   sidebarCollapsed: boolean;
   /** The list pane's width in px, wide and medium layouts. */
   listWidth: number;
+  /** `!`: the activity area hides its notices; a live hold card still shows. */
+  activityHidden: boolean;
 };
 
-export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420 };
+export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420, activityHidden: false };
 export const LIST_WIDTH_MIN = 260;
 export const LIST_WIDTH_MAX = 720;
 /** The reader keeps at least this much of the pane row, whatever the list width. */
@@ -107,7 +109,7 @@ export const LIST_WIDTH_STEP = 40;
  * `attachments` is the open, save or attach dialog `attachDialog` describes;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
  * invitation form `inviteDialog` describes; `signatures` is the Signatures
- * dialog `signaturesDialog` describes.
+ * dialog `signaturesDialog` describes; `activity` is the activity log.
  */
 export type Overlay =
   | "palette"
@@ -120,6 +122,7 @@ export type Overlay =
   | "rsvp"
   | "invite"
   | "signatures"
+  | "activity"
   | null;
 
 /**
@@ -326,6 +329,15 @@ export type ActivityKind =
   | "send_failed"
   | "send_partial"
   | "rebuild_refused";
+
+/** How a line of the activity log reads: a failure is an error. */
+export type ActivityLevel = "info" | "warning" | "error";
+
+/**
+ * One line of the activity log: a notice this window showed or a daemon
+ * event it heard, stamped when it arrived (ISO 8601).
+ */
+export type ActivityLogEntry = { id: number; at: string; level: ActivityLevel; text: string };
 
 /** One line of the activity area, dismissed by `id`. */
 export type ActivityNotice = {
@@ -543,6 +555,13 @@ export type AppState = {
   marked: Marked;
   activity: ActivityNotice[];
   activitySeq: number;
+  /**
+   * Every notice this window showed, the notice line's and the activity
+   * area's, and the daemon events worth a line, oldest first, the newest
+   * `ACTIVITY_LOG_CAP` (src/app/activity.ts). Dismissing a notice keeps its line.
+   */
+  activityLog: ActivityLogEntry[];
+  activityLogSeq: number;
   /** Syncs this window started, by `operation_id`. */
   syncs: Record<string, RunningSync>;
   /** `sync_trigger` calls not answered yet. */
@@ -662,6 +681,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     marked: NO_MARKS,
     activity: [],
     activitySeq: 0,
+    activityLog: [],
+    activityLogSeq: 0,
     syncs: {},
     syncStarting: 0,
     syncEarly: [],
@@ -718,6 +739,15 @@ export function liveHolds(s: AppState): HoldEntry[] {
  */
 export function shownNotices(s: AppState): ActivityNotice[] {
   return s.activity.filter((n) => n.kind !== "hold_cancelled");
+}
+
+/**
+ * The notices the activity area draws: none while `!` hides them
+ * (`prefs.activityHidden`), else {@link shownNotices}. Hold cards are not
+ * notices and always show.
+ */
+export function visibleNotices(s: AppState): ActivityNotice[] {
+  return s.prefs.activityHidden ? [] : shownNotices(s);
 }
 
 export const listKey = (account: string, mailbox: string): string => `${account}/${mailbox}`;

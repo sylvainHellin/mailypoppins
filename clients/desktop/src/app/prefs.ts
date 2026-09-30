@@ -1,4 +1,4 @@
-// Presentation preferences (pane sizes, sidebar collapsed) live in the GUI's
+// Presentation preferences (pane sizes, sidebar collapsed, notices hidden) live in the GUI's
 // localStorage, never in the daemon: they are not domain state.
 
 import { DEFAULT_PREFS, LIST_WIDTH_MAX, LIST_WIDTH_MIN, type Prefs } from "@/app/state";
@@ -17,6 +17,7 @@ export function loadPrefs(storage: Storage | undefined = globalThis.localStorage
     return {
       sidebarCollapsed: typeof p.sidebarCollapsed === "boolean" ? p.sidebarCollapsed : false,
       listWidth,
+      activityHidden: typeof p.activityHidden === "boolean" ? p.activityHidden : false,
     };
   } catch {
     return DEFAULT_PREFS;

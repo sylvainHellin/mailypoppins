@@ -11,7 +11,8 @@ import { CircleAlert, CircleCheck, Send, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMutations } from "@/app/mutations";
 import { useAppState, useDispatch } from "@/app/store";
-import { shownNotices, type ActivityNotice, type HoldEntry } from "@/app/state";
+import { FAILURES } from "@/app/activity";
+import { visibleNotices, type ActivityNotice, type HoldEntry } from "@/app/state";
 
 /** How long an applied notice stays. */
 export const APPLIED_MS = 5000;
@@ -20,17 +21,8 @@ export const HOLD_END_MS = 3000;
 /** The failed rows a notice lists before it says how many more. */
 const ROWS_SHOWN = 5;
 
-/** Kinds that report a failure: they stay until dismissed and are alerts. */
-export const FAILURES: ReadonlySet<ActivityNotice["kind"]> = new Set([
-  "failed",
-  "rolled_back",
-  "hold_cancel_failed",
-  "sync_failed",
-  "compose_failed",
-  "send_failed",
-  "send_partial",
-  "rebuild_refused",
-]);
+/** Kinds that report a failure: they stay until dismissed and are alerts (src/app/activity.ts). */
+export { FAILURES };
 
 export type NoticeToastProps = { notice: ActivityNotice; onDismiss: (id: number) => void };
 
@@ -185,8 +177,9 @@ export function HoldToast({ hold, awaiting = false, onCancel, onGone }: HoldToas
 
 /**
  * The activity area. A cancelled hold's notice stays in the model and is not
- * shown, since the hold's own toast says so. The area stays mounted when
- * empty, so its status region exists before the first notice.
+ * shown, since the hold's own toast says so. While `!` hides the notices the
+ * hold cards still show, so a send can always be cancelled. The area stays
+ * mounted when empty, so its status region exists before the first notice.
  */
 export function ActivityStack() {
   const s = useAppState();
@@ -194,7 +187,8 @@ export function ActivityStack() {
   const m = useMutations();
   const holds = Object.values(s.holds);
   const awaited = new Set(s.sends.flatMap((r) => (r.operation_id ? [r.operation_id] : [])));
-  const notices = shownNotices(s);
+  // `!` hides the notices (prefs.activityHidden); a hold card always shows.
+  const notices = visibleNotices(s);
   const applied = notices.filter((n) => !FAILURES.has(n.kind));
   const failures = notices.filter((n) => FAILURES.has(n.kind));
   // Stable, so a hold's tick does not restart a notice's timer.
