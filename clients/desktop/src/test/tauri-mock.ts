@@ -7,10 +7,11 @@ import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
 import draftsFx from "../../fixtures/drafts.json";
 import messagesFx from "../../fixtures/messages.json";
-import type { Bootstrap, DraftListing, MessageListRow } from "@/protocol/types";
+import type { Bootstrap, DraftListing, HoldStatus, MessageListRow } from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
+  GuiError,
   GuiEvent,
   InterceptedUrl,
   LocalSearchHit,
@@ -18,6 +19,8 @@ import type {
   MessageList,
   MessageMeta,
   MessageText,
+  MutationAck,
+  MutationBatch,
   VersionInfo,
 } from "@/lib/gui-types";
 
@@ -34,6 +37,8 @@ export class Channel<T> {
   onmessage: (message: T) => void = () => {};
 }
 
+const clone = <T,>(v: T): T => structuredClone(v);
+
 export const mock = {
   connection: { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true } as ConnectionStatus,
   channel: null as Channel<GuiEvent> | null,
@@ -49,6 +54,15 @@ export const mock = {
   nextOp: 1,
   /** What `search_server_cancel` answers. */
   cancelOutcome: "cancelled" as "cancelled" | "already_settled",
+  /** The rows the commands read and the mutations change, fresh per test. */
+  rows: clone(fixtures.messages),
+  drafts: clone(fixtures.drafts),
+  /** The holds `send_hold_status` lists and `send_cancel_hold` stops. */
+  holds: clone(fixtures.bootstrap.snapshot.holds) as HoldStatus[],
+  /** The revision the mock's own events carry. */
+  revision: 1000,
+  /** The next sync's operation id counter. */
+  nextSync: 1,
 };
 
 export function resetMock(): void {
@@ -61,6 +75,17 @@ export function resetMock(): void {
   mock.interceptLog = [];
   mock.nextOp = 1;
   mock.cancelOutcome = "cancelled";
+  mock.rows = clone(fixtures.messages);
+  mock.drafts = clone(fixtures.drafts);
+  mock.holds = clone(fixtures.bootstrap.snapshot.holds);
+  mock.revision = 1000;
+  mock.nextSync = 1;
+}
+
+/** Push a daemon event on the channel, as the fixture publishes it. */
+export function emitEnvelope(kind: string, payload: unknown): void {
+  const instance_id = mock.connection.state === "connected" ? mock.connection.instance_id : "fixture-instance-1";
+  emit({ type: "event", event: { instance_id, revision: ++mock.revision, kind, payload } });
 }
 
 export function emit(event: GuiEvent): void {
@@ -89,7 +114,7 @@ function strip(row: FixtureRow): MessageListRow {
 }
 
 function findRow(account: string, rowId: number): [string, FixtureRow] | null {
-  for (const [mailbox, rows] of Object.entries(fixtures.messages[account] ?? {})) {
+  for (const [mailbox, rows] of Object.entries(mock.rows[account] ?? {})) {
     const row = rows.find((r) => r.id + mock.rowShift === rowId);
     if (row) return [mailbox, row];
   }
@@ -100,8 +125,8 @@ export function mailboxListing(account: string): MailboxListing {
   const snap = fixtures.bootstrap.snapshot;
   const rows = snap.mailboxes[account] ?? [];
   const mailboxes = rows.map((m) => {
-    const msgs = fixtures.messages[account]?.[m.slug] ?? [];
-    const total = m.role === "drafts" ? (fixtures.drafts[account]?.drafts.length ?? 0) : msgs.length;
+    const msgs = mock.rows[account]?.[m.slug] ?? [];
+    const total = m.role === "drafts" ? (mock.drafts[account]?.drafts.length ?? 0) : msgs.length;
     const unread = m.role === "drafts" ? 0 : msgs.filter((r) => !r.flags.seen).length;
     return { slug: m.slug, label: m.label, role: m.role, kind: kindOf(m.role), total, unread, badge: total };
   });
@@ -114,6 +139,62 @@ export function mailboxListing(account: string): MailboxListing {
     runtime_state: a?.state ?? "opening",
     sync_health: a?.sync_health.state ?? "unknown",
   };
+}
+
+/** A refusal about one row, as the Rust layer maps the daemon's -32602. */
+function refusedRow(method: string, why: string): GuiError {
+  return { kind: "not_found", message: `${method}: the daemon refused the call: ${why} (-32602)`, code: -32602 };
+}
+
+/** An unknown account fails the whole command, as `account_unknown` does. */
+function knownAccount(cmd: string, account: string): void {
+  if (!fixtures.bootstrap.snapshot.accounts.some((a) => a.name === account)) {
+    throw { kind: "not_found", message: `${cmd}: the daemon refused the call: account_unknown: ${account} (-32005)`, code: -32005 };
+  }
+}
+
+/** One of the five message mutations over `row_ids`, in order, as fixture.rs answers it. */
+function mutate(cmd: string, account: string, args: Record<string, unknown>): MutationBatch {
+  knownAccount(cmd, account);
+  const method = `message.${cmd.slice("message_".length)}`;
+  const out: MutationBatch = { done: [], failed: [] };
+  const boxes = mock.rows[account];
+  for (const rowId of args.row_ids as number[]) {
+    const hit = findRow(account, rowId);
+    if (!hit) {
+      out.failed.push({ row_id: rowId, error: refusedRow(method, `${account} holds no message with row id ${rowId}`) });
+      continue;
+    }
+    const [mailbox, row] = hit;
+    const ack: MutationAck = { row_id: rowId, account, id: `${mailbox}/${row.uid}`, selector: row.selector, mailbox };
+    let dest: string | null = null;
+    if (cmd === "message_archive") dest = "archive";
+    if (cmd === "message_move") {
+      const wanted = String(args.destination);
+      dest = fixtures.bootstrap.snapshot.mailboxes[account]?.find((m) => m.slug === wanted || m.label === wanted)?.slug ?? null;
+      if (dest === null) {
+        out.failed.push({ row_id: rowId, error: refusedRow(method, `'${wanted}' is not a mailbox of ${account}`) });
+        continue;
+      }
+    }
+    const rows = boxes[mailbox];
+    if (dest !== null || cmd === "message_delete") rows.splice(rows.indexOf(row), 1);
+    if (dest !== null) {
+      const selector = `mp://${account}/${dest}/${row.message_id.replace(/^<|>$/g, "")}`;
+      (boxes[dest] ??= []).unshift({ ...row, selector });
+      ack.moved_to = { mailbox: dest, selector };
+    }
+    if (cmd === "message_set_flag") {
+      row.flags.flagged = Boolean(args.flagged);
+      ack.flagged = row.flags.flagged;
+    }
+    if (cmd === "message_set_read") {
+      row.flags.seen = Boolean(args.read);
+      ack.read = row.flags.seen;
+    }
+    out.done.push(ack);
+  }
+  return out;
 }
 
 async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -163,9 +244,9 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "list_messages": {
       const mailbox = String(args.mailbox);
       if (mailbox === "drafts") {
-        return { kind: "drafts", account, listing: fixtures.drafts[account] } satisfies MessageList;
+        return { kind: "drafts", account, listing: clone(mock.drafts[account]) } satisfies MessageList;
       }
-      const rows = (fixtures.messages[account]?.[mailbox] ?? []).map(strip).map((r) => ({ ...r, id: r.id + mock.rowShift }));
+      const rows = (mock.rows[account]?.[mailbox] ?? []).map(strip).map((r) => ({ ...r, id: r.id + mock.rowShift }));
       return { kind: "messages", account, mailbox, total: rows.length, rows } satisfies MessageList;
     }
     case "message_text": {
@@ -211,7 +292,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const params = args.params as { account: string; query: string; mailbox?: string };
       const q = params.query.trim().toLowerCase();
       const hits: LocalSearchHit[] = [];
-      for (const [mailbox, rows] of Object.entries(fixtures.messages[params.account] ?? {})) {
+      for (const [mailbox, rows] of Object.entries(mock.rows[params.account] ?? {})) {
         if (params.mailbox && params.mailbox !== mailbox) continue;
         for (const r of rows) {
           const text = `${r.subject ?? ""}\n${r.from ?? ""}\n${r.body ?? ""}`.toLowerCase();
@@ -224,6 +305,45 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       return { operation_id: `op-${mock.nextOp++}` };
     case "search_server_cancel":
       return mock.cancelOutcome;
+    case "message_archive":
+    case "message_delete":
+    case "message_move":
+    case "message_set_flag":
+    case "message_set_read":
+      return mutate(cmd, account, args);
+    case "draft_discard": {
+      knownAccount(cmd, account);
+      const out: { done: { account: string; id: string; selector: string; status: string }[]; failed: { id: string; error: unknown }[] } = { done: [], failed: [] };
+      for (const id of args.ids as string[]) {
+        const drafts = mock.drafts[account]?.drafts ?? [];
+        const at = drafts.findIndex((d) => d.id === id);
+        const selector = `mp://${account}/drafts/${id}`;
+        if (at < 0 || drafts[at].status === "approved") {
+          const why = at < 0 ? `no draft matches ${selector}` : `${selector} is approved, a queued send`;
+          out.failed.push({ id, error: refusedRow("draft.discard", why) });
+          continue;
+        }
+        const [gone] = drafts.splice(at, 1);
+        emitEnvelope("state.remove", { resource: `draft:${account}/${id}` });
+        out.done.push({ account, id, selector, status: gone.status });
+      }
+      return out;
+    }
+    case "send_hold_status": {
+      const only = args.account as string | null;
+      return { holds: mock.holds.filter((h) => only === null || only === undefined || h.account === only) };
+    }
+    case "send_cancel_hold": {
+      const id = String(args.operation_id);
+      const at = mock.holds.findIndex((h) => h.operation_id === id);
+      if (at < 0) throw refusedRow("send.cancel_hold", `no hold is running for ${id}`);
+      const [hold] = mock.holds.splice(at, 1);
+      emitEnvelope("send.hold_cancelled", { ...hold, remaining_secs: 0 });
+      return { cancelled: true, operation_id: id, revision: mock.revision };
+    }
+    case "sync_trigger":
+      knownAccount(cmd, account);
+      return { operation_id: `fixture-op-${mock.nextSync++}` };
     default:
       throw { kind: "internal", message: `the mock does not answer ${cmd}` };
   }

@@ -500,6 +500,8 @@ export function holdCancelAnswered(s: AppState, operationId: string, cancelled: 
 /** A refused cancel: most often the hold fired first, and its event says so. */
 export function holdCancelFailed(s: AppState, operationId: string, reason: string): AppState {
   const h = s.holds[operationId];
+  // Already over, as this window knows: nothing is left to report.
+  if (h && terminal(h.state)) return s;
   const next = h ? { ...s, holds: { ...s.holds, [operationId]: { ...h, cancelling: false } } } : s;
   const subject = h?.subject ? `"${h.subject}"` : "the message";
   return pushNotice(next, { kind: "hold_cancel_failed", account: h?.account ?? null, text: `Could not cancel the send of ${subject}: ${reason}` });
