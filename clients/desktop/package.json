@@ -6,8 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "prebuild": "node scripts/gen-keymap.ts --if-bin",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "gen:keymap": "node scripts/gen-keymap.ts",
+    "contrast": "node scripts/contrast.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

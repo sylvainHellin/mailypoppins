@@ -1,6 +1,9 @@
 import * as React from "react"
 
-const MOBILE_BREAKPOINT = 768
+// The shell's narrow layout starts below 760 px (src/app/layout.ts MEDIUM_MIN),
+// and index.css moves Tailwind's `md` there too; shadcn's default 768 would
+// turn the icon rail into an off-screen sheet between 760 and 767 px.
+const MOBILE_BREAKPOINT = 760
 
 export function useIsMobile() {
   const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
