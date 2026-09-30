@@ -126,6 +126,19 @@ describe("the Calendar view's model", () => {
     expect(s.calendarView?.refreshing).toBe(false);
   });
 
+  it("r that fails with rows shown keeps them and says so in the notice line", () => {
+    let s = run(inCalendar(), { type: "calendar_refresh" });
+    s = run(s, {
+      type: "calendar_failed",
+      account: "work",
+      gen: s.calendar.work.gen,
+      error: { kind: "timeout", message: "the agenda took too long" },
+    });
+    expect(s.notice).toBe("Calendar refresh failed: the agenda took too long");
+    expect(s.calendarView?.refreshing).toBe(false);
+    expect(calendarRows(s)).toHaveLength(4);
+  });
+
   it("goes stale with its own account's mail and syncs only", () => {
     let s = run(inCalendar(), { type: "switch_view", view: "mail" }, { type: "select_account", account: "home" }, { type: "switch_view", view: "calendar" });
     expect(s.calendarView?.account).toBe("home");

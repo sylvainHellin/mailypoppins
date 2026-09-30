@@ -502,6 +502,7 @@ The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
   The notice names the editor, or says "That event has no ics source in the store" for a row with none, or "Open failed: <why>".
 - `t` shows or hides the past events and never arms the `t` family.
 - `r` reads the agenda again and says "Calendar refreshed (N events)" once it lands.
+  A read that fails says "Calendar refresh failed: <why>" and keeps the rows it had.
 - `V` opens the RSVP choice for the cursor row (see RSVP).
 
 The palette's "Open the invite email in $EDITOR", "RSVP to invitation (Accept/Tentative/Decline)", "Show past events / upcoming only" and "Refresh events from disk" run the same actions, and outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the agenda".

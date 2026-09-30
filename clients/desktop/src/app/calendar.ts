@@ -110,15 +110,16 @@ export function calendarLoaded(s: AppState, account: string, gen: number, events
   return next;
 }
 
+/**
+ * A failed read keeps the rows it had, so an `r` that fails says so in the
+ * notice line: the view shows its error only while it has no rows.
+ */
 export function calendarFailed(s: AppState, account: string, gen: number, error: GuiError): AppState {
   const l = loadableOf(s, account);
   const view = s.calendarView;
-  const settled = view?.refreshing && view.account === account && gen === l.gen;
-  return {
-    ...s,
-    calendar: { ...s.calendar, [account]: { ...l, loadedGen: gen, error } },
-    calendarView: settled && view ? { ...view, refreshing: false } : view,
-  };
+  const next: AppState = { ...s, calendar: { ...s.calendar, [account]: { ...l, loadedGen: gen, error } } };
+  if (!view?.refreshing || view.account !== account || gen !== l.gen) return next;
+  return withNotice({ ...next, calendarView: { ...view, refreshing: false } }, `Calendar refresh failed: ${error.message}`);
 }
 
 // ---------------------------------------------------------------------------
