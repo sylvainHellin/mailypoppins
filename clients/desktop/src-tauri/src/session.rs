@@ -134,6 +134,10 @@ pub enum PendingKind {
     SendInvite,
     /// `contact.rebuild`: its `result` is a `ContactRebuilt`.
     ContactRebuild,
+    /// `config.oauth2_login`: its one progress carries the device code, and
+    /// its `result` is an `OAuth2Stored`.
+    #[serde(rename = "oauth2_login")]
+    OAuth2Login,
 }
 
 /// Where an intercepted URL came from.
@@ -1409,6 +1413,170 @@ mod tests {
             .cloned()
             .expect("dropped");
         assert_eq!(dropped["kind"], "contact_rebuild");
+        assert_eq!(dropped["operation_id"], started.operation_id.as_str());
+    }
+
+    /// The events among `seen` that name `id`.
+    fn events_of(seen: &Seen, id: &str) -> Vec<Value> {
+        lock(seen)
+            .iter()
+            .filter(|v| v["type"] == "event" && v["event"]["payload"]["operation_id"] == id)
+            .map(|v| v["event"].clone())
+            .collect()
+    }
+
+    /// Wait for `id`'s device-code progress to be committed.
+    fn await_device_code(door: &Door, id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = door
+                .call_within(
+                    "operation.status",
+                    json!({"operation_id": id}),
+                    Duration::from_secs(1),
+                )
+                .expect("status");
+            if !status["progress"].is_null() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{id} never reported its code");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_device_code_reaches_only_its_awaited_sign_in_which_settles_as_oauth2_login() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_device_code_delay(Duration::ZERO);
+        let mine = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+            .expect("started")
+            .operation_id;
+        // Another window's sign-in of the same account, which this one never awaited.
+        let other = fixture
+            .call("config.oauth2_login", json!({"account": "home"}))
+            .expect("the other window's")["operation_id"]
+            .as_str()
+            .expect("id")
+            .to_string();
+        await_device_code(&door, &mine);
+        await_device_code(&door, &other);
+        drain(&session, &door, &rx);
+        let progress = events_of(&seen, &mine);
+        assert_eq!(progress.len(), 1, "{progress:?}");
+        assert_eq!(progress[0]["kind"], "operation.progress");
+        assert_eq!(progress[0]["payload"]["phase"], "device_code");
+        assert_eq!(
+            progress[0]["payload"]["message"],
+            crate::fixture::DEVICE_CODE_MESSAGE
+        );
+        assert!(events_of(&seen, &other).is_empty());
+        assert_eq!(session.pending_kind(&mine), Some(PendingKind::OAuth2Login));
+
+        fixture.simulate("oauth_approve").expect("approved");
+        drain(&session, &door, &rx);
+        let finished = events_of(&seen, &mine)
+            .into_iter()
+            .find(|e| e["kind"] == "operation.finished")
+            .expect("the finish");
+        let stored: crate::configuration::OAuth2Stored =
+            serde_json::from_value(finished["payload"]["result"].clone()).expect("an OAuth2Stored");
+        assert_eq!(
+            stored,
+            crate::configuration::OAuth2Stored {
+                stored: true,
+                account: "home".into(),
+                kind: "graph".into(),
+                key: "oauth2-token-home".into(),
+            }
+        );
+        assert!(events_of(&seen, &other).is_empty());
+        assert!(session.pending().is_empty());
+    }
+
+    #[test]
+    fn a_denied_sign_in_fails_with_the_providers_sentence() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_device_code_delay(Duration::ZERO);
+        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+            .expect("started")
+            .operation_id;
+        await_device_code(&door, &id);
+        fixture.simulate("oauth_deny").expect("denied");
+        drain(&session, &door, &rx);
+        let finished = events_of(&seen, &id)
+            .into_iter()
+            .find(|e| e["kind"] == "operation.finished")
+            .expect("the finish");
+        assert_eq!(finished["payload"]["state"], "failed");
+        assert_eq!(
+            finished["payload"]["error"]["message"],
+            crate::fixture::OAUTH_DENIED
+        );
+        assert!(fixture.simulate("oauth_approve").is_err(), "nothing waits");
+    }
+
+    #[test]
+    fn a_cancelled_sign_in_stays_awaited_until_its_cancelled_finish() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_device_code_delay(Duration::ZERO);
+        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+            .expect("started")
+            .operation_id;
+        let outcome = crate::configuration::config_oauth2_cancel_on(&door, &id).expect("cancel");
+        assert_eq!(outcome, crate::commands::CancelOutcome::Cancelled);
+        assert_eq!(session.pending_kind(&id), Some(PendingKind::OAuth2Login));
+        drain(&session, &door, &rx);
+        let finished = events_of(&seen, &id)
+            .into_iter()
+            .find(|e| e["kind"] == "operation.finished")
+            .expect("the cancelled finish");
+        assert_eq!(finished["payload"]["state"], "cancelled");
+        assert!(session.pending().is_empty());
+        let again = crate::configuration::config_oauth2_cancel_on(&door, &id).expect("again");
+        assert_eq!(again, crate::commands::CancelOutcome::AlreadySettled);
+    }
+
+    #[test]
+    fn a_sign_in_settled_by_the_requery_carries_its_kind() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_device_code_delay(Duration::ZERO);
+        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+            .expect("started")
+            .operation_id;
+        await_device_code(&door, &id);
+        fixture.simulate("oauth_approve").expect("approved");
+        await_terminal(&door, &id);
+        while rx.try_recv().is_ok() {}
+        session.handle(
+            &door,
+            Incoming::Resync {
+                instance_id: fixture.instance_id(),
+                reason: "event_queue_overflow".into(),
+            },
+        );
+        let settled = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_settled")
+            .cloned()
+            .expect("settled by the requery");
+        assert_eq!(settled["kind"], "oauth2_login");
+        assert_eq!(settled["status"]["progress"]["phase"], "device_code");
+        assert_eq!(settled["status"]["result"]["key"], "oauth2-token-home");
+    }
+
+    #[test]
+    fn a_restart_drops_a_sign_in_as_oauth2_login() {
+        let (session, door, fixture, rx, seen) = harness();
+        let started =
+            crate::configuration::config_oauth2_login_on(&session, &door, "home").expect("started");
+        fixture.simulate("restart").expect("restart");
+        drain(&session, &door, &rx);
+        let dropped = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_dropped")
+            .cloned()
+            .expect("dropped");
+        assert_eq!(dropped["kind"], "oauth2_login");
         assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 

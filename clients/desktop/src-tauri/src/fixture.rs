@@ -48,6 +48,19 @@
 //! configuration left as it was. `config.set_password` journals the account
 //! and the kind with the value redacted ([`Fixture::password_writes`]) and
 //! answers `stored: true` under the daemon's key, `<kind>-password-<account>`.
+//! `config.add_account` appends the daemon's `[[accounts]]` block to
+//! config.toml and serves the account at once, ready, with an empty Inbox,
+//! Archive and Sent, in `account.list`, `mailbox.list`, the bootstrap and
+//! `config.get`, then publishes `config.changed` naming it as `added`; a
+//! taken name or a missing file is refused in the daemon's words.
+//! `config.init` does the same with a whole file, and only where none
+//! exists: `config_absent` removes config.toml and every account and
+//! restarts the daemon, whose `config.get` then answers `absent`.
+//! `config.oauth2_login` refuses as the daemon does (unknown account,
+//! password account, no client or tenant), then reports its device code
+//! ([`DEVICE_CODE_MESSAGE`]) as its one progress after [`DEVICE_CODE_DELAY`]
+//! and waits: `oauth_approve` settles every waiting sign-in `stored`,
+//! `oauth_deny` fails it with [`OAUTH_DENIED`].
 //!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
@@ -243,6 +256,23 @@ pub const CONFIG_INVALID_MESSAGE: &str = "key with no value, expected `=`";
 /// The directory under the per-run root the daemon log lives in.
 const LOGS_DIR: &str = "logs";
 
+/// The verification URL and the user code a fixture sign-in reports, the
+/// device-code progress's message.
+pub const DEVICE_CODE_MESSAGE: &str = "https://microsoft.com/devicelogin FXTR-CODE";
+
+/// How long a sign-in takes to report its device code.
+pub const DEVICE_CODE_DELAY: Duration = Duration::from_millis(300);
+
+/// Why an `oauth_deny` sign-in failed, the provider flow's sentence.
+pub const OAUTH_DENIED: &str = "Authorization was declined by the user.";
+
+/// The three mailboxes an added account starts with: role, slug, label.
+const ADDED_MAILBOXES: [(&str, &str, &str); 3] = [
+    ("inbox", "inbox", "Inbox"),
+    ("archive", "archive", "Archive"),
+    ("sent", "sent", "Sent"),
+];
+
 /// What [`Fixture::simulate`] can do.
 pub const SIMULATIONS: &[&str] = &[
     "disconnect",
@@ -265,6 +295,9 @@ pub const SIMULATIONS: &[&str] = &[
     "rebuild_refused",
     "signature_changed",
     "config_invalid",
+    "config_absent",
+    "oauth_approve",
+    "oauth_deny",
 ];
 
 /// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
@@ -440,6 +473,11 @@ struct State {
     config_revision: u64,
     /// Every `config.set_password`, its value redacted, oldest first.
     password_writes: Vec<Value>,
+    /// The sign-ins waiting for `oauth_approve` or `oauth_deny`, by
+    /// operation id: the account and the token's kind.
+    oauth_logins: BTreeMap<String, (String, &'static str)>,
+    /// How long a sign-in takes to report its device code.
+    device_code_delay: Duration,
 }
 
 impl State {
@@ -1045,6 +1083,216 @@ impl State {
             other => Err(refused(other, -32601, &format!("unknown method {other}"))),
         }
     }
+}
+
+/// The configuration's accounts: what `config.add_account` and
+/// `config.init` add, and what `config_absent` takes away.
+impl State {
+    /// Whether `config.toml`'s effective configuration names `account`.
+    fn configured(&self, account: &str) -> Option<&Value> {
+        self.config["accounts"]
+            .as_array()
+            .and_then(|all| all.iter().find(|a| a["name"] == account))
+    }
+
+    /// Start serving the wizard's `account`, as the daemon's swap does: a
+    /// ready account with Inbox, Archive and Sent, empty, in every answer
+    /// that lists accounts; answers its name.
+    fn configure_account(&mut self, account: &Value) -> String {
+        let name = account["name"].as_str().unwrap_or_default().to_string();
+        let auth = account["auth_method"].as_str().unwrap_or("password");
+        let first = self.accounts["accounts"]
+            .as_array()
+            .is_none_or(Vec::is_empty);
+        let backend = if auth == "graph" { "graph" } else { "imap" };
+        if let Some(list) = self.accounts["accounts"].as_array_mut() {
+            list.push(
+                json!({"name": name, "default": first, "backend": backend, "state": "ready"}),
+            );
+        } else {
+            self.accounts = json!({"accounts": [{"name": name, "default": first, "backend": backend, "state": "ready"}]});
+        }
+        let snapshot = &mut self.bootstrap["snapshot"];
+        if let Some(list) = snapshot["accounts"].as_array_mut() {
+            list.push(json!({"name": name, "state": "ready", "sync_health": {"state": "ok"}}));
+        }
+        snapshot["mailboxes"][&name] = ADDED_MAILBOXES
+            .iter()
+            .map(|(role, slug, label)| {
+                json!({"role": role, "slug": slug, "label": label, "total": 0, "unread": 0, "badge": 0})
+            })
+            .collect();
+        let boxes: BTreeMap<String, Vec<Value>> = ADDED_MAILBOXES
+            .iter()
+            .map(|(_, slug, _)| (slug.to_string(), Vec::new()))
+            .collect();
+        self.messages.insert(name.clone(), boxes);
+        let counts = self.counts(&name);
+        self.published.insert(name.clone(), counts);
+        let effective = effective_account(account);
+        if let Some(list) = self.config["accounts"].as_array_mut() {
+            list.push(effective);
+        } else {
+            self.config["accounts"] = json!([effective]);
+        }
+        name
+    }
+
+    /// A daemon on an empty configuration directory: no account anywhere.
+    fn forget_accounts(&mut self) {
+        self.accounts = json!({"accounts": []});
+        self.messages.clear();
+        self.drafts.clear();
+        self.outbox.clear();
+        self.holds.clear();
+        self.held_sends.clear();
+        self.published.clear();
+        self.oauth_logins.clear();
+        self.config["accounts"] = json!([]);
+        let snapshot = &mut self.bootstrap["snapshot"];
+        snapshot["accounts"] = json!([]);
+        snapshot["mailboxes"] = json!({});
+        snapshot["drafts"] = json!({});
+        snapshot["outbox"] = json!({});
+        snapshot["holds"] = json!([]);
+        snapshot["diagnostics"] = json!([]);
+    }
+
+    /// One swap that added `name`: the revision moves and `config.changed`
+    /// says so; answers the swap.
+    fn announce_added(&mut self, fixture: &Fixture, name: &str) -> Value {
+        self.config_state = "ok".to_string();
+        self.config_revision += 1;
+        let swap = json!({"added": [name], "updated": [], "removed": []});
+        let mut changed = swap.clone();
+        changed["config_revision"] = json!(self.config_revision);
+        fixture.emit_locked(self, "config.changed", changed);
+        swap
+    }
+}
+
+/// The account's `[[accounts]]` block, key for key what the daemon's
+/// `account_block` writes from the same object (src/daemon/methods/config.rs).
+/// A JSON string literal is a TOML basic string, so names with a quote or a
+/// backslash in them still parse.
+fn account_toml(account: &Value) -> String {
+    let quote = |v: &str| serde_json::to_string(v).unwrap_or_else(|_| "\"\"".into());
+    let strings = |object: &Value, fields: &[&str]| -> String {
+        fields
+            .iter()
+            .filter_map(|f| object[*f].as_str().map(|v| format!("{f} = {}\n", quote(v))))
+            .collect()
+    };
+    let mut out = format!(
+        "\n[[accounts]]\nname = {}\n",
+        quote(account["name"].as_str().unwrap_or_default())
+    );
+    out.push_str(&strings(
+        account,
+        &["default_from", "auth_method", "save_to_sent"],
+    ));
+    if account["oauth2"].is_object() {
+        out.push_str("\n[accounts.oauth2]\n");
+        out.push_str(&strings(&account["oauth2"], &["client_id", "tenant_id"]));
+    }
+    for table in ["smtp", "imap"] {
+        let settings = &account[table];
+        if !settings.is_object() {
+            continue;
+        }
+        out.push_str(&format!("\n[accounts.{table}]\n"));
+        out.push_str(&strings(settings, &["host", "username"]));
+        for field in [
+            "port",
+            "fetch_concurrency",
+            "body_fetch_deadline_secs",
+            "sync_interval_secs",
+        ] {
+            if let Some(n) = settings[field].as_u64() {
+                out.push_str(&format!("{field} = {n}\n"));
+            }
+        }
+        if let Some(flag) = settings["accept_invalid_certs"].as_bool() {
+            out.push_str(&format!("accept_invalid_certs = {flag}\n"));
+        }
+    }
+    let mailboxes = &account["mailboxes"];
+    if mailboxes.is_object() {
+        let server = |v: &Value| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v["server"].as_str().map(str::to_string))
+        };
+        for role in ["inbox", "archive", "sent"] {
+            if let Some(name) = server(&mailboxes[role]) {
+                out.push_str(&format!(
+                    "\n[accounts.mailboxes.{role}]\nserver = {}\n",
+                    quote(&name)
+                ));
+            }
+        }
+        for extra in mailboxes["extra"].as_array().into_iter().flatten() {
+            if let Some(name) = server(extra) {
+                out.push_str(&format!(
+                    "\n[[accounts.mailboxes.extra]]\nserver = {}\n",
+                    quote(&name)
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The account as `config.get` serves it once the daemon loaded the block:
+/// every key present, the daemon's defaults where the block said nothing,
+/// the passwords redacted.
+fn effective_account(account: &Value) -> Value {
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    let smtp = &account["smtp"];
+    let imap = &account["imap"];
+    let mailbox = |role: &str| match &account["mailboxes"][role] {
+        Value::String(s) => json!({"server": s}),
+        Value::Object(_) => account["mailboxes"][role].clone(),
+        _ => Value::Null,
+    };
+    json!({
+        "name": text(&account["name"]),
+        "default_from": text(&account["default_from"]),
+        "auth_method": account["auth_method"].as_str().unwrap_or("password"),
+        "oauth2": if account["oauth2"].is_object() {
+            json!({
+                "client_id": text(&account["oauth2"]["client_id"]),
+                "tenant_id": text(&account["oauth2"]["tenant_id"]),
+            })
+        } else {
+            Value::Null
+        },
+        "smtp": {
+            "host": text(&smtp["host"]),
+            "port": smtp["port"].as_u64().unwrap_or(465),
+            "username": text(&smtp["username"]),
+            "accept_invalid_certs": smtp["accept_invalid_certs"].as_bool().unwrap_or(false),
+            "password": crate::configuration::REDACTED,
+        },
+        "imap": {
+            "host": text(&imap["host"]),
+            "port": imap["port"].as_u64().unwrap_or(993),
+            "username": text(&imap["username"]),
+            "accept_invalid_certs": imap["accept_invalid_certs"].as_bool().unwrap_or(false),
+            "fetch_concurrency": 4,
+            "body_fetch_deadline_secs": 30,
+            "sync_interval_secs": 900,
+            "password": crate::configuration::REDACTED,
+        },
+        "mailboxes": {
+            "inbox": mailbox("inbox"),
+            "archive": mailbox("archive"),
+            "sent": mailbox("sent"),
+            "extra": account["mailboxes"]["extra"].as_array().cloned().unwrap_or_default(),
+        },
+        "save_to_sent": account["save_to_sent"].as_str().unwrap_or("auto"),
+        "hooks": [],
+    })
 }
 
 /// The draft files: the `draft.*` family.
@@ -2169,6 +2417,8 @@ impl Fixture {
             config_state: "ok".to_string(),
             config_revision: 0,
             password_writes: Vec::new(),
+            oauth_logins: BTreeMap::new(),
+            device_code_delay: DEVICE_CODE_DELAY,
         };
         state.rescan();
         state.seed_outbox();
@@ -2412,6 +2662,160 @@ impl Fixture {
                     "kind": kind,
                     "key": format!("{kind}-password-{account}"),
                 }))
+            }
+            // The daemon's `config.add_account`: its refusals in its order
+            // and words, then the block appended to config.toml and a swap
+            // that starts the account.
+            "config.add_account" => {
+                only(method, &params, &["account"])?;
+                let path = s.root.join(CONFIG_FILE);
+                if !path.exists() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "there is no configuration at {}; write one with config.init first",
+                            path.display()
+                        ),
+                    ));
+                }
+                let account = &params["account"];
+                if !account.is_object() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "account is a required object parameter",
+                    ));
+                }
+                let name = param_str(method, account, "name")?;
+                if s.configured(name).is_some() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("an account named {name} is already configured"),
+                    ));
+                }
+                let mut text = fs::read_to_string(&path).map_err(|e| {
+                    refused(method, -32603, &format!("reading {}: {e}", path.display()))
+                })?;
+                text.push('\n');
+                text.push_str(&account_toml(account));
+                fs::write(&path, text).map_err(|e| {
+                    refused(method, -32603, &format!("writing {}: {e}", path.display()))
+                })?;
+                let name = s.configure_account(account);
+                Ok(s.announce_added(self, &name))
+            }
+            // The daemon's `config.init`: only where no config.toml exists,
+            // which here is after `config_absent`.
+            "config.init" => {
+                only(
+                    method,
+                    &params,
+                    &["account", "secrets_backend", "theme", "notifications"],
+                )?;
+                let path = s.root.join(CONFIG_FILE);
+                if path.exists() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "a configuration already exists at {}; edit it and call config.reload",
+                            path.display()
+                        ),
+                    ));
+                }
+                let account = &params["account"];
+                if !account.is_object() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "account is a required object parameter",
+                    ));
+                }
+                param_str(method, account, "name")?;
+                let mut text = String::new();
+                if let Some(theme) = params["theme"].as_str() {
+                    text.push_str(&format!("theme = {}\n", json!(theme)));
+                }
+                if let Some(on) = params["notifications"].as_bool() {
+                    text.push_str(&format!("notifications = {on}\n"));
+                }
+                if let Some(backend) = params["secrets_backend"].as_str() {
+                    text.push_str(&format!("secrets_backend = {}\n", json!(backend)));
+                }
+                text.push_str(&account_toml(account));
+                fs::write(&path, text).map_err(|e| {
+                    refused(method, -32603, &format!("writing {}: {e}", path.display()))
+                })?;
+                let name = s.configure_account(account);
+                let mut answer = s.announce_added(self, &name);
+                answer["path"] = json!(path.display().to_string());
+                Ok(answer)
+            }
+            // The daemon's `config.oauth2_login`: its three refusals, then an
+            // operation whose one progress is the device code and which
+            // waits for `oauth_approve` or `oauth_deny`.
+            "config.oauth2_login" => {
+                only(method, &params, &["account"])?;
+                let name = param_str(method, &params, "account")?.to_string();
+                let Some(account) = s.configured(&name) else {
+                    return Err(refused(
+                        method,
+                        -32005,
+                        &format!("Account '{name}' not found in config"),
+                    ));
+                };
+                let kind = match account["auth_method"].as_str() {
+                    Some("oauth2") => "oauth2",
+                    Some("graph") => "graph",
+                    _ => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            &format!(
+                                "Account '{name}' uses auth_method = \"password\", not \"oauth2\" or \"graph\". \
+                                 Set auth_method = \"oauth2\" or \"graph\" in config.toml to use OAuth2."
+                            ),
+                        ))
+                    }
+                };
+                let oauth2 = &account["oauth2"];
+                if !oauth2.is_object() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "Account '{name}' requires an [accounts.oauth2] section with client_id and tenant_id."
+                        ),
+                    ));
+                }
+                let blank = |k: &str| oauth2[k].as_str().is_none_or(str::is_empty);
+                if blank("client_id") || blank("tenant_id") {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("OAuth2 client_id and tenant_id must be set for account '{name}'"),
+                    ));
+                }
+                let id = s.next_operation_id("fixture-oauth");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                s.oauth_logins.insert(id.clone(), (name, kind));
+                let delay = s.device_code_delay;
+                drop(s);
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    fixture.report_device_code(&op);
+                });
+                Ok(json!({"operation_id": id}))
             }
             "diagnostic.log_path" => {
                 only(method, &params, &[])?;
@@ -3647,6 +4051,74 @@ impl Fixture {
         self.emit("operation.finished", payload);
     }
 
+    /// A sign-in's one progress: the verification URL and the user code,
+    /// kept as the operation's `progress` for `operation.status`.
+    fn report_device_code(&self, id: &str) {
+        let mut s = self.state();
+        let running = !s.down
+            && s.operations
+                .get(id)
+                .is_some_and(|o| o["state"] == "running");
+        if !running {
+            return;
+        }
+        let progress = json!({
+            "phase": crate::configuration::DEVICE_CODE_PHASE, "done": 0,
+            "total": null, "message": DEVICE_CODE_MESSAGE
+        });
+        if let Some(o) = s.operations.get_mut(id) {
+            o["progress"] = progress.clone();
+        }
+        let mut payload = progress;
+        payload["operation_id"] = json!(id);
+        self.emit_locked(&mut s, KIND_OPERATION_PROGRESS, payload);
+    }
+
+    /// `oauth_approve` and `oauth_deny`: every sign-in still waiting ends,
+    /// stored or declined.
+    fn simulate_oauth(&self, approve: bool) -> Result<()> {
+        let waiting: Vec<(String, (String, &'static str))> = {
+            let mut s = self.state();
+            std::mem::take(&mut s.oauth_logins).into_iter().collect()
+        };
+        let waiting: Vec<_> = waiting
+            .into_iter()
+            .filter(|(id, _)| self.running(id))
+            .collect();
+        if waiting.is_empty() {
+            return Err(anyhow!("no sign-in is waiting for the provider"));
+        }
+        for (id, (account, kind)) in waiting {
+            if approve {
+                let result = json!({
+                    "stored": true, "account": account, "kind": kind,
+                    "key": format!("oauth2-token-{account}"),
+                });
+                self.settle(&id, "succeeded", Some(result));
+            } else {
+                self.settle_failed(&id, OAUTH_DENIED);
+            }
+        }
+        Ok(())
+    }
+
+    /// `config_absent`: the daemon restarts on an empty configuration
+    /// directory. config.toml goes, every account with it, and
+    /// `config.get` answers `absent` until `config.init` writes one.
+    fn simulate_config_absent(self: &Arc<Self>) -> Result<()> {
+        {
+            let mut s = self.state();
+            let path = s.root.join(CONFIG_FILE);
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+            s.forget_accounts();
+            s.config_state = "absent".to_string();
+            s.config_revision = 0;
+        }
+        self.simulate("restart")
+    }
+
     /// Drive one connection state; see [`SIMULATIONS`]. `rollback:<n>`
     /// reverts only the last `n` mutations.
     pub fn simulate(self: &Arc<Self>, what: &str) -> Result<()> {
@@ -3675,6 +4147,9 @@ impl Fixture {
             }
             "signature_changed" => return self.simulate_signature_changed(),
             "config_invalid" => return self.simulate_config_invalid(),
+            "config_absent" => return self.simulate_config_absent(),
+            "oauth_approve" => return self.simulate_oauth(true),
+            "oauth_deny" => return self.simulate_oauth(false),
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
                 self.state().send_next = Some(match what {
@@ -3921,6 +4396,12 @@ impl Fixture {
     /// The per-run directory the fixture writes its files under.
     pub fn root(&self) -> PathBuf {
         self.state().root.clone()
+    }
+
+    /// How long a sign-in takes to report its device code.
+    #[cfg(test)]
+    pub fn set_device_code_delay(&self, delay: Duration) {
+        self.state().device_code_delay = delay;
     }
 
     /// Set `config.get`'s `state` (`ok`, `absent`, `invalid`).

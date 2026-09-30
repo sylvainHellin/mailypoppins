@@ -126,6 +126,9 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "diagnostic.log_path",
     "config.reload",
     "config.set_password",
+    "config.init",
+    "config.add_account",
+    "config.oauth2_login",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -852,6 +855,9 @@ mod tests {
             "diagnostic.log_path",
             "config.reload",
             "config.set_password",
+            "config.init",
+            "config.add_account",
+            "config.oauth2_login",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }
