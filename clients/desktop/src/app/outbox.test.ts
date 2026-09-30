@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
-import { cursorRow, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog } from "@/app/outbox";
+import { cursorRow, hiddenByOutbox, outboxRows, outboxSummary, queueDepth, queueText, retryDialog, retryResult, discardDialog } from "@/app/outbox";
 import { initialState, isStale, type AppState } from "@/app/state";
 import { fixtures, outboxListing, mock, resetMock } from "@/test/tauri-mock";
+import { GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
 import type { OperationStatus, OutboxListing, OutboxRow } from "@/protocol/types";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
+
+/** Every action the palette can run, once each. */
+const paletteIds = (): ActionId[] => [...new Set([...paletteEntries(), ...GUI_ENTRIES].flatMap((e) => (e.id ? [e.id] : [])))];
 
 function row(id: number, patch: Partial<OutboxRow> = {}): OutboxRow {
   return {
@@ -223,3 +227,41 @@ describe("the confirmations and the words", () => {
     expect(queueText(queueDepth(s))).toBe("3 waiting for the server: 1 in the outbox, 1 sending, 1 change");
   });
 });
+
+describe("what the outbox view hides", () => {
+  it("hides every action on the mailbox selection and none of the others", () => {
+    const shut = initialState();
+    const open: AppState = { ...shut, outboxView: { account: "work", cursor: null } };
+    const hidden = paletteIds().filter((id) => hiddenByOutbox(open, id));
+    expect(hidden.sort()).toEqual(
+      [
+        "approve",
+        "archive",
+        "copy_selector",
+        "delete",
+        "demote",
+        "edit_recipients",
+        "forward",
+        "mark_all",
+        "mark_clear",
+        "mark_range",
+        "mark_toggle",
+        "move",
+        "open_editor",
+        "reply",
+        "reply_all",
+        "send",
+        "send_all",
+        "toggle_flag",
+        "toggle_read",
+      ].sort(),
+    );
+    // Enter's action, which has no palette row.
+    expect(hiddenByOutbox(open, "open_message")).toBe(true);
+    for (const id of ["new_draft", "focus_filter", "open_outbox", "outbox_retry", "outbox_discard", "clear_selection", "next_message"] as const) {
+      expect(hiddenByOutbox(open, id)).toBe(false);
+    }
+    expect(paletteIds().some((id) => hiddenByOutbox(shut, id))).toBe(false);
+  });
+});
+

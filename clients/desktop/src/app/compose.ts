@@ -141,7 +141,8 @@ export function forward(src: ComposeSource | null, dispatch: Dispatch<Action>): 
 
 /** `cn`: the wizard, for the account shown. */
 export function newDraft(s: AppState, dispatch: Dispatch<Action>): void {
-  const account = s.search?.account ?? s.selection.account;
+  // The outbox view may show another account than the selected one.
+  const account = s.outboxView?.account ?? s.search?.account ?? s.selection.account;
   if (!account) return;
   dispatch({ type: "open_compose", dialog: { kind: "new", account } });
 }

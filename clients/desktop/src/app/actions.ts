@@ -6,7 +6,7 @@ import { listWidthFor } from "@/app/layout";
 import { createMutations } from "@/app/mutations";
 import * as compose from "@/app/compose";
 import * as send from "@/app/send";
-import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
+import { CLOSE_OUTBOX_FIRST, cursorRow, discardDialog, hiddenByOutbox, retryDialog } from "@/app/outbox";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftItems,
@@ -96,13 +96,23 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return;
     }
     case "clear_selection":
-      // Marks go first, as the TUI's Esc clears a live selection first.
-      if (s.marked.keys.size > 0) return dispatch({ type: "mark_clear" });
+      // Marks go first, as the TUI's Esc clears a live selection first; over
+      // the outbox view the marks are hidden, and the view closes instead.
+      if (s.marked.keys.size > 0 && !s.outboxView) return dispatch({ type: "mark_clear" });
       return dispatch({ type: "clear_selection" });
-    case "focus_filter":
+    case "focus_filter": {
+      const focus = () => document.getElementById(FILTER_INPUT_ID)?.focus();
+      if (s.outboxView) {
+        // The filter belongs to the mailbox list: the view closes first, as
+        // a search closes it, and the field mounts on the next render.
+        dispatch({ type: "close_outbox" });
+        setTimeout(focus, 0);
+        return;
+      }
       dispatch({ type: "focus", pane: "list" });
-      queueMicrotask(() => document.getElementById(FILTER_INPUT_ID)?.focus());
+      queueMicrotask(focus);
       return;
+    }
     case "list_top":
       return dispatch({ type: "move_selection", to: "first", relative: false });
     case "list_bottom":
@@ -463,7 +473,12 @@ export function moveDestinations(s: AppState, account: string, source: string | 
   return rows.filter((m) => m.role !== "drafts" && m.slug !== source).map(({ slug, label }) => ({ slug, label }));
 }
 
-/** A stable runner bound to the latest state. */
+/**
+ * A stable runner bound to the latest state, the palette's and the menu's.
+ * Over the outbox view an action on the hidden mailbox selection answers a
+ * notice instead; the keymap drops those keys itself, and the reader's own
+ * buttons act on what the reader shows.
+ */
 export function useRunAction(
   state: AppState,
   dispatch: Dispatch<Action>,
@@ -472,7 +487,10 @@ export function useRunAction(
   const ref = useRef(state);
   ref.current = state;
   return useCallback(
-    (id: ActionId) => runAction(id, ref.current, dispatch, list?.current ?? undefined),
+    (id: ActionId) => {
+      if (hiddenByOutbox(ref.current, id)) return dispatch({ type: "notice", text: CLOSE_OUTBOX_FIRST });
+      runAction(id, ref.current, dispatch, list?.current ?? undefined);
+    },
     [dispatch, list],
   );
 }

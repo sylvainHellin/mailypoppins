@@ -281,8 +281,19 @@ The TUI has no outbox view, and its operator actions are the CLI's `mp outbox li
 - The palette's "Open outbox".
 
 The view replaces the list pane's content, as search results do, and focuses the list pane.
-Escape, the palette's "Clear selection / return to list", its "Mailbox" button, a mailbox in the sidebar, a digit key, another account, or a search brings the mailbox list back with its selection as it was.
-The reader keeps what it showed.
+Escape, the palette's "Clear selection / return to list", its "Mailbox" button, a mailbox in the sidebar, a digit key, another account, or a search brings the mailbox list back with its selection and its marks as they were.
+`/` and `fm` bring it back too and focus its filter, as a search brings it back, since the filter only narrows the mailbox list.
+The reader keeps what it showed, and its toolbar and draft buttons still act on that message or draft.
+
+### What the view hides
+
+The mailbox selection and its marks stay in the model while the view shows, and nothing the view does not show acts on them.
+The actions that read them are open, copy selector, archive, delete, move, the read and flag toggles, the marks (`v`, `Ctrl+a`, the range, clear marks), reply, reply all, forward, open in editor, edit recipients, approve, demote, `x` and `cX` (`hiddenByOutbox` in `src/app/outbox.ts`).
+Their keys do nothing from any pane, the reader included, since from the reader they would act on the marks as well.
+Their palette rows stay listed, and running one says "Close the outbox first (Escape): this acts on the mailbox selection".
+Escape closes the view before it clears any marks, so the first Escape never drops marks the view hid.
+The moves (`j`/`k`, `J`/`K`, `gj`/`gk`, `gg`/`G` and the pages) move the view's cursor, and `?`, the palette, zoom, the syncs, the held-send cancel and the notice keys work as anywhere.
+`cn` works too, since a new draft needs no row, and the draft goes to the view's account, which the sidebar's outbox line can make another one than the selected account.
 
 ### Rows
 
@@ -370,14 +381,14 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector.
-- `Escape`: clear the marks when any are set; else back to the list from the reader; with the outbox or a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
+- `Escape`: with the outbox shown and the focus outside the reader, back to the mailbox list; else clear the marks when any are set and the outbox is not shown; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
 - `Enter` in the field: search the store; `Shift+Enter` or `ff`: search the server.
 - `Cmd+[` or `Alt+Left`: back through the focus history.
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
 - `X`: dismiss the newest activity notice, a desktop key.
-- `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, and the other MESSAGE and List keys have no row to act on (see Outbox).
+- `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".

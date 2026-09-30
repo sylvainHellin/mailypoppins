@@ -5,6 +5,7 @@
 import { useEffect, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { liveHolds, screenFor, type AppState } from "@/app/state";
+import { hiddenByOutbox } from "@/app/outbox";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
 
@@ -77,7 +78,11 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
   const prefix = useRef<{ key: string; at: number } | null>(null);
 
   useEffect(() => {
-    const run = (id: ActionId) => runAction(id, ref.current, dispatch);
+    // Over the outbox view, a key for an action on the hidden mailbox
+    // selection does nothing, from any pane.
+    const run = (id: ActionId) => {
+      if (!hiddenByOutbox(ref.current, id)) runAction(id, ref.current, dispatch);
+    };
     const notice = (combo: string) => {
       const entry = describeKey(combo);
       if (entry && entry.badge) {
@@ -157,8 +162,7 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("new_draft");
           default:
             if (COMPOSE_ROW_KEYS[combo]) {
-              const noRow = s.focus === "sidebar" || (s.outboxView !== null && s.focus === "list");
-              if (!noRow) run(COMPOSE_ROW_KEYS[combo]);
+              if (s.focus !== "sidebar") run(COMPOSE_ROW_KEYS[combo]);
               return;
             }
             return notice(combo);
@@ -224,8 +228,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return handled(), run("dismiss_notice");
         case "Escape":
           handled();
-          if (s.marked.keys.size > 0) return run("mark_clear");
+          // The view hides the marks, so it closes before they clear.
           if (s.outboxView && s.focus !== "reader") return dispatch({ type: "close_outbox" });
+          if (s.marked.keys.size > 0 && !s.outboxView) return run("mark_clear");
           if (s.search && s.focus !== "reader") return dispatch({ type: "exit_search" });
           if (s.layout === "narrow") return dispatch({ type: "up" });
           return run("clear_selection");

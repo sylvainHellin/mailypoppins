@@ -211,3 +211,120 @@ describe("the outbox view", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
+
+describe("the outbox view hides the mailbox selection", () => {
+  const acting = [
+    "message_archive",
+    "message_delete",
+    "message_move",
+    "message_set_flag",
+    "message_set_read",
+    "draft_discard",
+    "draft_approve",
+    "draft_demote",
+    "send_draft",
+    "send_approved",
+  ];
+  const acted = () => mock.calls.filter((c) => acting.includes(c.cmd)).map((c) => c.cmd);
+  const marked = () => document.querySelector('[data-slot="marked-count"]')?.textContent ?? "";
+
+  it("drops every key on the hidden selection, from the list and from the reader", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await within(screen.getByRole("complementary", { name: "Reader" })).findByRole("toolbar", { name: "Message actions" });
+    await user.keyboard("go");
+    const region = await view("work");
+    // From the list pane: send, marks, the compose row keys.
+    await user.keyboard("x");
+    await user.keyboard("{Control>}a{/Control}");
+    for (const combo of ["cr", "ca", "cf", "ce", "cA", "cD", "cX"]) await user.keyboard(combo);
+    // From the reader, which still shows the message the list had selected.
+    await user.keyboard("{Tab}");
+    await waitFor(() => expect(document.activeElement?.closest("[data-pane]")).toHaveAttribute("data-pane", "reader"));
+    for (const key of ["a", "d", "u", "*", "M", "e", "r", "y", "x", "v"]) await user.keyboard(key);
+    for (const combo of ["cr", "cf", "ce"]) await user.keyboard(combo);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(acted()).toEqual([]);
+    expect(screen.queryByText(/Close the outbox first/)).toBeNull();
+    expect(region).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(marked()).toBe("");
+  });
+
+  it("Escape closes the view before it clears the marks the view hid", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jv");
+    expect(marked()).toBe("1 marked");
+    await user.keyboard("go");
+    await view("work");
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(marked()).toBe("1 marked");
+    await user.keyboard("{Escape}");
+    expect(marked()).toBe("");
+  });
+
+  it("/ closes the view and focuses the mailbox list's filter", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("go");
+    await view("work");
+    await user.keyboard("/");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Outbox of work" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toHaveAttribute("id", "mp-list-filter"));
+  });
+
+  it("cn opens the new-draft wizard for the view's account, which may not be the selected one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(screen.getByRole("button", { name: /Outbox of home/ }));
+    await view("home");
+    await user.keyboard("cn");
+    const wizard = await screen.findByRole("dialog", { name: "New draft" });
+    await waitFor(() => expect(within(wizard).getByRole("textbox", { name: "To" })).toHaveFocus());
+    await user.keyboard("kim@example.com");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
+    expect(callsOf("draft_create")[0].args).toMatchObject({ account: "home" });
+  });
+
+  it("the palette's actions on the selection say to close the view first, and its outbox rows still run", async () => {
+    const { user } = renderApp(1400, seedWork);
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("go");
+    await view("work");
+    await waitFor(() => expect(rowEl(5)).not.toBeNull());
+    for (const label of ["Archive", "Toggle flag/star", "Send all approved drafts", "Select all visible"]) {
+      await user.keyboard(":");
+      await user.keyboard(label);
+      await user.keyboard("{Enter}");
+      expect(await screen.findByText("Close the outbox first (Escape): this acts on the mailbox selection")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).toBeNull();
+    }
+    expect(acted()).toEqual([]);
+    expect(await view("work")).toBeInTheDocument();
+    await user.keyboard(":");
+    await user.keyboard("Discard outbox row");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Discard row 5?" })).toBeInTheDocument();
+  });
+
+  it("the palette's Clear selection closes the view and keeps the marks", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jv");
+    await user.keyboard("go");
+    await view("work");
+    await user.keyboard(":");
+    await user.keyboard("Clear selection");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(marked()).toBe("1 marked");
+  });
+});

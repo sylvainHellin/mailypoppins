@@ -5,6 +5,7 @@
 
 import type { OutboxListing, OutboxRetryOutcome, OutboxRow } from "@/protocol/types";
 import type { GuiError } from "@/lib/gui-types";
+import type { ActionId } from "@/keymap/catalog";
 import { pushNotice } from "@/app/pending";
 import {
   emptyLoadable,
@@ -173,6 +174,44 @@ export function openOutbox(s: AppState, account: string): AppState {
 
 export function closeOutbox(s: AppState): AppState {
   return s.outboxView ? { ...s, outboxView: null } : s;
+}
+
+/**
+ * The actions that read the mailbox selection or its marks, which the view
+ * hides: while it shows, a key for one does nothing and the palette or the
+ * menu answers {@link CLOSE_OUTBOX_FIRST}. Moves (`j`, `k`, `J`, `K`, `G`,
+ * `gg`, the pages) reach the view's own cursor through `move_selection`, and
+ * `cn` is left out, since a new draft needs no row and goes to the view's
+ * account.
+ */
+const SELECTION_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
+  "open_message",
+  "copy_selector",
+  "archive",
+  "delete",
+  "move",
+  "toggle_flag",
+  "toggle_read",
+  "mark_toggle",
+  "mark_range",
+  "mark_all",
+  "mark_clear",
+  "reply",
+  "reply_all",
+  "forward",
+  "open_editor",
+  "edit_recipients",
+  "approve",
+  "demote",
+  "send",
+  "send_all",
+]);
+
+export const CLOSE_OUTBOX_FIRST = "Close the outbox first (Escape): this acts on the mailbox selection";
+
+/** Whether the outbox view hides what `id` acts on. */
+export function hiddenByOutbox(s: AppState, id: ActionId): boolean {
+  return s.outboxView !== null && SELECTION_ACTIONS.has(id);
 }
 
 /** The row under the view's cursor: the one it names, else the first. */
