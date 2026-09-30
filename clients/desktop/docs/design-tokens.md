@@ -1,7 +1,7 @@
 # Design tokens
 
 The desktop client is dark only, and every colour a component uses is a semantic token defined once in `src/index.css`.
-The tokens are the shadcn set (`background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `border`, `input`, `ring`, `sidebar-*`, `chart-*`) plus six of our own: `selection`, `selection-foreground`, `link`, `framing`, `warning` and `disabled-foreground`.
+The tokens are the shadcn set (`background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `border`, `input`, `ring`, `sidebar-*`, `chart-*`) plus eight of our own: `selection`, `selection-foreground`, `link`, `framing`, `warning`, `disabled-foreground`, `reader-canvas` and `overlay`.
 Tailwind reaches them as `bg-background`, `text-link`, `ring-ring` and so on.
 
 ## Palette
@@ -17,9 +17,14 @@ They derive from the dark inverse of Basenord Palette D:
 
 `destructive` (`#FF7A85`) is a warm red kept apart from pumpkin, so an error never reads as a primary action.
 
+| Token | Value | Where it goes |
+|---|---|---|
+| `reader-canvas` | `#FFFFFF` | the reader frame's page, since mail is authored for white and a message that sets no background would draw black text on Prussian |
+| `overlay` | `#0C1B3399` | the scrim behind a dialog or a sheet: the Prussian canvas at 60% alpha |
+
 ## Rules
 
-- No component hardcodes a palette value: `src/app/colour-guard.test.ts` fails on a hex colour or an arbitrary `bg-[#…]` class anywhere under `src/components` or `src/app`.
+- No component hardcodes a palette value: `src/app/colour-guard.test.ts` fails on a hex colour, a functional colour, an arbitrary `bg-[#…]` class or a Tailwind palette class (`bg-black/10`, `text-slate-400`) anywhere under `src/components`, shadcn's `src/components/ui` included, or `src/app`.
 - Text pairs reach 4.5:1, focus rings and input borders 3:1, and disabled entries 3:1 although WCAG exempts inactive controls.
 - Every focusable shows a solid 2 px `ring` outline on `:focus-visible` (the base layer of `src/index.css`), whatever the component's own ring.
 - Icons are Lucide outline at stroke width 1.75, set once by `LucideProvider` in `src/main.tsx`.

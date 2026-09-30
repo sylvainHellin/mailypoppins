@@ -61,6 +61,7 @@
     --color-warning: var(--warning);
     --color-disabled-foreground: var(--disabled-foreground);
     --color-reader-canvas: var(--reader-canvas);
+    --color-overlay: var(--overlay);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -109,6 +110,9 @@
        message that sets no background would otherwise draw its default black
        text straight onto Prussian. */
     --reader-canvas: #FFFFFF;
+
+    /* The scrim behind a modal dialog or sheet: the Prussian canvas at 60%. */
+    --overlay: #0C1B3399;
 
     --destructive: #FF7A85;
     --border: #25406A;

@@ -21,6 +21,8 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/keymap/useKeymap.ts` | Keyboard routing |
 | `src/components/{shell,sidebar,list,search,reader,screens,palette}` | The views; `components/ui` is shadcn's; the reader frame is [reader.md](reader.md) |
 
+`components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
+
 ## Model
 
 The reducer keeps the fetched answers as generation-counted `Loadable`s: an event marks an answer stale by moving its `gen`, the loader fetches it at that generation, and an answer lands only as the generation it was asked at, so an event that arrives mid-fetch triggers one more fetch rather than being lost.
