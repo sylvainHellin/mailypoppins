@@ -22,7 +22,7 @@ The matrix is a list rather than a table because eight columns over 131 rows is 
 
 ### Classification vocabulary
 
-- GUI parity: a user-facing capability the GUI must deliver, in milestones M1 to M4 of the [native GUI plan](plans/native-gui.md).
+- GUI parity: a user-facing capability the GUI must deliver, in milestones M1 to M4 of the [native GUI plan](plans/native-gui.md), and M6 for desktop notifications.
 - CLI automation: a machine-facing surface whose consumers are scripts, agents, and other tools.
 - Diagnostics and maintenance: an operator surface for inspecting or repairing local state.
 - Daemon administration: lifecycle, locking, watching, and queue operation of the daemon itself.
@@ -37,7 +37,7 @@ A "client-side" entry needs no method at all and stays in the client process.
 
 ### GUI location
 
-Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129's shell plus #0131's read slices, and M2 to M4 are #0131.
+Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129's shell plus #0131's read slices, M2 to M4 are #0131, and M6 is #0132.
 An entry with another classification reads `not required`, since the plan puts no GUI-parity obligation on it.
 The ticket that ships an entry replaces the milestone with the surface and interaction it built.
 
@@ -1199,7 +1199,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the clipboard actions in `clients/tui/src/actions.rs`
 - Daemon surface: client-side in every client
-- GUI location: clients/desktop (M1, #0131 read slice)
+- GUI location: clients/desktop (M4, #0131)
 - Validation: manual
 - Status: not started
 
@@ -1217,7 +1217,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/notify.rs`, using osascript on macOS and notify-send on Linux with sanitized payloads
 - Daemon surface: the daemon decides a notification is warranted and emits `state.event`; the client holding the entitlement presents it
-- GUI location: clients/desktop (M4, #0131)
+- GUI location: clients/desktop (M6, #0132)
 - Validation: unit tests in `src/notify.rs`; `a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list` (`src/tui_tests/events.rs`), `a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals` (`tests/tui_daemon_recovery.rs`)
 - Status: routed (P5-U8); GUI not started
 - Note: the daemon decides *what arrived* and the client decides whether to notify. `sync.completed` carries `new_inbox_mail`, `[{from, subject}]` per ingested inbox message, and the TUI reads `notifications = true` on the way to `crate::notify` exactly where it always did (#0009). A client that dropped the event for that setting would drop the status line and the reload with it, so the opt-in is at the notifier and not at the stream.

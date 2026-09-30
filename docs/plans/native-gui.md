@@ -5,7 +5,8 @@
 The daemon the GUI needs has shipped.
 Phases 0 to 6 of the daemon migration landed as tickets #0118 to #0126 in release 0.10.0: one daemon owns every store, network session and durable operation, and the CLI and the TUI are its clients.
 On 2026-09-29 and 2026-09-30 the client kernel moved from the TUI into `crates/mp-client`, and the daemon gained the `message.html` query for a webview reader.
-The GUI itself is open, as tickets #0128 to #0132, and the first open ticket is #0128, milestone M0 below.
+The GUI itself is open, as tickets #0129 to #0132.
+M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-m0.md](../baselines/gui-spike-m0.md), and the next ticket is #0129, milestone M1 below.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -91,16 +92,29 @@ Composition replaces the reader pane.
 
 ## Performance targets
 
-The GUI has to feel snappy, and these numbers make that testable on Sylvain's Mac:
+The GUI has to feel snappy, and these numbers make that testable on Sylvain's Mac.
+Each target carries the M0 baseline, measured on 2026-09-30 with the spike's release build on macOS 26.6.2 ([gui-spike-m0.md](../baselines/gui-spike-m0.md)):
 
 - Cold start to a painted message list takes under 1 s, and a warm start under 500 ms.
+  M0 painted the list at 364 ms median over five back-to-back launches, and at 531 ms on the first launch after a build.
 - Keyboard navigation in the list and between panes responds within one frame, 16 ms.
+  M0 measured 0 ms median and 2 ms p90 from keydown to the next animation frame on a 500-row list.
 - A plain-text message opens in under 100 ms and an HTML message in under 250 ms, excluding the first webview warm-up.
+  M0 opened plain text in 9 to 27 ms, and a 320 KB HTML message in 13 ms median over the custom scheme and 19 ms over `srcdoc`.
 - Local search returns results in under 200 ms on a 50k-message account.
-- Resident memory stays under 300 MB, webview processes included, with one account open and the reader showing HTML.
+  M0 did not measure it.
+- Memory stays under 300 MB of physical footprint, webview processes included, with one account open and the reader showing HTML.
+  M0 measured 161 to 181 MB.
 - Neovim in the embedded terminal (M5) starts cold in under 300 ms and echoes a keystroke in under 30 ms.
+  M0 reached the statusline 219 ms after spawn with Sylvain's own plugin configuration, and echoed a keystroke to the rendered terminal in 4 ms median, 18 ms worst.
 
-M0 measures each target and records the baseline next to it in this section, and the targets are revised against what Tauri delivers.
+Three rules fix how the targets are measured:
+
+- Memory is the physical footprint that `footprint` and Activity Monitor report, summed over the app process and its WebKit processes, never RSS; RSS double-counts the shared WebKit pages and read 368 to 393 MB for the state M0 measured at 161 to 181 MB.
+- The Neovim target includes the user's own configuration and plugins, never `nvim --clean`; Sylvain's configuration used 219 ms of the 300, so a heavier plugin set can cross it.
+- Latency is measured with the window in front, because WebKit throttles a background or occluded window: in M0 xterm stopped rendering and a 10 s typing run took 125 s.
+
+Every target M0 measured was met, so none was revised.
 A target still missed by more than a factor of two at the end of M1 becomes a plan decision recorded here, and never slips silently.
 
 ## Location and build
@@ -137,11 +151,21 @@ The CSP is `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-s
 A rendition above 8 MiB is refused with `-32004` and `data.fallback = "message.materialise_html"`, and the GUI then falls back to the file handle and releases it with `message.release_handle` once the view closes.
 A message without markup is `-32602`, and the reader shows the stored plain text from `message.get` instead.
 
-The rendering rule:
+The rendering rule, decided on 2026-09-30 from the M0 findings:
 
-- The string loads as its own document, either a sandboxed `<iframe srcdoc>` without `allow-scripts` or a custom scheme that also sends the CSP as a response header.
-- It never goes through `innerHTML` into the application's own document.
-- The GUI intercepts every navigation out of the frame and opens links in the external browser.
+- The reader loads the rendition as its own document from the custom URI scheme, `mpmsg://localhost/<account>/<row_id>` on macOS.
+- A Rust scheme handler answers that URL with the `message.html` string and a `Content-Security-Policy` response header copied from the rendition's meta tag, so the message's own policy governs the document.
+- The app CSP stays strict: the scheme document ignores it, whereas a `srcdoc` document inherits it, and M0 lost the `data:` images of a `srcdoc` message under `img-src 'self'`.
+- Tauri issue #12767 did not reproduce on macOS 26.6, where the scheme iframe loads, renders and fires `load`; it is retested on macOS 15 before M6.
+- The string never goes through `innerHTML` into the application's own document.
+- The iframe carries `sandbox="allow-popups"` and no `allow-scripts`, so a `target=_blank` link reaches `on_navigation`; without `allow-popups` the sandbox drops it and nothing reaches Rust.
+- The app CSP's `frame-src` admits `mpmsg:`, `https:` and `http:`; limited to `mpmsg:`, it blocks a clicked link's frame navigation before `on_navigation` sees it, and the link is silently dead.
+- `on_navigation` sees subframe navigations as well as the main frame, so its allowlist admits the `mpmsg` scheme; it denies every other URL and hands an http(s) one to the external browser.
+- `window.open` reaches `on_new_window`, which denies it and hands the URL on the same way.
+- A `<meta http-equiv="refresh">` does nothing inside the sandbox, and no navigation from it reaches `on_navigation`.
+
+M0 saw the `target=_blank` path with `allow-scripts allow-popups`, because its probe needed a script to click; a real user click on a real message in the script-free frame is still unverified and is checked in M1.
+Admitting `https:` and `http:` in `frame-src` leaves `on_navigation` as the only guard against a web page loading in the reader frame, a risk listed below.
 
 ### What the CSP does not cover
 
@@ -226,12 +250,19 @@ Each one names the parity-matrix identifiers it closes, and replaces the milesto
 The Neovim half validates startup from a signed app, user config and plugin loading, Finder `PATH` resolution, PTY input, output, resize, clipboard, Unicode, IME, mouse and colour, keyboard routing between app and terminal, clean child termination on window close and after a crash, a save reaching the draft watcher and coming back through the subscription, and cold-start and keystroke-echo latency against the performance targets.
 No spike code is carried into `clients/desktop/`.
 
+M0 closed on 2026-09-30, and [gui-spike-m0.md](../baselines/gui-spike-m0.md) holds its numbers and findings.
+It did not test PTY resize, clipboard, IME, mouse, Unicode width, keyboard routing between app and terminal, child cleanup on window close or crash, the draft-watcher round trip, Finder `PATH` resolution or a signed-app launch; those rows move to M5.
+It wrote no dependency due-diligence record, which moves to M1.
+
 ### M1: read-only shell (#0129, and the read slices of #0131)
 
-- Scaffold `clients/desktop/` with the dependencies M0 recorded.
+- Record the dependency due diligence M0 did not write under `docs/baselines/decisions/`, starting from the stack the spike ran (Tauri 2.12, tauri-plugin-opener 2.7, React 19, Tailwind 4, and for M5 portable-pty 0.9 and xterm.js 6), and install nothing before Sylvain approves it.
+- Scaffold `clients/desktop/` with the approved dependencies.
 - The connector, handshake, bootstrap, reconnect, resync and version-mismatch restart screens.
 - The dark semantic tokens and the inset-sidebar shell with adaptive panes.
-- Accounts, the mailbox hierarchy with counts and sync health, the message list, the reader with `message.html`, and local and server search.
+- Accounts, the mailbox hierarchy with counts and sync health, the message list, the reader with `message.html` on the custom scheme, and local and server search.
+- Link handling is verified against an intercepted-URL log, never by opening real browser tabs on the developer's machine.
+  The opener plugin is called only behind an explicit user click in a shipped build, and any automated scenario stubs it.
 - Live events and reconnect, restoring presentation state by stable identifiers.
 - The command palette, keyboard routing, native menus, and accessibility primitives, with key help generated from the keymap data.
 - TypeScript protocol types generated from `mp-protocol`, after dependency due diligence on the generator.
@@ -261,8 +292,11 @@ No spike code is carried into `clients/desktop/`.
 ### M5: embedded Neovim (#0130)
 
 - Land the PTY and terminal dependencies M0 validated.
+- Batch PTY reads in Rust before sending them on the Channel: the spike's release build delivered 1.2 MB/s in sub-KiB chunks against 7.2 MB/s in dev, because each chunk costs Tauri a separate `webview.eval`.
+  `Channel` ordering held under a 200k-line burst (`seq 1 200000`, 1.49 MB) in both builds.
 - Replace the external-editor handoff with the embedded session described above, for new, reply, reply-all, forward and existing-draft editing.
 - Keyboard-focus, resize and crash-recovery tests with a real Neovim process.
+- Validate the Neovim rows M0 left untested: resize, clipboard, IME, mouse, Unicode width, keyboard routing, child cleanup on window close and crash, the draft-watcher round trip, Finder `PATH` resolution and a launch from a signed app.
 
 ### M6: signing, notarisation and bundling (#0132)
 
@@ -288,6 +322,7 @@ Rust-only GUI work, such as the connector, the pending-operations tracker and th
 - Accessibility tests cover focus order, labels, contrast, reduced motion, and keyboard-only operation.
 - Responsive tests cover wide, medium, and narrow layouts.
 - Reader tests load hostile HTML fixtures and assert that no script runs, no remote request leaves, and no navigation escapes the frame.
+- Link handling is verified against an intercepted-URL log, never by opening real browser tabs on the developer's machine; the opener plugin is called only behind an explicit user click in a shipped build, and any automated scenario stubs it.
 - PTY tests cover Neovim startup, Unicode, resize, save, quit, crash, and an unavailable executable.
 - Packaged-app smoke tests use the signed bundle rather than only development mode.
 - Cross-client scenarios mutate through the TUI or CLI and observe through the GUI, and the reverse.
@@ -309,6 +344,13 @@ The mitigation is a configurable executable path, known installation paths, and 
 
 A message renders inside the GUI's own webview, where a mistake reaches the application rather than a disposable browser tab.
 The mitigation is the rendering rule above, the CSP gaps listed with it, and the hostile-fixture tests.
+
+### The reader frame's navigation guard
+
+The app CSP admits `https:` and `http:` in `frame-src` so that link clicks reach `on_navigation`, which leaves `on_navigation` as the only guard against a web page loading in the reader frame.
+A hook that allows a URL by mistake, or a navigation WebKit does not report to it, puts a live web page inside the application's webview.
+The mitigation is a deny-by-default allowlist and a reader test per link form that asserts the intercepted-URL log and the frame's final URL.
+The fallback, if the guard proves leaky, is to rewrite every `<a href>` before rendering and close `frame-src` to `mpmsg:` again.
 
 ### Materialised file lifetime
 
@@ -333,5 +375,4 @@ The socket singleton, the handshake, the explicit restart and the packaging test
 
 - When the light theme deferred behind `OBS-07` lands, and what it needs beyond a second token set.
 - Message-list paging against whole-list transfer with row deltas for large mailboxes, where the TUI's whole-list model may not suit a webview list.
-- A custom scheme against `srcdoc` for the reader, where the scheme can send the CSP as a header and `srcdoc` needs no protocol handler.
 - How CI exercises the Tauri build on Linux without webkit2gtk.

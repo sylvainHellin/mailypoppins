@@ -135,10 +135,9 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 
 ## Next
 
-> Native GUI, the [native GUI plan](docs/plans/native-gui.md), reusing the daemon Phases 0 to 6 built. Seven milestones, M0 to M6, over five tickets, in order; all of them need the Mac.
+> Native GUI, the [native GUI plan](docs/plans/native-gui.md), reusing the daemon Phases 0 to 6 built. Seven milestones, M0 to M6, over five tickets, in order; all of them need the Mac. [#0128](docs/tickets/0128-gui-risk-spikes.md) M0 is done (2026-09-30): the spike met every target it measured and settled the reader route, recorded in [docs/baselines/gui-spike-m0.md](docs/baselines/gui-spike-m0.md). #0129 M1 is next.
 
-- [#0128 M0, Tauri, PTY and Neovim risk spikes](docs/tickets/0128-gui-risk-spikes.md) -- idea _(gates #0129; carries the live launchd check)_
-- [#0129 M1, read-only shell and design system](docs/tickets/0129-gui-shell-and-design-system.md) -- feature _(with the read slices of #0131)_
+- [#0129 M1, read-only shell and design system](docs/tickets/0129-gui-shell-and-design-system.md) -- feature _(with the read slices of #0131; carries the live launchd check and the dependency record from #0128)_
 - [#0131 M2 to M4, mutations, compose through the external editor, calendar, contacts and config](docs/tickets/0131-gui-full-parity.md) -- feature
 - [#0130 M5, embedded Neovim composition](docs/tickets/0130-gui-embedded-neovim.md) -- feature
 - [#0132 M6, distribution and release](docs/tickets/0132-gui-distribution-and-release.md) -- chore _(needs #0012)_
