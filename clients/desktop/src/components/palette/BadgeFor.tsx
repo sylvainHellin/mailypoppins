@@ -13,7 +13,7 @@ const TITLE: Record<BadgeKind, string> = {
 
 export function BadgeFor({ badge }: { badge: BadgeKind }) {
   return (
-    <Badge variant="outline" className="text-disabled-foreground" title={TITLE[badge]}>
+    <Badge variant="outline" className="text-muted-foreground" title={TITLE[badge]}>
       {badge}
     </Badge>
   );

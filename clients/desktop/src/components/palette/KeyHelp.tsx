@@ -39,7 +39,7 @@ export function KeyHelp({ open, onOpenChange }: KeyHelpProps) {
                         <th scope="row" className="w-28 py-0.5 pr-3 text-left font-normal">
                           <Kbd className="font-mono">{b.key}</Kbd>
                         </th>
-                        <td className={`py-0.5 ${badge ? "text-disabled-foreground" : ""}`}>
+                        <td className={`py-0.5 ${badge ? "text-muted-foreground" : ""}`}>
                           <span className="mr-2">{b.action}</span>
                           {badge ? <BadgeFor badge={badge} /> : null}
                         </td>

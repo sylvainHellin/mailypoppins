@@ -93,7 +93,10 @@ export const PAIRS: Pair[] = [
   { fg: "ring", bg: "popover", need: "ui", use: "Focus ring in a dialog" },
   { fg: "sidebar-ring", bg: "sidebar", need: "ui", use: "Sidebar focus ring" },
   { fg: "input", bg: "background", need: "ui", use: "Input border" },
-  { fg: "disabled-foreground", bg: "popover", need: "large", use: "Disabled palette entry (informational)" },
+  // Only the label of a disabled palette entry (CommandPalette.tsx), an
+  // inactive control WCAG exempts; the key help and every badge, which inform,
+  // are `muted-foreground`. Text that informs does not take this token.
+  { fg: "disabled-foreground", bg: "popover", need: "large", use: "Disabled palette entry (inactive control)" },
   { fg: "disabled-foreground", bg: "sidebar", need: "large", use: "Disabled sidebar entry (informational)" },
 ];
 
