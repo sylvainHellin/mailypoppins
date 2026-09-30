@@ -1,13 +1,28 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
+
+/*
+ * The mailypoppins desktop design system (#0129).
+ *
+ * Dark only, from the dark inverse of Basenord Palette D:
+ *   Prussian blue #0C1B33  outer canvas and dominant background
+ *   Cream         #F4F1E8  primary foreground
+ *   Ocean blue    #2E86AB  selection, focus, links, framing (lighter variants for text)
+ *   Pumpkin       #FF6700  primary actions, attention warnings, deltas only
+ *
+ * This file is the only place a palette value may appear (the colour-guard
+ * test greps src/components and src/app). Every pair's WCAG ratio is in
+ * docs/design-tokens.md, written by `pnpm contrast`.
+ */
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+    --breakpoint-md: 47.5rem;
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
+    --font-sans: "Inter", "Inter Variable", ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -39,6 +54,12 @@
     --color-card: var(--card);
     --color-foreground: var(--foreground);
     --color-background: var(--background);
+    --color-selection: var(--selection);
+    --color-selection-foreground: var(--selection-foreground);
+    --color-link: var(--link);
+    --color-framing: var(--framing);
+    --color-warning: var(--warning);
+    --color-disabled-foreground: var(--disabled-foreground);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -48,83 +69,80 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* One theme, dark; the shadcn semantic names stay so a light theme can follow. */
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    color-scheme: dark;
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
-}
 
-.dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    /* Surfaces, darkest to lightest. */
+    --sidebar: #0C1B33;             /* Prussian: the outer canvas */
+    --background: #0F213D;          /* the inset pane, Prussian lifted */
+    --card: #142A4A;
+    --popover: #172F52;
+    --muted: #1A3457;
+    --secondary: #1D3A60;
+    --accent: #1F3D66;
+
+    /* Text. */
+    --foreground: #F4F1E8;          /* Cream */
+    --card-foreground: #F4F1E8;
+    --popover-foreground: #F4F1E8;
+    --secondary-foreground: #F4F1E8;
+    --accent-foreground: #F4F1E8;
+    --muted-foreground: #B4BFCE;
+    --disabled-foreground: #7D8BA3;
+
+    /* Ocean: selection, focus, links, framing. */
+    --selection: #174A68;
+    --selection-foreground: #F4F1E8;
+    --framing: #2E86AB;             /* Ocean itself, for rules and outlines */
+    --ring: #4BA3CC;                /* Ocean lightened to clear 3:1 on every surface */
+    --link: #6DB6DA;                /* Ocean lightened to clear 4.5:1 as text */
+
+    /* Pumpkin: primary actions, attention, deltas. */
+    --primary: #FF6700;
+    --primary-foreground: #0C1B33;
+    --warning: #FF6700;
+
+    --destructive: #FF7A85;
+    --border: #25406A;
+    --input: #5075A8;
+
+    --chart-1: #FF6700;
+    --chart-2: #2E86AB;
+    --chart-3: #6DB6DA;
+    --chart-4: #F4F1E8;
+    --chart-5: #B4BFCE;
+
+    --sidebar-foreground: #F4F1E8;
+    --sidebar-primary: #4BA3CC;
+    --sidebar-primary-foreground: #0C1B33;
+    --sidebar-accent: #174A68;
+    --sidebar-accent-foreground: #F4F1E8;
+    --sidebar-border: #1E3558;
+    --sidebar-ring: #4BA3CC;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
-    }
+  }
+  html {
+    @apply font-sans antialiased;
+  }
   body {
     @apply bg-background text-foreground;
+  }
+  /* One visible focus indicator for every focusable, whatever the component
+     styles: a solid ring token outline, 3:1 on every surface. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
     }
-  html {
-    @apply font-sans;
-    }
+  }
 }
