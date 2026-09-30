@@ -22,6 +22,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/views.ts` | The full-pane views' titles and actions, and what a view hides |
 | `src/app/calendar.ts` | The agendas, the past/upcoming rule, the Calendar view's cursor and scope, and the source open |
 | `src/app/rsvp.ts` | The reader's invitation cards, the Graph refusals, the RSVP refusals in the TUI's words, the RSVP choice and the RSVPs this window awaits |
+| `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -35,7 +36,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host and the placeholder of a view no unit has filled |
-| `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, and the RSVP choice |
+| `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, the RSVP choice and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
@@ -65,10 +66,11 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
 | `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
+| `event` `operation.finished` of an invitation | the invitation settles: a notice says how, and the account's agenda, invitation cards and outbox counts are read again |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
 | `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; nothing draws it yet |
-| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`) or an RSVP (`rsvp`) settles or says it was interrupted |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`), an RSVP (`rsvp`) or an invitation (`send_invite`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -430,7 +432,7 @@ The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
 - `V` opens the RSVP choice for the cursor row (see RSVP).
 
 The palette's "Open the invite email in $EDITOR", "RSVP to invitation (Accept/Tentative/Decline)", "Show past events / upcoming only" and "Refresh events from disk" run the same actions, and outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the agenda".
-The header's "Past events" (`aria-pressed`) and "Refresh" buttons run `t` and `r`, and the card's RSVP button runs `V`.
+The header's "Past events" (`aria-pressed`) and "Refresh" buttons run `t` and `r`, its "New invitation" button opens the form (see New invitation), and the card's RSVP button runs `V`.
 
 ### RSVP
 
@@ -447,6 +449,24 @@ A reply is `calendar_rsvp`, awaited as `rsvp`: `state.rsvps` keeps each one this
 The settle says "Replied <response> to <summary>", with the response word the daemon took and the invitation's summary, and adds "; queued in the outbox" when no recipient took the reply yet.
 A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; a reply dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
 Every end makes the account's agenda and invitation cards stale, so the card and the agenda row show the new reply once the daemon folded it in.
+
+### New invitation
+
+The TUI has no form for a new invitation, only the CLI's `mp send --invite`; the desktop has a minimal one (SND-05), with no preview and no UID of its own, since the daemon mints one.
+The Calendar view's "New invitation" button and the palette's "New invitation" (CALENDAR, no key) open it, the overlay `invite` (`NewInvitationDialog.tsx`, a dialog named "New invitation"), for the Calendar view's account, else the selection's.
+Its fields are To, Cc, Subject, Start, the choice "Ends at" or "Lasts" with an End or a Duration field, Location and Description.
+Start and End are `datetime-local` fields, which send a local wall-clock time such as `2099-12-01T10:00`, one of the forms the daemon reads; Duration takes `1h30m` or `PT1H30M`.
+Only the End or the Duration shown is sent.
+The focus starts in To; Enter in a one-line field moves to the next field, Cmd+Enter or Ctrl+Enter sends, Escape cancels.
+
+The form asks before any call for a subject, a start and a recipient in To or Cc, in that order and with the Rust layer's sentences, and keeps what was typed.
+Every other refusal shows verbatim in the form's alert, which keeps it open: the daemon's words, such as "An invite needs --end or --duration".
+On a Graph account the form takes no input, its Send is disabled, and it shows the probe's sentence, the same one the reader's card shows (`invite_refusal`).
+
+A send is `send_invite`, awaited as `send_invite`: `state.inviteSends` keeps each one (`{token, account, subject, operation_id}`) and `inviteSendEarly` an end that overtook the answer.
+The form closes once the send started.
+The settle says "Sent the invitation <subject>"; one some recipients refused says "The invitation <subject> reached N of M recipients; the outbox names who never got it", one no recipient took that the outbox says why, a failure "The invitation <subject> failed: <why>", and a drop that it was interrupted.
+Every end makes the account's agenda, invitation cards and outbox counts stale, so the invitation appears in the agenda as the user's own once the daemon filed it.
 
 ### Staleness
 
@@ -481,8 +501,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, and the RSVP choice) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, and the RSVP choice on its listbox.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice and the New invitation form) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice on its listbox, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
