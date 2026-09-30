@@ -393,15 +393,44 @@ fn sweep_renditions(cache_dir: &Path, now: SystemTime) {
 pub fn hit_html_open_on(door: &Door, cache_dir: &Path, html: &str) -> Result<OpenedFile, GuiError> {
     sweep_renditions(cache_dir, SystemTime::now());
     let path = rendition_path(cache_dir, html);
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)
-            .map_err(|e| GuiError::internal(format!("could not create {}: {e}", dir.display())))?;
-    }
     let page = mp_core::parse::inject_csp_meta(&mp_core::parse::ensure_utf8_charset(html));
-    fs::write(&path, page)
-        .map_err(|e| GuiError::internal(format!("could not write {}: {e}", path.display())))?;
+    write_private(cache_dir, &path, page.as_bytes())?;
     open_file(door, &path)?;
     Ok(opened(&path))
+}
+
+/// Write a rendition readable by its owner only, as the daemon's handles and
+/// the TUI's temp files are: `renditions/` and the `hit-*` directory 0700
+/// (tightened if they exist wider), the file 0600.
+fn write_private(cache_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), GuiError> {
+    let private_dir = |dir: &Path| {
+        mp_core::config::create_private_dir_all(dir)
+            .map_err(|e| GuiError::internal(format!("could not create {}: {e}", dir.display())))
+    };
+    private_dir(&cache_dir.join(RENDITIONS))?;
+    if let Some(dir) = path.parent() {
+        private_dir(dir)?;
+    }
+    let failed =
+        |e: std::io::Error| GuiError::internal(format!("could not write {}: {e}", path.display()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let mut file = options.open(path).map_err(failed)?;
+        // `mode` applies to a new file only; one the same hit wrote before
+        // is narrowed too.
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(failed)?;
+        std::io::Write::write_all(&mut file, bytes).map_err(failed)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = options.open(path).map_err(failed)?;
+        std::io::Write::write_all(&mut file, bytes).map_err(failed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -990,6 +1019,37 @@ mod tests {
         assert!(page.to_lowercase().contains("charset=\"utf-8\""), "{page}");
         assert!(page.contains("Grüße"));
         assert_eq!(fixture.opened(), vec![file.path]);
+    }
+
+    /// The rendition is the owner's only, like the daemon's handles: the
+    /// directories 0700, the file 0600, and a wider leftover narrowed.
+    #[cfg(unix)]
+    #[test]
+    fn a_hit_rendition_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let (door, _fixture) = fixture_door();
+        let cache = scratch("private");
+        let html = "<p>private</p>";
+        let path = rendition_path(&cache, html);
+        let hit = path.parent().unwrap();
+        fs::create_dir_all(hit).unwrap();
+        fs::set_permissions(cache.join(RENDITIONS), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(hit, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let file = hit_html_open_on(&door, &cache, html).unwrap();
+        assert_eq!(Path::new(&file.path), path);
+        assert_eq!(mode(&cache.join(RENDITIONS)), 0o700);
+        assert_eq!(mode(hit), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert!(fs::read_to_string(&path).unwrap().contains("private"));
+
+        let other = rendition_path(&cache, "<p>fresh</p>");
+        hit_html_open_on(&door, &cache, "<p>fresh</p>").unwrap();
+        assert_eq!(mode(other.parent().unwrap()), 0o700);
+        assert_eq!(mode(&other), 0o600);
     }
 
     #[test]

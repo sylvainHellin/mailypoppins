@@ -154,7 +154,7 @@ Open for M4 and for Sylvain:
 - The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself.
 - The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself.
 - `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
-- The draft preview's Approve and Back to draft buttons act on the marks the outbox view hides while it is open (the fix1 review), and `clients/desktop/docs/shell.md`, "What the view hides", says nothing hidden acts on them.
+- The draft preview's Approve and Back to draft buttons acted on the marks the outbox view hides while it is open (the fix1 review), against `clients/desktop/docs/shell.md`, "What the view hides": fixed in `683bcfac`, they act on the draft shown.
 
 ## Exit gate
 

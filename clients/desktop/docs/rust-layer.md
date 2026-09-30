@@ -335,6 +335,7 @@ type SavedAttachments = {
 A server-only search hit has no row, so there is nothing to materialise; its markup is the hit's `html_body`.
 `hit_html_open` writes it with `mp_core::parse::ensure_utf8_charset` and `inject_csp_meta`, as the TUI's `html_temp_file` does, to `<app cache>/renditions/hit-<hash>/message.html`, one directory per markup, and opens it.
 The app cache is Tauri's `app_cache_dir`, `~/Library/Caches/dev.mailypoppins.desktop/` on macOS; the fixture uses `cache/` under its run directory.
+On unix `renditions/` and each `hit-<hash>/` are 0700, tightened if found wider (`mp_core::config::create_private_dir_all`), and `message.html` is 0600, as the daemon's handles and the TUI's temp files are.
 Each write first removes the renditions older than a day.
 
 A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon serves neither `draft.attach` nor a removal, so all four draft commands work on the file, which `draft.path` resolves fresh:
