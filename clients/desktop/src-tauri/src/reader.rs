@@ -327,6 +327,31 @@ mod tests {
     }
 
     #[test]
+    fn every_response_is_typed_and_unsniffable() {
+        // The text rendition and a failure carry the same guards as the
+        // HTML one: a declared type the webview may not second-guess, and
+        // the daemon policy.
+        let text = respond("GET", "/work/1002", Ok(fixture_door()));
+        assert_eq!(
+            text.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(text.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(text.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(text.headers()[header::CONTENT_SECURITY_POLICY], MESSAGE_CSP);
+        for failed in [
+            respond("GET", "/work/99999", Ok(fixture_door())),
+            respond("GET", "/work/x", Ok(fixture_door())),
+            respond("GET", "/work/1001", Err(GuiError::unavailable("down"))),
+        ] {
+            let h = failed.headers();
+            assert_eq!(h[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+            assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert_eq!(h[header::CONTENT_SECURITY_POLICY], MESSAGE_CSP);
+        }
+    }
+
+    #[test]
     fn statuses_follow_the_failure() {
         assert_eq!(
             respond("GET", "/work/99999", Ok(fixture_door())).status(),
