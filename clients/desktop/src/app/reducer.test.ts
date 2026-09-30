@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionTargets, reducer, type Action } from "@/app/reducer";
+import { actionTargets, progressAction, reducer, type Action } from "@/app/reducer";
 import { ACTIVITY_CAP } from "@/app/pending";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
 import { openableHits } from "@/app/search";
@@ -801,6 +801,61 @@ describe("mutations and pending state", () => {
       s = run(s, { type: "dismiss_all_notices" });
       expect(s.activity).toEqual([]);
       expect(run(s, { type: "dismiss_all_notices" })).toBe(s);
+    });
+  });
+
+  describe("operation progress", () => {
+    const progressEvent = (id: string, done: number, revision: number, message: string | null = null): Action => ({
+      type: "gui_event",
+      event: {
+        type: "event",
+        event: {
+          instance_id: fixtures.bootstrap.instance_id,
+          revision,
+          kind: "operation.progress",
+          payload: { operation_id: id, phase: "contacts", done, total: null, message },
+        },
+      },
+    });
+    const finished = (id: string, revision: number): Action => ({
+      type: "gui_event",
+      event: {
+        type: "event",
+        event: { instance_id: fixtures.bootstrap.instance_id, revision, kind: "operation.finished", payload: { operation_id: id, state: "succeeded", result: {}, error: null } },
+      },
+    });
+
+    it("decodes a report into the typed action and keeps the last one by operation id", () => {
+      expect(progressAction({ operation_id: "op-1", phase: "device_code", done: 0, total: null, message: "https://microsoft.com/devicelogin FXTR" })).toEqual({
+        type: "operation_progress",
+        operation_id: "op-1",
+        progress: { phase: "device_code", done: 0, total: null, message: "https://microsoft.com/devicelogin FXTR" },
+      });
+      expect(progressAction({ phase: "x", done: 0 })).toBeNull();
+      let s = run(booted(), progressEvent("op-1", 0, 900), progressEvent("op-1", 1, 901, "work"));
+      expect(s.progress).toEqual({ "op-1": { phase: "contacts", done: 1, total: null, message: "work" } });
+      s = run(s, { type: "operation_progress", operation_id: "op-2", progress: { phase: "draft", done: 0, total: 2, message: null } });
+      expect(Object.keys(s.progress)).toEqual(["op-1", "op-2"]);
+    });
+
+    it("drops the report when its operation finishes, settles or is dropped", () => {
+      let s = run(booted(), progressEvent("op-1", 0, 900), progressEvent("op-2", 0, 901), progressEvent("op-3", 0, 902));
+      s = run(s, finished("op-1", 903));
+      expect(Object.keys(s.progress)).toEqual(["op-2", "op-3"]);
+      s = run(s, {
+        type: "gui_event",
+        event: { type: "operation_settled", operation_id: "op-2", kind: "sync", status: { operation_id: "op-2", method: "sync.quick", state: "succeeded", scope: "durable", progress: null, result: null, error: null } },
+      });
+      s = run(s, { type: "gui_event", event: { type: "operation_dropped", operation_id: "op-3", kind: "sync", reason: "daemon restarted" } });
+      expect(s.progress).toEqual({});
+    });
+
+    it("keeps the reports over a re-bootstrap of the same daemon and drops them for another", () => {
+      let s = run(booted(), progressEvent("op-1", 0, 900));
+      s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "resync", bootstrap: fixtures.bootstrap } });
+      expect(Object.keys(s.progress)).toEqual(["op-1"]);
+      s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } } });
+      expect(s.progress).toEqual({});
     });
   });
 });

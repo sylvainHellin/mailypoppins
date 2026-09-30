@@ -6,6 +6,8 @@ import type {
   DraftInvalid,
   HoldStatus,
   MutationsRolledBackPayload,
+  OperationProgressPayload,
+  Progress,
   StateInvalidatePayload,
   StateRemovePayload,
   SyncCompletedPayload,
@@ -217,6 +219,8 @@ export type Action =
   | { type: "send_failed"; token: number; error: GuiError; invalid: DraftInvalid | null }
   | { type: "dismiss_notice"; id: number }
   | { type: "dismiss_all_notices" }
+  /** One `operation.progress` of an operation this window awaits (the Rust layer drops the others). */
+  | { type: "operation_progress"; operation_id: string; progress: Progress }
   // The outbox (app/outbox.ts; app/mutations.ts dispatches the row actions around their commands).
   | { type: "open_outbox"; account: string }
   | { type: "close_outbox" }
@@ -623,6 +627,23 @@ export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
   };
 }
 
+/** An `operation.progress` payload as the typed action, or null when it is not one. */
+export function progressAction(payload: unknown): Extract<Action, { type: "operation_progress" }> | null {
+  const p = payload as Partial<OperationProgressPayload> | null;
+  if (!p || typeof p.operation_id !== "string" || typeof p.phase !== "string" || typeof p.done !== "number") return null;
+  const total = typeof p.total === "number" ? p.total : null;
+  const message = typeof p.message === "string" ? p.message : null;
+  return { type: "operation_progress", operation_id: p.operation_id, progress: { phase: p.phase, done: p.done, total, message } };
+}
+
+/** The operation ended: its last report goes. */
+function endProgress(s: AppState, operationId: string): AppState {
+  if (!(operationId in s.progress)) return s;
+  const progress = { ...s.progress };
+  delete progress[operationId];
+  return { ...s, progress };
+}
+
 function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
   switch (kind) {
     case "state.invalidate": {
@@ -709,9 +730,14 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       return { ...s, shuttingDown: true };
     case "message.server_hit":
       return signal(s, serverHitSignal(payload));
+    case "operation.progress": {
+      const a = progressAction(payload);
+      return a ? reducer(s, a) : s;
+    }
     case "operation.finished": {
       const sig = finishedSignal(payload);
       if (sig.kind !== "finish") return s;
+      s = endProgress(s, sig.operation_id);
       const end = { operation_id: sig.operation_id, state: sig.state, error: sig.error, result: sig.result };
       if (isSyncOperation(s, sig.operation_id)) return syncSignal(s, end);
       if (isSendOperation(s, sig.operation_id)) return sendSignal(s, end);
@@ -758,6 +784,8 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         pending: {},
         holds: { ...ended, ...seedHolds(e.bootstrap.snapshot.holds) },
         marked: sameInstance ? next.marked : NO_MARKS,
+        // Operation ids are per daemon instance.
+        progress: sameInstance ? next.progress : {},
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
         overlay: closeOverlay ? null : next.overlay,
@@ -773,11 +801,13 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         interceptNotice: e.url.source === "open_external_stub" ? s.interceptNotice : e.url,
       };
     case "operation_settled":
+      s = endProgress(s, e.operation_id);
       if (e.kind === "sync") return syncSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "outbox_retry") return outboxSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
+      s = endProgress(s, e.operation_id);
       if (e.kind === "sync") return syncSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "outbox_retry") return outboxSignal(s, { operation_id: e.operation_id, dropped: e.reason });
@@ -1153,6 +1183,8 @@ export function reducer(s: AppState, a: Action): AppState {
       return sendStartFailed(s, a.token, a.error.message, a.invalid);
     case "dismiss_notice":
       return s.activity.some((n) => n.id === a.id) ? { ...s, activity: s.activity.filter((n) => n.id !== a.id) } : s;
+    case "operation_progress":
+      return { ...s, progress: { ...s.progress, [a.operation_id]: a.progress } };
     case "dismiss_all_notices":
       return s.activity.length > 0 ? { ...s, activity: [] } : s;
     case "open_outbox":

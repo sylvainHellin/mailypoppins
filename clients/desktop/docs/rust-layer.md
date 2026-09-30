@@ -395,6 +395,7 @@ A sync started by `sync_trigger`, a send started by `send_draft` or `send_approv
 A hit, a progress report or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 `operation.progress` reaches the webview only for an operation this window awaits, so another client's contacts rebuild or sign-in code never shows here.
 A progress report leaves its operation awaited; only the finish, a settle or a drop ends the wait.
+The frontend keeps each awaited operation's last report (`progress` in the model, by `operation_id`) until the operation ends ([shell.md](shell.md), "Model").
 
 ## The reader
 

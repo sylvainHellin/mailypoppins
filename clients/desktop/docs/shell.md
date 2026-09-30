@@ -58,6 +58,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
+| `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; nothing draws it yet |
 | `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`) or a retry (`outbox_retry`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 

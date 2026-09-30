@@ -11,6 +11,7 @@ import type {
   MutationsRolledBack,
   OperationState,
   OperationStatus,
+  Progress,
   RpcError,
   ServerSearchHit,
   SyncCompleted,
@@ -44,6 +45,12 @@ export type OperationFinishedPayload = {
   result?: unknown;
   error?: RpcError | null;
 };
+
+/**
+ * `operation.progress`: one report of a running operation, its `Progress`
+ * beside the `operation_id` (src/daemon/operations.rs, `progress_payload`).
+ */
+export type OperationProgressPayload = Progress & { operation_id: string };
 
 /** `daemon.shutting_down`: each pending entry is an `operation.status` result. */
 export type ShuttingDownPayload = { grace_secs: number; pending: OperationStatus[] };

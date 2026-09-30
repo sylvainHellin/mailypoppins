@@ -1,7 +1,16 @@
 // The desktop shell's model: connection, bootstrap, the fetched lists, the
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
-import type { Bootstrap, DraftEntry, DraftMessage, HoldStatus, MessageFlags, MessageListRow, OutboxListing } from "@/protocol/types";
+import type {
+  Bootstrap,
+  DraftEntry,
+  DraftMessage,
+  HoldStatus,
+  MessageFlags,
+  MessageListRow,
+  OutboxListing,
+  Progress,
+} from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
@@ -468,6 +477,12 @@ export type AppState = {
   outboxActions: OutboxAction[];
   /** Operation ends that arrived while an `outbox_retry` was unanswered, for its id. */
   outboxEarly: OperationEnd[];
+  /**
+   * The last `operation.progress` of each operation this window awaits, by
+   * `operation_id`, until it finishes, settles or is dropped. The Rust layer
+   * passes only its awaited operations' reports, so another client's never land here.
+   */
+  progress: Record<string, Progress>;
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -519,6 +534,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     outboxView: null,
     outboxActions: [],
     outboxEarly: [],
+    progress: {},
   };
 }
 
