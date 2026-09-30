@@ -2218,3 +2218,10 @@ When a message header is evidence, ask who can write it and where in the header 
 `rustfmt --edition 2021 tests/daemon_hooks.rs` also rewrote `tests/support/parity.rs`, because `mod support;` pulls the shared test support modules into the file's module tree and rustfmt formats every module it reaches.
 The tree as a whole is not rustfmt-clean, so formatting one new test file produced an unrelated diff in a file other suites own.
 Format a new file with `rustfmt --edition 2021 --config skip_children=true` (nightly) or check `git status` afterwards and undo whatever it touched beyond the new file.
+
+## On macOS a `/var/tmp` worktree fails the service-unit fixtures
+
+`AGENTS.md` sends agent worktrees and `CARGO_TARGET_DIR` to `/var/tmp`, which is right on the Linux host, where `/tmp` is a small tmpfs.
+On macOS `/var` is a symlink to `/private/var`, and six rows of `tests/daemon_service.rs` then fail: the unit and the plist carry the binary path as `current_exe()` reports it (`/var/tmp/...`) while the test expects the canonical `/private/var/tmp/...`, or the other way round.
+Nothing is wrong with the service code; the same rows pass from a checkout under `$HOME`.
+On the Mac, run the full suite from the primary checkout, or read those six failures as the path artifact they are.
