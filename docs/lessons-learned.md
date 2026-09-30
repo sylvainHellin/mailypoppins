@@ -2312,3 +2312,9 @@ The TUI's `mailbox_load_generation` drops a list read that started before an opt
 In the GUI that alone still lets a row come back: a batch sends one daemon call per row, so a read that starts after the optimistic apply can reach the store before the daemon has committed the later rows, and its generation is current.
 Every list answer is therefore laid under `pending` as well, which hides a row still leaving and shows a pending flag at its new value until the command answers.
 A refused batch also has to put its rows back in the reverse order they left: each saved index was taken after the batch's earlier rows had gone, so restoring in the original order shifts every later row by one.
+
+## A message row id is unique only within one account's store
+
+Each account has its own SQLite store, and `messages.id` is that store's autoincrement, so two accounts reuse the same ids.
+`find_by_id` in the daemon looks the id up in the store of the account the call names and has no account filter beyond that, so `message.delete` with `account: "work"` and a row id read from home's list acts on work's row of that id if one exists.
+The desktop fixture happens to scope row ids to their account and refuses the mismatch, which a live daemon does not; the GUI keeps each row id paired with the account it was listed from and never relies on that refusal (`clients/desktop/docs/rust-layer.md`, Mutations).

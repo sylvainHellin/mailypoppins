@@ -158,8 +158,11 @@ A `MessageMeta` header is `null` when the message did not carry it, where a `Mes
 The five message commands send one daemon call per row id, in the order given, each with `settle: false`, the TUI's contract.
 The daemon commits the row change and the server op it owes in one transaction and answers at once; it drains the queue once the account's mutations have been quiet for 1.5 s.
 `MutationAck` is the daemon's inline answer plus the `row_id` the call named; `id` and `selector` name the message before the mutation, and `moved_to` where an archive or a move put it.
-A row the daemon refused (gone, in another account, or a destination it cannot move to) lands in `failed` with its `GuiError`, and the next row goes ahead.
-An error about the whole batch (no daemon, an unknown account, a timeout) rejects the command when no row was done yet, and otherwise stops the batch and fills `failed` with every row not done, so the answer always says which rows changed.
+`moved_to.selector` carries the stored Message-ID with its angle brackets percent-encoded (`mp://work/archive/%3C…%3E`), as the daemon answers, and so differs from the moved row's own `selector`, which carries the bare Message-ID.
+A row id is an id in the named account's store, and the daemon acts on whichever row of that account holds it.
+Keeping each row id paired with the account it was listed from is the frontend's job; the fixture refuses an id it does not hold in that account, and nothing in the GUI relies on that.
+A row the daemon refused with `-32602` (no such row in that account, or a destination it cannot move to) lands in `failed` with its `GuiError`, and the next row goes ahead.
+An error about the whole batch (no daemon, an unknown account, an account not ready, a store failure, a timeout) rejects the command when no row was done yet, and otherwise stops the batch and fills `failed` with every row not done, so the answer always says which rows changed.
 `draft_discard` follows the same rules over draft ids and never forces: an approved draft is refused.
 The daemon has no undo for any of them; a server refusal arrives later as `mutations.rolled_back { account, failed }`, which names no row, so the frontend re-reads the account's lists.
 
