@@ -21,6 +21,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/outbox.ts` | The outbox listings, the outbox view, retry and discard, and the queue depth |
 | `src/app/views.ts` | The full-pane views' titles and actions, and what a view hides |
 | `src/app/calendar.ts` | The agendas, the past/upcoming rule, the Calendar view's cursor and scope, and the source open |
+| `src/app/rsvp.ts` | The reader's invitation cards, the Graph refusals, the RSVP refusals in the TUI's words, the RSVP choice and the RSVPs this window awaits |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -34,7 +35,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host and the placeholder of a view no unit has filled |
-| `src/components/calendar` | The Calendar view, its agenda list and rows, and the event card the reader's invitation card reuses |
+| `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, and the RSVP choice |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
@@ -56,17 +57,18 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
-| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda stale |
-| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda |
+| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
+| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
+| `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
 | `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; nothing draws it yet |
-| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`) or a retry (`outbox_retry`) settles or says it was interrupted |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`) or an RSVP (`rsvp`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -300,7 +302,7 @@ The reader keeps what it showed, and its toolbar and draft buttons still act on 
 ### What the view hides
 
 The mailbox selection and its marks stay in the model while the view shows, and nothing the view does not show acts on them.
-The actions that read them are open, copy selector, archive, delete, move, the read and flag toggles, the marks (`v`, `Ctrl+a`, the range, clear marks), reply, reply all, forward, open in editor, edit recipients, approve, demote, `x`, `cX`, the attachment keys `to`, `ts`, `tb` and `ta`, and `F` (`hiddenByOutbox` in `src/app/outbox.ts`).
+The actions that read them are open, copy selector, archive, delete, move, the read and flag toggles, the marks (`v`, `Ctrl+a`, the range, clear marks), reply, reply all, forward, open in editor, edit recipients, approve, demote, `x`, `cX`, the attachment keys `to`, `ts`, `tb` and `ta`, `F`, and the RSVP `tv` (`hiddenByOutbox` in `src/app/outbox.ts`).
 Their keys do nothing from any pane, the reader included, since from the reader they would act on the marks as well.
 Their palette rows stay listed, and running one says "Close the outbox first (Escape): this acts on the mailbox selection".
 Escape closes the view before it clears any marks, so the first Escape never drops marks the view hid.
@@ -425,10 +427,26 @@ The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
   The notice names the editor, or says "That event has no ics source in the store" for a row with none, or "Open failed: <why>".
 - `t` shows or hides the past events and never arms the `t` family.
 - `r` reads the agenda again and says "Calendar refreshed (N events)" once it lands.
-- `V`, the RSVP, is not bound yet; key help and the palette list it with its M4 badge.
+- `V` opens the RSVP choice for the cursor row (see RSVP).
 
-The palette's "Open the invite email in $EDITOR", "Show past events / upcoming only" and "Refresh events from disk" run the same actions, and outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the agenda".
-The header's "Past events" (`aria-pressed`) and "Refresh" buttons run `t` and `r`.
+The palette's "Open the invite email in $EDITOR", "RSVP to invitation (Accept/Tentative/Decline)", "Show past events / upcoming only" and "Refresh events from disk" run the same actions, and outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the agenda".
+The header's "Past events" (`aria-pressed`) and "Refresh" buttons run `t` and `r`, and the card's RSVP button runs `V`.
+
+### RSVP
+
+Three roads lead to a reply: the reader's invitation card ([reader.md](reader.md), "Invitations"), `tv` on the cursor email in Mail, and `V` or the card's RSVP button in the Calendar view.
+`V` refuses the cursor row in the TUI's agenda order and words: a cancelled row ("This event was cancelled by the organizer; nothing to RSVP"), a row the user organizes ("You are the organizer of this invite; nothing to RSVP"), a row that is not a `REQUEST` ("Only received invitations (REQUEST) can be RSVP'd"), then a Graph account with the daemon's sentence.
+The card's RSVP button is disabled with the same sentence under it, and both refuse a row whose reply is still sending.
+
+`tv` and `V` open the RSVP choice, the overlay `rsvp` (`RsvpDialog.tsx`, a dialog named "RSVP" with the invitation's summary): a listbox named "Response" with Accept, Tentative and Decline, Accept selected.
+Its keys are the TUI's RSVP overlay: `a`, `t` and `d` pick an answer, `j`, Down and Tab move down, `k`, Up and Shift+Tab move up, Enter sends the selected answer, Escape and `q` close without sending.
+The dialog owns every key while it is open, and Tab moves the selection, so the focus stays inside it.
+Enter sends even while a button behind the dialog still holds the focus, which the popup takes a moment after it opens.
+
+A reply is `calendar_rsvp`, awaited as `rsvp`: `state.rsvps` keeps each one this window started (`{token, account, row_id, response, summary, operation_id}`) until it settles or is dropped, and `rsvpEarly` holds an end that overtook the start's answer, as `sends` and `sendEarly` do.
+The settle says "Replied <response> to <summary>", with the response word the daemon took and the invitation's summary, and adds "; queued in the outbox" when no recipient took the reply yet.
+A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; a reply dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
+Every end makes the account's agenda and invitation cards stale, so the card and the agenda row show the new reply once the daemon folded it in.
 
 ### Staleness
 
@@ -436,6 +454,7 @@ No daemon resource names the agenda: it is a fold over the account's invitation 
 So an account's agenda goes stale on a `state.invalidate` or `state.remove` of `mailbox:<account>/...` or `message:<account>/...`, on that account's `sync.completed`, and on every bootstrap, which also drops the agendas of accounts that are gone.
 Only the shown agenda is read: one that went stale behind Mail or another view is read when the Calendar view comes back.
 A new, updated or cancelled invitation therefore reaches the agenda with the invalidation of the mailbox it lands in, without an `r`.
+The reader's invitation cards go stale on the same events, and a settled RSVP makes both stale.
 An account whose store is not ready (`-32006`) shows "<account> has no local store yet, so it has no agenda; it appears after the account's first sync", not an error; its first sync makes the agenda stale.
 
 ## Layouts
@@ -462,8 +481,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, and the attachment picker, Save and Attach file dialogs) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, the Save and Attach file dialogs in their path field, whose note is its description, and the attachment picker on its first file.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, and the RSVP choice) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, and the RSVP choice on its listbox.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -487,6 +506,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
+- `tv`: the RSVP choice for the cursor email, from the list or the reader (the TUI's MESSAGE key); in the Calendar view `V` does it for the cursor row (see Calendar, "RSVP").
 - `X`: dismiss the newest activity notice, a desktop key.
 - `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.

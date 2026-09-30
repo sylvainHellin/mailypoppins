@@ -25,6 +25,30 @@ The open message's toolbar (`ReaderToolbar.tsx`, `role="toolbar"`, "Message acti
 Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward opens the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
 Open in browser (`tb`) is last.
 
+## Invitations
+
+An email the store marks as an invitation (`MessageMeta.invite`) shows its invitation card under the header block (`InviteCard.tsx`, a region named "Invitation"), the Calendar view's event card with the reply buttons as its children ([shell.md](shell.md), "Calendar").
+The card reads `invite_get` once the reader shows the email, and a skeleton stands in until it lands.
+An email whose calendar data the store could not read says "This email carries no invitation the store could read".
+`state.invites` keeps each card by `readerKey`, and a card goes stale with its account's agenda: a `state.invalidate` or `state.remove` of the account's mailboxes or messages, its `sync.completed`, a bootstrap, and a settled RSVP.
+So an update or a cancellation that lands in the inbox, and the fixture's `invite_update` and `invite_cancel`, reach an open card without a reload.
+
+Below the details, the group "Reply to the invitation" holds Accept, Tentative and Decline.
+A button sends `calendar_rsvp` with its answer at once, and the three stay disabled while the reply is sending ("Sending Accept…").
+The TUI refuses some invitations, and the card disables the three with the TUI's sentence under them, `aria-describedby` from each button, checked in this order (`rsvpRefusal` in `src/app/rsvp.ts`):
+
+1. not a `REQUEST`: "Only received invitations (REQUEST) can be RSVP'd";
+2. cancelled: "This event was cancelled by the organizer; nothing to RSVP";
+3. superseded: "A newer version of this invitation has arrived; RSVP from that one";
+4. an email in the Sent mailbox, the user's own: "You are the organizer of this invite; nothing to RSVP";
+5. a Graph account: the daemon's sentence, from `invite_refusal`, read once per account and forgotten when another daemon instance answers.
+
+The TUI's sentences carry an em-dash where the desktop has a semicolon.
+With none of these, the line under the buttons says that `t v` opens the reply from the keyboard.
+
+`tv`, from the list or the reader, opens the RSVP choice for the cursor email after the TUI's guards: "Not a calendar invite" for an email that is none, the organizer sentence for one in the Sent mailbox, "This search hit has no local copy to RSVP from" for a server-only hit, then the card's reasons, read with `invite_get` when the card is not loaded.
+The choice and what a settled reply says are in [shell.md](shell.md), "Calendar".
+
 ## Attachments
 
 The header block lists the message's attachments from `MessageMeta.attachments`, each with its name, its size, and two icon buttons named after the file: "Open <name>" (`to`) and "Save <name>" (`ts`).

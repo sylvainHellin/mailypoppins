@@ -14,7 +14,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
-| `calendar.rs` | The agenda, and an agenda entry's `invite.ics` in the editor |
+| `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP and the Graph probe |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -113,6 +113,9 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_attachment_open` | `account`, `id`, `index` | `OpenedFile` |
 | `calendar_events` | `account` | `AgendaEvent[]`, every row, past ones included |
 | `invite_source_open` | `account`, `row_id` (an agenda row's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
+| `invite_get` | `account`, `row_id` | `EventFrontmatter`, or `null` for a message with no invitation |
+| `calendar_rsvp` | `account`, `row_id`, `response: "accept" \| "tentative" \| "decline"` | `{ operation_id }` |
+| `invite_refusal` | `account` | `InviteRefusal` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
@@ -193,6 +196,11 @@ type EditorSetting = {
   effective: string; effective_source: EditorSource;
 };
 type SyncMode = "quick" | "full";
+type RsvpSettled = {
+  account: string; selector: string; response: string; subject: string;
+  organizer: string; message_id: string; delivered: boolean;
+};
+type InviteRefusal = { account: string; refusal: string | null };
 
 type InterceptedUrl = { url: string; at: number; source: "navigation" | "new_window" | "open_external_stub" };
 type VersionInfo = {
@@ -255,6 +263,7 @@ A cancelled hold cancels the operation too, which then ends `cancelled`.
 | `send` | `send_draft` | `send.draft` | `SendOutcome` |
 | `send_approved` | `send_approved` | `send.approved` | `ApprovedOutcome` |
 | `outbox_retry` | `outbox_retry` | `send.outbox_retry` | `OutboxRetryOutcome` |
+| `rsvp` | `calendar_rsvp` | `calendar.rsvp` | `RsvpSettled` |
 
 Each ends one of three ways, as the event stream below says: `operation.finished` with `{operation_id, state, result?, error?}`, `operation_settled` with the whole `OperationStatus` after a re-query, or `operation_dropped` when the daemon restarted.
 A send's `state` is `succeeded` once the submission ran, with each recipient's verdict in `recipients`, `failed` with the transport's error, or `cancelled`; a `succeeded` send every recipient refused is a failure to show.
@@ -290,6 +299,20 @@ An account whose store is not ready is refused with `protocol` code `-32006`, an
 It reads the row's `invite.ics` with `message.ics {account, row_id}` (`mp_client::queries::message_ics`, which decodes the base64 the wire carries), writes it to `renditions/invite-<account>-<row_id>.ics` under the app's cache directory, the directory 0700 and the file 0600, and opens that file with the external editor as `editor_open` does.
 The file is a copy to read: an edit to it reaches nothing.
 A row with no `invite.ics` is `not_found` with the TUI's sentence, "That event has no ics source in the store", and nothing is written or opened.
+
+`invite_get` is `message.invite {account, row_id}` through `mp_client::queries::message_invite`: the `EventFrontmatter` a message carries, the reader's invitation card, or `null` for a row with no iMIP payload or one that does not parse.
+A row the account does not hold is `not_found` with `-32602`.
+
+`calendar_rsvp` starts `calendar.rsvp {account, row_id, response}` and awaits it as `kind: "rsvp"`.
+A response other than `accept`, `tentative` or `decline` is a `protocol` refusal before any call.
+The reply goes through the daemon's durable outbox, so a transport that fails leaves an outbox row the outbox view shows.
+`RsvpSettled` is the daemon's inline settle: `subject` is the reply's own (`Accepted: <summary>`), `organizer` whom it went to, and `delivered` whether any recipient took it; a reply nobody took yet waits in the outbox.
+The daemon refuses nothing about the invitation itself: an RSVP to the user's own, a cancelled or a superseded invitation is the frontend's to prevent, as it is the TUI's.
+
+`invite_refusal` answers whether an account can reply to or send invitations at all.
+The daemon refuses both on a Graph account (`ANO-4`) before it looks at anything else, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.
+That call is refused before an operation id exists, and `refusal` is the daemon's sentence, taken off the refusal text by `error::refusal_sentence` (the session keeps a refusal's text and drops its `data`).
+An `imap` account answers `refusal: null` without that call, and an unknown one is `not_found`.
 
 ## Drafts and the editor
 
@@ -482,7 +505,7 @@ The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies,
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update` and `invite_cancel` below.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel` and `rsvp_fail` below.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -548,6 +571,12 @@ The dates are 2020 and 2099 because the frontend filters on the real clock.
 `invite_update` delivers a new version of the steering committee: row 1008's `sequence` goes up by one and its start and end move one day later (the 15th of October 2099 the first time), its `invite.ics` follows, and an "Updated invitation: Steering committee" email with that `invite.ics` lands at the top of `work`'s inbox.
 `invite_cancel` marks row 1008 `cancelled`, in the row and in its `event`, and lands a "Cancelled: Steering committee" email carrying a `METHOD:CANCEL` `invite.ics` at the top of the inbox.
 Both change the agenda row in place, where a daemon would fold the new email into it, and both publish `state.invalidate` of `mailbox:work/inbox`, as the sync that fetched the email would.
+The reader's card of row 1008 follows, since `message.invite` reads the agenda row.
+
+`message.invite` answers a row's `event` from the agenda row of the same id, else from the version an `invite_update` or `invite_cancel` email carried (the cancellation's is a `CANCEL`), else `null`; a row the account holds neither in a mailbox nor in its agenda is `-32602`.
+`calendar.rsvp` refuses what the daemon refuses, in its order: an unknown parameter, an unknown account, the Graph account `home` with the daemon's sentence before anything else (so the probe's `{account}` alone gets it), a response word it does not take, a row it does not hold, and a row with no invitation.
+Otherwise the operation runs 0.5 s: the agenda row's `rsvp` and the user's own attendee status become the reply, `state.invalidate` of `mailbox:<account>/sent` says a copy was filed, and it settles with the daemon's shape, `delivered: true`.
+`rsvp_fail` fails the next RSVP instead with the transport error `send_fail` uses, after a `failed` outbox row naming the organizer and its `state.invalidate` of `outbox:<account>`; the agenda row keeps its reply.
 
 ## Tests
 
