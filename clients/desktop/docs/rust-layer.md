@@ -18,6 +18,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
 | `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
 | `daemon_files.rs` | The daemon's `config.toml` and its log file in the editor |
+| `configuration.rs` | The Settings view's `config.get`, reload and password store |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -105,6 +106,9 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
 | `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
 | `log_open` | none | `EditorLaunch`; `not_found` when the daemon's log file does not exist yet |
+| `config_get` | none | `ConfigSnapshot` |
+| `config_reload` | none | `ConfigSwap`; a file that does not load is `protocol` with code -32007 and the daemon's sentence |
+| `config_set_password` | `account`, `kind` (`"smtp"` or `"imap"`), `value` | `SecretStored` |
 | `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
 | `send_draft` | `account`, `id`, `hold` | `SendStarted`; rejects with a `SendRefusal` |
@@ -402,6 +406,45 @@ Neither computes a path: the daemon's answer names the file it uses.
 Both hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
 Both methods are in `REQUIRED_CAPABILITIES`.
 
+## Configuration and secrets
+
+`configuration.rs` serves the Settings view (ACC-05) with three daemon methods, all in `REQUIRED_CAPABILITIES`: `config.get`, `config.reload` and `config.set_password`.
+The daemon has no per-key writer, since a tenth `config.*` method is pinned shut, so a setting changes in `config.toml` and reaches the daemon through `config_reload`.
+
+```ts
+type ConfigSnapshot = { revision: number; path: string; state: "ok" | "absent" | "invalid"; config: EffectiveConfig };
+type EffectiveConfig = { secrets_backend: string; email: { send_hold_secs: number }; accounts: ConfigAccount[] };
+type ConfigAccount = {
+  name: string;
+  default_from: string;
+  auth_method: string; // password, oauth2 or graph
+  smtp: ConfigServer;
+  imap: ConfigServer;
+  oauth2: { client_id: string; tenant_id: string } | null;
+};
+type ConfigServer = { host: string; port: number; username: string };
+type ConfigSwap = { added: string[]; updated: string[]; removed: string[] };
+type SecretKind = "smtp" | "imap";
+type SecretStored = { stored: boolean; account: string; kind: string; key: string };
+```
+
+`EffectiveConfig` keeps the keys the view shows out of the daemon's whole effective configuration, and every one of them defaults when the daemon leaves it out, so a daemon that adds or drops a key never breaks the decode.
+`revision` is the configuration's own counter: 0 at daemon start and one more per swap, whatever the state revision does.
+
+`config_reload` answers what the swap started, restarted and stopped, and the daemon publishes `config.changed` with the same lists.
+A file that does not load leaves the daemon on the configuration it had: it publishes `config.invalid {path, line, message}` and refuses with `-32007`, which the command passes on as `protocol` with code -32007 and the daemon's sentence as the message.
+The line travels only in the event.
+
+`config_set_password` stores one password through the daemon's secrets backend and answers the backend's key, never the value; the daemon publishes no event for it.
+The value crosses this layer once, and these rules keep it there:
+
+- `SetPassword`, the struct that carries it, has a hand-written `Debug` that prints `<redacted>` for the value, as the daemon's `SetPasswordParams` does.
+- The `tracing` lines name the account and the kind: "stored the imap password of work", or "storing the smtp password of work failed: <why>".
+- A refusal is the daemon's sentence, which names the account and the kind and never the value.
+- The fixture journals `{account, kind, value: "<redacted>"}`, and under test its record of every call holds the value redacted too.
+
+`configuration.rs`'s tests check each rule: the `Debug`, a `tracing` subscriber that captures every level, the fixture's journal and call record, and a refusal's `GuiError` in its `Debug` and its JSON.
+
 ## Drafts and the editor
 
 A draft is a Markdown file with YAML frontmatter in the account's drafts directory, and every command that writes one answers its absolute `path`.
@@ -593,7 +636,7 @@ The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies,
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail`, `rebuild_refused` and `signature_changed` below; `send_fail` also fails the next invitation.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail`, `rebuild_refused`, `signature_changed` and `config_invalid` below; `send_fail` also fails the next invitation.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -683,9 +726,17 @@ It refuses an unknown parameter, an unknown account (`-32005`) and one whose sto
 `contact.rebuild` publishes its one `operation.progress` (phase `contacts`, `done: 0`, the account as its message) and settles 0.6 s later with `saved: written`, `contacts` the account's index size and `kept: 0`; the index itself does not change.
 `rebuild_refused` makes the next rebuild settle `refused_shrunk` instead, with 3 contacts found and the whole index kept (25 for `work`).
 
-`config.get` answers `{revision: 0, path, state: "ok", config}`, where `path` is `<temp>/mp-desktop-fixture-<pid>/config.toml`, written at start from the `fixtures/config.toml` template, whose accounts are `accounts.json`'s, and `config` is `fixtures/config.json`, the effective configuration with the passwords `<redacted>`.
+`config.get` answers `{revision, path, state: "ok", config}`, where `path` is `<temp>/mp-desktop-fixture-<pid>/config.toml`, written at start from the `fixtures/config.toml` template, whose accounts are `accounts.json`'s, and `config` is `fixtures/config.json`, the effective configuration with the passwords `<redacted>`.
+`revision` starts at 0.
 `diagnostic.log_path` answers `<root>/logs/mailypoppins-2026-09-30.log`, written at start with ten lines in the daemon's log format.
 Both refuse an unknown parameter with `-32602`.
+
+`config.reload` reads that file again, and refuses an unknown parameter too.
+When it loads, `revision` goes up by one, `config.changed` is published with nothing added, updated or removed and that revision, and the answer is the three empty lists.
+`config_invalid` appends the line `this line is not toml` to the file, and the next reload publishes `config.invalid` with the path, that line's number and "key with no value, expected `=`", then refuses with `-32007` and the same message; `revision` and `state` stay.
+A reload succeeds again once that line is gone from the file.
+`config.set_password` refuses an unknown parameter, a `kind` other than `smtp` or `imap`, and a missing `value` with `-32602`, and an account `config.json` does not configure with `-32005` "no account named <name> is configured".
+Otherwise it journals `{account, kind, value: "<redacted>"}` and answers `{stored: true, account, kind, key}`, with the daemon's key `<kind>-password-<account>`.
 
 ## Tests
 

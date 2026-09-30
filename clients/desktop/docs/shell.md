@@ -27,6 +27,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
 | `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
 | `src/app/interop.ts` | `sc` and `sf` (config.toml and the daemon log in the editor), and the reader's copies |
+| `src/app/settings.ts` | The Settings view's configuration, the config.toml banner's problem, `config.changed`, the reload, and the password dialog's store |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -39,12 +40,13 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/mutations` | The archive, delete, approve, demote and send confirmation, the move picker, and the activity area (notices and send holds) |
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 | `src/components/outbox` | The outbox view |
-| `src/components/views` | The view host and the placeholder of a view no unit has filled |
+| `src/components/views` | The view host, and `EmptyView.tsx`, the placeholder no view uses any more |
 | `src/components/contacts` | The Contacts view, its list and rows |
 | `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, the RSVP choice and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 | `src/components/signatures` | The Signatures dialog |
 | `src/components/activity` | The activity log dialog |
+| `src/components/settings` | The Settings view, the password dialog and the config.toml banner |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -69,7 +71,8 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
 | `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards and a line in the activity log |
-| `event` `config.changed`, `config.invalid` | a line in the activity log |
+| `event` `config.changed` | a line in the activity log, the config.toml banner cleared, the configuration and the account list stale, each added or updated account's counts and list stale, and a removed account the window still knows removed (see Settings) |
+| `event` `config.invalid` | a line in the activity log, and the config.toml banner |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or the new-draft wizard is open |
@@ -380,8 +383,7 @@ The window shows Mail (the list and the reader, or the outbox view in the list p
 `state.view` is `"mail" | "contacts" | "calendar" | "settings"`, and `switch_view` moves it.
 A full-pane view takes the list's and the reader's place, the splitter too, and is the `list` pane for focus; Tab cycles the sidebar and the view, and a history step never lands in the hidden reader.
 In the narrow layout the view stands where the list would, under a bar titled with its name whose back button goes up to the sidebar.
-Until its unit fills it, a view is a placeholder: a region named after the view ("Settings"), its heading, one line, and a "Mail" button (`EmptyView.tsx`, mounted by `ViewHost.tsx`).
-Contacts and Calendar are filled (see Contacts and Calendar); their regions keep the view's name.
+`ViewHost.tsx` mounts the view shown: Contacts, Calendar or Settings (see their sections), each a region named after the view, with its heading and a "Mail" button.
 
 ### Entry points
 
@@ -391,7 +393,7 @@ Contacts and Calendar are filled (see Contacts and Calendar); their regions keep
   Settings has no key: the TUI has no settings view, and `Space s` is left free.
 
 A switch to a view ends a search, as choosing a mailbox does, and keeps the selection, the marks and the outbox view; `Space m` inside Mail changes nothing but the focus.
-Escape, the placeholder's "Mail" button, the palette's "Clear selection / return to list", a mailbox in the sidebar, a search or an outbox bring Mail back as it was.
+Escape, the view's "Mail" button, the palette's "Clear selection / return to list", a mailbox in the sidebar, a search or an outbox bring Mail back as it was.
 `/` and `fm` from the palette bring Mail back and focus its filter.
 Another account keeps the view, which follows the selection's account.
 
@@ -650,6 +652,62 @@ The notice line says "Opened config.toml in <editor>" or "Opened the daemon log 
 With no configuration it says "There is no config.toml yet; add an account first", and with no log file yet "No log file found at <path>", both logged as warnings; any other failure is "Open config failed: <why>" or "Open log failed: <why>", logged as an error.
 The handoff reloads nothing: a saved change reaches the daemon with its next `config.reload`, and the `config.changed` or `config.invalid` that publishes lands in the log.
 
+## Settings
+
+The Settings view shows the daemon's configuration and stores account passwords (ACC-05).
+The daemon has no per-key writer, so a setting changes in config.toml, through the editor, and takes effect with Reload.
+
+### Entry points
+
+The sidebar's Settings entry and the palette's "Open settings" show the view; it has no key (see Views).
+The view reads `config_get` on every open, since another client may have reloaded config.toml, and again after each `config.changed`.
+While it loads the view shows three skeleton lines, and a failed read says "The configuration did not load: <why>".
+On a switch the focus follows into the view, on its "Mail" button, as in the other views.
+
+### General
+
+- Config file: `config.get`'s `path`, the daemon's file.
+- State: "Loaded", "No config.toml yet" or "Did not load when the daemon started".
+- Secrets backend: `encrypted-file` or `keyring`.
+- Send hold: `email.send_hold_secs` in seconds, or "none, a send leaves at once" for 0.
+- "Open config.toml" runs `sc` (see Activity log, "config.toml and the daemon log").
+- Reload calls `config_reload` and is disabled while it runs.
+- Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
+
+A reload says what the swap did on the notice line, in the activity log's words: "Configuration reloaded: no account changed" or "Configuration reloaded: added ...; updated ...; removed ...".
+A refused one says "config.toml was not reloaded: <the daemon's sentence>".
+Neither is logged a second time, since the daemon's `config.changed` or `config.invalid` already put the line in the activity log; any other failure is "Reload failed: <why>", logged as an error.
+
+### Accounts
+
+One card per configured account, named after it: how it signs in ("Password", "Microsoft 365 (OAuth2)", "Microsoft 365 (Graph)"), its From address, its SMTP and IMAP servers as `host:port as username` (none for Graph), and the app registration's client and tenant for OAuth2 and Graph.
+A password account has "Set SMTP password" and "Set IMAP password".
+An OAuth2 or Graph account has "Sign in", disabled, and below the cards "Add account" is disabled too; each says "Arrives with the account wizard, later in M4" as its description.
+The account wizard, the first-run screen and the device-code sign-in come with that wizard, and the palette's "Add account" keeps its M4 badge until then.
+`config.get` never says whether a password or a token is stored, so the cards do not either.
+
+### The password dialog
+
+"Set SMTP password" and "Set IMAP password" open the overlay `password` (`PasswordDialog.tsx`, a dialog titled after the button).
+`state.passwordDialog` holds only the account and the kind.
+The value lives in the dialog's own state, in a field labelled "Password" with `type="password"` and `autocomplete="off"`, and never reaches the model, a notice or the log.
+The field is emptied on submit, whatever the answer, and on close.
+Enter stores through `config_set_password`, and Escape or Cancel closes.
+Once stored the dialog closes and the notice line says "Stored the SMTP password for work".
+A refusal shows in the dialog's alert with the field empty and focused for a retry.
+
+### The config.toml banner
+
+`config.invalid`, from this window's reload or another client's, sets `state.configProblem` to its path, line and message.
+A banner above the panes, in every view, then says "config.toml was refused (<path>, line N): <message>; the daemon keeps the configuration it had", with "Open config.toml".
+It is a `role="alert"` element named "Configuration problem", inserted with its text so it is announced, and removed when `config.changed` says a configuration loaded.
+
+### config.changed
+
+The event clears the banner and makes the configuration and the account list stale.
+Each added or updated account's mailbox counts and, when shown, its list are read again; an added account's mailboxes load once the account list names it.
+For a removed account the daemon publishes `state.remove` of `account:<name>` first, which removes it from the window; `config.changed` removes only a name the window still knows, so a removal never runs twice.
+
 ## Layouts
 
 | Width | Layout | Shows |
@@ -674,8 +732,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, and the activity log) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, and the password dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -719,7 +777,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
 A KEYMAP key the desktop does not bind (such as `tt`, the TUI's thread view) shows a notice saying so; the palette lists the same actions disabled, with the badge.
-No row is left for M3; the palette's "Add account" carries the M4 badge until the Settings view brings it.
+No row is left for M3; the palette's "Add account" carries the M4 badge until the account wizard brings it.
 
 ## Tests
 
