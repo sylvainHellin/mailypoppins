@@ -64,7 +64,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 
 | GuiEvent | Effect |
 |---|---|
-| `connection` | the screen: connecting, unavailable, version mismatch, or the shell |
+| `connection` | the screen: connecting, unavailable, version mismatch, first run, or the shell |
 | `disconnected` | the reconnecting banner |
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
@@ -82,10 +82,11 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
 | `event` `operation.finished` of an invitation | the invitation settles: a notice says how, and the account's agenda, invitation cards and outbox counts are read again |
 | `event` `operation.finished` of a contact rebuild | the rebuild settles: a notice says how, and a written index is read again |
+| `event` `operation.finished` of a sign-in | the sign-in settles: the device-code dialog and a notice say how (see Account wizard) |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
-| `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; the Contacts view's header shows a rebuild's |
-| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`), an RSVP (`rsvp`), an invitation (`send_invite`) or a contact rebuild (`contact_rebuild`) settles or says it was interrupted |
+| `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; the Contacts view's header shows a rebuild's, and the device-code dialog a sign-in's |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`), an RSVP (`rsvp`), an invitation (`send_invite`), a contact rebuild (`contact_rebuild`) or a sign-in (`oauth2_login`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -654,7 +655,7 @@ The handoff reloads nothing: a saved change reaches the daemon with its next `co
 
 ## Settings
 
-The Settings view shows the daemon's configuration and stores account passwords (ACC-05).
+The Settings view shows the daemon's configuration, stores account passwords (ACC-05), signs OAuth2 and Graph accounts in (ACC-06) and adds accounts through the account wizard (ACC-01, ACC-02).
 The daemon has no per-key writer, so a setting changes in config.toml, through the editor, and takes effect with Reload.
 
 ### Entry points
@@ -682,8 +683,8 @@ Neither is logged a second time, since the daemon's `config.changed` or `config.
 
 One card per configured account, named after it: how it signs in ("Password", "Microsoft 365 (OAuth2)", "Microsoft 365 (Graph)"), its From address, its SMTP and IMAP servers as `host:port as username` (none for Graph), and the app registration's client and tenant for OAuth2 and Graph.
 A password account has "Set SMTP password" and "Set IMAP password".
-An OAuth2 or Graph account has "Sign in", disabled, and below the cards "Add account" is disabled too; each says "Arrives with the account wizard, later in M4" as its description.
-The account wizard, the first-run screen and the device-code sign-in come with that wizard, and the palette's "Add account" keeps its M4 badge until then.
+An OAuth2 or Graph account has "Sign in", which opens the device-code dialog on a new sign-in of that account (see Account wizard); while a sign-in runs, it shows that one again instead, with a notice when it is another account's.
+Below the cards "Add account" opens the account wizard, as does the palette's "Add account".
 `config.get` never says whether a password or a token is stored, so the cards do not either.
 
 ### The password dialog
@@ -707,6 +708,77 @@ It is a `role="alert"` element named "Configuration problem", inserted with its 
 The event clears the banner and makes the configuration and the account list stale.
 Each added or updated account's mailbox counts and, when shown, its list are read again; an added account's mailboxes load once the account list names it.
 For a removed account the daemon publishes `state.remove` of `account:<name>` first, which removes it from the window; `config.changed` removes only a name the window still knows, so a removal never runs twice.
+
+## Account wizard
+
+The account wizard (overlay `account_wizard`, `AccountWizard.tsx`) adds an account to config.toml through the daemon (ACC-01, ACC-02).
+The TUI has none, so its model is the CLI's `mp config init` and `mp config add-account` (src/config_cmd/init.rs).
+`state.accountWizard` holds only the preset it starts on; the form lives in the dialog's own state and never holds a password.
+The pure half is `app/wizard.ts`: the presets, the per-step checks and the `AccountDraft` the review writes.
+
+### Steps
+
+1. Provider: a radio group with the CLI's four presets, each with its hint.
+   "IMAP and SMTP" suggests ports 465 and 993.
+   "Proton Mail (Proton Bridge)" fills 127.0.0.1:1025 and 127.0.0.1:1143 with `accept_invalid_certs`.
+   "Microsoft 365 (OAuth2, IMAP and SMTP)" fills smtp.office365.com:587 and outlook.office365.com:993 and signs in with a device code.
+   "Microsoft 365 (Graph API)" has no server at all, and its mailboxes default to Inbox, Archive and Sent Items.
+   Switching the preset replaces the provider's values and keeps the name the user typed, the usernames and the app registration.
+2. Identity: the account name, and the From address ("Email address" for Graph, where it is required).
+3. Servers: SMTP host, port and username, IMAP host, port and username, then for both Microsoft 365 presets the client ID and the tenant ID; Graph shows only the last two.
+4. Mailboxes: the server names of Inbox, Archive and Sent (INBOX, Archive and Sent by default), and extra mailboxes to sync, one per line.
+5. Review: what will be written, then "Add account", or "Write config.toml" when the daemon has none.
+
+Next checks the step, and Enter in a field is Next.
+A refused step marks each field `aria-invalid`, ties its sentence to it with `aria-describedby`, and focuses the first one.
+The name must be non-empty, letters, digits, `.`, `-` and `_` starting with a letter or a digit, and not already configured.
+The SMTP host, the SMTP username and valid ports are required for the three IMAP presets; an empty IMAP host or username falls back to the SMTP one.
+The client ID and the tenant ID are required for both Microsoft 365 presets.
+The review runs every check again and jumps to the step of the first failure.
+There is no connection test and no server mailbox pick, since both need a configured account; a wrong host shows as the first sync's failure in the sidebar.
+
+### The write
+
+The review calls `config_add_account`, or `config_init` when `config_get` answered `absent`.
+The draft carries exactly the keys the daemon's `account_block` reads: `auth_method` only for the Microsoft 365 presets, `oauth2` with them, no server for Graph, and the From address defaulting to the SMTP username.
+A refusal (a taken name, a block the daemon does not load) shows in the wizard's alert, and the wizard stays open.
+On success the notice line says "Added the account <name>; ..." or "Wrote config.toml with the account <name>; ...", and the wizard hands over.
+The daemon's `config.changed` then names the account as added, so the account list and its mailboxes are read and the sidebar shows it (see Settings, "config.changed").
+
+A password preset hands over to the password dialog for the SMTP password, which IMAP falls back to; "Set IMAP password" in Settings stores a different one.
+A Microsoft 365 preset starts the sign-in and opens the device-code dialog.
+
+### The device-code dialog
+
+The overlay `device_code` (`DeviceCodeDialog.tsx`, titled "Sign in <account>") shows the sign-in `state.signIn` describes: the account, the operation id once `config_oauth2_login` answered, whether Cancel was asked, and how it ended.
+The code is the operation's one `operation.progress`, phase `device_code`, read from `progress` by the operation id; `app/signin.ts` splits its message on its one space into the verification URL and the user code.
+A progress report missed in a resync still arrives: the bootstrap of the same daemon lists the operation with its last progress, which the reducer puts back in `progress`.
+Until the code arrives the dialog says "Asking the provider for a device code".
+Then it shows the verification page and the code, "Copy code" (through `copyText`, which takes the focus) and "Open verification page" (through `open_external`, which allows https), and "Waiting for you to approve the sign-in in the browser".
+A finish that arrives before the start's answer waits for its id, as a rebuild's does.
+
+How it ends, in the dialog and as a notice in the activity log:
+
+- stored: "OAuth2 token acquired and cached for account '<name>'", the words of `mp_client::format::oauth2_stored_line` without its check mark;
+- failed: "The sign-in of <name> failed: <why>", the daemon's refusal or the provider's sentence;
+- cancelled: the sign-in's cancelled finish, saying the provider's poll runs on, so a sign-in finished in the browser may still complete and store the token;
+- dropped: "The sign-in of <name> was interrupted: <why>", after a daemon restart.
+
+While it runs, "Cancel sign-in" and Escape call `config_oauth2_cancel`; a Cancel before the start answered is sent once the id is known.
+The sign-in stays awaited until its `cancelled` finish, which ends it.
+Once it ended, Close or Escape closes the dialog and forgets the sign-in.
+The dialog opens on "Cancel sign-in", then moves the focus to "Copy code" when the code arrives and to Close when it ends.
+
+## First run
+
+A daemon started on an empty configuration directory has no config.toml and no account.
+With no account known, the loader reads `config_get` even outside the Settings view, and `absent` shows the setup screen (`screens/SetupScreen.tsx`, titled "Set up mailypoppins") instead of the shell.
+It names the file the daemon will write and holds the account wizard inline, with no Cancel, writing through `config_init`.
+The shell with zero accounts stays what it was when config.toml exists but names no account.
+
+Once `config.changed` names the account and the account list has it, the shell replaces the screen.
+The password or sign-in step is an overlay, which survives that swap.
+A window that started with no account selects the first one listed, and its inbox once its mailboxes are known.
 
 ## Layouts
 
@@ -732,8 +804,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, and the password dialog) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".

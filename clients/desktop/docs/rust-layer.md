@@ -18,7 +18,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
 | `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
 | `daemon_files.rs` | The daemon's `config.toml` and its log file in the editor |
-| `configuration.rs` | The Settings view's `config.get`, reload and password store |
+| `configuration.rs` | The Settings view's `config.get`, reload and password store, the account wizard's writes and the device-code sign-in |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -109,6 +109,10 @@ The type blocks in this document are for reading, and the generated files are th
 | `config_get` | none | `ConfigSnapshot` |
 | `config_reload` | none | `ConfigSwap`; a file that does not load is `protocol` with code -32007 and the daemon's sentence |
 | `config_set_password` | `account`, `kind` (`"smtp"` or `"imap"`), `value` | `SecretStored` |
+| `config_add_account` | `account` (`AccountDraft`) | `ConfigSwap`; a refusal is the daemon's sentence |
+| `config_init` | `account` (`AccountDraft`) | `ConfigInitialised`; refused where a `config.toml` exists |
+| `config_oauth2_login` | `account` | `OperationStarted`, awaited as `oauth2_login` |
+| `config_oauth2_cancel` | `operation_id` | `"cancelled"` or `"already_settled"` |
 | `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
 | `send_draft` | `account`, `id`, `hold` | `SendStarted`; rejects with a `SendRefusal` |
@@ -408,7 +412,7 @@ Both methods are in `REQUIRED_CAPABILITIES`.
 
 ## Configuration and secrets
 
-`configuration.rs` serves the Settings view (ACC-05) with three daemon methods, all in `REQUIRED_CAPABILITIES`: `config.get`, `config.reload` and `config.set_password`.
+`configuration.rs` serves the Settings view and the account wizard (ACC-01, ACC-02, ACC-05, ACC-06) with six daemon methods, all in `REQUIRED_CAPABILITIES`: `config.get`, `config.reload`, `config.set_password`, `config.init`, `config.add_account` and `config.oauth2_login`.
 The daemon has no per-key writer, since a tenth `config.*` method is pinned shut, so a setting changes in `config.toml` and reaches the daemon through `config_reload`.
 
 ```ts
@@ -444,6 +448,49 @@ The value crosses this layer once, and these rules keep it there:
 - The fixture journals `{account, kind, value: "<redacted>"}`, and under test its record of every call holds the value redacted too.
 
 `configuration.rs`'s tests check each rule: the `Debug`, a `tracing` subscriber that captures every level, the fixture's journal and call record, and a refusal's `GuiError` in its `Debug` and its JSON.
+
+### Accounts
+
+`config_add_account` appends one `[[accounts]]` block and `config_init` writes a whole file with one; both take an `AccountDraft`, the daemon's `account` parameter.
+
+```ts
+type AuthMethod = "password" | "oauth2" | "graph";
+type AccountDraft = {
+  name: string;
+  default_from?: string;
+  auth_method?: AuthMethod; // absent for a password account
+  oauth2?: { client_id: string; tenant_id: string };
+  smtp?: AccountDraftServer;
+  imap?: AccountDraftServer;
+  mailboxes?: { inbox: string; archive: string; sent: string; extra?: string[] };
+};
+type AccountDraftServer = { host?: string; port?: number; username?: string; accept_invalid_certs?: boolean };
+type ConfigInitialised = { path: string; added: string[]; updated: string[]; removed: string[] };
+```
+
+Every key of a draft is one the daemon's `account_block` reads (src/daemon/methods/config.rs), and an absent key is left out of the wire, so the daemon's default applies.
+The draft has no password key, and `deny_unknown_fields` refuses one, or any key the daemon would drop, when the webview sends it.
+The wizard stores a password afterwards through `config_set_password`, the daemon's one path into the secrets backend.
+`config_add_account` refuses a missing `config.toml` ("... write one with config.init first") and a taken name, and `config_init` an existing file ("a configuration already exists at <path>; edit it and call config.reload"), each as the daemon's sentence.
+A block that does not load is `-32007`, and the file stays as it was.
+Either write publishes `config.changed` naming the account as `added`, and the daemon starts its runtime before it answers.
+`ConfigInitialised` is the daemon's flat answer, the swap with the file's `path`.
+The tests serialise one draft per preset and hold every key path against `account_block`'s list.
+
+### Sign-in
+
+`config_oauth2_login` starts the device-code flow of an `oauth2` or `graph` account, awaited as `oauth2_login`.
+The daemon refuses an unknown account ("Account '<name>' not found in config", `-32005`), a password account and an account with no client or tenant, each with its own sentence.
+Its one `operation.progress` has phase `device_code`, `done: 0`, `total: null` and a message of two tokens, the verification URL and the user code, separated by their one space.
+It reaches only the window that started the sign-in, as every progress does, and the operation's `operation.status` keeps it as `progress`.
+It settles with an `OAuth2Stored`, never the token:
+
+```ts
+type OAuth2Stored = { stored: boolean; account: string; kind: string; key: string }; // kind oauth2 or graph, key oauth2-token-<account>
+```
+
+`config_oauth2_cancel` calls `operation.cancel` and keeps the sign-in awaited, so its `cancelled` finish ends it the usual way; one already over answers `already_settled`.
+The daemon never hands its cancel token to the provider's poll, so a sign-in finished in the browser after a cancel still caches its token.
 
 ## Drafts and the editor
 
@@ -544,7 +591,7 @@ The channel first carries a `connection` event and, once connected, a `rebootstr
 
 ```ts
 type BootstrapCause = "initial" | "subscribed" | "requested" | "resync" | "reconnected" | "instance_changed";
-type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry" | "rsvp" | "send_invite" | "contact_rebuild";
+type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry" | "rsvp" | "send_invite" | "contact_rebuild" | "oauth2_login";
 type GuiEvent =
   | { type: "event"; event: { instance_id: string; revision: number; kind: string; payload: unknown } }
   | { type: "resync"; instance_id: string; reason: string }
@@ -560,7 +607,7 @@ type GuiEvent =
 `event` carries the daemon's envelope verbatim and only when it applied above the watermark; duplicates are dropped in Rust.
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
 A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
-A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, a retry started by `outbox_retry`, an RSVP, an invitation and a contact index rebuild end the same three ways.
+A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, a retry started by `outbox_retry`, an RSVP, an invitation, a contact index rebuild and a sign-in end the same three ways.
 A hit, a progress report or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 `operation.progress` reaches the webview only for an operation this window awaits, so another client's contacts rebuild or sign-in code never shows here.
 A progress report leaves its operation awaited; only the finish, a settle or a drop ends the wait.
@@ -636,7 +683,7 @@ The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies,
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail`, `rebuild_refused`, `signature_changed` and `config_invalid` below; `send_fail` also fails the next invitation.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail`, `rebuild_refused`, `signature_changed`, `config_invalid`, `config_absent`, `oauth_approve` and `oauth_deny` below; `send_fail` also fails the next invitation.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -737,6 +784,21 @@ When it loads, `revision` goes up by one, `config.changed` is published with not
 A reload succeeds again once that line is gone from the file.
 `config.set_password` refuses an unknown parameter, a `kind` other than `smtp` or `imap`, and a missing `value` with `-32602`, and an account `config.json` does not configure with `-32005` "no account named <name> is configured".
 Otherwise it journals `{account, kind, value: "<redacted>"}` and answers `{stored: true, account, kind, key}`, with the daemon's key `<kind>-password-<account>`.
+
+`config.add_account` refuses an unknown parameter, a missing `config.toml`, a missing `account` object or `name`, and a name `config.json` already has, each with the daemon's sentence and `-32602`.
+Otherwise it appends the daemon's `[[accounts]]` block for the object to `<root>/config.toml`, key for key what `account_block` writes, and serves the account at once.
+The account is `ready` in `account.list` (`backend` `graph` for a Graph account, else `imap`, and `default` when it is the only one), in the bootstrap's accounts with sync health `ok`, and in `config.get` with the daemon's defaults and the passwords `<redacted>`.
+Its mailboxes are an empty Inbox, Archive and Sent (slugs `inbox`, `archive`, `sent`), which `mailbox.list` answers.
+Then `revision` goes up by one, `config.changed` is published with the account as `added`, and the answer is that swap.
+The fixture publishes nothing else, where the daemon's swap also starts a runtime whose state changes follow; `config.changed` is what the window reads the account list and the new mailboxes on.
+
+`config.init` does the same with a whole file, only where no `config.toml` exists, and adds `path` to its answer; otherwise it refuses with "a configuration already exists at <path>; edit it and call config.reload".
+`config_absent` is a daemon restarted on an empty configuration directory: it removes `<root>/config.toml`, every account from every answer (the bootstrap's accounts, mailboxes, drafts, outbox counts, holds and diagnostics, `account.list` and `config.get`), sets `state` to `absent` and `revision` to 0, and then runs `restart`.
+
+`config.oauth2_login` refuses as the daemon does: an unknown parameter, an account `config.json` does not configure (`-32005`), a password account, an account with no `oauth2` table, and one with an empty client or tenant, each with the daemon's sentence.
+Otherwise it starts an operation and 0.3 s later publishes its one `operation.progress`, phase `device_code`, message `https://microsoft.com/devicelogin FXTR-CODE`, which `operation.status` keeps as its `progress`.
+The sign-in then waits: `oauth_approve` settles every waiting one with `{stored: true, account, kind, key: "oauth2-token-<account>"}`, `kind` `oauth2` or `graph` after the account's `auth_method`, and `oauth_deny` fails it with the provider's "Authorization was declined by the user.".
+Either is an error when no sign-in waits; `operation.cancel` ends one `cancelled`, and `restart` forgets it.
 
 ## Tests
 
