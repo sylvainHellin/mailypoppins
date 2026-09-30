@@ -2226,3 +2226,25 @@ Format a new file with `rustfmt --edition 2021 --config skip_children=true` (nig
 On macOS `/var` is a symlink to `/private/var`, and six rows of `tests/daemon_service.rs` then fail: the unit and the plist carry the binary path as `current_exe()` reports it (`/var/tmp/...`) while the test expects the canonical `/private/var/tmp/...`, or the other way round.
 Nothing is wrong with the service code; the same rows pass from a checkout under `$HOME`.
 On the Mac, run the full suite from the primary checkout, or read those six failures as the path artifact they are.
+
+## Tauri's CSP nonce switches `'unsafe-inline'` off
+
+When the built `index.html` carries an inline `<style>` (a pre-paint background, say), Tauri adds a `'nonce-…'` source to `style-src` at load time.
+A browser that sees a nonce or a hash in a directive ignores `'unsafe-inline'` in it, for `<style>` elements and for `style` attributes alike, so every inline style React and Base UI set (popover positioning among them) is blocked.
+`clients/desktop/src-tauri/tauri.conf.json` sets `dangerousDisableAssetCspModification: ["style-src"]` to keep the policy as written; `script-src` is still hashed.
+
+## A window with `on_navigation` has to be built in `setup`, not in `tauri.conf.json`
+
+`on_navigation` and `on_new_window` exist only on `WebviewWindowBuilder`, so the desktop client builds its `main` window in `setup`.
+The config's `app.windows` must then be `[]`: a config window labelled `main` is created first, and the builder fails on the duplicate label at startup rather than at build time.
+
+## `mp_client::session::Connector::open` cannot fail, so a GUI connects twice
+
+`Connector.open` returns a `Connection`, never an error, because the binary's version ends the process with exit 4.
+A GUI has to show a screen instead, so `clients/desktop/src-tauri/src/session.rs` first runs the whole connect-or-start sequence on a throwaway runtime and only hands `Session::connect` a connector (which retries plain handshakes) once a daemon has answered.
+The cost is one extra handshake per launch; the alternative, an `open` that loops for ever, leaves a failed start as a spinner.
+
+## A session call's refusal code survives only as text
+
+`Session::call_within` flattens `ClientError::Rpc` into `"{method}: the daemon refused the call: {message} ({code})"` before it crosses the call channel.
+The desktop client reads the code back off the trailing parenthesis (`error::rpc_code`) to tell `-32602` from `-32004` or `-32005`; a typed error on the session's channel would remove that parsing.
