@@ -8,6 +8,7 @@ import * as compose from "@/app/compose";
 import * as send from "@/app/send";
 import * as attachments from "@/app/attachments";
 import { openEventSource } from "@/app/calendar";
+import { openAgendaRsvp, openRsvp } from "@/app/rsvp";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { hiddenNotice, viewPanes } from "@/app/views";
 import { actionTargets, type Action } from "@/app/reducer";
@@ -274,6 +275,10 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "calendar_toggle_past" });
     case "calendar_refresh":
       return dispatch({ type: "calendar_refresh" });
+    case "calendar_rsvp":
+      return openAgendaRsvp(s, dispatch);
+    case "rsvp":
+      return void openRsvp(s, dispatch);
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;

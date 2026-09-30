@@ -20,6 +20,7 @@ import type {
   DraftListing,
   DraftMessage,
   DraftPreview,
+  EventFrontmatter,
   HoldStatus,
   MessageListRow,
   OutboxListing,
@@ -169,7 +170,19 @@ export const mock = {
   calendar: clone(fixtures.calendar.events),
   /** The `invite.ics` of a row, by row id. */
   ics: clone(fixtures.calendar.ics),
+  /** The event an email no agenda row stands for carries, by row id (`simulateInvite`'s emails). */
+  invites: {} as Record<string, EventFrontmatter>,
+  /** The RSVPs `calendar_rsvp` started and no test settled yet, oldest first. */
+  rsvps: [] as { operation_id: string; account: string; row_id: number; response: string }[],
+  /** The next RSVP's operation id counter. */
+  nextRsvp: 1,
 };
+
+/** fixture.rs's `GRAPH_RSVP_REFUSAL`, what the probe answers for `home`. */
+export const GRAPH_RSVP_REFUSAL = "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)";
+
+/** fixture.rs's `SEND_FAIL_REASON`, what `rsvp_fail` fails an RSVP with. */
+export const SEND_FAIL_REASON = "421 4.7.0 fixture: the server closed the connection";
 
 /** The home directory `~` expands to in the mock. */
 export const MOCK_HOME = "/home/fixture";
@@ -209,6 +222,69 @@ export function resetMock(): void {
   mock.nextHandle = 1;
   mock.calendar = clone(fixtures.calendar.events);
   mock.ics = clone(fixtures.calendar.ics);
+  mock.invites = {};
+  mock.rsvps = [];
+  mock.nextRsvp = 1;
+}
+
+/** The event row `rowId` of `account` carries: its agenda row's, else the version an email delivered. */
+function inviteEvent(account: string, rowId: number): EventFrontmatter | null {
+  const row = (mock.calendar[account] ?? []).find((e) => e.row_id === rowId);
+  if (row) return clone(row.event);
+  return findRow(account, rowId) ? clone(mock.invites[String(rowId)] ?? null) : null;
+}
+
+/**
+ * fixture.rs's RSVP end: the oldest RSVP not settled yet (or `operationId`)
+ * settles with the agenda row's reply changed and `state.invalidate` of the
+ * account's Sent mailbox, or with `fail`, fails with an SMTP error after a
+ * `failed` outbox row, as after `rsvp_fail`. `delivered: false` settles a
+ * reply no recipient took yet.
+ */
+export function settleRsvp(opts: { fail?: boolean; delivered?: boolean; operationId?: string } = {}): string {
+  const at = opts.operationId ? mock.rsvps.findIndex((r) => r.operation_id === opts.operationId) : 0;
+  const [run] = mock.rsvps.splice(at, 1);
+  if (!run) throw new Error("no RSVP is waiting to settle");
+  const e = (mock.calendar[run.account] ?? []).find((x) => x.row_id === run.row_id)?.event ?? mock.invites[String(run.row_id)];
+  if (opts.fail) {
+    const o = (mock.outbox[run.account] ??= { ever_used: true, rows: [] });
+    o.rows.push({
+      id: 100 + mock.nextRsvp,
+      state: "failed",
+      partial: false,
+      never_submitted: false,
+      message_id: `<fixture-rsvp-${run.operation_id}@fixture.example>`,
+      target_mailbox: "Sent",
+      updated: 1_790_000_000,
+      last_error: SEND_FAIL_REASON,
+      rejected: [],
+      outstanding: [e?.organizer ?? ""],
+    });
+    emitEnvelope("state.invalidate", { resource: `outbox:${run.account}`, scope: { query: "counts" } });
+    emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: SEND_FAIL_REASON } });
+    return run.operation_id;
+  }
+  const status = run.response === "accept" ? "accepted" : run.response === "decline" ? "declined" : "tentative";
+  if (e) {
+    e.rsvp = status;
+    for (const a of e.attendees ?? []) if (a.address === "me@example.com") a.status = status;
+  }
+  emitEnvelope("state.invalidate", { resource: `mailbox:${run.account}/sent`, scope: { query: "counts" } });
+  const verb = status === "accepted" ? "Accepted" : status === "declined" ? "Declined" : "Tentative";
+  emitEnvelope("operation.finished", {
+    operation_id: run.operation_id,
+    state: "succeeded",
+    result: {
+      account: run.account,
+      selector: findRow(run.account, run.row_id)?.[1].selector ?? `mp://${run.account}/inbox/fixture-row-${run.row_id}`,
+      response: run.response,
+      subject: `${verb}: ${e?.summary ?? ""}`,
+      organizer: e?.organizer ?? "",
+      message_id: `<fixture-rsvp-${run.operation_id}@fixture.example>`,
+      delivered: opts.delivered ?? true,
+    },
+  });
+  return run.operation_id;
 }
 
 /** The agenda row `invite_update` and `invite_cancel` change, as fixture.rs's `INVITE_ROW`. */
@@ -243,6 +319,7 @@ export function simulateInvite(cancel: boolean): void {
   const tag = cancel ? "invite-cancel" : "invite-update";
   const subject = `${cancel ? "Cancelled" : "Updated invitation"}: ${e.event.summary}`;
   mock.ics[String(id)] = `BEGIN:VCALENDAR\r\nMETHOD:${cancel ? "CANCEL" : "REQUEST"}\r\nEND:VCALENDAR\r\n`;
+  mock.invites[String(id)] = { ...clone(e.event), method: cancel ? "CANCEL" : "REQUEST" };
   const row = {
     id,
     uid: id,
@@ -977,6 +1054,36 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       mock.editorFailure = null;
       if (failure) throw failure;
       return { editor: `code --wait '${path}'`, source: "probe" };
+    }
+    case "invite_get": {
+      knownAccount(cmd, account);
+      const rowId = Number(args.row_id);
+      if (!findRow(account, rowId) && !(mock.calendar[account] ?? []).some((e) => e.row_id === rowId)) {
+        throw refusedRow("message.invite", `no message has row_id ${rowId}`);
+      }
+      return inviteEvent(account, rowId);
+    }
+    case "invite_refusal": {
+      const a = fixtures.accounts.find((x) => x.name === account);
+      if (!a) throw { kind: "not_found", message: `account_unknown: ${account}`, code: null };
+      return { account, refusal: a.backend === "graph" ? GRAPH_RSVP_REFUSAL : null };
+    }
+    case "calendar_rsvp": {
+      knownAccount(cmd, account);
+      const response = String(args.response);
+      if (!["accept", "tentative", "decline"].includes(response)) {
+        throw { kind: "protocol", code: null, message: `An RSVP is accept, tentative or decline, not "${response}"` };
+      }
+      if (fixtures.accounts.find((x) => x.name === account)?.backend === "graph") {
+        throw { kind: "protocol", code: -32602, message: `calendar.rsvp: the daemon refused the call: ${GRAPH_RSVP_REFUSAL} (-32602)` };
+      }
+      const rowId = Number(args.row_id);
+      if (!inviteEvent(account, rowId)) {
+        throw { kind: "protocol", code: -32602, message: `calendar.rsvp: the daemon refused the call: row ${rowId} carries no invitation to reply to (-32602)` };
+      }
+      const operation_id = `fixture-rsvp-${mock.nextRsvp++}`;
+      mock.rsvps.push({ operation_id, account, row_id: rowId, response });
+      return { operation_id };
     }
     case "outbox_retry": {
       knownAccount(cmd, account);

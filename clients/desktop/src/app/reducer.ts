@@ -94,6 +94,8 @@ import {
   type MutationKind,
   type Overlay,
   type Pane,
+  type RsvpDialog,
+  type RsvpResponse,
   type Selection,
   type Target,
   type View,
@@ -116,7 +118,7 @@ import {
   staleAllOutboxes,
   staleOutbox,
 } from "@/app/outbox";
-import type { AgendaEvent, OutboxListing } from "@/protocol/types";
+import type { AgendaEvent, EventFrontmatter, OutboxListing } from "@/protocol/types";
 import {
   calendarFailed,
   calendarLoaded,
@@ -126,9 +128,23 @@ import {
   refreshCalendar,
   selectCalendarRow,
   staleAllCalendars,
-  staleCalendar,
   toggleCalendarPast,
 } from "@/app/calendar";
+import {
+  bootstrapInvites,
+  inviteFailed,
+  inviteLoaded,
+  inviteRefusalLoaded,
+  isRsvpOperation,
+  openRsvpDialog,
+  rsvpRequested,
+  rsvpSignal,
+  rsvpStarted,
+  rsvpStartFailed,
+  rsvpStarting,
+  staleInvitations,
+  wantInvite,
+} from "@/app/rsvp";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -252,6 +268,14 @@ export type Action =
   | { type: "calendar_select"; row_id: number }
   | { type: "calendar_toggle_past" }
   | { type: "calendar_refresh" }
+  // The invitations (app/rsvp.ts): the reader's cards, the Graph refusals, the RSVPs.
+  | { type: "invite_loaded"; key: string; gen: number; event: EventFrontmatter | null }
+  | { type: "invite_failed"; key: string; gen: number; error: GuiError }
+  | { type: "invite_refusal_loaded"; account: string; refusal: string | null }
+  | { type: "open_rsvp"; dialog: RsvpDialog }
+  | { type: "rsvp_requested"; token: number; account: string; row_id: number; response: RsvpResponse; summary: string }
+  | { type: "rsvp_started"; token: number; operation_id: string }
+  | { type: "rsvp_failed"; token: number; error: GuiError }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -673,7 +697,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const { family, parts } = parseResource(resource);
       const account = parts[0] ?? "";
       // No resource names the agenda: it is a fold over the account's mail.
-      if (family === "mailbox" || family === "message") s = staleCalendar(s, account);
+      if (family === "mailbox" || family === "message") s = staleInvitations(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
         return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === slug);
@@ -692,7 +716,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const { resource } = payload as StateRemovePayload;
       const { family, parts } = parseResource(resource);
       const account = parts[0] ?? "";
-      if (family === "mailbox" || family === "message") s = staleCalendar(s, account);
+      if (family === "mailbox" || family === "message") s = staleInvitations(s, account);
       if (family === "account") return removeAccount(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
@@ -734,7 +758,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "sync.completed": {
       const p = payload as SyncCompletedPayload;
       const health = p.error === null ? "ok" : "failed";
-      const next = staleMailboxes(patchAccount(staleCalendar(s, p.account), p.account, { sync_health: health }), p.account);
+      const next = staleMailboxes(patchAccount(staleInvitations(s, p.account), p.account, { sync_health: health }), p.account);
       return staleListIf(next, (a) => a === p.account);
     }
     case "draft.changed":
@@ -767,11 +791,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (isSyncOperation(s, sig.operation_id)) return syncSignal(s, end);
       if (isSendOperation(s, sig.operation_id)) return sendSignal(s, end);
       if (isOutboxOperation(s, sig.operation_id)) return outboxSignal(s, end);
-      // An unknown id may be a sync, a send or a retry whose start has not
-      // answered yet, or the search's: each holds it until its id is known.
+      if (isRsvpOperation(s, sig.operation_id)) return rsvpSignal(s, end);
+      // An unknown id may be a sync, a send, a retry or an RSVP whose start
+      // has not answered yet, or the search's: each holds it until its id is known.
       let next = s.syncStarting > 0 ? syncSignal(s, end) : s;
       if (sendStarting(next)) next = sendSignal(next, end);
       if (retryStarting(next)) next = outboxSignal(next, end);
+      if (rsvpStarting(next)) next = rsvpSignal(next, end);
       return signal(next, sig);
     }
     default:
@@ -795,7 +821,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // Row ids are per daemon instance, and the reloaded lists are the
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
-      const next = staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap)));
+      const next = bootstrapInvites(staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance);
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
@@ -830,12 +856,14 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "sync") return syncSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "outbox_retry") return outboxSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "rsvp") return rsvpSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       s = endProgress(s, e.operation_id);
       if (e.kind === "sync") return syncSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "outbox_retry") return outboxSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "rsvp") return rsvpSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -979,7 +1007,8 @@ function reduce(s: AppState, a: Action): AppState {
     case "reader_loaded": {
       const m = s.selection.message;
       if (!m || !s.selection.account || readerKey(s.selection.account, m.row_id) !== a.key) return s;
-      return { ...s, reader: { key: a.key, meta: a.meta, load: loaded(s.reader.load, a.gen, true) } };
+      const next = { ...s, reader: { key: a.key, meta: a.meta, load: loaded(s.reader.load, a.gen, true) } };
+      return a.meta.invite ? wantInvite(next, a.meta.account, a.meta.row_id) : next;
     }
     case "reader_failed": {
       const m = s.selection.message;
@@ -1119,13 +1148,14 @@ function reduce(s: AppState, a: Action): AppState {
         dialog: a.overlay === "mutation" ? s.dialog : null,
         composeDialog: a.overlay === "compose" ? s.composeDialog : null,
         attachDialog: a.overlay === "attachments" ? s.attachDialog : null,
+        rsvpDialog: a.overlay === "rsvp" ? s.rsvpDialog : null,
       };
     case "open_dialog":
-      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null };
+      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null };
     case "open_compose":
-      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null };
+      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null, rsvpDialog: null };
     case "open_attachments":
-      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null };
+      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null, rsvpDialog: null };
     case "save_dir":
       return a.dir.trim() ? { ...s, saveDir: a.dir.trim() } : s;
     case "hit_fetch_started":
@@ -1280,6 +1310,20 @@ function reduce(s: AppState, a: Action): AppState {
       return toggleCalendarPast(s);
     case "calendar_refresh":
       return refreshCalendar(s);
+    case "invite_loaded":
+      return inviteLoaded(s, a.key, a.gen, a.event);
+    case "invite_failed":
+      return inviteFailed(s, a.key, a.gen, a.error);
+    case "invite_refusal_loaded":
+      return inviteRefusalLoaded(s, a.account, a.refusal);
+    case "open_rsvp":
+      return openRsvpDialog(s, a.dialog);
+    case "rsvp_requested":
+      return rsvpRequested(s, { token: a.token, account: a.account, row_id: a.row_id, response: a.response, summary: a.summary });
+    case "rsvp_started":
+      return rsvpStarted(s, a.token, a.operation_id);
+    case "rsvp_failed":
+      return rsvpStartFailed(s, a.token, a.error.message);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

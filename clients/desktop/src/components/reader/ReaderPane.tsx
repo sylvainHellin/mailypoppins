@@ -4,6 +4,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DraftPreview } from "@/components/compose/DraftPreview";
 import { ReaderBody } from "@/components/reader/ReaderBody";
 import { ReaderHeader } from "@/components/reader/ReaderHeader";
+import { InviteCard } from "@/components/reader/InviteCard";
 import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
 import { READER_SCROLL_ID } from "@/app/actions";
@@ -117,6 +118,7 @@ export function ReaderPane() {
           <article aria-label={s.reader.meta.subject ?? "Message"} className="flex flex-1 flex-col">
             <ReaderToolbar meta={s.reader.meta} />
             <ReaderHeader meta={s.reader.meta} />
+            {s.reader.meta.invite ? <InviteCard meta={s.reader.meta} /> : null}
             <ReaderBody htmlUrl={s.reader.meta.html_url} subject={s.reader.meta.subject} />
           </article>
         ) : (

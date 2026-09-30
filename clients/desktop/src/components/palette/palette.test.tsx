@@ -23,9 +23,9 @@ describe("the command palette", () => {
     await shellReady();
     await user.keyboard(":");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    const rsvp = within(dialog).getAllByText("RSVP to invitation (Accept/Tentative/Decline)")[0].closest("[data-testid='palette-item']");
-    expect(rsvp).toHaveAttribute("data-disabled", "true");
-    expect(rsvp).toHaveTextContent("M4");
+    const signatures = within(dialog).getAllByText("Manage signatures")[0].closest("[data-testid='palette-item']");
+    expect(signatures).toHaveAttribute("data-disabled", "true");
+    expect(signatures).toHaveTextContent("M4");
   });
 
   it("runs every mutation action and no row is left for M2", () => {

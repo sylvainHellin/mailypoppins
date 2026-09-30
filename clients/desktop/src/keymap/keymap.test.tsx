@@ -113,8 +113,8 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    await user.keyboard("tv");
-    expect(await screen.findByText(/RSVP to invitation \(Accept\/Tentative\/Decline\) arrives in M4/)).toBeInTheDocument();
+    await user.keyboard("cs");
+    expect(await screen.findByText(/Manage signatures arrives in M4/)).toBeInTheDocument();
   });
 });
 

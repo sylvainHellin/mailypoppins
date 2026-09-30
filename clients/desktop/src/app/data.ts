@@ -8,6 +8,7 @@ import { asGuiError, type GuiEvent } from "@/lib/gui-types";
 import { onMenu, subscribe } from "@/lib/events";
 import type { Action } from "@/app/reducer";
 import { accountNames, isStale, readerKey, type AppState } from "@/app/state";
+import { refusalsWanted } from "@/app/rsvp";
 
 /** Subscribe once, read the connection and version, and route menu items. */
 export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => void): void {
@@ -162,6 +163,39 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .catch((e: unknown) => dispatch({ type: "reader_failed", key, gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, account, message, reader, dispatch]);
+
+  // The reader's invitation card, while the reader shows that invitation:
+  // created by `reader_loaded`, stale again with the account's agenda.
+  const meta = state.view === "mail" && state.reader.meta?.invite ? state.reader.meta : null;
+  const inviteKey = meta ? readerKey(meta.account, meta.row_id) : null;
+  const invite = inviteKey ? state.invites[inviteKey] : undefined;
+  useEffect(() => {
+    if (!hasBootstrap || !meta || !inviteKey || !invite || !isStale(invite)) return;
+    const gen = invite.gen;
+    const key = inviteKey;
+    const { account, row_id: rowId } = meta;
+    run(`invite:${key}@${gen}`, () =>
+      cmd
+        .inviteGet(account, rowId)
+        .then((event) => dispatch({ type: "invite_loaded", key, gen, event }))
+        .catch((e: unknown) => dispatch({ type: "invite_failed", key, gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, meta, inviteKey, invite, dispatch]);
+
+  // Each account whose Graph refusal a shown invitation or agenda needs, once.
+  const refusals = refusalsWanted(state).join("\u0000");
+  useEffect(() => {
+    if (!hasBootstrap || !refusals) return;
+    for (const account of refusals.split("\u0000")) {
+      run(`refusal:${account}`, () =>
+        cmd
+          .inviteRefusal(account)
+          .then((answer) => dispatch({ type: "invite_refusal_loaded", account, refusal: answer.refusal }))
+          // A probe that failed says nothing: the daemon still refuses the RSVP itself.
+          .catch(() => dispatch({ type: "invite_refusal_loaded", account, refusal: null })),
+      );
+    }
+  }, [hasBootstrap, refusals, dispatch]);
 
   useSearchSync(state, dispatch);
 }

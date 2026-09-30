@@ -65,11 +65,13 @@ const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
   cA: "approve",
   cD: "demote",
   cX: "send_all",
-  // The `t` family's attachment keys (MESSAGE `to`, `ts`, `tb`; List `ta`).
+  // The `t` family's attachment keys (MESSAGE `to`, `ts`, `tb`; List `ta`)
+  // and the MESSAGE RSVP (`tv`).
   to: "open_attachment",
   ts: "save_attachment",
   tb: "open_html",
   ta: "attach_file",
+  tv: "rsvp",
 };
 
 /** Tab cycles panes only from a pane (or nothing); elsewhere it is the browser's. */

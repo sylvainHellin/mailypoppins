@@ -28,6 +28,7 @@ export const CALENDAR_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   "calendar_open_source",
   "calendar_toggle_past",
   "calendar_refresh",
+  "calendar_rsvp",
 ]);
 
 export const OPEN_CALENDAR_FIRST = "Switch to the Calendar view first (Space a): this acts on the agenda";

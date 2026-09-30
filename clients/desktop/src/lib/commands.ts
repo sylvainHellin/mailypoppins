@@ -12,6 +12,7 @@ import type {
   DraftMessage,
   DraftPreview,
   DraftValidation,
+  EventFrontmatter,
   HoldListing,
   OutboxListing,
 } from "@/protocol/types";
@@ -29,6 +30,7 @@ import type {
   GuiEvent,
   HoldCancelled,
   InterceptedUrl,
+  InviteRefusal,
   LocalSearchHit,
   LocalSearchParams,
   MailboxListing,
@@ -229,6 +231,21 @@ export const calendarEvents = (account: string): Promise<AgendaEvent[]> =>
 /** Open an agenda row's `invite.ics` in the editor; `not_found` when the row has none. */
 export const inviteSourceOpen = (account: string, row_id: number): Promise<EditorLaunch> =>
   invoke<EditorLaunch>("invite_source_open", { account, row_id });
+
+// The invitations (docs/rust-layer.md, "The calendar"): a message's event,
+// an RSVP the Rust layer awaits as `rsvp`, and the Graph probe.
+
+/** The event a message carries, or null for one with no invitation. */
+export const inviteGet = (account: string, row_id: number): Promise<EventFrontmatter | null> =>
+  invoke<EventFrontmatter | null>("invite_get", { account, row_id });
+
+/** Reply to an invitation; the end arrives as `rsvp`, its result an `RsvpSettled`. */
+export const calendarRsvp = (account: string, row_id: number, response: "accept" | "tentative" | "decline"): Promise<OperationStarted> =>
+  invoke<OperationStarted>("calendar_rsvp", { account, row_id, response });
+
+/** The daemon's Graph sentence for a Graph account, null for one that can reply and send. */
+export const inviteRefusal = (account: string): Promise<InviteRefusal> =>
+  invoke<InviteRefusal>("invite_refusal", { account });
 
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });

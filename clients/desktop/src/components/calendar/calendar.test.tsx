@@ -166,14 +166,18 @@ describe("the Calendar view", () => {
     expect(await screen.findByText("Switch to the Calendar view first (Space a): this acts on the agenda")).toBeInTheDocument();
   });
 
-  it("key help lists the agenda keys as runnable, RSVP still for its unit", async () => {
+  it("key help lists every agenda key as runnable, RSVP included", async () => {
     const { user } = await openCalendar();
     await user.keyboard("?");
     const help = await screen.findByRole("dialog", { name: "Keys" });
     const section = within(help).getByRole("region", { name: "CALENDAR" });
-    for (const label of ["Open the invite email in $EDITOR", "Show past events / upcoming only", "Refresh events from disk"]) {
+    for (const label of [
+      "Open the invite email in $EDITOR",
+      "RSVP to invitation (Accept/Tentative/Decline)",
+      "Show past events / upcoming only",
+      "Refresh events from disk",
+    ]) {
       expect(within(section).getByText(label).closest("tr")).not.toHaveTextContent("M4");
     }
-    expect(within(section).getByText("RSVP to invitation (Accept/Tentative/Decline)").closest("tr")).toHaveTextContent("M4");
   });
 });

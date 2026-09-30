@@ -264,6 +264,7 @@ describe("what the outbox view hides", () => {
         "open_html",
         "reply",
         "reply_all",
+        "rsvp",
         "save_attachment",
         "send",
         "send_all",

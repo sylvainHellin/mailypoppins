@@ -77,7 +77,9 @@ export type ActionId =
   | "open_settings"
   | "calendar_open_source"
   | "calendar_toggle_past"
-  | "calendar_refresh";
+  | "calendar_refresh"
+  | "calendar_rsvp"
+  | "rsvp";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -130,7 +132,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Open attachment": { id: "open_attachment" },
   "Save attachment to disk": { id: "save_attachment" },
   "Open HTML in browser": { id: "open_html" },
-  "RSVP to invitation (Accept/Tentative/Decline)": { badge: "M4" },
+  "RSVP to invitation (Accept/Tentative/Decline)": { id: "rsvp" },
   "Navigate mailboxes": { badge: "key" },
   "Select mailbox": { id: "select_mailbox" },
   "Navigate emails": { badge: "key" },
@@ -165,7 +167,7 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Navigate events": { badge: "key" },
     "Jump to top / bottom": { id: "list_top" },
     "Open the invite email in $EDITOR": { id: "calendar_open_source" },
-    "RSVP to invitation (Accept/Tentative/Decline)": { badge: "M4" },
+    "RSVP to invitation (Accept/Tentative/Decline)": { id: "calendar_rsvp" },
     "Show past events / upcoming only": { id: "calendar_toggle_past" },
     "Refresh events from disk": { id: "calendar_refresh" },
   },

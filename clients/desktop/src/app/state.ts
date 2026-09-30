@@ -4,6 +4,7 @@
 import type {
   AgendaEvent,
   Bootstrap,
+  EventFrontmatter,
   DraftEntry,
   DraftMessage,
   HoldStatus,
@@ -101,9 +102,10 @@ export const LIST_WIDTH_STEP = 40;
 /**
  * `mutation` is the confirmation or the move picker `dialog` describes;
  * `compose` is the wizard or the recipients dialog `composeDialog` describes;
- * `attachments` is the open, save or attach dialog `attachDialog` describes.
+ * `attachments` is the open, save or attach dialog `attachDialog` describes;
+ * `rsvp` is the reply choice `rsvpDialog` describes.
  */
-export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | "attachments" | null;
+export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | "attachments" | "rsvp" | null;
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
@@ -404,6 +406,23 @@ export type OutboxAction = { token: number; kind: "retry" | "discard"; account: 
  */
 export type CalendarView = { account: string; cursor: number | null; showPast: boolean; refreshing: boolean };
 
+/** The three answers to an invitation, `calendar.rsvp`'s words. */
+export type RsvpResponse = "accept" | "tentative" | "decline";
+export const RSVP_RESPONSES: readonly RsvpResponse[] = ["accept", "tentative", "decline"];
+
+/**
+ * The RSVP choice (`tv`, the agenda's `V`): the invitation's row and what
+ * the dialog calls it, the event's summary or the email's subject.
+ */
+export type RsvpDialog = { account: string; row_id: number; summary: string };
+
+/**
+ * An RSVP this window started, from the choice until it settles or is
+ * dropped; `operation_id` is null until `calendar_rsvp` answers. `summary`
+ * names the invitation in its notice.
+ */
+export type RsvpRun = { token: number; account: string; row_id: number; response: RsvpResponse; summary: string; operation_id: string | null };
+
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
 
@@ -507,6 +526,23 @@ export type AppState = {
   /** The Calendar view's account, cursor and scope, kept while another view shows. */
   calendarView: CalendarView | null;
   /**
+   * The reader's invitation cards (`invite_get`), by `readerKey`: created
+   * when the reader shows an invitation, stale again with the account's
+   * agenda; only the shown one is read.
+   */
+  invites: Record<string, Loadable<EventFrontmatter | null>>;
+  /**
+   * Why an account cannot reply to or send invitations (`invite_refusal`):
+   * the daemon's Graph sentence, null when it can; absent until asked.
+   */
+  inviteRefusals: Record<string, string | null>;
+  /** What the `rsvp` overlay shows; null whenever another overlay or none is open. */
+  rsvpDialog: RsvpDialog | null;
+  /** RSVPs this window started, in start order. */
+  rsvps: RsvpRun[];
+  /** Operation ends that arrived while a `calendar_rsvp` was unanswered, for its id. */
+  rsvpEarly: OperationEnd[];
+  /**
    * The last `operation.progress` of each operation this window awaits, by
    * `operation_id`, until it finishes, settles or is dropped. The Rust layer
    * passes only its awaited operations' reports, so another client's never land here.
@@ -566,6 +602,11 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     outboxEarly: [],
     calendar: {},
     calendarView: null,
+    invites: {},
+    inviteRefusals: {},
+    rsvpDialog: null,
+    rsvps: [],
+    rsvpEarly: [],
     progress: {},
   };
 }

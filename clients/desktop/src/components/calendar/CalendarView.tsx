@@ -1,11 +1,12 @@
 import { useCallback, useRef } from "react";
-import { ArrowLeft, History, RotateCw } from "lucide-react";
+import { ArrowLeft, CalendarCheck, History, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgendaList } from "@/components/calendar/AgendaList";
 import { EventCard } from "@/components/calendar/EventCard";
 import { runAction } from "@/app/actions";
 import { calendarRows, cursorEvent } from "@/app/calendar";
+import { agendaRsvpRefusal, rsvpOf } from "@/app/rsvp";
 import { useAppState, useDispatch } from "@/app/store";
 
 /** The daemon's `AccountNotReady`: the account has no local store to read yet. */
@@ -28,7 +29,8 @@ export function CalendarView() {
   const rows = calendarRows(s);
   const current = cursorEvent(s, rows);
   const showPast = view?.showPast ?? false;
-  const run = (id: "calendar_toggle_past" | "calendar_refresh") => runAction(id, s, dispatch);
+  const run = (id: "calendar_toggle_past" | "calendar_refresh" | "calendar_rsvp") => runAction(id, s, dispatch);
+  const refusal = current && account ? (agendaRsvpRefusal(current, s.inviteRefusals[account] ?? null) ?? (rsvpOf(s, account, current.row_id) ? "A reply to this invitation is being sent" : null)) : null;
   const select = useCallback((rowId: number) => dispatch({ type: "calendar_select", row_id: rowId }), [dispatch]);
   const latest = useRef(s);
   latest.current = s;
@@ -108,7 +110,19 @@ export function CalendarView() {
         </div>
         <div className={`min-w-0 p-4 ${narrow ? "border-t border-border" : "min-h-0 flex-1 overflow-y-auto"}`}>
           {current ? (
-            <EventCard event={current.event} organizer={current.is_organizer} />
+            <EventCard event={current.event} organizer={current.is_organizer}>
+              <div className="flex flex-col items-start gap-1 pt-1">
+                <Button size="sm" variant="outline" disabled={refusal !== null} onClick={() => run("calendar_rsvp")} title="RSVP to invitation (V)">
+                  <CalendarCheck aria-hidden="true" />
+                  RSVP
+                </Button>
+                {refusal ? (
+                  <p data-slot="rsvp-refusal" className="text-xs text-muted-foreground">
+                    {refusal}
+                  </p>
+                ) : null}
+              </div>
+            </EventCard>
           ) : (
             <p className="text-sm text-muted-foreground">Select an event to see its details.</p>
           )}
