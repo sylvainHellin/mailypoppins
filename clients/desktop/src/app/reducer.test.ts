@@ -123,8 +123,11 @@ describe("the reducer", () => {
     s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 101, kind: "state.invalidate", payload: { resource: "mailbox:work/inbox", scope: {} } } } });
     const inflight = s.messages.gen;
     s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 102, kind: "state.invalidate", payload: { resource: "mailbox:work/inbox", scope: {} } } } });
-    expect(s.messages.gen).toBe(inflight); // already stale: one refetch covers both
+    // Already stale, and the fetch asked at `inflight` may have read before this change.
+    expect(s.messages.gen).toBe(inflight + 1);
     s = run(s, { type: "messages_loaded", key: listKey("work", "inbox"), gen: inflight, list: inbox("work", "inbox") });
+    expect(isStale(s.messages)).toBe(true);
+    s = run(s, { type: "messages_loaded", key: listKey("work", "inbox"), gen: s.messages.gen, list: inbox("work", "inbox") });
     expect(isStale(s.messages)).toBe(false);
     expect(gen).toBeLessThan(inflight);
   });

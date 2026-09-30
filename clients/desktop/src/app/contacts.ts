@@ -56,9 +56,7 @@ function loadableOf(s: AppState, account: string): Loadable<ContactSearch> {
 /** Read `account`'s contacts again, if this window has read them. */
 export function staleContacts(s: AppState, account: string): AppState {
   const l = s.contacts[account];
-  if (!l) return s;
-  const next = markStale(l);
-  return next === l ? s : { ...s, contacts: { ...s.contacts, [account]: next } };
+  return l ? { ...s, contacts: { ...s.contacts, [account]: markStale(l) } } : s;
 }
 
 /** A bootstrap reads every list this window has read again, and forgets those of accounts the snapshot no longer has. */
@@ -133,10 +131,7 @@ export function reopenContacts(s: AppState): AppState {
 export function setContactsQuery(s: AppState, query: string): AppState {
   const view = s.contactsView;
   if (!view || view.query === query) return s;
-  // A new generation even when a read is under way: that read was for the
-  // old query, and its answer must not settle this one.
-  const l = loadableOf(s, view.account);
-  const contacts = { ...s.contacts, [view.account]: { ...l, gen: l.gen + 1 } };
+  const contacts = { ...s.contacts, [view.account]: markStale(loadableOf(s, view.account)) };
   return { ...s, contacts, contactsView: { ...view, query, cursor: null } };
 }
 

@@ -44,6 +44,14 @@ describe("the signature listings", () => {
     expect(reopened.signatures.work.data).toEqual(listing("work"));
   });
 
+  it("a signature.changed during a read leaves the listing stale when that read lands", () => {
+    let s = run(booted(), { type: "open_signatures", account: "work" });
+    const asked = s.signatures.work.gen;
+    s = run(s, envelope("signature.changed", { name: "new" }));
+    s = run(s, { type: "signatures_loaded", account: "work", gen: asked, listing: listing("work") });
+    expect(isStale(s.signatures.work)).toBe(true);
+  });
+
   it("the new-draft wizard asks for its account's listing; forward and recipients do not", () => {
     const s = run(booted(), { type: "open_compose", dialog: { kind: "new", account: "home" } });
     expect(signaturesWanted(s)).toBe("home");

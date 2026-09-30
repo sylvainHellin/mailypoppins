@@ -74,9 +74,7 @@ function loadableOf(s: AppState, account: string): Loadable<AgendaEvent[]> {
 /** Read `account`'s agenda again, if this window has read it. */
 export function staleCalendar(s: AppState, account: string): AppState {
   const l = s.calendar[account];
-  if (!l) return s;
-  const next = markStale(l);
-  return next === l ? s : { ...s, calendar: { ...s.calendar, [account]: next } };
+  return l ? { ...s, calendar: { ...s.calendar, [account]: markStale(l) } } : s;
 }
 
 /**
@@ -211,11 +209,9 @@ export async function openEventSource(s: AppState, dispatch: Dispatch<Action>): 
 export function refreshCalendar(s: AppState): AppState {
   const view = s.calendarView;
   if (!view) return s;
-  const l = loadableOf(s, view.account);
-  const gen = l.gen === l.loadedGen ? l.gen + 1 : l.gen;
   return {
     ...s,
-    calendar: { ...s.calendar, [view.account]: { ...l, gen } },
+    calendar: { ...s.calendar, [view.account]: markStale(loadableOf(s, view.account)) },
     calendarView: { ...view, refreshing: true },
   };
 }

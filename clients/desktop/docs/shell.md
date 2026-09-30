@@ -50,7 +50,9 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 
 ## Model
 
-The reducer keeps the fetched answers as generation-counted `Loadable`s: an event marks an answer stale by moving its `gen`, the loader fetches it at that generation, and an answer lands only as the generation it was asked at, so an event that arrives mid-fetch triggers one more fetch rather than being lost.
+The reducer keeps the fetched answers as generation-counted `Loadable`s: an event marks an answer stale by moving its `gen`, and the loader fetches it at that generation.
+Every event moves `gen`, also on an answer already stale, and an answer lands as the generation it was asked at.
+An event that arrives mid-fetch thus leaves the answer stale when it lands, and the loader fetches once more.
 
 `view` is what the window shows beside the sidebar (see Views); the selection, the marks and the outbox view outlive a switch.
 

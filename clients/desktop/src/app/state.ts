@@ -41,10 +41,11 @@ export const VIEWS: readonly View[] = ["mail", "contacts", "calendar", "settings
 export type Layout = "wide" | "medium" | "narrow";
 
 /**
- * A fetched answer. `gen` moves when the answer goes stale, `loadedGen` is
- * the generation the data (or the error) was fetched at; the answer is stale
- * while they differ, so an event arriving during a fetch keeps it stale and
- * the loader fetches again once the first answer lands.
+ * A fetched answer. `gen` moves every time the answer goes stale, even when
+ * it already is, and `loadedGen` is the generation the data (or the error)
+ * was fetched at; the answer is stale while they differ. An event arriving
+ * during a fetch moves `gen` past the one the fetch was asked at, so its
+ * answer lands stale and the loader fetches again.
  */
 export type Loadable<T> = {
   data: T | null;
@@ -61,8 +62,12 @@ export function isStale<T>(l: Loadable<T>): boolean {
   return l.gen !== l.loadedGen;
 }
 
+/**
+ * A new generation, also for an answer already stale: a fetch under way was
+ * asked before the change, so its answer must not settle the new one.
+ */
 export function markStale<T>(l: Loadable<T>): Loadable<T> {
-  return isStale(l) ? l : { ...l, gen: l.gen + 1 };
+  return { ...l, gen: l.gen + 1 };
 }
 
 /**
