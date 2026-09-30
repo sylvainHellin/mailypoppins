@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 use mp_client::events::Incoming;
 use mp_client::session::{QueryHandle, Session};
 use mp_client::{Observe, StateTracker};
-use mp_protocol::events::KIND_OPERATION_FINISHED;
+use mp_protocol::events::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
 use mp_protocol::operation::OperationStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
@@ -719,11 +719,13 @@ impl SessionHandle {
                         // The TUI's `apply_finished` and `apply_server_hit`:
                         // an operation this layer no longer awaits is not
                         // this client's, or was already settled by a
-                        // re-bootstrap's `operation.status`, and a hit or a
-                        // finish after its `operation_settled` would reopen it.
+                        // re-bootstrap's `operation.status`, and a hit, a
+                        // progress report or a finish after its
+                        // `operation_settled` would reopen it. Only the
+                        // finish ends the wait.
                         let operation = matches!(
                             event.kind.as_str(),
-                            KIND_OPERATION_FINISHED | KIND_SERVER_HIT
+                            KIND_OPERATION_FINISHED | KIND_OPERATION_PROGRESS | KIND_SERVER_HIT
                         );
                         if operation {
                             let id = event.payload["operation_id"].as_str().unwrap_or_default();
@@ -1119,6 +1121,47 @@ mod tests {
         assert_eq!(
             t[mark..],
             ["event:message.server_hit", "event:operation.finished"],
+            "{t:?}"
+        );
+        assert!(session.pending().is_empty());
+    }
+
+    /// Another client's device code or rebuild progress never renders here,
+    /// and a progress report leaves its operation awaited until the finish.
+    #[test]
+    fn only_awaited_operations_progress_reaches_the_frontend() {
+        let (session, door, _fixture, _rx, seen) = harness();
+        let bootstrap = session.last_bootstrap().expect("bootstrapped");
+        lock(&session.shared.pump)
+            .pending
+            .insert("op-mine".into(), PendingKind::Sync);
+        let mark = lock(&seen).len();
+        let event = |revision: u64, kind: &str, id: &str| {
+            Incoming::Event(EventEnvelope {
+                instance_id: bootstrap.instance_id.clone(),
+                revision: bootstrap.revision + revision,
+                kind: kind.into(),
+                payload: json!({
+                    "operation_id": id, "phase": "contacts", "done": 0,
+                    "total": null, "message": "work"
+                }),
+            })
+        };
+        session.handle(&door, event(1, KIND_OPERATION_PROGRESS, "op-other-window"));
+        session.handle(&door, event(2, KIND_OPERATION_PROGRESS, "op-mine"));
+        assert_eq!(session.pending(), ["op-mine"]);
+        session.handle(&door, event(3, KIND_OPERATION_PROGRESS, "op-mine"));
+        assert_eq!(session.pending_kind("op-mine"), Some(PendingKind::Sync));
+        session.handle(&door, event(4, KIND_OPERATION_FINISHED, "op-mine"));
+        session.handle(&door, event(5, KIND_OPERATION_PROGRESS, "op-mine"));
+        let t = types(&seen);
+        assert_eq!(
+            t[mark..],
+            [
+                "event:operation.progress",
+                "event:operation.progress",
+                "event:operation.finished"
+            ],
             "{t:?}"
         );
         assert!(session.pending().is_empty());

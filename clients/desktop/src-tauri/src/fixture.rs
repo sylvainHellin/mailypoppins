@@ -125,6 +125,12 @@ const ARCHIVE_MAILBOX: &str = "archive";
 /// Keys a fixture row carries that a `message.list` row does not.
 const FIXTURE_ONLY_KEYS: &[&str] = &["body", "attachments"];
 
+/// Methods only the fixture answers, which the handshake never asks a daemon
+/// for: over a daemon the Rust layer does their work itself (`signature.list`
+/// reads the signatures directory), so they stay out of
+/// [`crate::connector::REQUIRED_CAPABILITIES`].
+pub const FIXTURE_ONLY_METHODS: &[&str] = &["signature.list"];
+
 /// What [`Fixture::simulate`] can do.
 pub const SIMULATIONS: &[&str] = &[
     "disconnect",
@@ -1845,12 +1851,12 @@ impl Fixture {
             calls.push((method.to_string(), params.clone()));
         }
         // Fixture mode skips the handshake, so under test every call is
-        // held against the list a real daemon is asked for there.
-        // `signature.list` is the fixture's own: over a daemon the GUI reads
-        // the signatures directory itself.
+        // held against the list a real daemon is asked for there, less the
+        // fixture's own methods.
         #[cfg(test)]
         assert!(
-            crate::connector::REQUIRED_CAPABILITIES.contains(&method) || method == "signature.list",
+            crate::connector::REQUIRED_CAPABILITIES.contains(&method)
+                || FIXTURE_ONLY_METHODS.contains(&method),
             "{method} is called but missing from REQUIRED_CAPABILITIES"
         );
         let mut s = self.state();
@@ -3150,6 +3156,18 @@ mod tests {
     fn fixture() -> (Arc<Fixture>, std::sync::mpsc::Receiver<Incoming>) {
         let (tx, rx) = channel();
         (Arc::new(Fixture::load(tx).expect("fixtures load")), rx)
+    }
+
+    /// A fixture-only method is never asked of a daemon, so it cannot also
+    /// be required at the handshake.
+    #[test]
+    fn the_fixture_only_methods_are_not_required_of_a_daemon() {
+        for method in FIXTURE_ONLY_METHODS {
+            assert!(
+                !crate::connector::REQUIRED_CAPABILITIES.contains(method),
+                "{method}"
+            );
+        }
     }
 
     #[test]

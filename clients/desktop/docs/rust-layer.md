@@ -38,7 +38,7 @@ type GuiError =
 ```
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
-The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, `signature.list` aside.
+The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`, today `signature.list`), whose work the layer does itself over a daemon.
 `setup` is the desktop's own configuration: an editor that did not start, or a settings file that does not read; its message names what to change.
 
 ## Types
@@ -392,7 +392,9 @@ type GuiEvent =
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
 A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
 A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, and a retry started by `outbox_retry` end the same three ways.
-A hit or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
+A hit, a progress report or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
+`operation.progress` reaches the webview only for an operation this window awaits, so another client's contacts rebuild or sign-in code never shows here.
+A progress report leaves its operation awaited; only the finish, a settle or a drop ends the wait.
 
 ## The reader
 
