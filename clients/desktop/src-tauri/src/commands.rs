@@ -505,9 +505,13 @@ pub fn search_server_cancel_on(
 #[tauri::command(rename_all = "snake_case")]
 pub fn subscribe_events(session: State<'_, SessionHandle>, on_event: Channel<GuiEvent>) {
     let session = session.inner().clone();
-    // Off the IPC thread: subscribing takes a bootstrap.
+    // The claim is taken here, on the IPC thread and so in call order; the
+    // subscription itself runs off it, since it waits for the pump lock and
+    // takes a bootstrap. Under React StrictMode two calls race to that lock,
+    // and the claim is what makes the later one the sink.
+    let claim = session.claim_subscription();
     tauri::async_runtime::spawn_blocking(move || {
-        session.subscribe(Box::new(move |event| on_event.send(event).is_ok()));
+        session.subscribe_claimed(claim, Box::new(move |event| on_event.send(event).is_ok()));
     });
 }
 

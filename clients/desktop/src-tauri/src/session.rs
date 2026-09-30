@@ -25,6 +25,7 @@
 //! Lock order: `pump` before `sink`, and `conn` is never held with either.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -240,6 +241,8 @@ struct Shared {
     changed: Condvar,
     pump: Mutex<Pump>,
     sink: Mutex<Option<Sink>>,
+    /// The latest subscription claimed by `subscribe_events`, in call order.
+    subscription: AtomicU64,
     fixture_door: Mutex<Option<Arc<Fixture>>>,
 }
 
@@ -265,6 +268,7 @@ impl SessionHandle {
                 changed: Condvar::new(),
                 pump: Mutex::new(Pump::default()),
                 sink: Mutex::new(None),
+                subscription: AtomicU64::new(0),
                 fixture_door: Mutex::new(None),
             }),
         }
@@ -483,7 +487,26 @@ impl SessionHandle {
 
     /// Register the frontend's channel, replacing any earlier one.
     pub fn subscribe(&self, sink: Sink) {
+        let claim = self.claim_subscription();
+        self.subscribe_claimed(claim, sink);
+    }
+
+    /// Take the next subscription number. `subscribe_events` claims it on
+    /// the IPC thread, in call order, and subscribes off it, so of two calls
+    /// racing to the pump lock the later one wins whichever gets there first.
+    pub fn claim_subscription(&self) -> u64 {
+        self.shared.subscription.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Register the channel of a claimed subscription, send it the status
+    /// and, when connected, the snapshot, all under the pump lock. A claim a
+    /// later one superseded is dropped: its channel is dead or about to be.
+    pub fn subscribe_claimed(&self, claim: u64, sink: Sink) {
         let mut pump = lock(&self.shared.pump);
+        if self.shared.subscription.load(Ordering::SeqCst) != claim {
+            tracing::debug!("[session] subscription {claim} superseded before it attached");
+            return;
+        }
         *lock(&self.shared.sink) = Some(sink);
         self.status_changed();
         let door = match &*lock(&self.shared.conn) {
@@ -797,6 +820,53 @@ mod tests {
         assert_eq!(
             types(&seen),
             vec!["connection:connected", "rebootstrapped:subscribed"]
+        );
+    }
+
+    fn recording(seen: &Seen) -> Sink {
+        let seen = Arc::clone(seen);
+        Box::new(move |e| {
+            lock(&seen).push(serde_json::to_value(&e).unwrap_or_default());
+            true
+        })
+    }
+
+    #[test]
+    fn the_second_of_two_subscriptions_is_the_sink() {
+        let (session, _d, _f, _rx, first) = harness();
+        let second: Seen = Arc::new(Mutex::new(Vec::new()));
+        session.subscribe(recording(&second));
+        lock(&first).clear();
+        session.emit(GuiEvent::Disconnected { reason: "x".into() });
+        assert!(lock(&first).is_empty());
+        assert_eq!(
+            types(&second),
+            vec![
+                "connection:connected",
+                "rebootstrapped:subscribed",
+                "disconnected"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_later_claim_wins_when_the_earlier_subscribes_last() {
+        // Two `subscribe_events` calls whose blocking halves run out of order.
+        let (session, _d, _f, _rx, _seen) = harness();
+        let (early, late): (Seen, Seen) = (Arc::default(), Arc::default());
+        let first = session.claim_subscription();
+        let second = session.claim_subscription();
+        session.subscribe_claimed(second, recording(&late));
+        session.subscribe_claimed(first, recording(&early));
+        session.emit(GuiEvent::Disconnected { reason: "x".into() });
+        assert!(lock(&early).is_empty());
+        assert_eq!(
+            types(&late),
+            vec![
+                "connection:connected",
+                "rebootstrapped:subscribed",
+                "disconnected"
+            ]
         );
     }
 

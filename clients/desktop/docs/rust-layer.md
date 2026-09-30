@@ -119,6 +119,7 @@ A `MessageMeta` header is `null` when the message did not carry it, where a `Mes
 ## The event stream
 
 `subscribe_events` registers one `Channel`; a second call replaces the first.
+The command claims a subscription number on the IPC thread, in call order, and attaches off it under the pump lock; a claim a later call superseded is dropped, so under React StrictMode's double mount the last call is the sink whichever attach runs first.
 The channel first carries a `connection` event and, once connected, a `rebootstrapped` with `cause: "subscribed"`, taken while events are held back, so the frontend's model starts complete and every later event applies on top of it.
 
 ```ts
