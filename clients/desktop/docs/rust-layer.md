@@ -328,6 +328,7 @@ A row the account does not hold is `not_found` with `-32602`.
 
 `calendar_rsvp` starts `calendar.rsvp {account, row_id, response}` and awaits it as `kind: "rsvp"`.
 A response other than `accept`, `tentative` or `decline` is a `protocol` refusal before any call.
+A daemon refusal of the start comes back as the daemon's own sentence with its code, as `send_invite`'s does.
 The reply goes through the daemon's durable outbox, so a transport that fails leaves an outbox row the outbox view shows.
 `RsvpSettled` is the daemon's inline settle: `subject` is the reply's own (`Accepted: <summary>`), `organizer` whom it went to, and `delivered` whether any recipient took it; a reply nobody took yet waits in the outbox.
 The daemon refuses nothing about the invitation itself: an RSVP to the user's own, a cancelled or a superseded invitation is the frontend's to prevent, as it is the TUI's.

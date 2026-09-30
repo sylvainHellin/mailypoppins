@@ -179,7 +179,7 @@ pub fn invite_get_on(
 /// Reply `response` to the invitation of row `row_id`, the TUI's RSVP
 /// overlay: an operation awaited as `rsvp`, whose `result` is an
 /// [`RsvpSettled`]. A response word the daemon does not take is refused
-/// here, before any call.
+/// here, before any call; a daemon refusal comes back as its own sentence.
 pub fn calendar_rsvp_on(
     session: &SessionHandle,
     door: &Door,
@@ -192,13 +192,15 @@ pub fn calendar_rsvp_on(
             "An RSVP is accept, tentative or decline, not {response:?}"
         )));
     }
-    let operation_id = session.start_operation(
-        door,
-        "calendar.rsvp",
-        json!({"account": account, "row_id": row_id, "response": response}),
-        PendingKind::Rsvp,
-        RSVP_START_BUDGET,
-    )?;
+    let operation_id = session
+        .start_operation(
+            door,
+            "calendar.rsvp",
+            json!({"account": account, "row_id": row_id, "response": response}),
+            PendingKind::Rsvp,
+            RSVP_START_BUDGET,
+        )
+        .map_err(daemon_sentence)?;
     Ok(OperationStarted { operation_id })
 }
 
@@ -623,10 +625,13 @@ mod tests {
             session.pending_kind(&started.operation_id),
             Some(PendingKind::Rsvp)
         );
-        assert!(matches!(
+        assert_eq!(
             calendar_rsvp_on(&session, &door, "home", 9201, "accept"),
-            Err(GuiError::Protocol { .. })
-        ));
+            Err(GuiError::Protocol {
+                message: crate::fixture::GRAPH_RSVP_REFUSAL.to_string(),
+                code: Some(-32602)
+            })
+        );
     }
 
     fn fields() -> InviteFields {
