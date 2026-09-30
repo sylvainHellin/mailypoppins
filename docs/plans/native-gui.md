@@ -6,7 +6,9 @@ The daemon the GUI needs has shipped.
 Phases 0 to 6 of the daemon migration landed as tickets #0118 to #0126 in release 0.10.0: one daemon owns every store, network session and durable operation, and the CLI and the TUI are its clients.
 On 2026-09-29 and 2026-09-30 the client kernel moved from the TUI into `crates/mp-client`, and the daemon gained the `message.html` query for a webview reader.
 The GUI itself is open, as tickets #0129 to #0132.
-M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-m0.md](../baselines/gui-spike-m0.md), and the next ticket is #0129, milestone M1 below.
+M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-m0.md](../baselines/gui-spike-m0.md).
+M1, the read-only shell (#0129), landed on the `gui-m1` branch on 2026-09-30 as `clients/desktop/`.
+#0129 stays open for the generated TypeScript protocol types, three reader-guard cases that need a real click, and the live launchd check carried from #0128.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -148,7 +150,7 @@ The GUI reimplements what stays outside `mp-client`:
 The reader fetches a message's markup with `message.html`, a query answering `{account, row_id, html, bytes}` inline.
 The string is byte-identical to the file `message.materialise_html` writes: charset forced to UTF-8, the CSP meta tag prepended, `<meta http-equiv="refresh">` stripped, and `cid:` images inlined as `data:` URIs.
 The CSP is `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'`.
-A rendition above 8 MiB is refused with `-32004` and `data.fallback = "message.materialise_html"`, and the GUI then falls back to the file handle and releases it with `message.release_handle` once the view closes.
+A rendition above 8 MiB is refused with `-32004` and `data.fallback = "message.materialise_html"`; the GUI's scheme handler then materialises the file, reads it, and releases the handle with `message.release_handle` as soon as the read is done.
 A message without markup is `-32602`, and the reader shows the stored plain text from `message.get` instead.
 
 The rendering rule, decided on 2026-09-30 from the M0 findings:
@@ -158,13 +160,16 @@ The rendering rule, decided on 2026-09-30 from the M0 findings:
 - The app CSP stays strict: the scheme document ignores it, whereas a `srcdoc` document inherits it, and M0 lost the `data:` images of a `srcdoc` message under `img-src 'self'`.
 - Tauri issue #12767 did not reproduce on macOS 26.6, where the scheme iframe loads, renders and fires `load`; it is retested on macOS 15 before M6.
 - The string never goes through `innerHTML` into the application's own document.
-- The iframe carries `sandbox="allow-popups"` and no `allow-scripts`, so a `target=_blank` link reaches `on_navigation`; without `allow-popups` the sandbox drops it and nothing reaches Rust.
+- The iframe carries `sandbox="allow-popups"` and no `allow-scripts`, so a `target=_blank` link reaches Rust; without `allow-popups` the sandbox drops it and nothing reaches Rust.
+  M0 saw it arrive at `on_navigation`; M1 refuses it at either hook.
 - The app CSP's `frame-src` admits `mpmsg:`, `https:` and `http:`; limited to `mpmsg:`, it blocks a clicked link's frame navigation before `on_navigation` sees it, and the link is silently dead.
-- `on_navigation` sees subframe navigations as well as the main frame, so its allowlist admits the `mpmsg` scheme; it denies every other URL and hands an http(s) one to the external browser.
-- `window.open` reaches `on_new_window`, which denies it and hands the URL on the same way.
+- `on_navigation` sees subframe navigations as well as the main frame, so its allowlist admits the `mpmsg` scheme; it denies every other URL, logs it as intercepted and shows it in a notice under the message.
+- `window.open` reaches `on_new_window`, which denies it and logs it the same way.
+- Neither hook opens a browser: only the notice's "Open in browser" button does, on the user's click, for http, https and mailto.
 - A `<meta http-equiv="refresh">` does nothing inside the sandbox, and no navigation from it reaches `on_navigation`.
 
-M0 saw the `target=_blank` path with `allow-scripts allow-popups`, because its probe needed a script to click; a real user click on a real message in the script-free frame is still unverified and is checked in M1.
+M0 saw the `target=_blank` path with `allow-scripts allow-popups`, because its probe needed a script to click.
+M1 drove the plain-link and `window.open` paths from the app document, but a real user click in the script-free frame on a plain link, a `target=_blank` link and a form submit is still unverified; the manual steps are in `clients/desktop/docs/reader.md`.
 Admitting `https:` and `http:` in `frame-src` leaves `on_navigation` as the only guard against a web page loading in the reader frame, a risk listed below.
 
 ### What the CSP does not cover
@@ -267,6 +272,27 @@ It wrote no dependency due-diligence record, which moves to M1.
 - The command palette, keyboard routing, native menus, and accessibility primitives, with key help generated from the keymap data.
 - TypeScript protocol types generated from `mp-protocol`, after dependency due diligence on the generator.
 - Fixture screens for visual iteration, testable without a live mail server.
+
+M1 landed on the `gui-m1` branch on 2026-09-30, in the commits from `40db682c` on, each tagged `(#0129)`.
+What landed:
+
+- The dependency record, [2026-09-30-tauri-stack.md](../baselines/decisions/2026-09-30-tauri-stack.md), and the scaffold on Tauri 2.12, React 19, Vite, Tailwind 4 and shadcn on Base UI.
+- The Rust layer, crate `mp-desktop`: the connector as `ClientKind::Gui` with the on-demand `mp daemon start`, one session and one subscription over the `StateTracker` watermark, re-bootstrap on resync and reconnect, typed commands, the `mpmsg` reader scheme with its own CSP header, the navigation allowlist with its intercepted-URL log, and fixture mode.
+- The dark tokens with a computed contrast table, the inset-sidebar shell in wide, medium and narrow layouts, and the connecting, daemon-unavailable, version-mismatch, reconnecting and resync screens.
+- Keyboard routing, the command palette with milestone badges and the key help, all read from `src/keymap/keymap.json`, which `pnpm gen:keymap` generates from `mp dump-keys --json`, plus the native menus.
+- The reader frame with `sandbox="allow-popups"`, the refused-link notice with an explicit "Open in browser", and local and server search.
+- 78 vitest tests and 55 Rust tests, plus one ignored test against a live daemon.
+
+What is open:
+
+- The TypeScript protocol types are hand-written in `src/protocol/types.ts`; generating them with ts-rs waits for Sylvain's approval, and the `schemars` question stays deferred.
+- The three guard cases that need a real click inside the frame (a plain link, a `target=_blank` link, a form submit) are a manual step in `clients/desktop/docs/reader.md`.
+- The live launchd check carried from #0128 is not taken.
+- `mp dump-keys --json` carries no action ids, so the palette matches keymap rows by their description; an `id` per row in the dump would replace that match.
+- App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
+- List windowing is off, so every row of a mailbox is mounted.
+- The performance targets have not been measured on the M1 build.
+- The light theme stays deferred.
 
 ### M2: mutations with the undo hold (#0131)
 

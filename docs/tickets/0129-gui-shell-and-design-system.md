@@ -33,6 +33,36 @@ Each of these makes the GUI the second consumer of something only the CLI or the
 - `Outbound::rebootstrap` drops lifecycle events (`config.changed`, `daemon.shutting_down`) at or below the snapshot revision; keeping them needs a protocol decision.
 - The TUI announces itself as `ClientKind::Cli`, so the daemon cannot tell clients apart, which matters for the last-client-exits rule of the undo-send hold once a GUI joins.
 
+## Landed
+
+The read-only shell landed as `clients/desktop/` on the `gui-m1` branch on 2026-09-30, in the commits from `40db682c` on, each tagged `(#0129)`.
+The plan's M1 section lists what it covers, and `clients/desktop/docs/` documents the Rust layer, the shell, the reader and the design tokens.
+The desktop client runs 78 vitest tests (`pnpm test`) and 55 Rust tests (`cargo test` in `src-tauri`), plus one ignored test against a live daemon.
+
+## Open
+
+The ticket stays open for the first three items; the rest are known limits of M1.
+
+- The TypeScript protocol types are hand-written in `clients/desktop/src/protocol/types.ts`; generating them with ts-rs waits for Sylvain's approval, and the `schemars` question stays deferred.
+- The three guard cases that need a real click inside the reader frame (a plain link, a `target=_blank` link, a form submit) are unverified; the manual steps are in `clients/desktop/docs/reader.md`.
+- The live launchd check below is not taken.
+- `mp dump-keys --json` carries no action ids, so the palette matches keymap rows by their description; an `id` per row in the dump would replace that match.
+- App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
+- List windowing is off, so every row of a mailbox is mounted.
+- The performance targets have not been measured on the M1 build.
+- The light theme stays deferred.
+
+## Deferred follow-ups for the client crates
+
+The M1 reviews found these, and none of them blocks the shell:
+
+- The socket, runtime and log path derivation moves into `mp-core`, so `clients/desktop/src-tauri/src/paths.rs` stops repeating the binary's.
+- A fallible `Connector::open` in `mp-client`: it answers a `Connection` or ends the process today, so the desktop layer runs its own connect sequence before it hands `Session::connect` a connector.
+- `Serialize` on `mp_client::queries::SearchHit`, so the desktop layer can hand a hit to the frontend without its own copy of the type.
+- An `mp_protocol` type for the `message.get` record, which the desktop layer decodes by hand today.
+- The daemon's meta-CSP strip regex in `crates/mp-core/src/parse.rs` (line 143) misses a meta whose `content` comes before its `http-equiv`; the desktop reader is safe because it always sends its own header.
+- Drop the unused `tauri-plugin-shell` crate and `@tauri-apps/plugin-shell` package, and the capability's `opener:allow-open-url` permission for the frontend, since `open_external` calls the opener from Rust.
+
 ## Owner action carried here
 
 Carried from #0128, which did not take it: the live launchd check from #0125 is NOT TAKEN and needs the Mac: `mp daemon install-service`, log out and back in, `mp daemon status`, `mp daemon uninstall-service`.

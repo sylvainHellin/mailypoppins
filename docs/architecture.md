@@ -32,6 +32,7 @@ The engine lives in the root package's `src/lib.rs` modules, the shared engine-f
 | `crates/mp-protocol` | the wire types, the framing, the fixtures | nothing of this workspace |
 | `crates/mp-client` | the socket transport, the handshake, and the client kernel every client shares: the session thread, its event stream, the `Queries` door and the typed reads over it, the row deltas, the `StateTracker` watermark, the connect-subscribe-settle helper | `mp-protocol` |
 | `clients/tui` | the terminal client: model, keys, views, the mapping of the typed reads onto its model, and the event application | `mp-core`, `mp-client`, `mp-protocol` |
+| `clients/desktop` (`mp-desktop`) | the macOS GUI (#0129): a Tauri 2 Rust layer and a React frontend, in its own workspace outside this one ([README](../clients/desktop/README.md)) | `mp-core`, `mp-client`, `mp-protocol`, by path |
 Config types derive `Clone` so they can be moved into background threads.
 
 The installed binary is `mp` (`cargo install --path .`).

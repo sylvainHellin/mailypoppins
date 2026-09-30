@@ -135,9 +135,9 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 
 ## Next
 
-> Native GUI, the [native GUI plan](docs/plans/native-gui.md), reusing the daemon Phases 0 to 6 built. Seven milestones, M0 to M6, over five tickets, in order; all of them need the Mac. [#0128](docs/tickets/0128-gui-risk-spikes.md) M0 is done (2026-09-30): the spike met every target it measured and settled the reader route, recorded in [docs/baselines/gui-spike-m0.md](docs/baselines/gui-spike-m0.md). #0129 M1 is next.
+> Native GUI, the [native GUI plan](docs/plans/native-gui.md), reusing the daemon Phases 0 to 6 built. Seven milestones, M0 to M6, over five tickets, in order; all of them need the Mac. [#0128](docs/tickets/0128-gui-risk-spikes.md) M0 is done (2026-09-30): the spike met every target it measured and settled the reader route, recorded in [docs/baselines/gui-spike-m0.md](docs/baselines/gui-spike-m0.md). #0129 M1 landed on the `gui-m1` branch (2026-09-30): the read-only shell in `clients/desktop/`, with accounts, mailboxes, the message list, the sandboxed reader and local and server search over the daemon, 78 vitest and 55 Rust tests. It stays open for the generated TypeScript protocol types (ts-rs, awaiting approval), the three reader-guard cases that need a real click, and the live launchd check.
 
-- [#0129 M1, read-only shell and design system](docs/tickets/0129-gui-shell-and-design-system.md) -- feature _(with the read slices of #0131; carries the live launchd check and the dependency record from #0128)_
+- [#0129 M1, read-only shell and design system](docs/tickets/0129-gui-shell-and-design-system.md) -- feature _(with the read slices of #0131, landed on `gui-m1`; open for the generated protocol types, the manual guard clicks and the live launchd check carried from #0128)_
 - [#0131 M2 to M4, mutations, compose through the external editor, calendar, contacts and config](docs/tickets/0131-gui-full-parity.md) -- feature
 - [#0130 M5, embedded Neovim composition](docs/tickets/0130-gui-embedded-neovim.md) -- feature
 - [#0132 M6, distribution and release](docs/tickets/0132-gui-distribution-and-release.md) -- chore _(needs #0012)_
