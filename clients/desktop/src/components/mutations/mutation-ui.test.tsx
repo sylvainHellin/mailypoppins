@@ -136,6 +136,47 @@ describe("the reader toolbar", () => {
   });
 });
 
+describe("mark read on an explicit open (MSG-08)", () => {
+  const unreadPressed = (id: number) => within(row(id)).getByRole("button", { name: "Unread" }).getAttribute("aria-pressed");
+
+  it("moving the cursor marks nothing; Enter on an unread row marks it read once", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jjj");
+    await user.keyboard("k");
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    await within(reader).findByRole("heading", { name: "Angebot Dachsanierung" });
+    // The cursor walked over two unread rows and shows one of them.
+    expect(callsOf("message_set_read")).toEqual([]);
+    expect(unreadPressed(1003)).toBe("true");
+
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(callsOf("message_set_read")).toEqual([{ account: "work", row_ids: [1002], read: true }]));
+    await waitFor(() => expect(unreadPressed(1002)).toBe("false"));
+
+    // Back to the list and into the reader again: the row is read, nothing more is sent.
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    await user.keyboard("{Tab}");
+    expect(callsOf("message_set_read")).toHaveLength(1);
+  });
+
+  it("Tab into the reader and a double-click open an unread row and mark it read", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jjj");
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    await within(reader).findByRole("heading", { name: "This week in type: variable fonts" });
+    expect(callsOf("message_set_read")).toEqual([]);
+    await user.keyboard("{Tab}");
+    await waitFor(() => expect(callsOf("message_set_read")).toEqual([{ account: "work", row_ids: [1003], read: true }]));
+
+    await user.dblClick(row(1006));
+    await waitFor(() => expect(callsOf("message_set_read")).toHaveLength(2));
+    expect(callsOf("message_set_read")[1]).toEqual({ account: "work", row_ids: [1006], read: true });
+    await waitFor(() => expect(unreadPressed(1006)).toBe("false"));
+  });
+});
+
 describe("the move picker", () => {
   it("filters as the name is typed, and Escape cancels", async () => {
     const { user } = renderApp();

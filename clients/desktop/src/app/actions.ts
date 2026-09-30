@@ -9,6 +9,7 @@ import {
   liveHolds,
   LIST_WIDTH_MIN,
   LIST_WIDTH_STEP,
+  PANES,
   readerKey,
   targetKey,
   type AppState,
@@ -48,9 +49,14 @@ export type ListGeometry = { width: number; max: number };
 export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>, list?: ListGeometry): void {
   switch (id) {
     case "focus_next":
-      return dispatch({ type: "cycle_focus", dir: 1 });
-    case "focus_prev":
-      return dispatch({ type: "cycle_focus", dir: -1 });
+    case "focus_prev": {
+      const dir = id === "focus_next" ? 1 : -1;
+      dispatch({ type: "cycle_focus", dir });
+      // Landing in the reader is an explicit open, as the TUI's Tab into the body pane is.
+      const pane = PANES[(PANES.indexOf(s.focus) + dir + PANES.length) % PANES.length];
+      if (pane === "reader") openedRead(s, dispatch);
+      return;
+    }
     case "focus_sidebar":
       return dispatch({ type: "focus", pane: "sidebar" });
     case "focus_list":
@@ -69,6 +75,7 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "move_selection", to: -1, relative: true });
     case "open_message":
       if (s.selection.message || s.selection.draft) dispatch({ type: "focus", pane: "reader" });
+      openedRead(s, dispatch);
       return;
     case "select_mailbox":
       return dispatch({ type: "sidebar_enter" });
@@ -200,6 +207,27 @@ export function openMessageTarget(s: AppState): MessageTarget | null {
   const account = s.selection.account;
   const m = s.selection.message;
   return account && m ? { account, row_id: m.row_id } : null;
+}
+
+/**
+ * The mark-read an explicit open owes (MSG-08), the TUI's `queue_mark_open_read`:
+ * Enter, a double-click on a row, or a focus move into the reader marks an
+ * unread received message read through `setRead`, applied at once like the
+ * `u` toggle. Moving the cursor marks nothing, and a draft, a row already
+ * read (or with a read pending) and a row the model does not show are left
+ * alone, so an open marks at most once. The TUI has no delay or setting for it.
+ */
+export function markOpenRead(t: MessageTarget | null, seen: boolean | null | undefined, dispatch: Dispatch<Action>): void {
+  if (!t || seen !== false) return;
+  void createMutations(dispatch).setRead([t], true);
+}
+
+/** `markOpenRead` for the selected message, as the model shows it. */
+function openedRead(s: AppState, dispatch: Dispatch<Action>): void {
+  const account = s.search?.account ?? s.selection.account;
+  const m = s.selection.message;
+  const t = account && m ? { account, row_id: m.row_id } : null;
+  markOpenRead(t, t ? flagsOf(s, t)?.seen : null, dispatch);
 }
 
 function messageTargets(targets: Target[]): MessageTarget[] {

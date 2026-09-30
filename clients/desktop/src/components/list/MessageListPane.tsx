@@ -8,7 +8,7 @@ import { MessageRow } from "@/components/list/MessageRow";
 import { revealRow, useWindow, WINDOW_FROM } from "@/components/list/useWindow";
 import { SearchResults } from "@/components/search/SearchResults";
 import { SearchStatusBar } from "@/components/search/SearchStatusBar";
-import { FILTER_INPUT_ID, runAction, runMutation } from "@/app/actions";
+import { FILTER_INPUT_ID, markOpenRead, runAction, runMutation } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
 import { filteredDrafts, filteredRows, targetKey } from "@/app/state";
 import type { MessageListRow } from "@/protocol/types";
@@ -60,13 +60,15 @@ export function MessageListPane() {
     [dispatch],
   );
   const onOpen = useCallback(
-    (row: MessageListRow) =>
+    (row: MessageListRow) => {
       dispatch({
         type: "select_message",
         message: { row_id: row.id, message_id: row.message_id, selector: row.selector },
         focus: "reader",
-      }),
-    [dispatch],
+      });
+      markOpenRead(account ? { account, row_id: row.id } : null, row.flags.seen, dispatch);
+    },
+    [account, dispatch],
   );
   const onSelectDraft = useCallback((id: string) => dispatch({ type: "select_draft", id }), [dispatch]);
   const mark = useCallback(

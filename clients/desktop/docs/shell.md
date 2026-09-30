@@ -118,6 +118,11 @@ The keys and the palette act on `actionTargets(state)`: the marked rows, else th
 A row toggle acts on its own row and the reader toolbar on the open message, whatever is marked.
 Marks a batch acted on are cleared once it is dispatched, as the TUI clears its selection.
 
+Opening an unread message marks it read, the TUI's rule since #0110 (`MSG-08`).
+An open is Enter from the list, a double-click on a row or a search hit, or Tab or Shift+Tab landing in the reader; a single click or a cursor move only selects, and marks nothing.
+`markOpenRead` in `src/app/actions.ts` calls `setRead` on that one row, applied at once like the `u` toggle, and does nothing for a draft or a row already read, so an open marks at most once.
+The TUI has no delay or setting for it, and neither has the desktop.
+
 Archive and delete ask first, as the TUI's confirmations do: "Archive this email?" with the sender and subject, or "Delete 3 emails?" over marks.
 `y` or Enter confirms and `n` or Escape cancels; the confirm button has the initial focus.
 Delete over a draft discards it with `draft_discard`, and a batch that holds messages and drafts calls both.
@@ -179,7 +184,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 
 - `j`/`k`, arrows: move in the focused pane (the sidebar cursor, the list selection, or scroll the reader).
 - `J`/`K`, `gj`/`gk`: next and previous message from any pane.
-- `Enter`: open the mailbox under the cursor, or move into the reader.
+- `Enter`: open the mailbox under the cursor, or open the message in the reader and mark it read.
 - `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `Space m`: the list; `ga`: next account.
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.

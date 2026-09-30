@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { SearchHitRow } from "@/components/search/SearchHitRow";
+import { markOpenRead } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey, type SearchHit, type SearchState } from "@/app/state";
 
@@ -32,6 +33,8 @@ export function SearchResults({ search }: { search: SearchState }) {
         message: { row_id: hit.row_id, message_id: hit.message_id, selector: hit.selector },
         ...(focus ? { focus } : {}),
       });
+      // Opening a hit marks it read (MSG-08); selecting one does not.
+      if (focus) markOpenRead({ account: hit.account, row_id: hit.row_id }, hit.flags.seen, dispatch);
     },
     [dispatch],
   );
