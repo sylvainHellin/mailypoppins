@@ -36,6 +36,16 @@
 //! [`REBUILD_DELAY`] with `saved: written`; after `rebuild_refused` the next
 //! one settles `refused_shrunk` with 3 contacts found and the index kept.
 //!
+//! The signatures are `signatures.json`'s, held in memory and mirrored to
+//! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
+//! real file. `signature.list` and the pseudo-methods `signature.read`,
+//! `signature.create`, `signature.rename`, `signature.delete` and
+//! `signature.set_default` answer what the Rust layer answers from
+//! `mp_core::signatures` over a daemon ([`FIXTURE_ONLY_METHODS`]), with its
+//! sentences; a create and a rename publish the watcher's
+//! `signature.changed` for the new file, a delete publishes nothing, and
+//! `signature_changed` edits `work` as another window would.
+//!
 //! `send.draft` and `send.approved` arm a hold of the fixture's own
 //! `email.send_hold_secs` when asked for one, count it down through the same
 //! machinery, then "send": the draft file goes, a filed copy lands in Sent,
@@ -91,7 +101,8 @@ use mp_protocol::draft::{
 use mp_protocol::events::{
     Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
     KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
+    KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::{
     ApprovedOutcome, HoldListing, HoldStatus, OutboxCounts, OutboxListing, OutboxRetryOutcome,
@@ -179,9 +190,23 @@ const FIXTURE_ONLY_KEYS: &[&str] = &["body", "attachments"];
 
 /// Methods only the fixture answers, which the handshake never asks a daemon
 /// for: over a daemon the Rust layer does their work itself (`signature.list`
-/// reads the signatures directory), so they stay out of
+/// and [`crate::signatures`] call `mp_core::signatures`), so they stay out of
 /// [`crate::connector::REQUIRED_CAPABILITIES`].
-pub const FIXTURE_ONLY_METHODS: &[&str] = &["signature.list"];
+pub const FIXTURE_ONLY_METHODS: &[&str] = &[
+    "signature.list",
+    "signature.read",
+    "signature.create",
+    "signature.rename",
+    "signature.delete",
+    "signature.set_default",
+];
+
+/// The directory under the per-run root the signature files mirror into.
+const SIGNATURES_DIR: &str = "signatures";
+
+/// The line `signature_changed` appends to `work`, as an edit in another
+/// window would.
+pub const SIGNATURE_EDIT_LINE: &str = "Edited behind the fixture's back.";
 
 /// What [`Fixture::simulate`] can do.
 pub const SIMULATIONS: &[&str] = &[
@@ -203,6 +228,7 @@ pub const SIMULATIONS: &[&str] = &[
     "invite_cancel",
     "rsvp_fail",
     "rebuild_refused",
+    "signature_changed",
 ];
 
 /// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
@@ -786,7 +812,198 @@ impl State {
 /// What a draft method answers and the watcher events it owes.
 type Answered = (Value, Vec<(&'static str, Value)>);
 
-/// The draft files: the `draft.*` family and `signature.list`.
+/// The signatures: `signature.list` and the pseudo-methods the Rust layer
+/// answers itself over a daemon, from `mp_core::signatures`. The contents
+/// live in memory (`signatures.json`'s shape) and every change is mirrored
+/// to `<root>/signatures/<name>.md`, so an Edit opens a real file; the
+/// refusals are `mp_core::signatures`' sentences, as `-32602`.
+impl State {
+    fn signature_path(&self, name: &str) -> PathBuf {
+        self.root.join(SIGNATURES_DIR).join(format!("{name}.md"))
+    }
+
+    fn signature_exists(&self, name: &str) -> bool {
+        self.signatures["signatures"].get(name).is_some()
+    }
+
+    /// `signature.list`'s answer for `account`: every name, sorted, and the
+    /// account's default.
+    fn signature_listing(&self, account: &str) -> Value {
+        let mut names: Vec<&String> = self.signatures["signatures"]
+            .as_object()
+            .map(|o| o.keys().collect())
+            .unwrap_or_default();
+        names.sort();
+        json!({
+            "account": account, "names": names,
+            "default": self.signatures["defaults"][account]
+        })
+    }
+
+    /// The name under `key`, or `mp_core::signatures::validate_name`'s refusal.
+    fn signature_name<'a>(method: &str, params: &'a Value, key: &str) -> Result<&'a str> {
+        let name = param_str(method, params, key)?;
+        mp_core::signatures::validate_name(name)
+            .map_err(|e| refused(method, -32602, &format!("{e:#}")))?;
+        Ok(name)
+    }
+
+    /// `mp_core::signatures`' refusal of a name that names no signature.
+    fn signature_known(&self, method: &str, name: &str) -> Result<()> {
+        if self.signature_exists(name) {
+            Ok(())
+        } else {
+            Err(refused(
+                method,
+                -32602,
+                &format!("no signature named '{name}'"),
+            ))
+        }
+    }
+
+    /// Write `name`'s content to its file.
+    fn mirror_signature(&self, name: &str) -> Result<PathBuf> {
+        let path = self.signature_path(name);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let content = self.signatures["signatures"][name]
+            .as_str()
+            .unwrap_or_default();
+        fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+        Ok(path)
+    }
+
+    /// The watcher's `signature.changed` for the file of `name`.
+    fn signature_changed(&self, name: &str) -> (&'static str, Value) {
+        (
+            KIND_SIGNATURE_CHANGED,
+            json!({"name": name, "path": self.signature_path(name).display().to_string()}),
+        )
+    }
+
+    /// Point every account default that named `old` at `new`, or clear it,
+    /// as `mp_core::signatures`' rename and delete do.
+    fn retarget_signature_defaults(&mut self, old: &str, new: Option<&str>) {
+        let Some(defaults) = self.signatures["defaults"].as_object_mut() else {
+            return;
+        };
+        let accounts: Vec<String> = defaults
+            .iter()
+            .filter(|(_, v)| v.as_str() == Some(old))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for account in accounts {
+            match new {
+                Some(new) => defaults.insert(account, json!(new)),
+                None => defaults.remove(&account),
+            };
+        }
+    }
+
+    fn signature_method(&mut self, method: &str, params: &Value) -> Result<Answered> {
+        match method {
+            "signature.list" => {
+                let account = param_str(method, params, "account")?;
+                self.account_known(method, account)?;
+                Ok((self.signature_listing(account), Vec::new()))
+            }
+            "signature.read" => {
+                let name = Self::signature_name(method, params, "name")?;
+                self.signature_known(method, name)?;
+                let answer = json!({
+                    "name": name,
+                    "path": self.signature_path(name).display().to_string(),
+                    "content": self.signatures["signatures"][name],
+                });
+                Ok((answer, Vec::new()))
+            }
+            "signature.create" => {
+                let name = Self::signature_name(method, params, "name")?;
+                if self.signature_exists(name) {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("a signature named '{name}' already exists"),
+                    ));
+                }
+                if !self.signatures["signatures"].is_object() {
+                    self.signatures["signatures"] = json!({});
+                }
+                self.signatures["signatures"][name] = json!("");
+                let path = self.mirror_signature(name)?;
+                let answer =
+                    json!({"name": name, "path": path.display().to_string(), "content": ""});
+                Ok((answer, vec![self.signature_changed(name)]))
+            }
+            "signature.rename" => {
+                let account = param_str(method, params, "account")?;
+                self.account_known(method, account)?;
+                let old = Self::signature_name(method, params, "old")?;
+                let new = Self::signature_name(method, params, "new")?;
+                if old == new {
+                    return Ok((self.signature_listing(account), Vec::new()));
+                }
+                self.signature_known(method, old)?;
+                if self.signature_exists(new) {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("a signature named '{new}' already exists"),
+                    ));
+                }
+                let content = self.signatures["signatures"]
+                    .as_object_mut()
+                    .and_then(|o| o.remove(old))
+                    .unwrap_or_default();
+                self.signatures["signatures"][new] = content;
+                fs::rename(self.signature_path(old), self.signature_path(new))
+                    .or_else(|_| self.mirror_signature(new).map(|_| ()))?;
+                self.retarget_signature_defaults(old, Some(new));
+                Ok((
+                    self.signature_listing(account),
+                    vec![self.signature_changed(new)],
+                ))
+            }
+            "signature.delete" => {
+                let account = param_str(method, params, "account")?;
+                self.account_known(method, account)?;
+                let name = Self::signature_name(method, params, "name")?;
+                self.signature_known(method, name)?;
+                if let Some(o) = self.signatures["signatures"].as_object_mut() {
+                    o.remove(name);
+                }
+                let _ = fs::remove_file(self.signature_path(name));
+                self.retarget_signature_defaults(name, None);
+                // The daemon's watcher publishes no removal (no `signature.removed`).
+                Ok((self.signature_listing(account), Vec::new()))
+            }
+            "signature.set_default" => {
+                let account = param_str(method, params, "account")?;
+                self.account_known(method, account)?;
+                match &params["name"] {
+                    Value::Null => {
+                        if let Some(d) = self.signatures["defaults"].as_object_mut() {
+                            d.remove(account);
+                        }
+                    }
+                    _ => {
+                        let name = Self::signature_name(method, params, "name")?;
+                        self.signature_known(method, name)?;
+                        if !self.signatures["defaults"].is_object() {
+                            self.signatures["defaults"] = json!({});
+                        }
+                        self.signatures["defaults"][account] = json!(name);
+                    }
+                }
+                Ok((self.signature_listing(account), Vec::new()))
+            }
+            other => Err(refused(other, -32601, &format!("unknown method {other}"))),
+        }
+    }
+}
+
+/// The draft files: the `draft.*` family.
 impl State {
     fn drafts_dir(&self, account: &str) -> PathBuf {
         self.root.join("drafts").join(account)
@@ -1123,18 +1340,6 @@ impl State {
         self.account_known(method, &account)?;
         let dir = self.drafts_dir(&account);
         match method {
-            "signature.list" => {
-                let mut names: Vec<&String> = self.signatures["signatures"]
-                    .as_object()
-                    .map(|o| o.keys().collect())
-                    .unwrap_or_default();
-                names.sort();
-                let answer = json!({
-                    "account": account, "names": names,
-                    "default": self.signatures["defaults"][&account]
-                });
-                Ok((answer, Vec::new()))
-            }
             "draft.create" => {
                 let name = param_str(method, params, "name")?;
                 let file_name = match Path::new(name).extension() {
@@ -1857,6 +2062,7 @@ impl Fixture {
         }
         let root = fixture_root();
         seed_drafts(&root, &seeds, &bodies).context("writing the fixture drafts")?;
+        seed_signatures(&root, &signatures).context("writing the fixture signatures")?;
         let html_by_key: BTreeMap<String, String> =
             serde_json::from_str(HTML).context("fixtures/html.json")?;
         let mut html = BTreeMap::new();
@@ -2128,9 +2334,20 @@ impl Fixture {
             | "draft.approve"
             | "draft.demote"
             | "draft.validate"
-            | "draft.preview"
-            | "signature.list" => {
+            | "draft.preview" => {
                 let (answer, events) = s.draft_method(method, &params)?;
+                for (kind, payload) in events {
+                    self.emit_locked(&mut s, kind, payload);
+                }
+                Ok(answer)
+            }
+            "signature.list"
+            | "signature.read"
+            | "signature.create"
+            | "signature.rename"
+            | "signature.delete"
+            | "signature.set_default" => {
+                let (answer, events) = s.signature_method(method, &params)?;
                 for (kind, payload) in events {
                     self.emit_locked(&mut s, kind, payload);
                 }
@@ -3321,6 +3538,7 @@ impl Fixture {
                 self.state().rebuild_refused = true;
                 return Ok(());
             }
+            "signature_changed" => return self.simulate_signature_changed(),
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
                 self.state().send_next = Some(match what {
@@ -3579,6 +3797,24 @@ impl Fixture {
         }
     }
 
+    /// Another window edited the signature `work`: a line appended to it and
+    /// its file, and the watcher's `signature.changed`.
+    fn simulate_signature_changed(&self) -> Result<()> {
+        let mut s = self.state();
+        let current = s.signatures["signatures"]["work"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("no signature named 'work' to edit"))?;
+        s.signatures["signatures"]["work"] = json!(format!(
+            "{}\n{SIGNATURE_EDIT_LINE}",
+            current.trim_end_matches('\n')
+        ));
+        s.mirror_signature("work")?;
+        let (kind, payload) = s.signature_changed("work");
+        self.emit_locked(&mut s, kind, payload);
+        Ok(())
+    }
+
     /// The editor saved the newest draft `editor_open` named: a line appended
     /// (`editor_save`), or a frontmatter that no longer parses
     /// (`editor_invalid`), and the watcher's event for it.
@@ -3748,6 +3984,22 @@ fn seed_drafts(
                 .open(&path)?
                 .set_modified(now - Duration::from_secs(60 * (i as u64 + 1)))?;
         }
+    }
+    Ok(())
+}
+
+/// Write `signatures.json`'s signatures as `<root>/signatures/<name>.md`,
+/// the files the Signatures dialog's Edit opens.
+fn seed_signatures(root: &Path, signatures: &Value) -> Result<()> {
+    let dir = root.join(SIGNATURES_DIR);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (name, content) in signatures["signatures"].as_object().into_iter().flatten() {
+        mp_core::signatures::validate_name(name)
+            .with_context(|| format!("fixtures/signatures.json names `{name}`"))?;
+        fs::write(
+            dir.join(format!("{name}.md")),
+            content.as_str().unwrap_or_default(),
+        )?;
     }
     Ok(())
 }

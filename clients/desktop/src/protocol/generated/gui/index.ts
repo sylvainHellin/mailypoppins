@@ -53,6 +53,7 @@ export type { SavedFile } from "./SavedFile";
 export type { SendRefusal } from "./SendRefusal";
 export type { SendStarted } from "./SendStarted";
 export type { ServerSearchParams } from "./ServerSearchParams";
+export type { SignatureFile } from "./SignatureFile";
 export type { SignatureListing } from "./SignatureListing";
 export type { SyncMode } from "./SyncMode";
 export type { VcardDraft } from "./VcardDraft";

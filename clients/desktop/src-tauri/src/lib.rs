@@ -31,6 +31,7 @@ pub mod navigation;
 pub mod paths;
 pub mod reader;
 pub mod session;
+pub mod signatures;
 
 #[cfg(test)]
 mod ts_bindings;
@@ -167,6 +168,11 @@ pub fn run() {
             commands::draft_preview,
             commands::draft_set_recipients,
             commands::signature_list,
+            signatures::signature_read,
+            signatures::signature_create,
+            signatures::signature_rename,
+            signatures::signature_delete,
+            signatures::signature_set_default,
             editor::editor_open,
             editor::editor_setting_get,
             editor::editor_setting_set,
