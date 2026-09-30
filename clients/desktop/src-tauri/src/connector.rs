@@ -88,6 +88,16 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "draft.list",
     "operation.status",
     "operation.cancel",
+    "message.archive",
+    "message.delete",
+    "message.move",
+    "message.set_flag",
+    "message.set_read",
+    "draft.discard",
+    "send.cancel_hold",
+    "send.hold_status",
+    "sync.quick",
+    "sync.full",
 ];
 
 /// Why a connect failed, for the connection screen.

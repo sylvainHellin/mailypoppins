@@ -14,7 +14,17 @@
     "message.release_handle",
     "draft.list",
     "operation.status",
-    "operation.cancel"
+    "operation.cancel",
+    "message.archive",
+    "message.delete",
+    "message.move",
+    "message.set_flag",
+    "message.set_read",
+    "draft.discard",
+    "send.cancel_hold",
+    "send.hold_status",
+    "sync.quick",
+    "sync.full"
   ],
   "snapshot": {
     "accounts": [
@@ -44,7 +54,9 @@
       "work": {"queued": 0, "failed": 0},
       "home": {"queued": 1, "failed": 0}
     },
-    "holds": [],
+    "holds": [
+      {"operation_id": "fixture-hold-seed", "account": "work", "draft_id": "angebot-antwort", "subject": "Re: Angebot Dachsanierung", "hold_secs": 60, "remaining_secs": 60, "fires_at": "2026-09-30T12:01:00Z", "origin": "tui"}
+    ],
     "operations": [],
     "diagnostics": [
       {"name": "account:home", "status": "warn", "detail": "The last sync of home failed: the server refused the login."}

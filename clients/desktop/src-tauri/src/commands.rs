@@ -22,6 +22,7 @@ use mp_client::queries;
 use mp_core::selector::DRAFTS_MAILBOX;
 use mp_protocol::draft::DraftListing;
 use mp_protocol::listing::MessageListRow;
+use mp_protocol::send::HoldListing;
 use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
@@ -39,6 +40,9 @@ const MESSAGE_BUDGET: Duration = Duration::from_secs(10);
 const SEARCH_BUDGET: Duration = Duration::from_secs(20);
 const START_BUDGET: Duration = Duration::from_secs(10);
 const CANCEL_BUDGET: Duration = Duration::from_secs(5);
+/// One message of a mutation batch: a local commit, no server round trip.
+const MUTATION_BUDGET: Duration = Duration::from_secs(10);
+const HOLD_BUDGET: Duration = Duration::from_secs(5);
 
 /// `MP_DESKTOP_STUB_OPENER=1`: `open_external` records instead of opening.
 pub const STUB_OPENER_ENV: &str = "MP_DESKTOP_STUB_OPENER";
@@ -323,6 +327,125 @@ pub enum CancelOutcome {
     AlreadySettled,
 }
 
+/// Where a move or an archive put the message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct MovedTo {
+    pub mailbox: String,
+    pub selector: String,
+}
+
+/// The daemon's answer to one message mutation (`message.archive`,
+/// `message.delete`, `message.move`, `message.set_flag`, `message.set_read`),
+/// which the daemon builds inline, plus the `row_id` the GUI named.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct MutationAck {
+    /// The row the call named; not on the wire.
+    #[serde(default)]
+    pub row_id: i64,
+    pub account: String,
+    /// `<mailbox>/<uid>` before the mutation.
+    pub id: String,
+    /// The selector before the mutation.
+    pub selector: String,
+    /// The mailbox the message was in.
+    pub mailbox: String,
+    /// Archive and move only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<MovedTo>,
+    /// `message.set_read` only: the state set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<bool>,
+    /// `message.set_flag` only: the state set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flagged: Option<bool>,
+}
+
+/// One message of a batch the daemon refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct MutationFailure {
+    pub row_id: i64,
+    pub error: GuiError,
+}
+
+/// What a mutation over a list of rows came to, one call per row in the
+/// list's order, as the TUI does it. A row the daemon refused (gone, or
+/// never there) is in `failed` and the rest go ahead.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct MutationBatch {
+    pub done: Vec<MutationAck>,
+    pub failed: Vec<MutationFailure>,
+}
+
+/// The daemon's answer to one `draft.discard`, which it builds inline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftDiscarded {
+    pub account: String,
+    pub id: String,
+    pub selector: String,
+    /// The status the draft was in (`draft`, `approved`, ...).
+    pub status: String,
+}
+
+/// One draft of a batch the daemon refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftDiscardFailure {
+    pub id: String,
+    pub error: GuiError,
+}
+
+/// What a `draft.discard` over a list of ids came to, one call per id.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftDiscardBatch {
+    pub done: Vec<DraftDiscarded>,
+    pub failed: Vec<DraftDiscardFailure>,
+}
+
+/// The daemon's answer to `send.cancel_hold`, which it builds inline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct HoldCancelled {
+    pub cancelled: bool,
+    pub operation_id: String,
+    /// The revision the cancel moved the daemon to.
+    pub revision: u64,
+}
+
+/// Which sync pass `sync_trigger` starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    /// `sync.quick`: the newest messages of each mailbox.
+    Quick,
+    /// `sync.full`: every message.
+    Full,
+}
+
+impl SyncMode {
+    fn method(self) -> &'static str {
+        match self {
+            SyncMode::Quick => "sync.quick",
+            SyncMode::Full => "sync.full",
+        }
+    }
+}
+
 /// Versions on both sides of the socket.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -525,6 +648,216 @@ pub fn search_server_cancel_on(
     }
 }
 
+/// A refusal that is about one row of a batch (it is gone, or a parameter
+/// the row made wrong), after which the next row still goes. Anything else
+/// (no daemon, an unknown account, a timeout) is about the whole batch.
+fn about_one_row(error: &GuiError) -> bool {
+    matches!(
+        error,
+        GuiError::NotFound {
+            code: Some(-32602),
+            ..
+        } | GuiError::Protocol { .. }
+    )
+}
+
+/// What a batch came to: the answers, and the items refused with why.
+type Outcomes<I, T> = (Vec<T>, Vec<(I, GuiError)>);
+
+/// Run `each` over `items` in order, one call per item.
+///
+/// A per-row refusal lands in `failed` and the batch goes on. An error about
+/// the whole batch stops it: it is the command's error when nothing was done
+/// yet, and otherwise the error of every item not done, so the answer still
+/// says which rows changed.
+fn each_of<I: Clone, T>(
+    items: &[I],
+    mut each: impl FnMut(&I) -> Result<T, GuiError>,
+) -> Result<Outcomes<I, T>, GuiError> {
+    let mut done = Vec::new();
+    let mut failed = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        match each(item) {
+            Ok(answer) => done.push(answer),
+            Err(e) if about_one_row(&e) => failed.push((item.clone(), e)),
+            Err(e) if done.is_empty() => return Err(e),
+            Err(e) => {
+                failed.extend(items[i..].iter().map(|rest| (rest.clone(), e.clone())));
+                break;
+            }
+        }
+    }
+    Ok((done, failed))
+}
+
+/// One message mutation over `row_ids`, always `settle: false`: the daemon
+/// commits each row and its owed server op and drains them once the
+/// account's mutations have been quiet for 1.5 s (#0133).
+fn mutate_on(
+    door: &Door,
+    method: &str,
+    account: &str,
+    row_ids: &[i64],
+    extra: &[(&str, Value)],
+) -> Result<MutationBatch, GuiError> {
+    let (done, failed) = each_of(row_ids, |&row_id| {
+        let mut params = json!({"account": account, "row_id": row_id, "settle": false});
+        for (key, value) in extra {
+            params[*key] = value.clone();
+        }
+        let answer = call(door, method, params, MUTATION_BUDGET, Addressing::Resource)?;
+        let mut ack: MutationAck = serde_json::from_value(answer)
+            .map_err(|e| GuiError::protocol(format!("{method} did not decode: {e}")))?;
+        ack.row_id = row_id;
+        Ok(ack)
+    })?;
+    Ok(MutationBatch {
+        done,
+        failed: failed
+            .into_iter()
+            .map(|(row_id, error)| MutationFailure { row_id, error })
+            .collect(),
+    })
+}
+
+pub fn message_archive_on(
+    door: &Door,
+    account: &str,
+    row_ids: &[i64],
+) -> Result<MutationBatch, GuiError> {
+    mutate_on(door, "message.archive", account, row_ids, &[])
+}
+
+pub fn message_delete_on(
+    door: &Door,
+    account: &str,
+    row_ids: &[i64],
+) -> Result<MutationBatch, GuiError> {
+    mutate_on(door, "message.delete", account, row_ids, &[])
+}
+
+pub fn message_move_on(
+    door: &Door,
+    account: &str,
+    row_ids: &[i64],
+    destination: &str,
+) -> Result<MutationBatch, GuiError> {
+    mutate_on(
+        door,
+        "message.move",
+        account,
+        row_ids,
+        &[("destination", json!(destination))],
+    )
+}
+
+pub fn message_set_flag_on(
+    door: &Door,
+    account: &str,
+    row_ids: &[i64],
+    flagged: bool,
+) -> Result<MutationBatch, GuiError> {
+    mutate_on(
+        door,
+        "message.set_flag",
+        account,
+        row_ids,
+        &[("flagged", json!(flagged))],
+    )
+}
+
+pub fn message_set_read_on(
+    door: &Door,
+    account: &str,
+    row_ids: &[i64],
+    read: bool,
+) -> Result<MutationBatch, GuiError> {
+    mutate_on(
+        door,
+        "message.set_read",
+        account,
+        row_ids,
+        &[("read", json!(read))],
+    )
+}
+
+/// `draft.discard` over `ids`, never forced: an approved draft is refused,
+/// the way the TUI refuses it.
+pub fn draft_discard_on(
+    door: &Door,
+    account: &str,
+    ids: &[String],
+) -> Result<DraftDiscardBatch, GuiError> {
+    let (done, failed) = each_of(ids, |id| {
+        let answer = call(
+            door,
+            "draft.discard",
+            json!({"account": account, "id": id}),
+            MUTATION_BUDGET,
+            Addressing::Resource,
+        )?;
+        serde_json::from_value::<DraftDiscarded>(answer)
+            .map_err(|e| GuiError::protocol(format!("draft.discard did not decode: {e}")))
+    })?;
+    Ok(DraftDiscardBatch {
+        done,
+        failed: failed
+            .into_iter()
+            .map(|(id, error)| DraftDiscardFailure { id, error })
+            .collect(),
+    })
+}
+
+/// Every hold the daemon carries, or `account`'s.
+pub fn send_hold_status_on(door: &Door, account: Option<&str>) -> Result<HoldListing, GuiError> {
+    let params = match account {
+        Some(account) => json!({"account": account}),
+        None => json!({}),
+    };
+    let answer = call(
+        door,
+        "send.hold_status",
+        params,
+        HOLD_BUDGET,
+        Addressing::Params,
+    )?;
+    serde_json::from_value(answer)
+        .map_err(|e| GuiError::protocol(format!("send.hold_status did not decode: {e}")))
+}
+
+/// Stop one hold, from whichever client armed it. A hold that already fired
+/// or never was is `not_found`: a cancel is not a recall.
+pub fn send_cancel_hold_on(door: &Door, operation_id: &str) -> Result<HoldCancelled, GuiError> {
+    let answer = call(
+        door,
+        "send.cancel_hold",
+        json!({"operation_id": operation_id}),
+        HOLD_BUDGET,
+        Addressing::Resource,
+    )?;
+    serde_json::from_value(answer)
+        .map_err(|e| GuiError::protocol(format!("send.cancel_hold did not decode: {e}")))
+}
+
+/// Start a sync pass of `account` and await it like a server search: it ends
+/// with `operation.finished`, `operation_settled` or `operation_dropped`, and
+/// the pass itself publishes `sync.completed` to every client.
+pub fn sync_trigger_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    mode: SyncMode,
+) -> Result<OperationStarted, GuiError> {
+    let operation_id = session.start_operation(
+        door,
+        mode.method(),
+        json!({"account": account}),
+        PendingKind::Sync,
+        START_BUDGET,
+    )?;
+    Ok(OperationStarted { operation_id })
+}
+
 // ---------------------------------------------------------------------------
 // The commands
 // ---------------------------------------------------------------------------
@@ -648,6 +981,115 @@ pub async fn search_server_cancel(
     .await
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_archive(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_ids: Vec<i64>,
+) -> Result<MutationBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        message_archive_on(door, &account, &row_ids)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_delete(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_ids: Vec<i64>,
+) -> Result<MutationBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        message_delete_on(door, &account, &row_ids)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_move(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_ids: Vec<i64>,
+    destination: String,
+) -> Result<MutationBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        message_move_on(door, &account, &row_ids, &destination)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_set_flag(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_ids: Vec<i64>,
+    flagged: bool,
+) -> Result<MutationBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        message_set_flag_on(door, &account, &row_ids, flagged)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_set_read(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_ids: Vec<i64>,
+    read: bool,
+) -> Result<MutationBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        message_set_read_on(door, &account, &row_ids, read)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_discard(
+    session: State<'_, SessionHandle>,
+    account: String,
+    ids: Vec<String>,
+) -> Result<DraftDiscardBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_discard_on(door, &account, &ids)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_hold_status(
+    session: State<'_, SessionHandle>,
+    account: Option<String>,
+) -> Result<HoldListing, GuiError> {
+    with_door(&session, move |_, door| {
+        send_hold_status_on(door, account.as_deref())
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_cancel_hold(
+    session: State<'_, SessionHandle>,
+    operation_id: String,
+) -> Result<HoldCancelled, GuiError> {
+    with_door(&session, move |_, door| {
+        send_cancel_hold_on(door, &operation_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn sync_trigger(
+    session: State<'_, SessionHandle>,
+    account: String,
+    mode: SyncMode,
+) -> Result<OperationStarted, GuiError> {
+    with_door(&session, move |s, door| {
+        sync_trigger_on(s, door, &account, mode)
+    })
+    .await
+}
+
 /// `mp daemon restart`. The frontend asks the user first; this just does it.
 /// In fixture mode it simulates a daemon restart instead.
 #[tauri::command(rename_all = "snake_case")]
@@ -718,7 +1160,8 @@ pub fn version_info(session: State<'_, SessionHandle>) -> VersionInfo {
 }
 
 /// Fixture mode only: drive a connection state (`disconnect`, `reconnect`,
-/// `restart`, `resync`, `new_mail`, `shutdown`).
+/// `restart`, `resync`, `new_mail`, `shutdown`), a rolled-back drain
+/// (`rollback`, `rollback:<n>`) or a send hold (`hold`).
 #[tauri::command(rename_all = "snake_case")]
 pub fn fixture_simulate(session: State<'_, SessionHandle>, what: String) -> Result<(), GuiError> {
     let fixture = session
@@ -736,6 +1179,272 @@ mod tests {
     fn door() -> Door {
         let (tx, _rx) = std::sync::mpsc::channel();
         Door::Fixture(Arc::new(Fixture::load(tx).expect("fixture")))
+    }
+
+    /// A fixture door and the fixture behind it, its events dropped.
+    fn fixture_door() -> (Door, Arc<Fixture>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Keep the receiver alive so the fixture's sends do not fail.
+        std::mem::forget(rx);
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        (Door::Fixture(Arc::clone(&fixture)), fixture)
+    }
+
+    fn rows_of(d: &Door, account: &str, mailbox: &str) -> Vec<MessageListRow> {
+        match list_messages_on(d, account, mailbox).expect("list") {
+            MessageList::Messages { rows, .. } => rows,
+            other => panic!("expected messages, got {other:?}"),
+        }
+    }
+
+    fn ids_of(d: &Door, account: &str, mailbox: &str) -> Vec<i64> {
+        rows_of(d, account, mailbox).iter().map(|r| r.id).collect()
+    }
+
+    /// Every mutation call the fixture saw went out with `settle: false`.
+    fn assert_queued(fixture: &Fixture, method: &str, count: usize) {
+        let calls: Vec<Value> = fixture
+            .calls()
+            .into_iter()
+            .filter(|(m, _)| m == method)
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(calls.len(), count, "{method} calls");
+        assert!(
+            calls.iter().all(|p| p["settle"] == false),
+            "{method} went out without settle: false: {calls:?}"
+        );
+    }
+
+    fn not_found_row(failure: &MutationFailure) -> bool {
+        matches!(
+            failure.error,
+            GuiError::NotFound {
+                code: Some(-32602),
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn an_archive_moves_every_row_in_order_and_queues() {
+        let (d, f) = fixture_door();
+        let batch = message_archive_on(&d, "work", &[1002, 1001]).expect("archived");
+        assert!(batch.failed.is_empty());
+        let ids: Vec<i64> = batch.done.iter().map(|a| a.row_id).collect();
+        assert_eq!(ids, [1002, 1001], "the list's order");
+        let ack = &batch.done[1];
+        assert_eq!(
+            (ack.account.as_str(), ack.mailbox.as_str()),
+            ("work", "inbox")
+        );
+        assert_eq!(
+            ack.moved_to.as_ref().map(|m| m.mailbox.as_str()),
+            Some("archive")
+        );
+        assert_eq!(ack.read, None);
+        assert_queued(&f, "message.archive", 2);
+        let inbox = ids_of(&d, "work", "inbox");
+        assert!(!inbox.contains(&1001) && !inbox.contains(&1002));
+        assert_eq!(ids_of(&d, "work", "archive").len(), 5);
+        let value = serde_json::to_value(&batch).expect("json");
+        assert!(value["done"][0].get("read").is_none(), "absent, not null");
+    }
+
+    #[test]
+    fn an_unknown_row_fails_alone_and_the_rest_go_ahead() {
+        let (d, _f) = fixture_door();
+        let batch = message_archive_on(&d, "work", &[1001, 424242, 1002]).expect("batch");
+        assert_eq!(batch.done.len(), 2);
+        assert_eq!(batch.failed.len(), 1);
+        assert_eq!(batch.failed[0].row_id, 424242);
+        assert!(not_found_row(&batch.failed[0]));
+        let value = serde_json::to_value(&batch.failed[0]).expect("json");
+        assert_eq!(value["error"]["kind"], "not_found");
+    }
+
+    #[test]
+    fn a_row_of_another_account_is_not_found_and_an_unknown_account_fails_the_batch() {
+        let (d, _f) = fixture_door();
+        let batch = message_delete_on(&d, "work", &[1015]).expect("batch");
+        assert!(batch.done.is_empty());
+        assert!(not_found_row(&batch.failed[0]));
+        assert_eq!(ids_of(&d, "home", "inbox").len(), 4, "home is untouched");
+        assert!(matches!(
+            message_delete_on(&d, "nobody", &[1001]),
+            Err(GuiError::NotFound {
+                code: Some(-32005),
+                ..
+            })
+        ));
+        let empty = message_delete_on(&d, "work", &[]).expect("nothing to do");
+        assert_eq!(empty, MutationBatch::default());
+    }
+
+    #[test]
+    fn a_delete_removes_the_row() {
+        let (d, f) = fixture_door();
+        let batch = message_delete_on(&d, "work", &[1009]).expect("deleted");
+        assert_eq!(batch.done[0].mailbox, "sent");
+        assert_eq!(batch.done[0].moved_to, None);
+        assert_queued(&f, "message.delete", 1);
+        assert!(!ids_of(&d, "work", "sent").contains(&1009));
+        assert!(matches!(
+            message_text_on(&d, "work", 1009),
+            Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_move_lands_in_the_destination_by_slug_or_label() {
+        let (d, f) = fixture_door();
+        let batch = message_move_on(&d, "home", &[1015], "Newsletters").expect("moved");
+        let moved = batch.done[0].moved_to.clone().expect("moved_to");
+        assert_eq!(moved.mailbox, "newsletters");
+        assert!(moved.selector.starts_with("mp://home/newsletters/"));
+        assert!(ids_of(&d, "home", "newsletters").contains(&1015));
+        let meta = message_html_meta_on(&d, "home", 1015).expect("meta");
+        assert_eq!(meta.mailbox, "newsletters");
+        assert_eq!(meta.selector, moved.selector);
+        assert_queued(&f, "message.move", 1);
+        let calls = f.calls();
+        let call = calls
+            .iter()
+            .find(|(m, _)| m == "message.move")
+            .expect("call");
+        assert_eq!(call.1["destination"], "Newsletters");
+
+        let refused = message_move_on(&d, "home", &[1016], "drafts").expect("batch");
+        assert!(refused.done.is_empty() && not_found_row(&refused.failed[0]));
+        let refused = message_move_on(&d, "home", &[1016], "nowhere").expect("batch");
+        assert!(refused.failed[0].error.message().contains("not a mailbox"));
+    }
+
+    #[test]
+    fn flag_and_read_set_the_state_they_name() {
+        let (d, f) = fixture_door();
+        let unread_before = list_mailboxes_on(&d, None, "work")
+            .expect("mailboxes")
+            .mailboxes[0]
+            .unread;
+        let flagged = message_set_flag_on(&d, "work", &[1001, 1002], true).expect("flagged");
+        assert!(flagged.done.iter().all(|a| a.flagged == Some(true)));
+        assert!(message_html_meta_on(&d, "work", 1002)
+            .expect("meta")
+            .flags
+            .contains(&"flagged".to_string()));
+        let unread = message_set_read_on(&d, "work", &[1001], false).expect("unread");
+        assert_eq!(unread.done[0].read, Some(false));
+        let row = rows_of(&d, "work", "inbox")
+            .into_iter()
+            .find(|r| r.id == 1001)
+            .expect("1001");
+        assert!(!row.flags.seen && row.flags.flagged);
+        let calls = f.calls();
+        assert_queued(&f, "message.set_flag", 2);
+        assert_queued(&f, "message.set_read", 1);
+        let read_call = calls
+            .iter()
+            .find(|(m, _)| m == "message.set_read")
+            .expect("call");
+        assert_eq!(read_call.1["read"], false);
+        let listing = list_mailboxes_on(&d, None, "work").expect("mailboxes");
+        assert_eq!(
+            listing.mailboxes[0].unread,
+            unread_before + 1,
+            "1001 joins the unread"
+        );
+    }
+
+    #[test]
+    fn a_batch_stops_at_an_error_about_the_whole_batch() {
+        let unavailable = || GuiError::Timeout {
+            message: "slow".into(),
+        };
+        let (done, failed) = each_of(
+            &[1, 2, 3],
+            |&i| {
+                if i == 1 {
+                    Ok(i)
+                } else {
+                    Err(unavailable())
+                }
+            },
+        )
+        .expect("one went");
+        assert_eq!(done, [1]);
+        let failed: Vec<i32> = failed.into_iter().map(|(i, _)| i).collect();
+        assert_eq!(failed, [2, 3], "the rest are reported, not dropped");
+        assert!(each_of(&[1, 2], |_| Err::<i32, _>(unavailable())).is_err());
+    }
+
+    #[test]
+    fn drafts_are_discarded_one_by_one() {
+        let (d, _f) = fixture_door();
+        let batch = draft_discard_on(
+            &d,
+            "work",
+            &["offsite-note".to_string(), "no-such-draft".to_string()],
+        )
+        .expect("batch");
+        assert_eq!(batch.done.len(), 1);
+        assert_eq!(batch.done[0].selector, "mp://work/drafts/offsite-note");
+        assert_eq!(batch.failed[0].id, "no-such-draft");
+        match list_messages_on(&d, "work", "drafts").expect("drafts") {
+            MessageList::Drafts { listing, .. } => assert_eq!(listing.drafts.len(), 1),
+            other => panic!("expected drafts, got {other:?}"),
+        }
+        assert!(matches!(
+            draft_discard_on(&d, "nobody", &["x".to_string()]),
+            Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn holds_are_listed_and_cancelled_once() {
+        let (d, _f) = fixture_door();
+        let all = send_hold_status_on(&d, None).expect("status");
+        assert_eq!(all.holds.len(), 1);
+        assert!(send_hold_status_on(&d, Some("home"))
+            .expect("home")
+            .holds
+            .is_empty());
+        let id = all.holds[0].operation_id.clone();
+        let cancelled = send_cancel_hold_on(&d, &id).expect("cancelled");
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.operation_id, id);
+        assert!(send_hold_status_on(&d, None)
+            .expect("status")
+            .holds
+            .is_empty());
+        assert!(matches!(
+            send_cancel_hold_on(&d, &id),
+            Err(GuiError::NotFound {
+                code: Some(-32602),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_sync_is_awaited_as_a_sync() {
+        let (d, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let started = sync_trigger_on(&session, &d, "work", SyncMode::Full).expect("started");
+        assert_eq!(session.pending(), vec![started.operation_id.clone()]);
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(
+            (method.as_str(), params),
+            ("sync.full", json!({"account": "work"}))
+        );
+        assert!(matches!(
+            sync_trigger_on(&session, &d, "nobody", SyncMode::Quick),
+            Err(GuiError::NotFound { .. })
+        ));
+        assert_eq!(
+            serde_json::to_value(SyncMode::Quick).expect("json"),
+            json!("quick")
+        );
     }
 
     #[test]

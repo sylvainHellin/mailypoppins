@@ -120,6 +120,8 @@ pub enum BootstrapCause {
 #[serde(rename_all = "snake_case")]
 pub enum PendingKind {
     ServerSearch,
+    /// `sync.quick` or `sync.full`.
+    Sync,
 }
 
 /// Where an intercepted URL came from.
@@ -380,6 +382,7 @@ impl SessionHandle {
             Err(e) => return self.fail(unavailable(format!("the fixtures did not load: {e:#}"))),
         };
         *lock(&self.shared.fixture_door) = Some(Arc::clone(&fixture));
+        fixture.start_clock();
         let door = Door::Fixture(fixture);
         self.ready(door.clone());
         self.pump(&door, rx);
