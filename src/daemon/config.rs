@@ -390,6 +390,7 @@ fn hook_json(hook: &crate::config::HookConfig) -> Value {
         "match": {
             "authenticated_from": criteria.authenticated_from,
             "authserv_id": criteria.authserv_id,
+            "accept_spf": criteria.accept_spf,
             "to": criteria.to,
             "subject": criteria.subject,
             "headers": criteria.headers,

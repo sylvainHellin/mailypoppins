@@ -2211,6 +2211,7 @@ The receiving server records its DKIM, SPF and DMARC verdicts in an `Authenticat
 What the sender cannot do is put a header *above* the receiving server's, which prepends its own on acceptance, so `src/daemon/hooks/auth.rs` reads the topmost `Authentication-Results` and nothing below it, and trusts it only when it carries the configured authserv-id.
 That rule has one precondition: the named server must stamp every message it accepts (Gmail does), because on a server that stamps nothing the topmost header is the sender's.
 The pass also has to be for exactly the `From:` domain: DMARC's relaxed alignment would let any subdomain's mail server vouch for the parent domain's addresses.
+And it has to be DKIM unless the hook opts into SPF: `evoqs.com`'s SPF record includes `spf.protection.outlook.com` and `mx.ovh.com`, and `hines.com`'s includes Salesforce, ExactTarget and Squarespace, so an SPF pass for those domains is available to every customer of those platforms, while a DKIM pass needs the domain's own key.
 When a message header is evidence, ask who can write it and where in the header block they can put it.
 
 ## `rustfmt` on a test file formats the whole `mod support` tree

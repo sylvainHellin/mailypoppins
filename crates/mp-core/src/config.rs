@@ -136,8 +136,9 @@ pub struct HookConfig {
 #[derive(Debug, Deserialize, Default, Clone, PartialEq)]
 pub struct HookMatch {
     /// The `From:` address must be one of these, case-insensitively, *and*
-    /// the receiving server's own `Authentication-Results` must show a DKIM or
-    /// SPF pass for exactly that address's domain. Needs `authserv_id`.
+    /// the receiving server's own `Authentication-Results` must show a DKIM
+    /// pass (or, with `accept_spf`, an SPF pass) for exactly that address's
+    /// domain. Needs `authserv_id`.
     #[serde(default)]
     pub authenticated_from: Vec<String>,
     /// The authserv-id the receiving server stamps its
@@ -145,6 +146,12 @@ pub struct HookMatch {
     /// topmost such header is read, and only when it carries this id.
     #[serde(default)]
     pub authserv_id: Option<String>,
+    /// Also accept an SPF pass for the `From:` domain. Off by default: an SPF
+    /// record that includes a shared platform (`spf.protection.outlook.com`,
+    /// a newsletter service) lets every other customer of that platform pass
+    /// SPF for the domain, where a DKIM signature needs the domain's own key.
+    #[serde(default)]
+    pub accept_spf: bool,
     /// At least one `To:`, `Cc:` or `Delivered-To:` address must be one of
     /// these, case-insensitively and with any `+tag` compared literally.
     #[serde(default)]
@@ -2069,6 +2076,7 @@ name = "test"
         assert_eq!(hook.mailbox, "inbox");
         assert_eq!(hook.timeout_secs, 60);
         assert_eq!(hook.criteria.authenticated_from, vec!["a@b.c".to_string()]);
+        assert!(!hook.criteria.accept_spf, "SPF is opt-in");
         assert_eq!(hook.criteria.headers["X-Task"], "^go$");
     }
 

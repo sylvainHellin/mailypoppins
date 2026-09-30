@@ -176,6 +176,7 @@ fn list(account: &AccountConfig) -> Result<Value, RpcError> {
                 "match": {
                     "authenticated_from": hook.criteria.authenticated_from,
                     "authserv_id": hook.criteria.authserv_id,
+                    "accept_spf": hook.criteria.accept_spf,
                     "to": hook.criteria.to,
                     "subject": hook.criteria.subject,
                     "headers": hook.criteria.headers,

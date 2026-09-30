@@ -18,13 +18,14 @@ The design is `~/dotfiles/pi/.config/pi/.agents/research/2026-09-29-pi-remote-de
 ### Configuration
 
 `[[accounts.hooks]]` in `config.toml`, per account because the runner is per account runtime (the design's `account` field is the table the entry sits in).
-`name`, `mailbox` (a role or a configured server name, default `inbox`), `exec` (argv, no shell), `timeout_secs` (default 60), and a `match` table: `authenticated_from` with `authserv_id`, `to`, `subject` (regex), `headers` (name to regex).
+`name`, `mailbox` (a role or a configured server name, default `inbox`), `exec` (argv, no shell), `timeout_secs` (default 60), and a `match` table: `authenticated_from` with `authserv_id` and `accept_spf`, `to`, `subject` (regex), `headers` (name to regex).
 `config::validate_hooks` refuses at load and at reload: a missing or unsafe name, a duplicate, an empty `exec`, a zero timeout, a regex that does not compile, `authenticated_from` without `authserv_id`, and a `match` with no criterion at all.
 The hooks are part of `config.get`'s effective account, so editing one restarts that account's runtime.
 
 ### The sender check (`src/daemon/hooks/auth.rs`)
 
-`From:` appears once and carries one address, the address is on the list, and the **topmost** `Authentication-Results` header carries `authserv_id` and records a DKIM pass (`header.d`, else the domain of `header.i`) or an SPF pass (`smtp.mailfrom`) for exactly the `From:` domain.
+`From:` appears once and carries one address, the address is on the list, and the **topmost** `Authentication-Results` header carries `authserv_id` and records a DKIM pass (`header.d`, else the domain of `header.i`) for exactly the `From:` domain.
+An SPF pass (`smtp.mailfrom`) counts only with `match.accept_spf = true`: the design allowed DKIM or SPF, but an SPF record that includes a shared platform (`spf.protection.outlook.com`, newsletter services) passes SPF for every customer of it, and the three live senders checked on the home server (`hellin.me`, `proton.me`, `tum.de`) all carry an aligned DKIM signature.
 The receiving server prepends its header above everything the message arrived with, so a forged one is never the topmost; a header from another hop, or one with no authserv-id (Exchange Online), is not trusted.
 Exact equality rather than DMARC's relaxed alignment, so a subdomain's server cannot vouch for the parent domain.
 RFC 8601 parsing strips nested comments outside quoted strings, splits on `;` outside quotes, tolerates `/version` and spaces around `=`.
@@ -52,7 +53,7 @@ Every scan and run logs a `[hooks]` line.
 
 ## Tests
 
-- `src/daemon/hooks/auth.rs`: a genuine Gmail stamp; a spoofed `From:` with a failing stamp; a forged pass below the real fail; no stamp; a stamp from another hop; Exchange Online's id-less stamp; a pass for another domain; a subdomain signature for the parent domain; an SPF-only pass; an authenticated sender not on the list; two `From:` headers and two addresses; recipient (plus address), subject and header criteria; the RFC 8601 parser.
+- `src/daemon/hooks/auth.rs`: a genuine Gmail stamp; a spoofed `From:` with a failing stamp; a forged pass below the real fail; no stamp; a stamp from another hop; Exchange Online's id-less stamp; a pass for another domain; a subdomain signature for the parent domain; an SPF-only pass refused without `accept_spf` and accepted with it; an authenticated sender not on the list; two `From:` headers and two addresses; recipient (plus address), subject and header criteria; the RFC 8601 parser.
 - `src/daemon/hooks/mod.rs`: no arming before a sync and no backfill; a spoofed sender is considered and never claimed; the arrival mark holds the cursor for a late lower UID; a message moved out and back does not fire twice; a renumbered mailbox re-arms; a removed hook forgets its cursor; a claimed message runs with its payload and the run is recorded; `prepare` refuses a message `match` rejects.
 - `src/daemon/hooks/exec.rs` and `state.rs`: stdin and env, exit codes, timeout kill, a missing program, output tails; cursor advance, fired-id bound, atomic 0600 state file.
 - `crates/mp-core/src/config.rs`, `src/daemon/config.rs`: defaults, every refusal, a changed hook updates the account.

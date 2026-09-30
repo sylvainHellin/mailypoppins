@@ -447,13 +447,16 @@ timeout_secs = 60               # default 60; the command is killed after it
 [accounts.hooks.match]          # every criterion given must pass; at least one is required
 authenticated_from = ["me@example.org", "me@work.example"]
 authserv_id = "mx.google.com"   # required with authenticated_from
+accept_spf = false              # default; true also accepts an SPF pass (see below)
 to = ["assistant+pi@gmail.com"] # To, Cc or Delivered-To, exact, +tag included
 subject = "^\\[pi\\]"            # a regular expression on the decoded subject
 headers = { "X-Task" = "^yes$" }  # header name to a regular expression
 ```
 
 **The sender check is the one to get right**, because a hook may run anything with the user's rights and `From:` alone proves nothing.
-`authenticated_from` passes only when `From:` carries exactly one address, that address is on the list, and the *topmost* `Authentication-Results` header carries `authserv_id` and records a DKIM pass whose signing domain, or an SPF pass whose envelope-sender domain, is exactly the `From:` domain.
+`authenticated_from` passes only when `From:` carries exactly one address, that address is on the list, and the *topmost* `Authentication-Results` header carries `authserv_id` and records a DKIM pass whose signing domain is exactly the `From:` domain.
+An SPF pass whose envelope-sender domain is the `From:` domain counts too only with `accept_spf = true`, because an SPF record that includes a shared platform passes SPF for every customer of it: `spf.protection.outlook.com` covers every Microsoft 365 tenant.
+A domain whose provider does not sign with the domain's own DKIM key (a Microsoft 365 tenant without custom DKIM signs as `<tenant>.onmicrosoft.com`) therefore fails until that is set up, and `mp hooks test` says so.
 The receiving server prepends its own header above everything the message arrived with, so a forged one never reaches the top, and a verdict from another hop (a forwarder, or Exchange Online, which writes no authserv-id) is not trusted.
 Exact domain equality is stricter than DMARC's relaxed alignment on purpose: a department's `xyz.tum.de` server cannot vouch for a `tum.de` address.
 Two limits follow from the design.

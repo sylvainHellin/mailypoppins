@@ -18,10 +18,16 @@
 //!   stamped nothing, and the check fails rather than trust a hop it does not
 //!   know.
 //! - The verdict must be a DKIM pass whose signing domain (`header.d`, or the
-//!   domain of `header.i`) *is* the `From:` domain, or an SPF pass whose
-//!   `smtp.mailfrom` domain is. Exact equality, not DMARC's relaxed alignment:
-//!   relaxed alignment would let any subdomain's mail server (a department's
-//!   `xyz.tum.de`) vouch for an address at the parent (`tum.de`).
+//!   domain of `header.i`) *is* the `From:` domain. Exact equality, not
+//!   DMARC's relaxed alignment: relaxed alignment would let any subdomain's
+//!   mail server (a department's `xyz.tum.de`) vouch for an address at the
+//!   parent (`tum.de`).
+//! - An SPF pass whose `smtp.mailfrom` domain is the `From:` domain counts only
+//!   when the hook sets `accept_spf`. An SPF record that includes a shared
+//!   platform (`spf.protection.outlook.com` covers every Microsoft 365 tenant,
+//!   a newsletter service covers its customers) lets another customer of that
+//!   platform pass SPF for the domain; a DKIM signature needs the domain's own
+//!   key.
 //! - `From:` must carry exactly one mailbox, and appear exactly once, so the
 //!   address checked is unambiguously the one a mail client shows.
 //!
@@ -84,7 +90,12 @@ pub fn evaluate(criteria: &HookMatch, parsed: &mailparse::ParsedMail) -> Verdict
 
     if !criteria.authenticated_from.is_empty() {
         let trusted = criteria.authserv_id.as_deref().unwrap_or_default();
-        let result = sender_check(headers, &criteria.authenticated_from, trusted);
+        let result = sender_check(
+            headers,
+            &criteria.authenticated_from,
+            trusted,
+            criteria.accept_spf,
+        );
         if let Ok((address, _)) = &result {
             verdict.authenticated_sender = Some(address.clone());
         }
@@ -151,6 +162,7 @@ fn sender_check(
     headers: &[mailparse::MailHeader],
     allowed: &[String],
     trusted: &str,
+    accept_spf: bool,
 ) -> Result<(String, String), String> {
     let address = single_from(headers)?;
     if !allowed
@@ -159,7 +171,7 @@ fn sender_check(
     {
         return Err(format!("{address} is not an allowed sender"));
     }
-    let how = authenticated(headers, &address, trusted)?;
+    let how = authenticated(headers, &address, trusted, accept_spf)?;
     Ok((address, how))
 }
 
@@ -186,6 +198,7 @@ fn authenticated(
     headers: &[mailparse::MailHeader],
     address: &str,
     trusted: &str,
+    accept_spf: bool,
 ) -> Result<String, String> {
     let Some(topmost) = headers.iter().find(|header| {
         header
@@ -217,16 +230,15 @@ fn authenticated(
                 .property("header.d")
                 .or_else(|| result.property("header.i"))
                 .map(domain_of),
-            "spf" => result.property("smtp.mailfrom").map(domain_of),
+            "spf" if accept_spf => result.property("smtp.mailfrom").map(domain_of),
             _ => None,
         };
         if vouched.as_deref() == Some(domain.as_str()) {
             return Ok(format!("{}=pass for {domain} by {trusted}", result.method));
         }
     }
-    Err(format!(
-        "{trusted} recorded no DKIM or SPF pass for {domain}"
-    ))
+    let methods = if accept_spf { "DKIM or SPF" } else { "DKIM" };
+    Err(format!("{trusted} recorded no {methods} pass for {domain}"))
 }
 
 /// The domain of an address, a bare domain, or an `@domain` DKIM identity,
@@ -510,7 +522,7 @@ mod tests {
             &message(stamp, "sylvain@hellin.me", ""),
         );
         assert!(!v.matched());
-        assert!(v.checks[0].detail.contains("no DKIM or SPF pass"), "{v:?}");
+        assert!(v.checks[0].detail.contains("no DKIM pass"), "{v:?}");
     }
 
     /// The sender wrote a perfect-looking stamp of their own; the receiving
@@ -585,14 +597,20 @@ mod tests {
         assert!(!v.matched(), "{v:?}");
     }
 
+    /// An SPF pass alone is refused unless the hook opts in: a shared
+    /// platform in the domain's SPF record passes SPF for everyone on it.
     #[test]
-    fn an_spf_pass_for_the_from_domain_is_enough() {
-        let stamp = "Authentication-Results: mx.google.com; spf=pass (google.com: ...) smtp.mailfrom=sylvain.hellin@tum.de; dkim=none\n";
-        let v = verdict(
-            &criteria(&["sylvain.hellin@tum.de"]),
-            &message(stamp, "\"Hellin, Sylvain\" <sylvain.hellin@tum.de>", ""),
-        );
-        assert!(v.matched(), "{v:?}");
+    fn an_spf_pass_counts_only_when_the_hook_accepts_spf() {
+        let stamp = "Authentication-Results: mx.google.com; spf=pass (google.com: ...) smtp.mailfrom=s.hellin@evoqs.com; dkim=pass header.d=evoqsgmbh.onmicrosoft.com\n";
+        let raw = message(stamp, "\"Hellin, Sylvain\" <s.hellin@evoqs.com>", "");
+        let mut c = criteria(&["s.hellin@evoqs.com"]);
+        let refused = verdict(&c, &raw);
+        assert!(!refused.matched(), "{refused:?}");
+        assert!(refused.checks[0].detail.contains("no DKIM pass"), "{refused:?}");
+        c.accept_spf = true;
+        let accepted = verdict(&c, &raw);
+        assert!(accepted.matched(), "{accepted:?}");
+        assert!(accepted.checks[0].detail.starts_with("s.hellin@evoqs.com, spf=pass"));
     }
 
     #[test]

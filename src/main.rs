@@ -2719,8 +2719,13 @@ fn render_hook(hook: &serde_json::Value) -> String {
     let senders = strings(&criteria["authenticated_from"]);
     if !senders.is_empty() {
         out.push_str(&format!(
-            "    from     {} (authenticated by {})\n",
+            "    from     {} ({} checked by {})\n",
             senders.join(", "),
+            if criteria["accept_spf"].as_bool().unwrap_or(false) {
+                "DKIM or SPF"
+            } else {
+                "DKIM"
+            },
             wire_str(&criteria["authserv_id"])
         ));
     }
