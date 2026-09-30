@@ -148,9 +148,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the global arguments `-A/--account`, `-s/--signature`, `--no-signature` in `src/main.rs` (`no_signature`, `src/main.rs:41`), `src/signatures.rs`
 - Daemon surface: an account parameter on every domain method, `signature.list`, `state.bootstrap`
-- GUI location: clients/desktop: the sidebar lists every account, and `ga` or a mailbox chosen in it selects the active account (M1, #0129); the signature choice is M3 (#0131)
-- Validation: `tests/cli_help_snapshot.rs` pins the global arguments; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`)
-- Status: GUI shipped (M1, #0129) for the account selector; the rest not started
+- GUI location: clients/desktop: the sidebar lists every account, and `ga` or a mailbox chosen in it selects the active account (M1, #0129); a new draft's signature is chosen in the `cn` wizard's Signature select, filled from `signature_list` with the account's default preselected and "none" last (M3, #0131)
+- Validation: `tests/cli_help_snapshot.rs` pins the global arguments; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`), `clients/desktop/src/components/compose/compose.test.tsx` (`has the TUI's fields, the default signature preselected, and a none option`, `none carries no signature`)
+- Status: GUI shipped (M1, #0129) for the account selector and (M3, #0131) for a new draft's signature; a reply or a forward has no signature choice, since `draft.reply` and `draft.forward` take no signature argument
 - Note: the GUI equivalent is the active-account selector plus a per-composition signature choice.
 
 ### ACC-10 Signature file management
@@ -168,9 +168,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the `{{SIGNATURE}}` marker handling in `src/send.rs:185-268`, the file and default lookup in `src/signatures.rs`
 - Daemon surface: `draft.create`, `draft.reply`, `draft.forward`, and `draft.set_recipients` all re-splice
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, plus the marker assertions in `clients/tui/src/actions.rs` unit tests
-- Status: not started
+- GUI location: clients/desktop: `draft_create` passes the wizard's `signature` or `no_signature`, and the daemon splices it into the new draft (M3, #0131)
+- Validation: `tests/draft_integration.rs`, plus the marker assertions in `clients/tui/src/actions.rs` unit tests; `clients/desktop/src-tauri/src/commands.rs` (`validate_preview_and_signatures_answer_from_the_files`)
+- Status: GUI shipped (M3, #0131) for a new draft; the desktop's `ce` rewrites the recipients and never re-splices, since its recipients dialog has no signature select, where the TUI's re-splices a changed signature
 - Note: editing recipients re-splices the block, which is what makes this its own capability.
 
 ### ACC-12 Multi-account operation
@@ -246,9 +246,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/ui/sidebar.rs` over the store's mailbox rows
 - Daemon surface: `state.bootstrap`, then `state.event` for count changes
-- GUI location: clients/desktop: the sidebar shows each mailbox's label and unread count, and the account's outbox line while a send is queued or failed (M1, #0129)
-- Validation: TUI golden frames; `clients/desktop/src-tauri/src/commands.rs` (`mailboxes_carry_kind_and_totals`), `clients/desktop/src-tauri/src/fixture.rs` (`counts_are_computed_from_the_rows`), `clients/desktop/src/app/reducer.test.ts` (`marks the list and the counts stale on an invalidation of the selected mailbox`), with no desktop test of the outbox line
-- Status: GUI shipped (M1, #0129)
+- GUI location: clients/desktop: the sidebar shows each mailbox's label and unread count, and the account's outbox line while a send is queued or failed (M1, #0129); the outbox line counts queued, failed and partly delivered rows from the outbox listing, moves on an `outbox:<account>` invalidation without a bootstrap, and is a button that opens the account's outbox (M3, #0131)
+- Validation: TUI golden frames; `clients/desktop/src-tauri/src/commands.rs` (`mailboxes_carry_kind_and_totals`), `clients/desktop/src-tauri/src/fixture.rs` (`counts_are_computed_from_the_rows`), `clients/desktop/src/app/reducer.test.ts` (`marks the list and the counts stale on an invalidation of the selected mailbox`), `clients/desktop/src/components/outbox/outbox.test.tsx` (`opens from the sidebar line, which shows what waits, and lists the row with its notes`, `an invalidation refreshes the sidebar line without a bootstrap`)
+- Status: GUI shipped (M1, #0129), and the outbox line's count and link (M3, #0131)
 - Note: delivered through the bootstrap snapshot rather than a query.
 
 ## Listing, filtering, and search
@@ -340,10 +340,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the SERVER SEARCH keymap section (`clients/tui/src/app/keymap.rs`): `Enter`, `e`, `y`, `f`, `r`, `R`, `w`, `a`, `b`, `o`, `O`
 - Daemon surface: `message.get`, `message.materialise_html`, `message.materialise_attachment`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`
-- GUI location: clients/desktop (M1 for open and copy, M3 for reply, forward and attachments, #0131); archive is `a` on a result with a local row, which asks first like a list row and takes the hit out of the results (M2, #0131)
-- Validation: TUI golden frames; the desktop's archive of a hit runs the list's path (`actionTargets` over the results), with no search-specific test
-- Status: routed (P5-U6, completed by P5-U10c-I1); GUI shipped (M2, #0131) for archive; the rest not started
-- Note: a server-only hit has no row to archive, and `f` waits on a `message.fetch` command the Tauri layer does not have yet (M3).
+- GUI location: clients/desktop (M1 for open and copy, #0129); archive is `a` on a result with a local row, which asks first like a list row and takes the hit out of the results (M2, #0131); a hit is a list row, so `r`, `ca` and `cf` reply and forward (a server-only hit through `draft_from_message`), `tb`, `to` and `ts` stand for the overlay's `b`, `o` and `O`, and `F` or the reader's Fetch button fetches a server-only hit into the store and opens its row (M3, #0131; shell.md, "Compose", and reader.md, "Drafts and server-only hits")
+- Validation: TUI golden frames; the desktop's archive of a hit runs the list's path (`actionTargets` over the results), with no search-specific test; `clients/desktop/src/keymap/keymap.test.tsx` (`on a server-only hit, r, ca and cf build the draft from the hit's own headers`), `clients/desktop/src/components/reader/reader.test.tsx` (`F fetches it into the store, then the reader opens the row and a second F says it is there`, `the Fetch button fetches, and a refusal lands in the activity area`, `opens the hit's own markup in the browser, and one with none has no button`), `clients/desktop/src-tauri/src/commands.rs` (`fetch_ingests_a_server_only_message_once_and_then_says_it_is_present`)
+- Status: routed (P5-U6, completed by P5-U10c-I1); GUI shipped (M2, #0131) for archive, and (M3, #0131) for reply, reply-all, forward, fetch, the browser rendition and attachments; the rest not started
+- Note: a server-only hit has no row to archive, and `to` and `ts` on one say to fetch it first, since only a stored message has parts to materialise.
+  The desktop fetches with `F`, because `f` is the find family's prefix there (`fm`, `ff`), and replies to all with `ca` rather than the overlay's `R`.
 - Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6; `f` and the three rendition keys joined them in P5-U10c-I1.
   `f` is `message.fetch` `{account, mailbox, message_id}`, a durable operation that is idempotent over a message the store already holds: it answers with that row and `already_present: true` and opens no session, so the overlay keeps its "Already in the local store" line by branching on a boolean rather than matching a refusal.
   `Enter` / `e` / `y` are `RD-06`'s `message.materialise_markdown`.
@@ -554,9 +555,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the confirm variants in `clients/tui/src/app/types.rs`, covering approve, demote, archive, delete, send, send-approved, and signature deletion
 - Daemon surface: client-side, over the same methods
-- GUI location: clients/desktop: archive and delete ask first in a dialog ("Archive this email?" with the sender and subject, "Delete 3 emails?" over marks), `y` or Enter confirms and `n` or Escape cancels (M2, #0131); the other confirmations arrive with the actions they guard (M3 and M4, #0131)
-- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`, `n cancels the confirmation and nothing is called`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`Archive asks first and archives on confirm`, `Delete asks first, and Cancel deletes nothing`)
-- Status: GUI shipped (M2, #0131) for archive and delete; the rest not started
+- GUI location: clients/desktop: archive and delete ask first in a dialog ("Archive this email?" with the sender and subject, "Delete 3 emails?" over marks), `y` or Enter confirms and `n` or Escape cancels (M2, #0131); the same dialog asks "Approve 2 drafts?" and "Mark 2 drafts as draft?" over marks, "Draft is not approved. Approve and send?" or "Send this email?" before `x`, "Send all approved emails?" before `cX`, and before an outbox retry or discard, with a warning line (M3, #0131; shell.md, "Approve and demote", "Send" and "Retry and discard"); the signature deletion confirmation arrives with signature management (M4, #0131)
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`, `n cancels the confirmation and nothing is called`, `cA over marked drafts asks first, with the TUI's words, and approves the batch`, `x on a draft asks the TUI's approve-and-send question, and y sends it with the hold`, `x on received mail says it needs a draft, and n cancels a send`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`Archive asks first and archives on confirm`, `Delete asks first, and Cancel deletes nothing`), `clients/desktop/src/components/outbox/outbox.test.tsx` (`R retries the cursor row after the warning, and the settle says how it ended`)
+- Status: GUI shipped (M2, #0131) for archive and delete, and (M3, #0131) for approve, demote, send and send-approved; signature deletion not started
 - Note: archive asks for confirmation in the desktop as the TUI does, since the daemon has no undo for it.
 
 ### MSG-08 Mark a message read on an explicit open
@@ -589,27 +590,28 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp new <name>` (`src/main.rs`), TUI `cn` (`clients/tui/src/app/keymap.rs:583`)
 - Daemon surface: `draft.create`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- GUI location: clients/desktop: `cn` from any pane or the palette's "New draft" opens the wizard, whose submit calls `draft_create` with the recipients and the signature and opens the file in the external editor (M3, #0131; shell.md, "Compose", "The wizard")
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cn opens the new-draft wizard for the shown account`), `clients/desktop/src/components/compose/compose.test.tsx` (`Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor`, `shows the daemon's refusal in the dialog, which stays open`), `clients/desktop/src-tauri/src/commands.rs` (`a_created_draft_is_a_file_with_frontmatter_and_a_taken_name_is_refused`)
+- Status: routed (P4-U6); GUI shipped (M3, #0131)
+- Note: the desktop prints no selector; the new draft's file opens in the editor and its row appears in Drafts through `draft.changed`.
 
 ### DFT-02 List the account's drafts, optionally filtered by status
 
 - Classification: GUI parity
 - Source anchor: `mp list [--status]`, `src/main.rs`
 - Daemon surface: `draft.list`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- GUI location: clients/desktop: the Drafts mailbox lists every draft with its status pill (`draft`, `approved`), a pencil badge while the editor has it, a "sending" badge while a send runs, and a file that does not parse as an `invalid` row named by its stem (M3, #0131; shell.md, "Draft rows")
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/app/events.test.tsx` (`a draft.invalid from the editor turns the row invalid and keeps it selected`), `clients/desktop/src/components/compose/compose.test.tsx` (`ends when the draft is removed, and shows the editing mark on its row until then`), `clients/desktop/src-tauri/src/fixture.rs` (`the_seeded_drafts_are_files_with_frontmatter_in_a_per_run_dir`)
+- Status: routed (P4-U6); GUI shipped (M3, #0131) for the listing with each draft's status; there is no status filter
 
 ### DFT-03 Validate draft frontmatter
 
 - Classification: GUI parity
 - Source anchor: `mp validate [selector]`, `src/draft.rs`
 - Daemon surface: `draft.validate`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, unit tests in `src/draft.rs`
-- Status: routed (P4-U6); GUI not started
+- GUI location: clients/desktop: the draft preview in the reader shows `draft_validate`'s report, "Valid" or "Not sendable" with the error and the warnings, and `send_draft` validates before it approves, so a draft that does not validate keeps its status (M3, #0131; reader.md, "Drafts and server-only hits", and shell.md, "Send")
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, unit tests in `src/draft.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`shows the headers, the status, the validation and the body of the selected draft`), `clients/desktop/src-tauri/src/commands.rs` (`validate_preview_and_signatures_answer_from_the_files`, `a_draft_that_does_not_validate_keeps_its_status_and_is_not_sent`)
+- Status: routed (P4-U6); GUI shipped (M3, #0131)
 - Note: an invalid draft stays editable and cannot be approved or sent.
 
 ### DFT-04 Approve a draft and demote it back to draft status
@@ -617,18 +619,19 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp mark-approved`, `mp mark-draft` (`src/main.rs`), TUI `cA` and `cD` (`clients/tui/src/app/keymap.rs:667-668`)
 - Daemon surface: `draft.approve`, `draft.demote`, resolved through `draft.path` first so the client knows the previous status
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- GUI location: clients/desktop: `cA` and `cD` in Drafts, the palette and the draft preview's Approve and Back to draft buttons, on the marked drafts after a confirmation or on the cursor draft at once; the status changes in the list as a pending axis, and a draft that does not parse is refused alone with the diagnostic and the path (M3, #0131; shell.md, "Approve and demote")
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cA approves the cursor draft and cD puts it back`, `cA over marked drafts asks first, with the TUI's words, and approves the batch`), `clients/desktop/src/components/compose/compose.test.tsx` (`a draft that does not parse is refused, and the alert names why and where`), `clients/desktop/src-tauri/src/commands.rs` (`approve_refuses_an_invalid_draft_with_its_payload_and_goes_on`)
+- Status: routed (P4-U6); GUI shipped (M3, #0131)
 
 ### DFT-05 Preview a draft as a dry run through a bare selector
 
 - Classification: GUI parity
 - Source anchor: the top-level positional `[SELECTOR]` argument in `src/main.rs`
 - Daemon surface: `draft.preview`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P4-U6); GUI not started
+- GUI location: clients/desktop: Enter on a draft shows `DraftPreview` in the reader, with From, To, Cc, Bcc, the status, the body cut at 500 characters and the file path (M3, #0131; reader.md, "Drafts and server-only hits")
+- Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`Enter opens a draft's preview in the reader`, `shows the headers, the status, the validation and the body of the selected draft`)
+- Status: routed (P4-U6); GUI shipped (M3, #0131)
+- Note: the send confirmation shows the TUI's "To: <to> - <subject>" line rather than the dry run.
 
 ### DFT-06 Resolve a draft selector to its filesystem path
 
@@ -637,7 +640,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `draft.path`
 - GUI location: not required (CLI automation)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_draft_slice.rs`
-- Status: routed (P5-U6); GUI not started
+- Status: routed (P5-U6); the desktop resolves `e`, `ce` and the draft attachment commands through it (M3, #0131)
 - Note: the only selector-to-path edge, and the handle external editors and agents use, so it stays supported under the filesystem boundary.
   It is also every draft-only key of the TUI since P5-U6: `cursor_draft` resolves the file under the cursor through it, where it used to open the store's drafts index.
   The lookup had two outcomes (not in the index, and the index could not be read) where `draft.path` has one refusal, so the second status line is gone and its reason is in the log.
@@ -648,19 +651,19 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp edit <selector>`, `src/main.rs`
 - Daemon surface: `draft.path`, then a client-side editor session on the canonical file
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/daemon_draft_slice.rs`, with a stub editor that records the path it was handed
-- Status: routed (P4-U6); GUI not started
-- Note: the GUI equivalent is the embedded Neovim session on the same file.
+- GUI location: clients/desktop: `e` on a draft, the palette and the draft preview's Edit in editor run `draft_path`, then `editor_open`, which starts the resolved external editor without waiting for it; the editing banner names the draft and the editor, with Reopen in editor and Done (M3, #0131; shell.md, "The editing banner", rust-layer.md, "Drafts and the editor")
+- Validation: `tests/daemon_draft_slice.rs`, with a stub editor that records the path it was handed; `clients/desktop/src/keymap/keymap.test.tsx` (`e on a draft resolves its path and opens the editor; on a message it opens the reader`), `clients/desktop/src/components/compose/compose.test.tsx` (`names the draft and the editor; Reopen runs the editor again and Done ends the session`, `an editor that did not start is a failure notice naming what to set`), `clients/desktop/src-tauri/src/editor.rs` (`the_env_and_the_setting_win_over_visual_editor_and_the_probes`, `a_terminal_editor_in_the_environment_falls_through_to_the_probes`)
+- Status: routed (P4-U6); GUI shipped (M3, #0131) through the external editor
+- Note: the GUI equivalent is the embedded Neovim session on the same file, which M5 (#0130) brings; until then the desktop hands the file to the editor `MP_DESKTOP_EDITOR`, `desktop.json`, `$VISUAL` or `$EDITOR`, a probed `code`, `zed`, `subl` or `cursor`, or `open -t` names, in that order.
 
 ### DFT-08 Create a reply or a reply-all draft from a received message
 
 - Classification: GUI parity
 - Source anchor: `mp reply <selector> [--all] [--mailbox]` (`src/main.rs`), TUI `r`, `cr` (`clients/tui/src/app/keymap.rs:626`), `ca`, search overlay `r` and `R`
 - Daemon surface: `draft.reply`, and `draft.create_from_message` for a hit with no local row
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`
-- Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI not started
+- GUI location: clients/desktop: `r` or `cr` and `ca` from the list or the reader, the reader toolbar's Reply and Reply all, and the palette, which open the new draft in the external editor; on a server-only hit they go through `draft_from_message` (M3, #0131; shell.md, "Compose")
+- Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`r and cr reply to the cursor row and open the draft in the editor, ca replies to all`, `on a server-only hit, r, ca and cf build the draft from the hit's own headers`), `clients/desktop/src/components/compose/compose.test.tsx` (`Reply, Reply all and Forward act on the open message`), `clients/desktop/src-tauri/src/commands.rs` (`a_reply_carries_in_reply_to_and_the_subject`)
+- Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI shipped (M3, #0131)
 - Note: the TUI's four reply keys went through it in P5-U6, addressed by the `row_id` the method gained for them.
   A search hit that resolved to no local row is the one reply neither `draft.reply` nor `draft.forward` can build, because every form of their `source` is an address into the store; P5-U10d-I routed it through `draft.create_from_message` `{account, kind, message}`, where the message travels instead of an address, nothing is ingested, no unread count moves, and a hit with no `Message-ID` or in a mailbox the sidebar does not list still quotes.
 
@@ -669,9 +672,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp forward <selector> [--mailbox]` (`src/main.rs`), TUI `cf`, search overlay `w`
 - Daemon surface: `draft.forward`, and `draft.create_from_message` for a hit with no local row
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`
-- Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI not started
+- GUI location: clients/desktop: `cf` from the list or the reader, the reader toolbar's Forward and the palette open the forward wizard with To, Cc, Bcc and a `Fwd: ` subject, whose submit calls `draft_forward` with `headers` and opens the draft in the external editor; a server-only hit is forwarded at once through `draft_from_message`, and the search overlay's `w` is `cf` on the hit's row (M3, #0131; shell.md, "The wizard")
+- Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cf on a stored message asks for the recipients first, with the forward's subject`), `clients/desktop/src-tauri/src/commands.rs` (`a_forward_carries_the_attachments_and_a_hit_is_built_from_itself`)
+- Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI shipped (M3, #0131)
 - Note: the forward carries the original attachments, which the GUI must reproduce rather than dropping.
   A forward of a server-only hit is the exception and carries none: `message.search_server` streams the envelope and the two body renditions, so since P5-U10c-I1 the client has no parts to forward, and `draft.create_from_message` takes none.
   P5-U6 routed the TUI's two forward keys through it and gave the method `headers`, the compose wizard's override of the recipients and the subject it collected before the draft existed.
@@ -681,9 +684,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the compose wizard variants in `clients/tui/src/app/types.rs`, `clients/tui/src/ui/compose.rs`
 - Daemon surface: `draft.create`, `draft.forward` with `headers`, `signature.list`; the wizard itself is client-side
-- GUI location: clients/desktop (M3, #0131)
-- Validation: TUI golden frames
-- Status: routed (P5-U6) for its forward mode; GUI not started
+- GUI location: clients/desktop: `ComposeWizard`, a dialog opened by `cn` ("New draft") and `cf` ("Forward"), with To, Cc, Bcc and Subject, a Signature select for a new draft, Enter to the next field, Cmd+Enter or Ctrl+Enter to submit and Escape to cancel; it needs one recipient, as the TUI's does (M3, #0131; shell.md, "The wizard")
+- Validation: TUI golden frames; `clients/desktop/src/components/compose/compose.test.tsx` (`has the TUI's fields, the default signature preselected, and a none option`, `Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor`, `refuses a draft with no recipient, as the TUI does, and stays open`, `Escape cancels and writes nothing`), `clients/desktop/src/components/shell/a11y.test.tsx` (`names the new-draft wizard, starts it in To, and keeps Tab inside it`)
+- Status: routed (P5-U6) for its forward mode; GUI shipped (M3, #0131) without the inline body, since `draft.create` takes none and the body is written in the editor
 - Note: an inline body field, a signature picker, and a submit chord; the overlay-internal keys go into `docs/baselines/pre-daemon/manual-keys.md`, the P0-U2 inventory (`ANO-2`).
 
 ### DFT-11 Edit the recipients of an existing draft
@@ -691,9 +694,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ce` in the drafts mailbox (`clients/tui/src/app/keymap.rs:656`)
 - Daemon surface: `draft.set_recipients`, which re-splices the signature block
-- GUI location: clients/desktop (M3, #0131)
-- Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui_tests/actions_store.rs`)
-- Status: not started
+- GUI location: clients/desktop: `ce` in Drafts, the palette and the draft preview's Edit recipients open the "Edit recipients" dialog filled from `draft_preview`, and its submit calls `draft_set_recipients`, which rewrites the `to`, `cc`, `bcc` and `subject` lines client-side with `mp_core::draft::rewrite_draft_recipients` (M3, #0131; shell.md, "The recipients dialog")
+- Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui_tests/actions_store.rs`); `clients/desktop/src/keymap/keymap.test.tsx` (`ce opens the recipients dialog filled from the draft file`), `clients/desktop/src/components/compose/compose.test.tsx` (`rewrites the recipients and keeps the subject when it did not change`), `clients/desktop/src-tauri/src/commands.rs` (`set_recipients_rewrites_the_header_and_keeps_the_body`)
+- Status: GUI shipped (M3, #0131) for the recipients and the subject; the dialog has no signature select, so it never re-splices the signature the TUI's `ce` re-splices when it changed
 - Note: `draft.set_recipients` is not built and the rewrite is still a client-side write to the file `draft.path` resolved (P5-U6 routed the resolution, not the write).
   It reaches no engine module, so the residue gate does not name it; what it costs is a second drafts-index refresh the daemon could have done in one.
 
@@ -702,9 +705,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: implicit workflow, no command; the drafts index refresh in `clients/tui/src/`
 - Daemon surface: daemon-owned watcher emitting `state.event`, plus `draft.list`'s fresh directory scan
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/daemon_draft_watch.rs`, `tests/daemon_draft_index_slice.rs`
-- Status: routed (P3b-U10 served it, P5-U10d-I dropped the client's poll); GUI not started
+- GUI location: clients/desktop: a save in the editor reaches the Drafts list as `draft.changed`, which re-reads it with the editing banner kept, and a save that breaks the frontmatter as `draft.invalid`, which turns the row `invalid` and keeps it selected; no action reloads anything itself (M3, #0131; shell.md, "Compose")
+- Validation: `tests/daemon_draft_watch.rs`, `tests/daemon_draft_index_slice.rs`; `clients/desktop/src/app/events.test.tsx` (`a draft.changed from the editor re-reads the Drafts list and keeps the editing banner`, `a draft.invalid from the editor turns the row invalid and keeps it selected`), `clients/desktop/src-tauri/src/commands.rs` (`an_editor_save_publishes_draft_changed_and_bumps_the_row`), `clients/desktop/src-tauri/src/fixture.rs` (`a_broken_draft_is_published_invalid_skipped_and_refused`)
+- Status: routed (P3b-U10 served it, P5-U10d-I dropped the client's poll); GUI shipped (M3, #0131)
 - Note: the mechanism that keeps the GUI correct while Neovim writes the file.
   The daemon has watched every configured account's drafts directory since P3b-U10 and `draft.list` answers from a directory scan, so the client's one-second fingerprint poll and its three `store::drafts::refresh_account` calls needed no method to replace them; P5-U10d-I deleted all four and reduced `draft.changed`, `draft.invalid` and `state.remove` of a `draft:` resource into the invalidate-and-reload the poll made.
   The store's `drafts` table survives as the daemon's own, refreshed on every `mailbox.list` for the sidebar count, which is the one thing that reads it.
@@ -716,9 +719,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp open <selector> [--mailbox]` (`src/main.rs`), TUI `to`, search overlay `o`
 - Daemon surface: `message.materialise_attachment`, one call per part, opened client-side through `parse::open_file_with_system`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `the_cursor_row_materialises_its_blobs_into_daemon_handles` (`src/tui_tests/actions_store.rs`)
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `to` from the list or the reader opens a message's only part at once and picks among several in the "Open attachment" dialog, and each entry of the reader's attachment list has an Open button; `attachment_open` hands the daemon's file to the system opener and says "Opened: <name>" (M3, #0131; reader.md, "Attachments")
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `the_cursor_row_materialises_its_blobs_into_daemon_handles` (`src/tui_tests/actions_store.rs`); `clients/desktop/src/components/reader/reader.test.tsx` (`opens a part with the system opener and saves one into the directory the dialog names`, `to opens one attachment at once and picks among several; ts saves the checked parts`, `says No attachments for a message without any`), `clients/desktop/src-tauri/src/attachments.rs` (`open_materialises_the_part_and_hands_the_daemons_file_to_the_opener`)
+- Status: routed (P5-U6); GUI shipped (M3, #0131)
 - Note: the printed path is the one row of the slice that is not byte-identical to the pre-daemon binary and cannot be: a materialised file lives under `<data_dir>/runtime/handles/<handle>/` with a lifetime attached, rather than in the client's own temp directory. The handle is deliberately not released, because the viewer just launched is holding the file.
 
 ### ATT-02 Save a received message's attachments into a client-named directory
@@ -726,9 +729,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp save <selector> [-o dir] [--mailbox]`, the option at `src/main.rs:301` and the handler in `src/main.rs`
 - Daemon surface: `message.materialise_attachment`, one call per part, plus a client-side copy into the destination and a `message.release_handle` per part
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`
-- Status: routed (P4-U8); GUI not started
+- GUI location: clients/desktop: `ts` from the list or the reader, or a Save button in the reader's attachment list, opens the Save dialog with a checkbox per part and a Directory field that starts at `~/Downloads` and then offers the last directory used; `attachment_save` copies with the `_1` rule and releases each handle (M3, #0131; reader.md, "Attachments")
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `clients/desktop/src/components/reader/reader.test.tsx` (`opens a part with the system opener and saves one into the directory the dialog names`, `keeps the Save dialog open on a relative directory, and offers the last directory used next`), `clients/desktop/src-tauri/src/attachments.rs` (`save_applies_the_underscore_rule_and_releases_each_handle`, `the_save_directory_expands_home_and_refuses_a_relative_path_or_a_file`)
+- Status: routed (P4-U8); GUI shipped (M3, #0131) with a typed directory; the native folder picker waits on the `tauri-plugin-dialog` install, and `ts` on a draft saves nothing and says its files are already on disk
 - Note: the destination defaults to the current directory and only the client knows what that means (`ANO-15`), so the client resolves it twice over: the absolute form anchors the writes, and the spelling the user typed is what the `✓` lines print. The result is a permanent user artifact rather than a daemon-owned handle with a lifetime, which is what separates this entry from `ATT-01`, `ATT-04`, and `ATT-05`. The daemon never renames a part, so the `_1` rule for two parts sharing a name is applied client-side, within one call.
 
 ### ATT-03 Attach a file to a draft
@@ -736,10 +739,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ta` in the drafts mailbox (`clients/tui/src/app/keymap.rs:659`), `resolve_attachment_paths` (`src/send.rs:1964`)
 - Daemon surface: `draft.attach` with an absolute path
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/draft_integration.rs`
-- Status: not started
+- GUI location: clients/desktop: `ta` in Drafts, the palette or the draft preview's Attach file open the "Attach file" dialog, whose File field takes an absolute or `~` path; `draft_attach` appends it client-side with `mp_core::draft::append_draft_attachment`, and the preview's attachment list removes an entry with `draft_attachment_remove` (M3, #0131; reader.md, "Drafts and server-only hits")
+- Validation: `tests/draft_integration.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`ta opens the path dialog, which keeps a missing file open and attaches an existing one`, `the preview lists the entries in order, opens one, flags a missing one and removes one`), `clients/desktop/src-tauri/src/attachments.rs` (`attach_appends_in_order_refuses_duplicates_and_missing_files_and_remove_rewrites`, `a_draft_entry_resolves_as_the_send_path_resolves_it`)
+- Status: GUI shipped (M3, #0131) with a typed path; the native file picker waits on the `tauri-plugin-dialog` install
 - Note: appends to the `attachments:` frontmatter list and verifies the path at the prompt, so the GUI file picker applies the same verification.
+  `draft.attach` is not built, so the desktop, like the TUI, rewrites the file itself, and the daemon serves no removal either.
 - Accepted divergence (P4-U15 review): a relative entry resolves against **the draft file's own directory**, where the pre-daemon binary resolved it against the sending process's working directory. No attachment path crosses the wire - `send.draft` carries a selector and the daemon reads the draft itself - so the client has nothing to rewrite, and the daemon's cwd is whichever directory happened to start it (`daemon::lifecycle::spawn_detached` sets no `current_dir`). The draft's directory is the one anchor both processes agree on; `send::resolve_attachment_paths` takes it explicitly and reads no `current_dir()`. Pinned by `tests/daemon_send_attachments.rs` and the unit rows in `src/send.rs` and `tests/daemon_autostart.rs`. A `~`-relative or absolute entry is unaffected, which is what the TUI's attach prompt stores.
 
 ### ATT-04 Open a draft's own attachment
@@ -747,18 +751,19 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/selector.rs`
 - Daemon surface: `draft.materialize_attachment`, opened client-side
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/cli_selector_contract.rs`
-- Status: not started
+- GUI location: clients/desktop: `to` on a draft opens its one file or picks among several, and the draft preview's attachment list has an Open button per entry, disabled with a "missing" badge when no file is there; `draft_attachment_open` opens the path the frontmatter names with the system opener (M3, #0131; reader.md, "Drafts and server-only hits")
+- Validation: `tests/cli_selector_contract.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`to on a draft picks among its files; ta outside Drafts and ts on a draft say why not`, `the preview lists the entries in order, opens one, flags a missing one and removes one`)
+- Status: GUI shipped (M3, #0131)
+- Note: `draft.materialize_attachment` is not served; a draft's file is already on disk, so the desktop opens the path the frontmatter lists, resolved as the send path resolves it.
 
 ### ATT-05 Open a message's HTML part in the browser
 
 - Classification: GUI parity
 - Source anchor: TUI `tb` (`clients/tui/src/app/keymap.rs:633`), search overlay `b`
 - Daemon surface: `message.materialise_html`, opened client-side through `parse::open_file_with_system`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file` and `the_browser_rendition_inlines_cid_images_as_data_uris` (`src/tui_tests/actions_store.rs`)
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `tb`, the reader toolbar's Open in browser and the palette hand the daemon's rendition to the default browser through `html_open`, and a server-only hit's markup through `hit_html_open`, which writes it with the charset and the CSP into the app cache (M3, #0131; reader.md, "The browser rendition")
+- Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file` and `the_browser_rendition_inlines_cid_images_as_data_uris` (`src/tui_tests/actions_store.rs`); `clients/desktop/src/components/reader/reader.test.tsx` (`tb and the toolbar open the daemon's rendition in the browser, and a message without markup says so`, `opens the hit's own markup in the browser, and one with none has no button`), `clients/desktop/src-tauri/src/attachments.rs` (`html_opens_the_daemons_rendition_and_a_message_without_markup_is_none`, `a_hit_rendition_carries_the_charset_and_the_csp_and_opens`)
+- Status: routed (P5-U6); GUI shipped (M3, #0131)
 - Note: the daemon writes the rendition rather than the markup: the charset meta, the CSP tag and the `cid:` inlining are three #0037 fixes, and serving unhardened markup through a new door would undo them.
   A message whose sender wrote no markup is `-32602`, which the client renders as its "No HTML version available" line and not as an error.
   The file lands in a handle directory with a lifetime, where the TUI wrote it into the row's own materialisation directory; the handle is deliberately not released, because the browser just launched is holding it (`ATT-01`'s rule).
@@ -770,9 +775,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp send <selector> [-y]`, `src/main.rs`, `src/send.rs`
 - Daemon surface: `send.draft`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/outbox_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12); GUI not started
+- GUI location: clients/desktop: `x` on an approved draft asks "Send this email?" with "To: <to> - <subject>", and its OK calls `send_draft` with `hold: true`, awaited as the operation kind `send`; the hold card or a notice then says how it ended (M3, #0131; shell.md, "Send")
+- Validation: `tests/outbox_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`x on an approved draft asks Send this email?, sends the cursor draft only, and leaves the marks`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`with no hold, the outcome is a notice: Sent in the status region, Failed as an alert`), `clients/desktop/src-tauri/src/commands.rs` (`an_approved_draft_is_sent_without_a_second_approve`), `clients/desktop/src-tauri/src/fixture.rs` (`a_held_send_counts_down_then_sends_files_and_settles`, `send_fail_fails_the_operation_and_parks_a_failed_row`)
+- Status: routed (P4-U12); GUI shipped (M3, #0131)
 - Note: the preview and the `[y/N]` prompt stay in the client, which renders them from `draft.preview`: a daemon has no stdin, and a run without `-y` prints `Cancelled.` and exits 0 without a single `send.*` call.
 
 ### SND-02 Send every approved draft of one account or of all accounts
@@ -780,9 +785,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp send-approved [-y] [--all-accounts]` (`src/main.rs`), TUI `cX` (`clients/tui/src/app/keymap.rs:669`)
 - Daemon surface: `send.approved`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `cX` in Drafts and the palette ask "Send all approved emails?" with "In <mailbox label>", and the OK calls `send_approved` with `hold: true` for the selected account, awaited as the operation kind `send_approved`; the end says "Sent N, failed M" or "No approved emails found" (M3, #0131; shell.md, "Send")
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cX is Drafts only, and in Drafts sends every approved draft of the account`), `clients/desktop/src/app/reducer.test.ts` (`a batch says Sent N, failed M with its failures as an alert`), `clients/desktop/src-tauri/src/commands.rs` (`send_approved_is_awaited_as_send_approved`), `clients/desktop/src-tauri/src/fixture.rs` (`send_approved_sends_every_approved_draft_behind_one_hold`)
+- Status: routed (P5-U6); GUI shipped (M3, #0131) for one account; the `--all-accounts` loop has no GUI path
 - Note: `--all-accounts` is a loop in the client over `global_config.accounts` in configuration order, so `send.approved` names one account and a caller that sends `all_accounts` is refused.
   The TUI's `cX` went through it in P5-U6 and derives its line from the settled `{sent, failed}`; an account with neither is the "No approved emails found" the empty scan printed.
   The transport check stays client-side, because its sentence is the key's and the progress line has to say which transport was resolved.
@@ -792,23 +797,23 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `x` (`clients/tui/src/app/keymap.rs:573`)
 - Daemon surface: `draft.approve` then `send.draft`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `x` from any pane, or the palette's "Send current draft (approve + send)", on a `draft` status asks "Draft is not approved. Approve and send?", and `send_draft` then validates, approves and sends the cursor draft; a draft being sent refuses `d`, `cA`, `cD`, `e`, `ce` and `x` (M3, #0131; shell.md, "Send")
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`x on a draft asks the TUI's approve-and-send question, and y sends it with the hold`, `x on received mail says it needs a draft, and n cancels a send`), `clients/desktop/src-tauri/src/commands.rs` (`send_draft_validates_approves_then_sends_with_the_hold`, `a_refused_approve_stops_the_send_with_the_invalid_payload`)
+- Status: GUI shipped (M3, #0131)
 
 ### SND-04 Undo-send hold with a visible countdown and a cancel key
 
 - Classification: GUI parity
 - Source anchor: `email.send_hold_secs` with a 20 second default, resolved daemon-side in `src/daemon/hold.rs`
 - Daemon surface: `send.hold_status`, `send.cancel_hold`, `hold: true` on `send.draft` / `send.approved`, and the countdown on `state.event` as `send.hold_started` / `send.hold_tick` / `send.hold_fired` / `send.hold_cancelled`
-- GUI location: clients/desktop: each hold is a card in the activity area, "Sending in N s" with the subject, the account, a progress bar and Cancel; `u` cancels the newest held send, as the TUI's does, and the palette has "Cancel the held send" (M2, #0131)
-- Validation: `src/tui_tests/hold.rs`, `tests/daemon_send_hold.rs`, `tests/phase5_undo_send_hold.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U1); `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (the "held sends" block), `clients/desktop/src/app/events.test.tsx` (`counts a hold down from its events and cancels it`), `clients/desktop/src/keymap/keymap.test.tsx` (`u cancels a held send while one counts down, and toggles read otherwise`), `clients/desktop/src-tauri/src/fixture.rs` (`a_simulated_hold_counts_down_and_fires`, `a_cancelled_hold_stops_and_cannot_be_cancelled_twice`)
-- Status: routed (P6-U2); GUI shipped (M2, #0131)
+- GUI location: clients/desktop: each hold is a card in the activity area, "Sending in N s" with the subject, the account, a progress bar and Cancel; `u` cancels the newest held send, as the TUI's does, and the palette has "Cancel the held send" (M2, #0131); `x` and `cX` arm it, and the card of a send this window started says "Sending…" after the fire and then "Sent", "Send cancelled", "Failed: <reason>" or "Partly delivered: …" in an end line mounted empty with the card (M3, #0131; shell.md, "Send")
+- Validation: `src/tui_tests/hold.rs`, `tests/daemon_send_hold.rs`, `tests/phase5_undo_send_hold.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U1); `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (the "held sends" block), `clients/desktop/src/app/events.test.tsx` (`counts a hold down from its events and cancels it`), `clients/desktop/src/keymap/keymap.test.tsx` (`u cancels a held send while one counts down, and toggles read otherwise`), `clients/desktop/src-tauri/src/fixture.rs` (`a_simulated_hold_counts_down_and_fires`, `a_cancelled_hold_stops_and_cannot_be_cancelled_twice`, `a_cancelled_send_settles_cancelled_and_leaves_the_draft`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`counts down, says Sending… once fired, then Sent in the status line mounted with the card`, `Cancel on this window's card ends in Send cancelled and frees the draft`), `clients/desktop/src/components/shell/a11y.test.tsx` (`mounts a hold card's end line empty, and the same node takes Sent`)
+- Status: routed (P6-U2); GUI shipped (M2, #0131), and armed by the desktop's own sends (M3, #0131)
 - Note: the hold is the daemon's, and the TUI keeps only what it renders: the status line, the `u` key and the `App::hold` the events fill.
   `mp send` and `mp send-approved` bypass it by construction (`ANO-7`), because they pass no `hold` and the parameter defaults to off.
   The daemon owns the window: `hold` is a boolean and `email.send_hold_secs` is resolved daemon-side, so a caller that passes nothing bypasses the hold and `send_hold_secs = 0` fires at once with no countdown published.
   When the last client exits mid-hold the daemon cancels the hold and leaves the draft approved, which is what killing the TUI did before the move; a client that merely closed *its* window while another is connected cancels nothing, because a send is durable.
-  The desktop renders the holds any client armed, from the bootstrap's `holds` and the four `send.hold_*` events, with the seconds of the last tick; it arms none until M3 sends a draft.
+  The desktop renders the holds any client armed, from the bootstrap's `holds` and the four `send.hold_*` events, with the seconds of the last tick, and since M3 it arms its own, always passing `hold: true`.
 
 ### SND-05 Send a calendar invitation
 
@@ -826,9 +831,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/outbox.rs`, surfaced as a TUI badge and status entry
 - Daemon surface: `state.bootstrap` outbox summary, then `state.event`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12) for the `mp outbox list` surface; the TUI badge and GUI not started
+- GUI location: clients/desktop: `go`, the palette's "Open outbox" or the sidebar's outbox line open the account's outbox in the list pane, from `outbox_list`, re-read on every `outbox:<account>` invalidation; each row shows its state chip (Queued, Failed, Sent, copy owed, Partly delivered), its id, time and Message-ID, and the lines `mp outbox list` indents (M3, #0131; shell.md, "Outbox")
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/components/outbox/outbox.test.tsx` (`go opens the selected account's outbox, Escape brings the mailbox back`, `shows each state with its chip, and a partial delivery never as a failure`, `drops every key on the hidden selection, from the list and from the reader`), `clients/desktop/src/app/outbox.test.ts` (`goes stale on an invalidation of its account, and is created by one when never read`), `clients/desktop/src-tauri/src/commands.rs` (`outbox_list_reads_the_listing_and_ever_used`)
+- Status: routed (P4-U12) for the `mp outbox list` surface; GUI shipped (M3, #0131); the TUI badge not started
 - Note: covers queued, retrying, failed, and partly delivered submissions.
 
 ### SND-07 Outbox operator actions
@@ -836,10 +841,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: daemon administration
 - Source anchor: `mp outbox list`, `mp outbox retry <id>`, `mp outbox discard <id>`, `src/main.rs`, `src/outbox.rs`, `tests/outbox_integration.rs`
 - Daemon surface: `send.outbox_list`, `send.outbox_retry`, `send.outbox_discard`
-- GUI location: not required (daemon administration)
-- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12); GUI not started
-- Note: deliberately manual, because a submission that died without a verdict may or may not have been delivered, so the GUI shows the blocked state and names the command instead of guessing.
+- GUI location: not required (daemon administration); the desktop's outbox view offers them anyway: `R` or Retry on a `failed` or `sent_pending_append` row and `d` or Discard on any row, each behind a confirmation that warns about a second delivery or names what the discard gives up (M3, #0131; shell.md, "Retry and discard")
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/components/outbox/outbox.test.tsx` (`R retries the cursor row after the warning, and the settle says how it ended`, `R on a row the daemon will not retry names why and asks nothing`, `d discards the cursor row after the warning, and the sidebar line goes with it`, `a refused discard puts the row back and says why`), `clients/desktop/src/app/outbox.test.ts` (`retries only what the daemon admits, and warns about a second delivery`, `names what a discard gives up, for each state`), `clients/desktop/src-tauri/src/commands.rs` (`outbox_retry_is_awaited_as_outbox_retry_and_a_refusal_awaits_nothing`, `outbox_discard_answers_the_row_and_a_second_discard_is_not_found`)
+- Status: routed (P4-U12); GUI shipped (M3, #0131)
+- Note: deliberately manual, because a submission that died without a verdict may or may not have been delivered, so the desktop asks first and says so in the confirmation rather than retrying on its own.
   `send.outbox_retry` is an operation and not a command: it re-arms the row and then drains it against SMTP and IMAP.
 
 ### SND-08 Partly delivered submission where a recipient was refused
@@ -847,9 +852,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity for the surfacing
 - Source anchor: `src/outbox.rs`, `src/send.rs`
 - Daemon surface: `state.event` carrying the partly delivered state
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12) for the CLI surface; the `state.event` half and the GUI not started
+- GUI location: clients/desktop: a send some recipients refused ends "Partly delivered: <address (reason)>, …" on its card, which stays until dismissed, and its outbox row reads Partly delivered with the recipients who never got it (M3, #0131; shell.md, "Send" and "Rows")
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/app/reducer.test.ts` (`a partial delivery reads Partly delivered and names the refused recipients, never a plain failure`), `clients/desktop/src/components/outbox/outbox.test.tsx` (`shows each state with its chip, and a partial delivery never as a failure`), `clients/desktop/src-tauri/src/fixture.rs` (`send_partial_refuses_one_recipient_and_keeps_a_partial_row`)
+- Status: routed (P4-U12) for the CLI surface; GUI shipped (M3, #0131); the `state.event` half not started, since the desktop reads the state from the send's outcome and from `send.outbox_list` after an `outbox:<account>` invalidation
 - Note: only a human can close this state, and the GUI must not present it as a plain failure.
 
 ### SND-09 Sent-copy append after submission
@@ -857,9 +862,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/imap_client/sent.rs`
 - Daemon surface: daemon-internal, reported on `state.event`
-- GUI location: clients/desktop (M3, #0131)
-- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12) for the CLI surface; the `state.event` half and the GUI not started
+- GUI location: clients/desktop: a `sent_pending_append` row shows in the outbox view as "Sent, copy owed" with the mailbox it is owed to, and Retry files the copy after "File the Sent copy of row N?" (M3, #0131; shell.md, "Rows" and "Retry and discard")
+- Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/app/outbox.test.ts` (`says a retry's outcome in each of the row's ends`), `clients/desktop/src-tauri/src/fixture.rs` (`send_pending_append_owes_the_sent_copy`, `a_retried_pending_append_row_files_its_copy`)
+- Status: routed (P4-U12) for the CLI surface; GUI shipped (M3, #0131); the `state.event` half not started, since the desktop reads the state from `send.outbox_list`
 - Note: implicit workflow driven on the next startup or sync, which is how the outbox drives itself.
 
 ## Sync, offline behaviour, and pending operations
@@ -924,9 +929,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/pending_ops.rs`, `src/ops.rs`
 - Daemon surface: `state.event` for queue depth and outcomes; the drains of a `sync.*` pass as `operation.progress`
-- GUI location: clients/desktop: the activity area reports each batch the daemon took or refused, a `mutations.rolled_back` as an alert in the TUI's words, and a failed or dropped sync; `ss` and `sS` start a quick or a full sync of the selected account (M2, #0131)
-- Validation: unit tests in `src/pending_ops.rs`; `clients/desktop/src/app/events.test.tsx` (`brings rows back on a rollback and says so`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (the "activity notices" block), `clients/desktop/src/keymap/keymap.test.tsx` (`ss and sS start a quick and a full sync of the selected account`), `clients/desktop/src-tauri/src/fixture.rs` (`a_burst_of_mutations_is_one_drain`, `a_rollback_restores_the_rows_and_says_how_many`)
-- Status: routed (P4-U10) for the sync tick's drains; GUI shipped (M2, #0131) for the outcomes, with no queue depth shown
+- GUI location: clients/desktop: the activity area reports each batch the daemon took or refused, a `mutations.rolled_back` as an alert in the TUI's words, and a failed or dropped sync; `ss` and `sS` start a quick or a full sync of the selected account (M2, #0131); the status region shows the queue depth while it is not 0, "3 waiting for the server: 1 in the outbox, 1 sending, 1 change" (M3, #0131; shell.md, "Counts and the queue depth")
+- Validation: unit tests in `src/pending_ops.rs`; `clients/desktop/src/app/events.test.tsx` (`brings rows back on a rollback and says so`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (the "activity notices" block), `clients/desktop/src/keymap/keymap.test.tsx` (`ss and sS start a quick and a full sync of the selected account`), `clients/desktop/src-tauri/src/fixture.rs` (`a_burst_of_mutations_is_one_drain`, `a_rollback_restores_the_rows_and_says_how_many`), `clients/desktop/src/app/outbox.test.ts` (`counts the queue depth from the outbox, the sends and the pending changes`, `counts a retry of a row the listing already counts as open once, and a failed row's retry as sending`)
+- Status: routed (P4-U10) for the sync tick's drains; GUI shipped (M2, #0131) for the outcomes and (M3, #0131) for the queue depth, which counts the queued outbox rows, this window's running sends and retries and its unanswered changes; the daemon publishes no depth of its own pending-operation queue, so a change it took and has not yet replayed is not counted
 
 ### SYN-07 Store ingest, reconciliation, and drop-and-rebuild on an unreadable SQLite file
 
