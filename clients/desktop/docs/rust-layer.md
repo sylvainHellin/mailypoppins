@@ -16,6 +16,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
+| `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -40,7 +41,7 @@ type GuiError =
 ```
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
-The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`, today `signature.list`), whose work the layer does itself over a daemon.
+The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.list`, `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
 `setup` is the desktop's own configuration: an editor that did not start, or a settings file that does not read; its message names what to change.
 
 ## Types
@@ -93,6 +94,11 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_preview` | `account`, `id` | `DraftPreview` |
 | `draft_set_recipients` | `account`, `id`, `to`, `cc`, `bcc`, `subject?` | `DraftLocation` |
 | `signature_list` | `account` | `SignatureListing` |
+| `signature_read` | `name` | `SignatureFile` |
+| `signature_create` | `name` | `SignatureFile` |
+| `signature_rename` | `account`, `old`, `new` | `SignatureListing` |
+| `signature_delete` | `account`, `name` | `SignatureListing` |
+| `signature_set_default` | `account`, `name` (or `null` to clear) | `SignatureListing` |
 | `editor_open` | `path` | `EditorLaunch` |
 | `editor_setting_get` | none | `EditorSetting` |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
@@ -357,6 +363,30 @@ No event says that an index changed, so the frontend reads the list again after 
 It answers the `DraftCreated` and the `.vcf`'s path, and opens nothing: the frontend hands the draft to the editor as a new draft's.
 An empty address is a `protocol` refusal before any call.
 
+## Signatures
+
+A signature is the file `<config_dir>/signatures/<name>.md`, shared by every account, and each account's default lives in the app state file.
+The daemon serves no `signature.*` method, so the signature commands call `mp_core::signatures` over a daemon door, as the TUI does, from the desktop's own config directory, which the handshake already takes to be the daemon's (`Identity.config_dir`).
+
+```ts
+type SignatureListing = { account: string; names: string[]; default: string | null };
+type SignatureFile = { name: string; path: string; content: string };
+```
+
+- `signature_list` lists every valid name, sorted, and the account's default when its file still exists.
+- `signature_read` answers the file's path and content.
+- `signature_create` writes an empty file and answers it; the frontend opens `path` in the editor next, as the TUI's `n` does.
+- `signature_rename` moves the file and points every account default that named it at the new name.
+- `signature_delete` removes the file and clears every default that named it.
+- `signature_set_default` records the account's default, or clears it for `name: null`.
+
+The last three answer the account's listing after the change.
+No command writes content: the editor does, through `editor_open` on the file.
+A refusal is `mp_core`'s sentence as it stands ("signature name '../x' cannot start with a dot", "a signature named 'work' already exists"), a `protocol` error with no code, or `not_found` for "no signature named '<name>'".
+
+The daemon's watcher publishes `signature.changed {name, path}` when a signature file is written or created, including by this layer, and nothing when one is deleted, since no `signature.removed` exists.
+So the frontend reads the listing again after each change it makes, and on every `signature.changed` while the Signatures dialog or the new-draft wizard is open ([shell.md](shell.md), "Signatures").
+
 ## Drafts and the editor
 
 A draft is a Markdown file with YAML frontmatter in the account's drafts directory, and every command that writes one answers its absolute `path`.
@@ -367,7 +397,7 @@ A draft is a Markdown file with YAML frontmatter in the account's drafts directo
 
 `draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.
 An absent `subject` keeps the draft's own, and the signature is not re-spliced.
-The daemon serves no `signature.list`, so `signature_list` reads the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on.
+The daemon serves no `signature.list`, so `signature_list` reads the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on (see Signatures).
 
 Every change to a draft file, from the daemon, an editor or a client-side rewrite, reaches the frontend as the watcher's `draft.changed` or `draft.invalid`, and the commands publish nothing of their own.
 
@@ -548,7 +578,7 @@ The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies,
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail` and `rebuild_refused` below; `send_fail` also fails the next invitation.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail`, `rebuild_refused` and `signature_changed` below; `send_fail` also fails the next invitation.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -599,6 +629,12 @@ The drafts are real files in a per-run directory, `<temp>/mp-desktop-fixture-<pi
 Every call rescans that directory, as the daemon's draft queries do, so the listing, the counts and the bootstrap's drafts follow the files.
 `draft.create`, `draft.reply`, `draft.forward` and `draft.create_from_message` write through the same `mp_core::draft` builders as the daemon; a reply or forward is renamed `<id>.md`, a created draft keeps its name, and a forward carries the source's attachments as small files under `attachments/`.
 `signature.list` answers from `signatures.json`, whose `work` default is spliced into a new `work` draft.
+
+The signatures are `signatures.json`'s `work` and `short`, with `work` the default of `work`.
+They live in memory and are mirrored to `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md`, written at start and on every change, so an Edit opens a real file.
+The pseudo-methods `signature.read {name}`, `signature.create {name}`, `signature.rename {account, old, new}`, `signature.delete {account, name}` and `signature.set_default {account, name}` do what `mp_core::signatures` does, and refuse with its sentences as `-32602`; an unknown account is `-32005`.
+A create and a rename publish the watcher's `signature.changed` for the new file, and a delete and a default change publish nothing.
+`signature_changed` appends "Edited behind the fixture's back." to `work` and its file and publishes `signature.changed`, as an edit in another window would; it is an error once `work` is gone.
 Each write publishes `draft.changed`, and a file that does not parse is listed under `skipped`, is an `invalid` row in the bootstrap, and is refused by `draft.approve` and `draft.preview` with `-32010`.
 
 `editor_open` spawns nothing in fixture mode: it journals the path and the resolved command.

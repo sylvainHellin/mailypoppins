@@ -24,6 +24,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/rsvp.ts` | The reader's invitation cards, the Graph refusals, the RSVP refusals in the TUI's words, the RSVP choice and the RSVPs this window awaits |
 | `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
+| `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -40,6 +41,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/contacts` | The Contacts view, its list and rows |
 | `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, the RSVP choice and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
+| `src/components/signatures` | The Signatures dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -64,6 +66,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
+| `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or the new-draft wizard is open |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
@@ -216,6 +219,7 @@ On a draft, reply and forward say that a draft has nothing to quote.
 
 `cn` and `cf` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft" or "Forward" with To, Cc, Bcc and Subject.
 A new draft also has a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; the forward has none, since `draft_forward` takes no signature.
+The select reads the account's listing in `state.signatures`, which a `signature.changed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
 The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
 Enter in a field moves to the next one and, after the last, to the submit button; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
 A draft needs at least one recipient across To, Cc and Bcc, the TUI's rule, and trailing separators are trimmed from each field.
@@ -536,6 +540,55 @@ A new, updated or cancelled invitation therefore reaches the agenda with the inv
 The reader's invitation cards go stale on the same events, and a settled RSVP makes both stale.
 An account whose store is not ready (`-32006`) shows "<account> has no local store yet, so it has no agenda; it appears after the account's first sync", not an error; its first sync makes the agenda stale.
 
+## Signatures
+
+The Signatures dialog is the TUI's signatures overlay (ACC-10): it lists every signature, marks the default of the selection's account, and creates, renames, edits, deletes, and sets or clears the default.
+The signatures are files every account shares, and the default is per account, so the dialog sets the default of the account it opened on, the TUI's rule.
+The commands behind it are in [rust-layer.md](rust-layer.md), "Signatures".
+
+### Entry points
+
+- `cs`, the TUI's GLOBAL key, in Mail from any pane, the outbox view included; it opens on the outbox's or the search's account when one shows, else the selection's.
+- The palette's "Manage signatures", from any view.
+
+In Contacts and Calendar `cs` is not reachable, as in the TUI: `c` copies in Contacts and does nothing in Calendar, and neither arms the `c` family.
+
+### The dialog
+
+`SignaturesDialog.tsx` is the overlay `signatures`, `state.signaturesDialog` is `{account}`, and the cursor, the mode and the name field are the component's own.
+The left side is a single-select `listbox` named "Signatures": each name, the default with a "default" badge, the first row under the cursor on open, and "No signatures yet; press n to create one" when there are none.
+The right side, a region named "Preview", shows the cursor signature's body from `signature_read`, read again whenever the listing is, and "(empty)" for an empty file.
+The footer's buttons are New, Rename, Edit, Delete, and Set default or Clear default by whether the cursor row is the default.
+
+| Key | Action | Command |
+|---|---|---|
+| `j`, Down | cursor down | none |
+| `k`, Up | cursor up | none |
+| Enter | make the cursor signature the default, or clear the default when it already is | `signature_set_default` |
+| `e` | open the cursor signature in the editor | `editor_open` |
+| `n` | the name field, empty; Enter creates the signature and opens it in the editor | `signature_create`, then `editor_open` |
+| `r` | the name field, seeded with the cursor name; Enter renames | `signature_rename` |
+| `d` | the confirmation, then the delete | `signature_delete` |
+| Escape, `q` | close | none |
+
+The dialog owns every key while it is open, and reads them in the capture phase, since the popup stops the arrow keys on their way up.
+In the name field the keys are the field's: Enter commits, and Escape goes back to the list with the dialog still open.
+A refused name stays in the field, and the dialog's alert line shows "Cannot create: ", "Cannot rename: ", "Cannot set the default signature: " or "Cannot delete: " before `mp_core`'s sentence, the TUI's words; an editor that did not start is "Cannot open signature: " and why.
+A change that went through says so in the status line, the TUI's words again: "'<name>' is now the default signature", "'<name>' is no longer the default signature", "Created signature '<name>'", "Renamed '<old>' to '<new>'", "Deleted signature '<name>'", and "Editing signature '<name>' in <editor>" for an editor that started.
+With no signature under the cursor, the alert line answers `e`, `r` and `d` with "No signature to edit; press n to create one", "No signature to rename" and "No signature to delete".
+
+`d` raises the shared confirmation over the dialog, titled "Delete signature '<name>'?" with the file's path as its detail, as the TUI does.
+`y` or Enter deletes and `n` or Escape cancels, and either answer lands back on the list; the cursor then moves to the next row, else the one before.
+Deleting the default clears it, which `mp_core` does itself.
+
+### Staleness
+
+`state.signatures` keeps each account's `signature_list` answer as a `Loadable`.
+Every open of the dialog or of the new-draft wizard for an account creates it or makes it stale.
+Every `signature.changed`, every change the dialog makes (answered or refused) and every bootstrap make all of them stale, since the files are shared.
+Only the listing of the open dialog or the open wizard is read; a stale one is read when one of them opens again.
+The daemon publishes nothing for a delete, so another client's delete shows on the next open, and this dialog's own delete shows at once because it reads the listing again.
+
 ## Layouts
 
 | Width | Layout | Shows |
@@ -560,8 +613,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice and the New invitation form) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice on its listbox, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, and the Signatures dialog with its delete confirmation) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -592,6 +645,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
 - In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
+- `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser, from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
   The search overlay's `o`, `O` and `b` are these same keys on a hit, which is a list row here.
@@ -602,7 +656,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
-A key whose action a later milestone brings (an M4 key such as `tv`) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
+A key whose action a later milestone brings (an M4 key such as `sc`) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
 No row is left for M3.
 
 ## Tests
