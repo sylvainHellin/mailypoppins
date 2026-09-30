@@ -379,9 +379,14 @@ impl State {
         match (method, destination, new_state) {
             (_, Some(destination), _) => {
                 let mut row = rows.remove(index);
-                let selector =
-                    Selector::new(&account, &destination, message_key(&message_id)).to_string();
-                row["selector"] = json!(selector);
+                // The row's own selector is `Selector::for_message`'s, the
+                // bare Message-ID; `moved_to` carries the stored Message-ID,
+                // brackets and all, which is what the daemon answers.
+                row["selector"] =
+                    json!(
+                        Selector::new(&account, &destination, message_key(&message_id)).to_string()
+                    );
+                let selector = Selector::new(&account, &destination, &message_id).to_string();
                 let target = boxes.entry(destination.clone()).or_default();
                 let at = target
                     .iter()
@@ -1568,7 +1573,8 @@ mod tests {
         assert_eq!(answer["moved_to"]["mailbox"], "archive");
         assert_eq!(
             answer["moved_to"]["selector"],
-            "mp://work/archive/quarterly-ledger-review-1001@fixture.example"
+            "mp://work/archive/%3Cquarterly-ledger-review-1001@fixture.example%3E",
+            "the stored Message-ID, brackets percent-encoded, as the daemon answers"
         );
         assert!(
             rx.try_recv().is_err(),
@@ -1793,7 +1799,8 @@ mod tests {
     #[test]
     fn a_cancelled_hold_stops_and_cannot_be_cancelled_twice() {
         let (f, rx) = fixture();
-        f.set_hold_second(Duration::from_millis(30));
+        // The fire is ten of these away, far past the cancel below.
+        f.set_hold_second(Duration::from_millis(100));
         f.simulate("hold").expect("hold");
         let id = next_event(&rx).payload["operation_id"]
             .as_str()
@@ -1804,7 +1811,13 @@ mod tests {
             .call("send.cancel_hold", json!({"operation_id": id}))
             .expect("cancelled");
         assert_eq!(answer["cancelled"], true);
-        let cancelled = next_event(&rx);
+        // A tick posted between the first one and the cancel is still queued.
+        let cancelled = loop {
+            let e = next_event(&rx);
+            if e.kind != KIND_SEND_HOLD_TICK {
+                break e;
+            }
+        };
         assert_eq!(cancelled.kind, KIND_SEND_HOLD_CANCELLED);
         assert_eq!(cancelled.payload["remaining_secs"], 0);
         assert_eq!(answer["revision"], cancelled.revision);

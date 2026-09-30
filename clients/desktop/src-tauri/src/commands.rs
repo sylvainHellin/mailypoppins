@@ -652,12 +652,17 @@ pub fn search_server_cancel_on(
 /// the row made wrong), after which the next row still goes. Anything else
 /// (no daemon, an unknown account, a timeout) is about the whole batch.
 fn about_one_row(error: &GuiError) -> bool {
+    // Every per-row refusal of the daemon's `message.*` mutations and of
+    // `draft.discard` is `-32602` (no such row, a destination it cannot move
+    // to, an approved draft), which a resource call reads as `NotFound`. An
+    // account that is not ready (`-32006`) or a store failure (`-32603`) is
+    // about the whole batch.
     matches!(
         error,
         GuiError::NotFound {
             code: Some(-32602),
             ..
-        } | GuiError::Protocol { .. }
+        }
     )
 }
 
@@ -1264,7 +1269,10 @@ mod tests {
     }
 
     #[test]
-    fn a_row_of_another_account_is_not_found_and_an_unknown_account_fails_the_batch() {
+    fn an_unknown_id_of_the_fixture_account_is_not_found_and_an_unknown_account_fails_the_batch() {
+        // 1015 is a home row, which the fixture scopes away from work. A live
+        // daemon does not: row ids are per-store, and it would act on work's
+        // row 1015 if there were one (rust-layer.md, Mutations).
         let (d, _f) = fixture_door();
         let batch = message_delete_on(&d, "work", &[1015]).expect("batch");
         assert!(batch.done.is_empty());
@@ -1301,11 +1309,17 @@ mod tests {
         let batch = message_move_on(&d, "home", &[1015], "Newsletters").expect("moved");
         let moved = batch.done[0].moved_to.clone().expect("moved_to");
         assert_eq!(moved.mailbox, "newsletters");
-        assert!(moved.selector.starts_with("mp://home/newsletters/"));
+        assert_eq!(
+            moved.selector, "mp://home/newsletters/%3Cdinner-on-saturday-1015@fixture.example%3E",
+            "the stored Message-ID, brackets percent-encoded, as the daemon answers"
+        );
         assert!(ids_of(&d, "home", "newsletters").contains(&1015));
         let meta = message_html_meta_on(&d, "home", 1015).expect("meta");
         assert_eq!(meta.mailbox, "newsletters");
-        assert_eq!(meta.selector, moved.selector);
+        assert_eq!(
+            meta.selector, "mp://home/newsletters/dinner-on-saturday-1015@fixture.example",
+            "the row's own selector is the bare Message-ID, unlike moved_to's"
+        );
         assert_queued(&f, "message.move", 1);
         let calls = f.calls();
         let call = calls
@@ -1376,6 +1390,29 @@ mod tests {
         let failed: Vec<i32> = failed.into_iter().map(|(i, _)| i).collect();
         assert_eq!(failed, [2, 3], "the rest are reported, not dropped");
         assert!(each_of(&[1, 2], |_| Err::<i32, _>(unavailable())).is_err());
+    }
+
+    #[test]
+    fn an_account_that_is_not_ready_rejects_the_batch_after_one_call() {
+        let mut calls = 0;
+        let result = each_of(&[1, 2, 3], |_| {
+            calls += 1;
+            Err::<i32, _>(GuiError::from_call_text(
+                "message.archive: the daemon refused the call: account_not_ready: work (-32006)",
+                Addressing::Resource,
+            ))
+        });
+        assert!(
+            matches!(
+                result,
+                Err(GuiError::Protocol {
+                    code: Some(-32006),
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(calls, 1, "no round trip for the rows after it");
     }
 
     #[test]
