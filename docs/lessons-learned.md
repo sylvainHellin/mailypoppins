@@ -2330,3 +2330,9 @@ cmdk's `Command.Input` also sets `aria-labelledby` to its own label, which overr
 
 `clients/desktop/src/test/tauri-mock.ts` imports `clients/desktop/fixtures/*.json` as the wire shapes they hold (`drafts.json` as a `DraftListing` per account), beside the Rust fixture that compiles them in.
 Reshaping one for the Rust side alone broke 74 vitest tests at once, so data only the Rust fixture needs goes into a file of its own (`draft-bodies.json`, `signatures.json`).
+
+## A Tab onto a Base UI focus guard moves focus a frame later
+
+Base UI's focus trap puts a guard on each side of a modal, and a guard that takes focus sends it back into the dialog with `requestAnimationFrame` (`enqueueFocus` in `@base-ui/react/floating-ui-react`).
+A test that Tabs round a dialog and reads `document.activeElement` right after each `user.tab()` races that frame: in a loaded suite the frame lands between two Tabs, the next Tab starts from the first control, and the loop never sees it take focus.
+The desktop's wizard test waits for focus to settle inside the dialog after every Tab, cycles until the first control comes round, and records every `focusin` outside the dialog (`clients/desktop/src/components/shell/a11y.test.tsx`).

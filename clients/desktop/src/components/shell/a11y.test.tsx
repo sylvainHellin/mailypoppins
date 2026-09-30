@@ -169,22 +169,38 @@ describe("accessibility primitives", () => {
     expect(wizard).toHaveAccessibleDescription(/opens in your editor/);
     await waitFor(() => expect(within(wizard).getByRole("textbox", { name: "To" })).toHaveFocus());
     // Base UI traps focus with a guard on each side and makes the rest of
-    // the window inert: under jsdom, Tab passes the guard and the body and
-    // wraps to To, and no control outside the dialog ever takes focus.
+    // the window inert. Tab onto a guard moves focus back into the dialog on
+    // the next animation frame, so each Tab waits for focus to settle inside
+    // the wizard before the next one: sampling right after the Tab raced that
+    // frame and missed To under a loaded suite. On the way, focus may pass a
+    // guard or the body, and no control outside the dialog ever takes it.
     const to = within(wizard).getByRole("textbox", { name: "To" });
-    const trapped = () => {
-      const el = document.activeElement as HTMLElement;
-      return wizard.contains(el) || el.hasAttribute("data-base-ui-focus-guard") || el === document.body;
+    const escaped: Element[] = [];
+    const watch = (e: FocusEvent) => {
+      const el = e.target as HTMLElement;
+      if (!wizard.contains(el) && !el.hasAttribute("data-base-ui-focus-guard") && el !== document.body) escaped.push(el);
     };
-    let wrapped = false;
-    for (let i = 0; i < 12; i++) {
+    document.addEventListener("focusin", watch);
+    const settled = () => waitFor(() => expect(wizard).toContainElement(document.activeElement as HTMLElement));
+    const visited: Element[] = [];
+    // Cycle until To comes round again; the bound only stops a broken trap
+    // from looping forever, the wizard has seven controls.
+    for (let i = 0; i < 40; i++) {
       await user.tab();
-      expect(trapped()).toBe(true);
-      if (document.activeElement === to) wrapped = true;
+      await settled();
+      visited.push(document.activeElement!);
+      if (document.activeElement === to) break;
     }
-    expect(wrapped).toBe(true);
+    expect(visited[visited.length - 1]).toBe(to);
+    for (const name of ["Cc", "Bcc", "Subject"]) expect(visited).toContain(within(wizard).getByRole("textbox", { name }));
+    expect(visited).toContain(within(wizard).getByRole("combobox", { name: "Signature" }));
+    expect(visited).toContain(within(wizard).getByRole("button", { name: "Create and edit" }));
+    // Shift+Tab from To wraps backwards to the last control, still inside.
     await user.tab({ shift: true });
-    expect(trapped()).toBe(true);
+    await settled();
+    expect(document.activeElement).toBe(visited[visited.length - 2]);
+    document.removeEventListener("focusin", watch);
+    expect(escaped).toEqual([]);
     for (const name of ["To", "Cc", "Bcc", "Subject"]) expect(within(wizard).getByRole("textbox", { name })).toBeInTheDocument();
     expect(within(wizard).getByRole("combobox", { name: "Signature" })).toBeInTheDocument();
   });
