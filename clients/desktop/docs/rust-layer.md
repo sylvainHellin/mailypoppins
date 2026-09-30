@@ -14,6 +14,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
+| `calendar.rs` | The agenda, and an agenda entry's `invite.ics` in the editor |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -110,6 +111,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_attach` | `account`, `id`, `path` (absolute or `~`) | `DraftAttachments` |
 | `draft_attachment_remove` | `account`, `id`, `index` | `DraftAttachments` |
 | `draft_attachment_open` | `account`, `id`, `index` | `OpenedFile` |
+| `calendar_events` | `account` | `AgendaEvent[]`, every row, past ones included |
+| `invite_source_open` | `account`, `row_id` (an agenda row's) | `EditorLaunch`; `not_found` when the row has no `invite.ics` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
@@ -275,6 +278,18 @@ type OutboxDiscarded = { discarded: boolean; row_id: number; message_id: string;
 
 A row that is gone is `not_found` with code `-32602`.
 Neither command publishes anything of its own: the daemon's `state.invalidate` of `outbox:<account>` follows every change to the outbox.
+
+## The calendar
+
+`calendar_events` is `calendar.events {account}`, read through `mp_client::queries::calendar_events`: the account's agenda, deduped, reply-folded and sorted by the daemon, undated rows last.
+An `AgendaEvent` is the protocol's own type: `row_id` (the winning copy's), the `event` block (`EventFrontmatter`: method, sequence, summary, start and end in RFC3339, location, organizer, the user's own `rsvp`, `recurrence`, `attendees`, and the derived `cancelled`, `superseded` and `cancelled_instances`), `subject`, the UTC sort keys `start_sort` and `end_sort` (empty when unknown), `start_display` in the daemon's local time, `is_organizer` and `cancelled`.
+The layer passes every row: the past/upcoming filter is the frontend's, as it is the TUI's.
+An account whose store is not ready is refused with `protocol` code `-32006`, and an unknown one is `not_found` with `-32005`.
+
+`invite_source_open` is the TUI's agenda Enter and `e` (`Action::OpenEventSource`).
+It reads the row's `invite.ics` with `message.ics {account, row_id}` (`mp_client::queries::message_ics`, which decodes the base64 the wire carries), writes it to `renditions/invite-<account>-<row_id>.ics` under the app's cache directory, the directory 0700 and the file 0600, and opens that file with the external editor as `editor_open` does.
+The file is a copy to read: an edit to it reaches nothing.
+A row with no `invite.ics` is `not_found` with the TUI's sentence, "That event has no ics source in the store", and nothing is written or opened.
 
 ## Drafts and the editor
 
@@ -463,11 +478,11 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 
 ## Fixture mode
 
-The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies and 1 armed send hold.
+The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies, 1 armed send hold and 6 agenda events.
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append` and `send_hold:<secs>` below.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update` and `invite_cancel` below.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -524,6 +539,15 @@ Each write publishes `draft.changed`, and a file that does not parse is listed u
 `editor_save` appends a line to the file the last `editor_open` named, which moves it to the top of the listing, and publishes `draft.changed`.
 `editor_invalid` breaks that file's frontmatter and publishes `draft.invalid`.
 Either is an error before any `editor_open`.
+
+`calendar.events` answers each account's agenda from `calendar.json`, sorted as the daemon sorts it, and refuses an unknown account with `-32005` and one whose `account.list` state is not `ready` with `-32006`.
+`work` has five rows: a past kick-off in 2020 (row 9101), the steering committee of the inbox invitation (row 1008, `REQUEST` in 2099 with an accepted, a pending and a declined attendee), a weekly team sync the user organizes (row 9103, `is_organizer`, one cancelled occurrence), a cancelled budget review (row 9102) and an undated offsite planning (row 9104); `home` has one upcoming appointment (row 9201).
+The dates are 2020 and 2099 because the frontend filters on the real clock.
+`message.ics` answers the base64 of the row's `invite.ics` from the same file, `null` for row 9104, and `-32602` for a row the account has neither in a mailbox nor in its agenda.
+
+`invite_update` delivers a new version of the steering committee: row 1008's `sequence` goes up by one and its start and end move one day later (the 15th of October 2099 the first time), its `invite.ics` follows, and an "Updated invitation: Steering committee" email with that `invite.ics` lands at the top of `work`'s inbox.
+`invite_cancel` marks row 1008 `cancelled`, in the row and in its `event`, and lands a "Cancelled: Steering committee" email carrying a `METHOD:CANCEL` `invite.ics` at the top of the inbox.
+Both change the agenda row in place, where a daemon would fold the new email into it, and both publish `state.invalidate` of `mailbox:work/inbox`, as the sync that fetched the email would.
 
 ## Tests
 

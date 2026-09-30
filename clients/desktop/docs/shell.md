@@ -20,6 +20,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/send.ts` | `x` and `cX`: the send confirmations and what their OK runs |
 | `src/app/outbox.ts` | The outbox listings, the outbox view, retry and discard, and the queue depth |
 | `src/app/views.ts` | The full-pane views' titles and actions, and what a view hides |
+| `src/app/calendar.ts` | The agendas, the past/upcoming rule, the Calendar view's cursor and scope, and the source open |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -33,6 +34,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host and the placeholder of a view no unit has filled |
+| `src/components/calendar` | The Calendar view, its agenda list and rows, and the event card the reader's invitation card reuses |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
@@ -54,8 +56,8 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
-| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it |
-| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale |
+| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda stale |
+| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
@@ -355,7 +357,8 @@ The window shows Mail (the list and the reader, or the outbox view in the list p
 `state.view` is `"mail" | "contacts" | "calendar" | "settings"`, and `switch_view` moves it.
 A full-pane view takes the list's and the reader's place, the splitter too, and is the `list` pane for focus; Tab cycles the sidebar and the view, and a history step never lands in the hidden reader.
 In the narrow layout the view stands where the list would, under a bar titled with its name whose back button goes up to the sidebar.
-Until its unit fills it, each view is a placeholder: a region named after the view ("Contacts", "Calendar", "Settings"), its heading, one line, and a "Mail" button (`EmptyView.tsx`, mounted by `ViewHost.tsx`).
+Until its unit fills it, a view is a placeholder: a region named after the view ("Contacts", "Settings"), its heading, one line, and a "Mail" button (`EmptyView.tsx`, mounted by `ViewHost.tsx`).
+Calendar is filled (see Calendar); its region keeps the view's name.
 
 ### Entry points
 
@@ -373,7 +376,7 @@ Another account keeps the view, which follows the selection's account.
 
 Outside Mail the mailbox selection and its marks are out of sight, so the actions that read them do nothing: the outbox view's set (see Outbox, "What the view hides"), through `hiddenByView` in `src/app/views.ts`.
 Their palette rows and menu items answer "Go back to Mail first (Escape): this acts on the mailbox selection", which takes precedence over the outbox's own sentence.
-`move_selection` leaves the mail list alone in a view; a unit that gives its view a cursor moves it there.
+`move_selection` leaves the mail list alone in a view; in Calendar it moves the agenda's cursor, and a later view with a cursor moves its own there.
 
 ### Keys in a view
 
@@ -382,10 +385,58 @@ The keymap reads a view's table (`VIEW_KEYS` in `src/keymap/viewKeys.ts`) after 
 - A key the table binds runs at once, so a view can take `c`, `t`, `a` or `r` without arming the mail families.
 - `s` and Space still arm; `g` arms in Contacts and Calendar only for their own `gg`; `c`, `t` and `f` never arm.
 - Under an armed prefix only the view's combos and the view-agnostic ones run: `ss`, `sS`, `Space m`, `Space c`, `Space a` (`VIEW_AGNOSTIC_COMBOS`, which Mail reads too).
-- Tab, `:`, `Ctrl+p`, `?`, `X`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it.
+- Tab, `:`, `Ctrl+p`, `?`, `X`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it, before a view's own Enter.
 - Every other printable key does nothing, silently, as the TUI's views ignore the mail keys: the MESSAGE keys, `v`, `x`, `y`, `F`, `z`, `/` and the digits.
 
 Each unit that fills a view adds its keys to that view's table: the table's keys are `ActionId`s, so a palette row runs the same action.
+
+## Calendar
+
+The Calendar view lists the agenda of the selection's account, the TUI's Calendar view (CAL-02, CAL-03).
+It follows the selection's account: the palette's "Switch account" shows the next account's agenda, and the scope stays.
+
+### The agenda
+
+`calendar_events` answers every row, deduped, folded and sorted by the daemon; `state.calendar` keeps each account's answer as a `Loadable`, created on the first open for that account.
+The view shows upcoming events only until `t` shows the past ones, the TUI's rule (`visibleEvents` in `src/app/calendar.ts`, a port of `recompute_calendar_visible`):
+
+- an undated row (empty `start_sort`) is always listed, since it has no place on the timeline;
+- a dated row is listed while its end, or its start when the end is unknown, is not before now, so a running event stays until it ends;
+- now is `new Date().toISOString().slice(0, 19)`, the UTC `YYYY-MM-DDTHH:MM:SS` form the sort keys use.
+
+`state.calendarView` is `{account, cursor, showPast, refreshing}`: the cursor is an agenda `row_id`, the first shown row while it is `null`.
+`t` flips `showPast`, puts the cursor back on the first row and says "Calendar: showing all events" or "Calendar: showing upcoming events", the TUI's status line.
+
+### Rows and the card
+
+The agenda is a single-select `listbox` named "Agenda" beside the event card; in the narrow layout the card sits under the list.
+A row (`AgendaRow.tsx`, an `option` named "<when>, <title>, <badge>") shows the daemon's `start_display` verbatim ("undated" when it is empty), the event's summary or else the email's subject, and one badge in the TUI's order: cancelled, organizer, else the user's own reply (accepted, tentative, declined, or "no reply").
+A cancelled row's title is struck through.
+The card (`EventCard.tsx`, a region named "Event") is the TUI's shared event card: the summary; "Cancelled by the organizer." or "Superseded: a newer version of this invitation has arrived."; the cancelled occurrences of a series, three named and the rest counted; When, Repeats, Where, Organizer; "Your RSVP" unless the user organizes it; and every attendee with their status.
+It takes the `EventFrontmatter`, an `organizer` flag, a region name and children, so the reader's invitation card can reuse it with its reply buttons.
+The header says "<account>: N upcoming events" or "N events, past included", and a line under the list says that only events that arrived by email are listed.
+
+### Keys and actions
+
+The Calendar view's table binds the TUI's CALENDAR keys (`VIEW_KEYS.calendar`):
+
+- `j`/`k`, the arrows, `gg`/`G`, `Home`/`End` and the pages move the agenda's cursor through `move_selection`.
+- Enter and `e` open the cursor row's `invite.ics` in the external editor through `invite_source_open`; a double-click opens the row clicked.
+  The notice names the editor, or says "That event has no ics source in the store" for a row with none, or "Open failed: <why>".
+- `t` shows or hides the past events and never arms the `t` family.
+- `r` reads the agenda again and says "Calendar refreshed (N events)" once it lands.
+- `V`, the RSVP, is not bound yet; key help and the palette list it with its M4 badge.
+
+The palette's "Open the invite email in $EDITOR", "Show past events / upcoming only" and "Refresh events from disk" run the same actions, and outside the Calendar view they answer "Switch to the Calendar view first (Space a): this acts on the agenda".
+The header's "Past events" (`aria-pressed`) and "Refresh" buttons run `t` and `r`.
+
+### Staleness
+
+No daemon resource names the agenda: it is a fold over the account's invitation mail.
+So an account's agenda goes stale on a `state.invalidate` or `state.remove` of `mailbox:<account>/...` or `message:<account>/...`, on that account's `sync.completed`, and on every bootstrap, which also drops the agendas of accounts that are gone.
+Only the shown agenda is read: one that went stale behind Mail or another view is read when the Calendar view comes back.
+A new, updated or cancelled invitation therefore reaches the agenda with the invalidation of the mailbox it lands in, without an `r`.
+An account whose store is not ready (`-32006`) shows "<account> has no local store yet, so it has no agenda; it appears after the account's first sync", not an error; its first sync makes the agenda stale.
 
 ## Layouts
 
@@ -404,7 +455,7 @@ The list is drawn at the stored width only while the reader keeps `READER_MIN` (
 The window has three panes, each one tab stop, in reading order:
 
 1. Sidebar (`<nav aria-label="Accounts and mailboxes">`): the mailbox under the sidebar cursor.
-2. List (`<section aria-label="Message list">` inside `<main>`): the selected row of the `listbox`, or its first row; while the outbox shows, `<section aria-label="Outbox of <account>">` and the row under its cursor, a `listitem` named "Row N, <chip>"; outside Mail, the view's `<section>` named after it.
+2. List (`<section aria-label="Message list">` inside `<main>`): the selected row of the `listbox`, or its first row; while the outbox shows, `<section aria-label="Outbox of <account>">` and the row under its cursor, a `listitem` named "Row N, <chip>"; outside Mail, the view's `<section>` named after it, in Calendar the cursor row of the "Agenda" `listbox`.
 3. Reader (`<aside aria-label="Reader">`, complementary): the scrollable message; outside Mail there is none, and Tab cycles the first two.
 
 Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, reader, sidebar), starting from the pane the model holds as focused, and only while focus sits in a pane or on the page; anywhere else (a dialog, a screen's buttons, the splitter) they are the browser's.
@@ -439,6 +490,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `X`: dismiss the newest activity notice, a desktop key.
 - `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.
+- In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser, from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
