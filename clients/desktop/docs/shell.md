@@ -520,6 +520,7 @@ The card's RSVP button is disabled with the same sentence under it, and both ref
 `tv` and `V` open the RSVP choice, the overlay `rsvp` (`RsvpDialog.tsx`, a dialog named "RSVP" with the invitation's summary): a listbox named "Response" with Accept, Tentative and Decline, Accept selected.
 Its keys are the TUI's RSVP overlay: `a`, `t` and `d` pick an answer, `j`, Down and Tab move down, `k`, Up and Shift+Tab move up, Enter sends the selected answer, Escape and `q` close without sending.
 The dialog owns every key while it is open, and Tab moves the selection, so the focus stays inside it.
+It reads them in the capture phase, as the Signatures dialog does, since the popup stops the arrow keys on their way up.
 Enter sends even while a button behind the dialog still holds the focus, which the popup takes a moment after it opens.
 
 A reply is `calendar_rsvp`, awaited as `rsvp`: `state.rsvps` keeps each one this window started (`{token, account, row_id, response, summary, operation_id}`) until it settles or is dropped, and `rsvpEarly` holds an end that overtook the start's answer, as `sends` and `sendEarly` do.

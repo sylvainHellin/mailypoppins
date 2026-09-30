@@ -103,6 +103,18 @@ describe("tv and the RSVP choice", () => {
     expect(screen.queryByRole("dialog", { name: "RSVP" })).toBeNull();
   });
 
+  it("the arrows move the choice with the focus in the dialog", async () => {
+    const { user } = await openInvitation();
+    await user.keyboard("tv");
+    const dialog = await screen.findByRole("dialog", { name: "RSVP" });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    const selected = () => within(dialog).getByRole("option", { selected: true }).getAttribute("data-response");
+    await user.keyboard("{ArrowDown}{ArrowDown}");
+    expect(selected()).toBe("decline");
+    await user.keyboard("{ArrowUp}");
+    expect(selected()).toBe("tentative");
+  });
+
   it("tv opens the choice: a, t, d pick, j, k and Tab move, Enter sends the choice", async () => {
     const { user } = await openInvitation();
     await user.keyboard("tv");

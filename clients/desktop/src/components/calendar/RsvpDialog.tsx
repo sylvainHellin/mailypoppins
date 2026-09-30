@@ -36,7 +36,8 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
   const latest = useRef({ dialog, selected });
   latest.current = { dialog, selected };
 
-  // On the window, so the keys work before the popup has taken focus.
+  // On the window, so the keys work before the popup has taken focus, and in
+  // the capture phase, since the popup stops the arrow keys on their way up.
   useEffect(() => {
     if (!open) return;
     const send = () => {
@@ -69,8 +70,8 @@ export function RsvpDialog({ dialog, onOpenChange }: RsvpDialogProps) {
         send();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [open, dispatch, onOpenChange]);
 
   const optionId = (i: number) => `${id}-option-${i}`;
