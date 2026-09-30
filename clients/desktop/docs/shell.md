@@ -27,6 +27,7 @@ The reducer keeps the fetched answers as generation-counted `Loadable`s: an even
 
 Selection is held by stable identifiers: account name, mailbox slug, and for a message its `message_id` and `selector` next to the `row_id`.
 A `rebootstrapped` keeps what still exists, falls back to the default account's inbox for what does not, and marks the message `verified: false`; the reloaded list confirms it by `message_id` (taking the new `row_id` after a daemon restart) or clears it.
+An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`, and `list_accounts` moves it to the default account only while that flag holds; any selection the user makes clears it, so a click made before the answer, or between a failed fetch and its retry, is never reverted.
 
 | GuiEvent | Effect |
 |---|---|

@@ -298,7 +298,9 @@ function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
   };
 
   const prev = s.selection;
-  const account = prev.account && names.includes(prev.account) ? prev.account : defaultAccount(next, names);
+  const kept = prev.account !== null && names.includes(prev.account);
+  const account = kept ? prev.account : defaultAccount(next, names);
+  next = { ...next, selectionAuto: kept ? s.selectionAuto : account !== null };
   const slugs = account ? (bootstrap.snapshot.mailboxes[account] ?? []).map((m) => m.slug) : [];
   const keepMailbox = account === prev.account && prev.mailbox !== null && slugs.includes(prev.mailbox);
   const mailbox = keepMailbox ? prev.mailbox : account ? defaultMailbox(next, account) : null;
@@ -496,7 +498,24 @@ function reverify(s: AppState, list: MessageList): AppState {
 // The reducer
 // ---------------------------------------------------------------------------
 
+/** The intents by which the user chooses what is selected. */
+const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
+  "select_account",
+  "select_mailbox",
+  "select_message",
+  "select_draft",
+  "move_selection",
+  "sidebar_enter",
+  "jump_mailbox",
+  "next_account",
+  "clear_selection",
+  "search_local",
+  "search_server",
+  "exit_search",
+]);
+
 export function reducer(s: AppState, a: Action): AppState {
+  if (s.selectionAuto && USER_SELECTION.has(a.type)) s = { ...s, selectionAuto: false };
   switch (a.type) {
     case "gui_event":
       return applyGuiEvent(s, a.event);
@@ -507,9 +526,11 @@ export function reducer(s: AppState, a: Action): AppState {
 
     case "accounts_loaded": {
       let next: AppState = { ...s, accounts: loaded(s.accounts, a.gen, a.accounts) };
-      // The first answer names the default account; honour it while nothing
-      // was chosen by hand yet (the bootstrap picked the first name).
-      if (s.accounts.data === null && next.selection.message === null) {
+      // The answer names the default account; honour it while the selection
+      // is still the one a bootstrap picked (the snapshot's first name), and
+      // never over a choice the user made, even one made before this answer
+      // or between a failed fetch and its retry.
+      if (next.selectionAuto) {
         const def = a.accounts.find((x) => x.default)?.name;
         if (def && def !== next.selection.account) {
           const mailbox = defaultMailbox(next, def);

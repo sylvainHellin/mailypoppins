@@ -3,7 +3,7 @@ import { reducer, type Action } from "@/app/reducer";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
 import type { Bootstrap, MessageListRow } from "@/protocol/types";
-import type { MessageList } from "@/lib/gui-types";
+import type { AccountInfo, MessageList } from "@/lib/gui-types";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
 
@@ -129,6 +129,55 @@ describe("the reducer", () => {
     const s = booted();
     const next = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "someone-else", revision: 900, kind: "state.invalidate", payload: { resource: "mailbox:work/inbox", scope: {} } } } });
     expect(next).toBe(s);
+  });
+
+  describe("the default account from list_accounts", () => {
+    const accounts = (def: string): AccountInfo[] =>
+      ["work", "home"].map((name) => ({
+        name,
+        default: name === def,
+        backend: "imap" as const,
+        store_state: "ready",
+        runtime_state: "ready" as const,
+        sync_health: "ok" as const,
+        outbox: { queued: 0, failed: 0 },
+      }));
+
+    it("moves the bootstrap's pick to the default account", () => {
+      const reversed = { ...fixtures.bootstrap, snapshot: { ...fixtures.bootstrap.snapshot, accounts: [...fixtures.bootstrap.snapshot.accounts].reverse() } };
+      let s = run(initialState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: reversed } });
+      expect(s.selection.account).toBe("home");
+      expect(s.selectionAuto).toBe(true);
+      s = run(s, { type: "accounts_loaded", gen: s.accounts.gen, accounts: accounts("work") });
+      expect(s.selection).toMatchObject({ account: "work", mailbox: "inbox" });
+    });
+
+    it("keeps a mailbox the user chose before list_accounts answered", () => {
+      let s = booted();
+      expect(s.selectionAuto).toBe(true);
+      s = run(s, { type: "select_mailbox", account: "home", slug: "newsletters" });
+      expect(s.selectionAuto).toBe(false);
+      s = run(s, { type: "accounts_loaded", gen: s.accounts.gen, accounts: accounts("work") });
+      expect(s.selection).toMatchObject({ account: "home", mailbox: "newsletters" });
+    });
+
+    it("keeps a choice made between a failed list_accounts and its retry", () => {
+      let s = booted();
+      s = run(s, { type: "accounts_failed", gen: s.accounts.gen, error: { kind: "timeout", message: "slow" } });
+      s = run(s, { type: "next_account" });
+      expect(s.selection.account).toBe("home");
+      s = run(s, { type: "accounts_loaded", gen: s.accounts.gen, accounts: accounts("work") });
+      expect(s.selection).toMatchObject({ account: "home", mailbox: "inbox" });
+    });
+
+    it("stays with the user's account across a later re-bootstrap", () => {
+      let s = booted();
+      s = run(s, { type: "select_account", account: "home" });
+      s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "resync", bootstrap: fixtures.bootstrap } });
+      expect(s.selectionAuto).toBe(false);
+      s = run(s, { type: "accounts_loaded", gen: s.accounts.gen, accounts: accounts("work") });
+      expect(s.selection.account).toBe("home");
+    });
   });
 
   it("tracks sync health and account state from events", () => {

@@ -159,6 +159,12 @@ export type AppState = {
   messages: Loadable<MessageList> & { key: string | null };
   reader: ReaderState;
   selection: Selection;
+  /**
+   * The selection's account was picked by a bootstrap, not by the user: the
+   * first `list_accounts` answer may still move it to the default account.
+   * Any user selection clears it.
+   */
+  selectionAuto: boolean;
   /** Search results replace the mailbox list while this is set. */
   search: SearchState | null;
   sidebarCursor: { account: string; slug: string } | null;
@@ -192,6 +198,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     messages: { ...emptyLoadable<MessageList>(), key: null },
     reader: emptyReader(),
     selection: { account: null, mailbox: null, message: null, draft: null },
+    selectionAuto: false,
     search: null,
     sidebarCursor: null,
     focus: "list",
