@@ -63,6 +63,12 @@ export const mock = {
   revision: 1000,
   /** The next sync's operation id counter. */
   nextSync: 1,
+  /**
+   * Hold the next answer of a command: it is computed at the call, from the
+   * rows as they are then, and delivered once the promise settles, as a read
+   * that overtook a later write would be.
+   */
+  gates: new Map<string, Promise<unknown>>(),
 };
 
 export function resetMock(): void {
@@ -80,6 +86,7 @@ export function resetMock(): void {
   mock.holds = clone(fixtures.bootstrap.snapshot.holds);
   mock.revision = 1000;
   mock.nextSync = 1;
+  mock.gates.clear();
 }
 
 /** Push a daemon event on the channel, as the fixture publishes it. */
@@ -353,7 +360,13 @@ export const invoke = vi.fn(async <T,>(cmd: string, args?: Record<string, unknow
   mock.calls.push({ cmd, args });
   const failure = mock.failing.get(cmd);
   if (failure !== undefined) throw failure;
-  return (await answer(cmd, args)) as T;
+  const result = await answer(cmd, args);
+  const gate = mock.gates.get(cmd);
+  if (gate) {
+    mock.gates.delete(cmd);
+    await gate;
+  }
+  return result as T;
 });
 
 export const listen = vi.fn(async <T,>(event: string, handler: (e: { payload: T }) => void) => {

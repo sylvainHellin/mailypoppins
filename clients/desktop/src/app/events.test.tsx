@@ -1,7 +1,14 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { emit, fixtures, mock } from "@/test/tauri-mock";
+import { setWidth } from "@/test/setup";
+import { emit, emitEnvelope, fixtures, mock, resetMock } from "@/test/tauri-mock";
+import { AppShell } from "@/components/shell/AppShell";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { StoreProvider, useAppState, useDispatch } from "@/app/store";
+import type { Action } from "@/app/reducer";
+import { useMutations, type Mutations } from "@/app/mutations";
+import type { AppState } from "@/app/state";
 
 const listCalls = () => mock.calls.filter((c) => c.cmd === "list_messages").length;
 
@@ -39,5 +46,110 @@ describe("live events end to end", () => {
     expect(mock.calls.some((c) => c.cmd === "message_html_meta" && c.args?.row_id === 1502)).toBe(true);
     expect(within(reader).getByTitle(/^Message body/)).toHaveAttribute("src", "mpmsg://localhost/work/1502");
     expect(screen.queryByText(/Resynchronising|Reconnecting/)).toBeNull();
+  });
+});
+
+/** The app with a probe that reads the model and holds the bound mutations. */
+function renderProbed() {
+  resetMock();
+  setWidth(1400);
+  const probe = {} as { state: AppState; m: Mutations; dispatch: (a: Action) => void };
+  function Probe() {
+    probe.state = useAppState();
+    probe.m = useMutations();
+    probe.dispatch = useDispatch();
+    return null;
+  }
+  render(
+    <StoreProvider>
+      <TooltipProvider>
+        <AppShell />
+        <Probe />
+      </TooltipProvider>
+    </StoreProvider>,
+  );
+  return probe;
+}
+
+const shownRows = () => [...document.querySelectorAll('[role="option"][data-row-id]')].map((e) => Number(e.getAttribute("data-row-id")));
+
+describe("mutations end to end", () => {
+  it("archives a row, and the drain's invalidation keeps it gone", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    await act(() => probe.m.archive([{ account: "work", row_id: 1002 }]));
+    expect(shownRows()).not.toContain(1002);
+    const before = listCalls();
+    act(() => emitEnvelope("state.invalidate", { resource: "mailbox:work/inbox", scope: { query: "counts" } }));
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+    await waitFor(() => expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen));
+    expect(shownRows()).not.toContain(1002);
+    expect(probe.state.activity.map((n) => n.text)).toEqual(["Archived 1 message"]);
+  });
+
+  it("drops a list read that started before the archive and landed after it", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    let open!: () => void;
+    mock.gates.set("list_messages", new Promise<void>((r) => (open = r)));
+    const before = listCalls();
+    act(() => emitEnvelope("state.invalidate", { resource: "mailbox:work/inbox", scope: {} }));
+    await waitFor(() => expect(listCalls()).toBe(before + 1));
+
+    await act(() => probe.m.archive([{ account: "work", row_id: 1002 }]));
+    expect(shownRows()).not.toContain(1002);
+    await act(async () => open());
+    expect(shownRows()).not.toContain(1002);
+    // The dropped answer asked for a fresh read, which the archive is in.
+    await waitFor(() => expect(listCalls()).toBe(before + 2));
+    await waitFor(() => expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen));
+    expect(shownRows()).not.toContain(1002);
+  });
+
+  it("brings rows back on a rollback and says so", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    await act(() => probe.m.archive([{ account: "work", row_id: 1002 }]));
+    // The fixture's rollback: the row is back where it was, then the event.
+    const archived = mock.rows.work.archive.findIndex((r) => r.id === 1002);
+    const [back] = mock.rows.work.archive.splice(archived, 1);
+    mock.rows.work.inbox.splice(1, 0, back);
+    act(() => emitEnvelope("mutations.rolled_back", { account: "work", failed: 1 }));
+    await waitFor(() => expect(shownRows()).toContain(1002));
+    expect(probe.state.activity.map((n) => n.kind)).toEqual(["applied", "rolled_back"]);
+  });
+
+  it("counts a hold down from its events and cancels it", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    expect(probe.state.holds["fixture-hold-seed"]?.state).toBe("started");
+    const hold = { ...fixtures.bootstrap.snapshot.holds[0], operation_id: "op-armed", hold_secs: 10, remaining_secs: 10 };
+    mock.holds.push(hold);
+    act(() => emitEnvelope("send.hold_started", hold));
+    act(() => emitEnvelope("send.hold_tick", { ...hold, remaining_secs: 9 }));
+    expect(probe.state.holds["op-armed"]).toMatchObject({ state: "tick", remaining_secs: 9 });
+    await act(() => probe.m.cancelHold("op-armed"));
+    expect(probe.state.holds["op-armed"]).toMatchObject({ state: "cancelled", remaining_secs: 0 });
+    act(() => emitEnvelope("send.hold_fired", { ...fixtures.bootstrap.snapshot.holds[0], remaining_secs: 0 }));
+    expect(probe.state.holds["fixture-hold-seed"].state).toBe("fired");
+    expect(probe.state.activity.filter((n) => n.kind === "hold_cancelled")).toHaveLength(1);
+  });
+
+  it("discards a draft, and the state.remove that follows reloads the list without it", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    const drafts = () => {
+      const list = probe.state.messages.data;
+      return list?.kind === "drafts" ? list.listing.drafts.map((d) => d.id) : null;
+    };
+    act(() => probe.dispatch({ type: "select_mailbox", account: "work", slug: "drafts" }));
+    await waitFor(() => expect(drafts()).toEqual(["angebot-antwort", "offsite-note"]));
+    const before = listCalls();
+    await act(() => probe.m.discardDrafts("work", ["offsite-note"]));
+    expect(drafts()).toEqual(["angebot-antwort"]);
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+    await waitFor(() => expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen));
+    expect(drafts()).toEqual(["angebot-antwort"]);
+    expect(probe.state.activity.map((n) => n.text)).toEqual(["Discarded 1 draft"]);
   });
 });
