@@ -8,20 +8,29 @@
 //! writes it under the app's cache directory, readable by its owner only,
 //! before the external editor opens it. Edits to that copy reach nothing:
 //! the file is an artifact to read, not a draft.
+//!
+//! The invitations (CAL-01, CAL-05, #0131): `message.invite` answers the
+//! event a message carries, which the reader's invitation card shows;
+//! `calendar.rsvp` is an operation the GUI awaits as `rsvp`. The daemon
+//! refuses an RSVP from a Graph account before it reads anything else, so
+//! [`invite_refusal_on`] asks it with `{account}` alone and shows its
+//! sentence without a message in hand; an IMAP account is never asked.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{AppHandle, State};
 
 use mp_client::queries;
-use mp_protocol::calendar::AgendaEvent;
+use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 
 use crate::attachments::{cache_dir, write_private, RENDITIONS};
-use crate::commands::with_door;
+use crate::commands::{list_accounts_on, with_door, OperationStarted};
 use crate::editor::{self, EditorLaunch, Lookup};
-use crate::error::{Addressing, GuiError};
-use crate::session::{Budgeted, Door, SessionHandle};
+use crate::error::{refusal_sentence, Addressing, GuiError};
+use crate::session::{Budgeted, Door, PendingKind, SessionHandle};
 
 /// One agenda read: a store scan and the reply fold, daemon-side.
 const AGENDA_BUDGET: Duration = Duration::from_secs(15);
@@ -31,6 +40,45 @@ const ICS_BUDGET: Duration = Duration::from_secs(10);
 
 /// What the TUI says when a row has no `invite.ics` (`Action::OpenEventSource`).
 pub const NO_ICS: &str = "That event has no ics source in the store";
+
+/// One invitation card read: a blob read and an ics parse.
+const INVITE_BUDGET: Duration = Duration::from_secs(10);
+
+/// Starting an RSVP: its plan reads the row and its `invite.ics` first.
+const RSVP_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// The Graph probe: a refusal before any read.
+const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// The three answers `calendar.rsvp` takes.
+pub const RSVP_RESPONSES: [&str; 3] = ["accept", "tentative", "decline"];
+
+/// What `calendar.rsvp` settles with, the daemon's inline `json!`
+/// (`src/daemon/methods/calendar.rs`): `subject` is the reply's
+/// (`Accepted: <summary>`), `delivered` whether any recipient took it; a
+/// reply that reached nobody waits in the outbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct RsvpSettled {
+    pub account: String,
+    pub selector: String,
+    pub response: String,
+    pub subject: String,
+    pub organizer: String,
+    pub message_id: String,
+    pub delivered: bool,
+}
+
+/// Why `account` cannot answer or send an invitation at all, as the daemon
+/// says it: the Graph sentence, or null for an account that can.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct InviteRefusal {
+    pub account: String,
+    pub refusal: Option<String>,
+}
 
 /// `account`'s agenda, every row: past events included, the filter is the
 /// frontend's.
@@ -98,9 +146,120 @@ pub fn invite_source_open_on(
     editor::open_on(fixture, lookup, &path.to_string_lossy(), window)
 }
 
+/// The event row `row_id` of `account` carries, the reader's invitation
+/// card; `None` for a row with no iMIP payload or one that does not parse.
+pub fn invite_get_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+) -> Result<Option<EventFrontmatter>, GuiError> {
+    let q = Budgeted {
+        door,
+        budget: INVITE_BUDGET,
+    };
+    queries::message_invite(&q, account, row_id)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
+}
+
+/// Reply `response` to the invitation of row `row_id`, the TUI's RSVP
+/// overlay: an operation awaited as `rsvp`, whose `result` is an
+/// [`RsvpSettled`]. A response word the daemon does not take is refused
+/// here, before any call.
+pub fn calendar_rsvp_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    row_id: i64,
+    response: &str,
+) -> Result<OperationStarted, GuiError> {
+    if !RSVP_RESPONSES.contains(&response) {
+        return Err(GuiError::protocol(format!(
+            "An RSVP is accept, tentative or decline, not {response:?}"
+        )));
+    }
+    let operation_id = session.start_operation(
+        door,
+        "calendar.rsvp",
+        json!({"account": account, "row_id": row_id, "response": response}),
+        PendingKind::Rsvp,
+        RSVP_START_BUDGET,
+    )?;
+    Ok(OperationStarted { operation_id })
+}
+
+/// Whether `account` can reply to or send invitations: a Graph account
+/// (`account.list`'s `backend`) is asked `calendar.rsvp {account}` alone,
+/// which the daemon refuses with its Graph sentence before it looks at
+/// anything else, so no operation starts; an IMAP account answers null
+/// without a call.
+pub fn invite_refusal_on(door: &Door, account: &str) -> Result<InviteRefusal, GuiError> {
+    let accounts = list_accounts_on(door, None)?;
+    let info = accounts
+        .iter()
+        .find(|a| a.name == account)
+        .ok_or_else(|| GuiError::not_found(format!("account_unknown: {account}")))?;
+    if info.backend != "graph" {
+        return Ok(InviteRefusal {
+            account: account.to_string(),
+            refusal: None,
+        });
+    }
+    match door.call_within("calendar.rsvp", json!({"account": account}), PROBE_BUDGET) {
+        Err(e) => {
+            let text = format!("{e:#}");
+            match refusal_sentence(&text) {
+                Some(sentence) => Ok(InviteRefusal {
+                    account: account.to_string(),
+                    refusal: Some(sentence.to_string()),
+                }),
+                None => Err(GuiError::from_call_text(&text, Addressing::Params)),
+            }
+        }
+        Ok(_) => Err(GuiError::protocol(
+            "calendar.rsvp started with no response to send; the Graph probe expected a refusal",
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The commands
 // ---------------------------------------------------------------------------
+
+/// The invitation card of a row: its event, or null.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn invite_get(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+) -> Result<Option<EventFrontmatter>, GuiError> {
+    with_door(&session, move |_, door| {
+        invite_get_on(door, &account, row_id)
+    })
+    .await
+}
+
+/// Start an RSVP, awaited as `rsvp`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn calendar_rsvp(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+    response: String,
+) -> Result<OperationStarted, GuiError> {
+    with_door(&session, move |session, door| {
+        calendar_rsvp_on(session, door, &account, row_id, &response)
+    })
+    .await
+}
+
+/// The Graph probe; see [`invite_refusal_on`].
+#[tauri::command(rename_all = "snake_case")]
+pub async fn invite_refusal(
+    session: State<'_, SessionHandle>,
+    account: String,
+) -> Result<InviteRefusal, GuiError> {
+    with_door(&session, move |_, door| invite_refusal_on(door, &account)).await
+}
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn calendar_events(
@@ -250,6 +409,74 @@ mod tests {
                 Duration::from_millis(100)
             ),
             Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn invite_get_on_answers_the_card_of_an_invitation_and_null_for_a_plain_email() {
+        let (door, _f) = fixture_door();
+        let event = invite_get_on(&door, "work", INVITE_ROW)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.summary.as_deref(), Some("Steering committee"));
+        assert_eq!(event.rsvp, "needs-action");
+        assert_eq!(invite_get_on(&door, "work", 1009).expect("read"), None);
+        assert!(matches!(
+            invite_get_on(&door, "work", 424_242),
+            Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn the_graph_probe_answers_the_daemon_sentence_and_starts_nothing() {
+        let (door, f) = fixture_door();
+        let probe = invite_refusal_on(&door, "home").expect("probed");
+        assert_eq!(probe.account, "home");
+        assert_eq!(
+            probe.refusal.as_deref(),
+            Some(crate::fixture::GRAPH_RSVP_REFUSAL)
+        );
+        assert_eq!(f.operation_count(), 0);
+        let rsvps: Vec<_> = f
+            .calls()
+            .into_iter()
+            .filter(|(m, _)| m == "calendar.rsvp")
+            .collect();
+        assert_eq!(
+            rsvps,
+            vec![("calendar.rsvp".to_string(), json!({"account": "home"}))]
+        );
+    }
+
+    #[test]
+    fn an_imap_account_is_not_probed() {
+        let (door, f) = fixture_door();
+        let probe = invite_refusal_on(&door, "work").expect("answered");
+        assert_eq!(probe.refusal, None);
+        assert!(f.calls().iter().all(|(m, _)| m != "calendar.rsvp"));
+        assert!(matches!(
+            invite_refusal_on(&door, "nobody"),
+            Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn an_rsvp_word_the_daemon_does_not_take_is_refused_before_any_call() {
+        let (door, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let err =
+            calendar_rsvp_on(&session, &door, "work", INVITE_ROW, "maybe").expect_err("refused");
+        assert!(matches!(err, GuiError::Protocol { .. }), "{err:?}");
+        assert!(f.calls().is_empty());
+        let started =
+            calendar_rsvp_on(&session, &door, "work", INVITE_ROW, "decline").expect("started");
+        assert_eq!(
+            session.pending_kind(&started.operation_id),
+            Some(PendingKind::Rsvp)
+        );
+        assert!(matches!(
+            calendar_rsvp_on(&session, &door, "home", 9201, "accept"),
+            Err(GuiError::Protocol { .. })
         ));
     }
 

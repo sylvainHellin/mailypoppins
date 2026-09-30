@@ -128,6 +128,8 @@ pub enum PendingKind {
     SendApproved,
     /// `send.outbox_retry`: its `result` is an `OutboxRetryOutcome`.
     OutboxRetry,
+    /// `calendar.rsvp`: its `result` is an `RsvpSettled`.
+    Rsvp,
 }
 
 /// Where an intercepted URL came from.
@@ -1209,6 +1211,65 @@ mod tests {
             .cloned()
             .expect("dropped");
         assert_eq!(dropped["kind"], "send_approved");
+        assert_eq!(dropped["operation_id"], started.operation_id.as_str());
+    }
+
+    #[test]
+    fn an_rsvp_settled_by_the_requery_carries_its_kind_and_reply() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_rsvp_delay(Duration::ZERO);
+        let started = crate::calendar::calendar_rsvp_on(
+            &session,
+            &door,
+            "work",
+            crate::fixture::INVITE_ROW,
+            "accept",
+        )
+        .expect("started");
+        let id = started.operation_id;
+        await_terminal(&door, &id);
+        while rx.try_recv().is_ok() {}
+        session.handle(
+            &door,
+            Incoming::Resync {
+                instance_id: fixture.instance_id(),
+                reason: "event_queue_overflow".into(),
+            },
+        );
+        let settled = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_settled")
+            .cloned()
+            .expect("settled by the requery");
+        assert_eq!(settled["kind"], "rsvp");
+        assert_eq!(settled["operation_id"], id.as_str());
+        let reply: crate::calendar::RsvpSettled =
+            serde_json::from_value(settled["status"]["result"].clone()).expect("an RsvpSettled");
+        assert_eq!(reply.response, "accept");
+        assert!(reply.delivered);
+        assert!(session.pending().is_empty());
+    }
+
+    #[test]
+    fn a_restart_drops_an_rsvp_as_rsvp() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_rsvp_delay(Duration::from_secs(5));
+        let started = crate::calendar::calendar_rsvp_on(
+            &session,
+            &door,
+            "work",
+            crate::fixture::INVITE_ROW,
+            "decline",
+        )
+        .expect("started");
+        fixture.simulate("restart").expect("restart");
+        drain(&session, &door, &rx);
+        let dropped = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_dropped")
+            .cloned()
+            .expect("dropped");
+        assert_eq!(dropped["kind"], "rsvp");
         assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 

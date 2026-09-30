@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::{Config, TS};
 
-use crate::{attachments, commands, connector, editor, error, session};
+use crate::{attachments, calendar, commands, connector, editor, error, session};
 
 /// Exports each listed type, and its dependencies, into `$cfg`'s directory.
 macro_rules! export {
@@ -86,6 +86,8 @@ fn export_into(dir: &Path) -> usize {
         attachments::SavedAttachments,
         attachments::DraftAttachment,
         attachments::DraftAttachments,
+        calendar::RsvpSettled,
+        calendar::InviteRefusal,
         editor::EditorSource,
         editor::EditorLaunch,
         editor::EditorSetting,

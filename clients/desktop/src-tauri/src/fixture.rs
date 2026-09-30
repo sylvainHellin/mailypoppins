@@ -17,6 +17,13 @@
 //! `fixtures/calendar.json`, and `message.ics` a row's `invite.ics` from the
 //! same file; `invite_update` and `invite_cancel` change `work`'s steering
 //! committee the way a new version or a cancellation of it arriving would.
+//! `message.invite` answers a row's event from the same agenda (or, for the
+//! emails those two deliver, from the version they carried);
+//! `calendar.rsvp` refuses the Graph account `home` with the daemon's
+//! sentence before anything else, then settles after [`RSVP_DELAY`] with
+//! the agenda row's own reply changed and `state.invalidate` of the
+//! account's Sent mailbox, or, after `rsvp_fail`, fails with an SMTP error
+//! and parks a `failed` outbox row.
 //!
 //! `send.draft` and `send.approved` arm a hold of the fixture's own
 //! `email.send_hold_secs` when asked for one, count it down through the same
@@ -123,6 +130,13 @@ const SEND_DELAY: Duration = Duration::from_millis(400);
 /// Why a `send_fail` send failed, as a transport would say it.
 pub const SEND_FAIL_REASON: &str = "421 4.7.0 fixture: the server closed the connection";
 
+/// How long an RSVP's submission takes.
+pub const RSVP_DELAY: Duration = Duration::from_millis(500);
+
+/// The daemon's `GRAPH_RSVP_REFUSAL` (`ANO-4`), word for word.
+pub const GRAPH_RSVP_REFUSAL: &str =
+    "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)";
+
 /// Why a `send_partial` send's last recipient was refused.
 pub const SEND_REFUSED_REASON: &str = "550 5.1.1 fixture: no such mailbox";
 
@@ -160,6 +174,7 @@ pub const SIMULATIONS: &[&str] = &[
     "send_hold:<secs>",
     "invite_update",
     "invite_cancel",
+    "rsvp_fail",
 ];
 
 /// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
@@ -168,6 +183,17 @@ pub const SIMULATIONS: &[&str] = &[
 struct CalendarSeed {
     events: BTreeMap<String, Vec<AgendaEvent>>,
     ics: BTreeMap<String, String>,
+}
+
+/// An RSVP the fixture is submitting.
+struct RsvpReply {
+    account: String,
+    row_id: i64,
+    selector: String,
+    response: String,
+    /// The reply as an attendee status: `accepted`, `tentative`, `declined`.
+    status: &'static str,
+    event: EventFrontmatter,
 }
 
 /// One `editor_open` the fixture stubbed.
@@ -294,6 +320,12 @@ struct State {
     calendar: BTreeMap<String, Vec<AgendaEvent>>,
     /// row id -> the `invite.ics` `message.ics` answers for it.
     ics: BTreeMap<i64, String>,
+    /// row id -> the event of an email no agenda row stands for (the
+    /// versions `invite_update` and `invite_cancel` deliver).
+    invites: BTreeMap<i64, EventFrontmatter>,
+    /// The next RSVP fails with an SMTP error (`rsvp_fail`).
+    rsvp_fail: bool,
+    rsvp_delay: Duration,
 }
 
 impl State {
@@ -478,6 +510,38 @@ impl State {
             (a.start_sort.is_empty(), &a.start_sort).cmp(&(b.start_sort.is_empty(), &b.start_sort))
         });
         Ok(events)
+    }
+
+    /// `account.list`'s `backend` of `account`: `imap` or `graph`.
+    fn backend(&self, account: &str) -> &str {
+        self.accounts["accounts"]
+            .as_array()
+            .and_then(|all| all.iter().find(|a| a["name"] == account))
+            .and_then(|a| a["backend"].as_str())
+            .unwrap_or("imap")
+    }
+
+    /// Whether `account` holds row `row_id`: a stored email, or an agenda
+    /// row whose email the fixture does not list.
+    fn holds_row(&self, account: &str, row_id: i64) -> bool {
+        self.row(account, row_id).is_some()
+            || self
+                .calendar
+                .get(account)
+                .is_some_and(|events| events.iter().any(|e| e.row_id == row_id))
+    }
+
+    /// The event row `row_id` of `account` carries, what `message.invite`
+    /// answers: its agenda row's, else the version an email delivered.
+    fn invite_event(&self, account: &str, row_id: i64) -> Option<EventFrontmatter> {
+        self.calendar
+            .get(account)
+            .and_then(|events| events.iter().find(|e| e.row_id == row_id))
+            .map(|e| e.event.clone())
+            .or_else(|| {
+                self.row(account, row_id)
+                    .and_then(|_| self.invites.get(&row_id).cloned())
+            })
     }
 
     fn account_known(&self, method: &str, account: &str) -> Result<()> {
@@ -1797,6 +1861,9 @@ impl Fixture {
             send_delay: SEND_DELAY,
             calendar: calendar.events,
             ics,
+            invites: BTreeMap::new(),
+            rsvp_fail: false,
+            rsvp_delay: RSVP_DELAY,
         };
         state.rescan();
         state.seed_outbox();
@@ -1857,6 +1924,28 @@ impl Fixture {
     #[cfg(test)]
     pub fn set_send_delay(&self, delay: Duration) {
         self.state().send_delay = delay;
+    }
+
+    /// How long an RSVP's submission takes; a test shortens it.
+    #[cfg(test)]
+    pub fn set_rsvp_delay(&self, delay: Duration) {
+        self.state().rsvp_delay = delay;
+    }
+
+    /// How many operations the fixture has started and still knows.
+    #[cfg(test)]
+    pub fn operation_count(&self) -> usize {
+        self.state().operations.len()
+    }
+
+    /// `account`'s outbox rows, every state.
+    #[cfg(test)]
+    pub fn outbox_rows(&self, account: &str) -> Vec<OutboxRow> {
+        self.state()
+            .outbox
+            .get(account)
+            .map(|o| o.rows.clone())
+            .unwrap_or_default()
     }
 
     /// How long one second of a hold lasts; a test shortens it.
@@ -2298,6 +2387,110 @@ impl Fixture {
                     .map_or(Value::Null, |text| json!(base64(text.as_bytes())));
                 Ok(json!({"account": account, "row_id": row_id, "ics": ics}))
             }
+            "message.invite" => {
+                only(
+                    method,
+                    &params,
+                    &["account", "id", "mailbox", "row_id", "selector"],
+                )?;
+                let account = param_str(method, &params, "account")?;
+                s.account_ready(method, account)?;
+                let row_id = params["row_id"].as_i64().unwrap_or(-1);
+                if !s.holds_row(account, row_id) {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("no message has row_id {row_id}"),
+                    ));
+                }
+                let event = s
+                    .invite_event(account, row_id)
+                    .map_or(Value::Null, |e| serde_json::to_value(e).unwrap_or_default());
+                Ok(json!({"account": account, "row_id": row_id, "event": event}))
+            }
+            "calendar.rsvp" => {
+                only(
+                    method,
+                    &params,
+                    &["account", "mailbox", "response", "row_id", "selector"],
+                )?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                // `ANO-4` before anything else, as the daemon's plan has it:
+                // the desktop's probe sends `{account}` alone.
+                if s.backend(&account) == "graph" {
+                    return Err(refused(method, -32602, GRAPH_RSVP_REFUSAL));
+                }
+                let response = param_str(method, &params, "response")?.to_string();
+                let status = match response.as_str() {
+                    "accept" => "accepted",
+                    "tentative" => "tentative",
+                    "decline" => "declined",
+                    other => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            &format!(
+                                "response is one of \"accept\", \"tentative\", \"decline\", not {other:?}"
+                            ),
+                        ))
+                    }
+                };
+                let row_id = params["row_id"].as_i64().ok_or_else(|| {
+                    refused(
+                        method,
+                        -32602,
+                        "the fixture addresses an RSVP by row_id, which is an integer",
+                    )
+                })?;
+                s.account_ready(method, &account)?;
+                if !s.holds_row(&account, row_id) {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("{account} holds no message with row id {row_id}"),
+                    ));
+                }
+                let selector = s.row(&account, row_id).map_or_else(
+                    || format!("mp://{account}/inbox/fixture-row-{row_id}"),
+                    |(_, r)| r["selector"].as_str().unwrap_or_default().to_string(),
+                );
+                let Some(event) = s.invite_event(&account, row_id) else {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("{selector} carries no invitation to reply to"),
+                    ));
+                };
+                let id = s.next_operation_id("fixture-rsvp");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                let fail = std::mem::take(&mut s.rsvp_fail);
+                let delay = s.rsvp_delay;
+                drop(s);
+                let reply = RsvpReply {
+                    account,
+                    row_id,
+                    selector,
+                    response,
+                    status,
+                    event,
+                };
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    if fixture.running(&op) {
+                        fixture.finish_rsvp(&op, reply, fail);
+                    }
+                });
+                Ok(json!({"operation_id": id}))
+            }
             "send.outbox_list" => {
                 only(method, &params, &["account"])?;
                 let account = param_str(method, &params, "account")?;
@@ -2486,6 +2679,84 @@ impl Fixture {
                 }
             }
         });
+    }
+
+    /// An RSVP's submission is over: after `rsvp_fail` the SMTP error fails
+    /// the operation and the reply waits in the outbox as `failed`; else the
+    /// agenda row carries the reply, `state.invalidate` of the Sent mailbox
+    /// says a copy was filed there, and the operation settles with the
+    /// daemon's shape.
+    fn finish_rsvp(&self, op: &str, reply: RsvpReply, fail: bool) {
+        let RsvpReply {
+            account,
+            row_id,
+            selector,
+            response,
+            status,
+            event,
+        } = reply;
+        let organizer = event.organizer.clone().unwrap_or_default();
+        let mut s = self.state();
+        let outbox_row = s.next_outbox_row;
+        s.next_outbox_row += 1;
+        let message_id = format!("<fixture-rsvp-{outbox_row}@fixture.example>");
+        if fail {
+            let row = OutboxRow {
+                id: outbox_row,
+                state: "failed".into(),
+                partial: false,
+                never_submitted: false,
+                message_id,
+                target_mailbox: Some("Sent".into()),
+                updated: unix_now(),
+                last_error: Some(SEND_FAIL_REASON.into()),
+                rejected: Vec::new(),
+                outstanding: vec![organizer],
+            };
+            let outbox = s.outbox.entry(account.clone()).or_default();
+            outbox.ever_used = true;
+            outbox.rows.push(row);
+            self.emit_locked(&mut s, "state.invalidate", outbox_invalidate(&account));
+            drop(s);
+            self.fail(op, SEND_FAIL_REASON);
+            return;
+        }
+        if let Some(row) = s
+            .calendar
+            .get_mut(&account)
+            .and_then(|events| events.iter_mut().find(|e| e.row_id == row_id))
+        {
+            row.event.rsvp = status.to_string();
+            for attendee in &mut row.event.attendees {
+                if attendee.address == "me@example.com" {
+                    attendee.status = status.to_string();
+                }
+            }
+        }
+        if let Some(e) = s.invites.get_mut(&row_id) {
+            e.rsvp = status.to_string();
+        }
+        self.emit_locked(
+            &mut s,
+            "state.invalidate",
+            json!({"resource": format!("mailbox:{account}/sent"), "scope": {"query": "counts"}}),
+        );
+        drop(s);
+        let verb = match status {
+            "accepted" => "Accepted",
+            "declined" => "Declined",
+            _ => "Tentative",
+        };
+        let result = json!({
+            "account": account,
+            "selector": selector,
+            "response": response,
+            "subject": format!("{verb}: {}", event.summary.as_deref().unwrap_or_default()),
+            "organizer": organizer,
+            "message_id": message_id,
+            "delivered": true,
+        });
+        self.settle(op, "succeeded", Some(result));
     }
 
     /// [`State::deliver`], with the events it owes published in order.
@@ -2731,6 +3002,10 @@ impl Fixture {
             "editor_save" => return self.simulate_editor(false),
             "invite_update" => return self.simulate_invite(false),
             "invite_cancel" => return self.simulate_invite(true),
+            "rsvp_fail" => {
+                self.state().rsvp_fail = true;
+                return Ok(());
+            }
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
                 self.state().send_next = Some(match what {
@@ -2885,9 +3160,10 @@ impl Fixture {
     /// (`invite_update`: its sequence one up and its start a day later) or
     /// its cancellation does (`invite_cancel`): the agenda row
     /// [`INVITE_ROW`] changes in place, the email that carried the change
-    /// lands at the top of `work`'s inbox with its `invite.ics`, and
-    /// `state.invalidate` of `mailbox:work/inbox` says so, as a sync that
-    /// fetched it would.
+    /// lands at the top of `work`'s inbox with its `invite.ics` and the
+    /// version it carries (`message.invite`), and `state.invalidate` of
+    /// `mailbox:work/inbox` says so, as a sync that fetched it would. The
+    /// reader's card of row [`INVITE_ROW`] follows, since it reads the agenda row.
     fn simulate_invite(&self, cancel: bool) -> Result<()> {
         let mut s = self.state();
         let event = s
@@ -2916,6 +3192,11 @@ impl Fixture {
         let id = s.next_row;
         s.next_row += 1;
         s.ics.insert(id, source.clone());
+        // The email carries its own version: the cancellation's card is a
+        // CANCEL, which no one replies to.
+        let mut carried = event.event.clone();
+        carried.method = Some(method.to_string());
+        s.invites.insert(id, carried);
         let summary = event.event.summary.clone().unwrap_or_default();
         let (subject, tag) = if cancel {
             (format!("Cancelled: {summary}"), "invite-cancel")
@@ -3607,6 +3888,141 @@ mod tests {
         );
         let newest = inbox_ids(&f, "work", "inbox")[0];
         assert!(f.state().ics.contains_key(&newest));
+    }
+
+    #[test]
+    fn message_invite_answers_the_agenda_event_and_the_version_an_email_carried() {
+        let (f, _rx) = fixture();
+        let answer = f
+            .call(
+                "message.invite",
+                json!({"account": "work", "row_id": INVITE_ROW}),
+            )
+            .expect("invite");
+        assert_eq!(answer["event"]["summary"], "Steering committee");
+        assert_eq!(answer["event"]["method"], "REQUEST");
+        let plain = f
+            .call("message.invite", json!({"account": "work", "row_id": 1009}))
+            .expect("a plain email");
+        assert!(plain["event"].is_null());
+        let e = f
+            .call(
+                "message.invite",
+                json!({"account": "work", "row_id": 424_242}),
+            )
+            .expect_err("no row");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
+        f.simulate("invite_cancel").expect("cancel");
+        let newest = inbox_ids(&f, "work", "inbox")[0];
+        let carried = f
+            .call(
+                "message.invite",
+                json!({"account": "work", "row_id": newest}),
+            )
+            .expect("the cancellation");
+        assert_eq!(carried["event"]["method"], "CANCEL");
+        assert_eq!(carried["event"]["cancelled"], true);
+        let card = f
+            .call(
+                "message.invite",
+                json!({"account": "work", "row_id": INVITE_ROW}),
+            )
+            .expect("the original");
+        assert_eq!(card["event"]["cancelled"], true, "row 1008's card follows");
+    }
+
+    #[test]
+    fn calendar_rsvp_refuses_graph_first_then_settles_with_the_reply() {
+        let (f, rx) = fixture();
+        f.set_rsvp_delay(Duration::ZERO);
+        let e = f
+            .call("calendar.rsvp", json!({"account": "home"}))
+            .expect_err("graph");
+        let text = format!("{e:#}");
+        assert_eq!(
+            crate::error::refusal_sentence(&text),
+            Some(GRAPH_RSVP_REFUSAL)
+        );
+        assert_eq!(f.operation_count(), 0);
+        let e = f
+            .call(
+                "calendar.rsvp",
+                json!({"account": "work", "row_id": INVITE_ROW, "response": "maybe"}),
+            )
+            .expect_err("a bad word");
+        assert!(format!("{e:#}").contains("not \"maybe\""), "{e:#}");
+        let e = f
+            .call(
+                "calendar.rsvp",
+                json!({"account": "work", "row_id": 1009, "response": "accept"}),
+            )
+            .expect_err("no invitation");
+        assert!(
+            format!("{e:#}").contains("carries no invitation to reply to"),
+            "{e:#}"
+        );
+        let started = f
+            .call(
+                "calendar.rsvp",
+                json!({"account": "work", "row_id": INVITE_ROW, "response": "tentative"}),
+            )
+            .expect("started");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+        let sent = next_event(&rx);
+        assert_eq!(sent.kind, "state.invalidate");
+        assert_eq!(sent.payload["resource"], "mailbox:work/sent");
+        let finished = next_event(&rx);
+        assert_eq!(finished.kind, KIND_OPERATION_FINISHED);
+        assert_eq!(finished.payload["operation_id"], id.as_str());
+        let result: crate::calendar::RsvpSettled =
+            serde_json::from_value(finished.payload["result"].clone()).expect("RsvpSettled");
+        assert_eq!(result.response, "tentative");
+        assert_eq!(result.subject, "Tentative: Steering committee");
+        assert_eq!(result.organizer, "chair@example.com");
+        assert!(result.delivered);
+        assert_eq!(
+            result.selector,
+            "mp://work/inbox/invitation-steering-comm-1008@fixture.example"
+        );
+        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
+        assert_eq!(row.event.rsvp, "tentative");
+    }
+
+    #[test]
+    fn rsvp_fail_fails_the_next_rsvp_and_parks_a_failed_outbox_row() {
+        let (f, rx) = fixture();
+        f.set_rsvp_delay(Duration::ZERO);
+        f.simulate("rsvp_fail").expect("armed");
+        let started = f
+            .call(
+                "calendar.rsvp",
+                json!({"account": "work", "row_id": INVITE_ROW, "response": "accept"}),
+            )
+            .expect("started");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+        assert_eq!(next_event(&rx).payload["resource"], "outbox:work");
+        let finished = next_event(&rx);
+        assert_eq!(finished.payload["operation_id"], id.as_str());
+        assert_eq!(finished.payload["state"], "failed");
+        assert_eq!(finished.payload["error"]["message"], SEND_FAIL_REASON);
+        let rows = f.outbox_rows("work");
+        let parked = rows.last().expect("a row");
+        assert_eq!(parked.state, "failed");
+        assert_eq!(parked.outstanding, vec!["chair@example.com".to_string()]);
+        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
+        assert_eq!(
+            row.event.rsvp, "needs-action",
+            "a failed reply changes nothing"
+        );
+        // Once: the next one goes out.
+        f.call(
+            "calendar.rsvp",
+            json!({"account": "work", "row_id": INVITE_ROW, "response": "accept"}),
+        )
+        .expect("started");
+        assert_eq!(next_event(&rx).payload["resource"], "mailbox:work/sent");
     }
 
     /// The next event, within five seconds.

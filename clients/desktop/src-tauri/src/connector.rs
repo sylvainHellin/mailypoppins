@@ -117,6 +117,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "sync.full",
     "calendar.events",
     "message.ics",
+    "message.invite",
+    "calendar.rsvp",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -834,6 +836,8 @@ mod tests {
             "message.materialise_attachment",
             "calendar.events",
             "message.ics",
+            "message.invite",
+            "calendar.rsvp",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }

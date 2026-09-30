@@ -194,6 +194,24 @@ pub fn rpc_code(text: &str) -> Option<i32> {
     tail[open + 1..close].trim().parse().ok()
 }
 
+/// The daemon's own sentence of a refusal, without the method, the
+/// `the daemon refused the call:` frame and the trailing `(<code>)`: what a
+/// surface shows verbatim (the Graph refusal, a `send.invite` refusal).
+pub fn refusal_sentence(text: &str) -> Option<&str> {
+    const FRAME: &str = "the daemon refused the call:";
+    let start = text.find(FRAME)? + FRAME.len();
+    let tail = text[start..].trim();
+    let body = match tail.rfind(" (") {
+        Some(open)
+            if tail.ends_with(')') && tail[open + 2..tail.len() - 1].parse::<i32>().is_ok() =>
+        {
+            &tail[..open]
+        }
+        _ => tail,
+    };
+    Some(body.trim()).filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +221,16 @@ mod tests {
         let text = "message.html: the daemon refused the call: no markup (x) (-32602)";
         assert_eq!(rpc_code(text), Some(-32602));
         assert_eq!(rpc_code("message.html: the daemon is not reachable"), None);
+    }
+
+    #[test]
+    fn the_sentence_is_read_off_the_refusal_text() {
+        let text = "calendar.rsvp: the daemon refused the call: RSVP is not supported for Graph accounts yet (#0036, blocked on #0035) (-32602)";
+        assert_eq!(
+            refusal_sentence(text),
+            Some("RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)")
+        );
+        assert_eq!(refusal_sentence("x: the daemon is not reachable"), None);
     }
 
     #[test]
