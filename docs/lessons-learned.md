@@ -2305,3 +2305,10 @@ ts-rs also leaves a trailing space after each opening `{`, which the export test
 What other clients hear comes from the drainer 1.5 s after the account's last mutation: one `state.invalidate` with scope `{"query": "counts"}` per mailbox whose `(total, unread)` moved, and a `mutations.rolled_back` when the server refused something.
 A `set_flag` moves no count, so no other client learns about a star until it re-reads the list; a client that shows flags from events alone shows a stale star.
 The desktop fixture (`clients/desktop/src-tauri/src/fixture.rs`) publishes the same way, so the GUI is built against what the daemon actually sends.
+
+## The GUI's list generation needs an overlay of the pending rows next to it
+
+The TUI's `mailbox_load_generation` drops a list read that started before an optimistic removal, and the desktop's `listGen` does the same (`clients/desktop/src/app/pending.ts`).
+In the GUI that alone still lets a row come back: a batch sends one daemon call per row, so a read that starts after the optimistic apply can reach the store before the daemon has committed the later rows, and its generation is current.
+Every list answer is therefore laid under `pending` as well, which hides a row still leaving and shows a pending flag at its new value until the command answers.
+A refused batch also has to put its rows back in the reverse order they left: each saved index was taken after the batch's earlier rows had gone, so restoring in the original order shifts every later row by one.

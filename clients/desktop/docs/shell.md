@@ -13,6 +13,8 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/protocol/types.ts` | Wire shapes embedded in them, hand-written until ts-rs generates them |
 | `src/app/state.ts`, `reducer.ts` | The model and the one reducer: GuiEvents, answers, intents |
 | `src/app/search.ts` | Search hits in one shape, and the server search's transitions |
+| `src/app/pending.ts` | The transitions of mutations, send holds and syncs |
+| `src/app/mutations.ts` | The mutation dispatch: apply, call, reconcile |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
 | `src/app/layout.ts`, `prefs.ts`, `store.tsx` | Breakpoints, localStorage preferences, the context store |
@@ -40,10 +42,12 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
 | `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared |
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale |
-| `event` `draft.*`, `mutations.rolled_back` | the account's counts and, when shown, its list stale |
+| `event` `draft.*` | the account's counts and, when shown, its list stale |
+| `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
+| `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
-| `operation_settled`, `operation_dropped` | the server search settles, or shows as dropped |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped) |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -57,6 +61,51 @@ Cancel calls `search_server_cancel`; leaving a running search (Escape, a new que
 A server-only hit (`row_id: null`) is listed with a "server only" badge and does not open: fetching it into the store is M2's.
 Escape, from the list or the field, returns to the mailbox list with the selection it had before the search; choosing a mailbox or an account ends the search as well.
 A `rebootstrapped` keeps the search and its hits: the selection to restore goes through the same rules as a live one, a local search runs again after a daemon restart (row ids are per instance), and a server search waits for the `operation_settled` or `operation_dropped` the Rust layer's re-query sends.
+
+## Mutations and pending state
+
+Archive, delete, move, flag, read and draft discard change the model at once, as the TUI does, and the command's answer then confirms or refuses each row.
+`src/app/mutations.ts` holds one async function per action: `archive(rows)`, `remove(rows)`, `move(rows, destination)`, `setFlag(rows, flagged)`, `setRead(rows, read)`, `discardDrafts(account, ids)`, `cancelHold(operation_id)` and `sync(account, mode)`.
+A row is `{ account, row_id }`, a single row is a batch of one, and `actionTargets(state)` gives the marked rows in list order or else the selected one.
+`useMutations()` binds them to the store; `createMutations(dispatch)` takes any dispatch, which is how the tests drive the reducer without a DOM.
+
+The model keeps what the daemon has not confirmed yet:
+
+- `pending`, by row key (`<account>#<row_id>`, or `<account>#draft:<id>`): the kind, the batch that owns it, the destination or the flag value, the row as the list, the search and the Drafts list had it with its index, the flag before the change, and the sidebar counts it moved.
+- `listGen`, by list key: moved by every optimistic change and every answer that settles one.
+- `holds`, by `operation_id`: each `HoldStatus` with its state (`started`, `tick`, `cancelled`, `fired`) and whether this window's cancel is in flight.
+- `marked`: the multi-select's row keys and its range anchor.
+- `activity`: numbered notices (applied, failed with each row's reason, rolled back, hold cancelled, sync failed), dismissed by `dismiss_notice`.
+- `syncs`: the syncs this window started, by `operation_id`.
+
+A mutation dispatches `mutation_apply` for each account in the rows, then calls the account's command, in the order given.
+Archive, delete, move and discard take the row out of the list and the search, and flag and read change it in place, in the reader's headers too.
+The sidebar counts move with them: total and unread of the source and of the archive or move destination, and the badge along with unread or total when it showed one of them.
+
+The answer reconciles the batch.
+Each row in `done` leaves `pending` and keeps its optimistic state, and an archive or a move names its destination in the notice.
+Each row in `failed` is put back where it was, with the daemon's reason in a `failed` notice, and the account's counts are re-read.
+The rows are put back in the reverse order they left, since each index was taken after the batch's earlier rows had gone.
+A command that throws puts back every row of its batch.
+A second mutation of a pending row takes its entry over and keeps the first one's saved row, and the first batch's answer then leaves that row alone.
+
+The generation guard is the TUI's `mailbox_load_generation`.
+The loader sends `listGen[key]` with each list read, and a `messages_loaded` carrying an older value is dropped and read again, so a reload that started before an archive cannot bring the row back.
+A read that started after the change can still predate the daemon's commit, so every list answer is laid under `pending`: a row still leaving is hidden, and a flag still pending shows its new value.
+Of two reads of one list, the older answer never replaces the newer one.
+
+When the rows the cursor sits on leave, the cursor goes to the next row that stays, else to the previous one, else nowhere, and the reader follows.
+The TUI moves its cursor the same way.
+A cursor on a row that stays does not move.
+
+The daemon has no undo for archive, delete or move.
+A refusal from the server arrives after the drain as `mutations.rolled_back { account, failed }`, which names no row.
+Every row of that account still pending is put back, the account's counts and list are marked stale so the daemon's rows replace the rest, and the notice uses the TUI's words.
+
+A `rebootstrapped` empties `pending`, seeds `holds` from the snapshot, and keeps the marks only on the same daemon instance, since row ids are per instance.
+A hold that fired or was cancelled stays so whatever tick arrives late, and a cancel reports once whether its answer or its event lands first.
+A sync is awaited by the `operation_id` `sync_trigger` answers; an end that overtakes the answer is held until the id is known.
+The marks follow the list: a mailbox change or a search clears them, a row that leaves drops its mark, and a reload drops the marks of rows it no longer lists.
 
 ## Layouts
 
