@@ -226,6 +226,16 @@ describe("the confirmations and the words", () => {
     s = run(s, { type: "mutation_apply", batch: 1, kind: "flag", targets: [{ account: "work", row_id: 1001 }], value: true });
     expect(queueText(queueDepth(s))).toBe("3 waiting for the server: 1 in the outbox, 1 sending, 1 change");
   });
+
+  it("counts a retry of a row the listing already counts as open once, and a failed row's retry as sending", () => {
+    let s = opened([row(5), row(6, { state: "sent_pending_append", last_error: null, outstanding: [] })]);
+    const before = queueDepth(s);
+    expect(before.sending).toBe(0);
+    s = run(s, { type: "outbox_action_requested", token: 1, kind: "retry", account: "work", row_id: 6 });
+    expect(queueDepth(s)).toEqual({ ...before, sending: 0, total: before.total });
+    s = run(s, { type: "outbox_action_requested", token: 2, kind: "retry", account: "work", row_id: 5 });
+    expect(queueDepth(s)).toEqual({ ...before, sending: 1, total: before.total + 1 });
+  });
 });
 
 describe("what the outbox view hides", () => {

@@ -254,6 +254,17 @@ describe("the outbox view hides the mailbox selection", () => {
     expect(marked()).toBe("");
   });
 
+  it("Ctrl+a over the view marks nothing in the hidden mailbox list", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("go");
+    await view("work");
+    await user.keyboard("{Control>}a{/Control}");
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(marked()).toBe("");
+  });
+
   it("Escape closes the view before it clears the marks the view hid", async () => {
     const { user } = renderApp();
     await shellReady();

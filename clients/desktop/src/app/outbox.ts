@@ -137,15 +137,24 @@ export function summaryText(o: OutboxSummary): string {
     .join(", ");
 }
 
+/** Whether the loaded listing already counts `rowId` as open (queued, or owed its Sent copy). */
+function openInListing(s: AppState, account: string, rowId: number): boolean {
+  const row = s.outbox[account]?.data?.rows.find((r) => r.id === rowId);
+  return row !== undefined && (row.state === "pending_send" || row.state === "sent_pending_append");
+}
+
 /**
  * What waits to reach a server (SYN-06): the queued outbox rows of every
  * account, the sends and retries of this window still running, and the
- * optimistic changes whose commands have not answered.
+ * optimistic changes whose commands have not answered. A retry of a row the
+ * listing already counts as open (a `sent_pending_append` row) is counted
+ * once, in the outbox.
  */
 export function queueDepth(s: AppState): { outbox: number; sending: number; changes: number; total: number } {
   const accounts = s.bootstrap?.snapshot.accounts.map((a) => a.name) ?? [];
   const outbox = accounts.reduce((n, a) => n + outboxSummary(s, a).queued, 0);
-  const sending = s.sends.length + s.outboxActions.filter((a) => a.kind === "retry").length;
+  const retries = s.outboxActions.filter((a) => a.kind === "retry" && !openInListing(s, a.account, a.row_id));
+  const sending = s.sends.length + retries.length;
   const changes = Object.keys(s.pending).length;
   return { outbox, sending, changes, total: outbox + sending + changes };
 }
