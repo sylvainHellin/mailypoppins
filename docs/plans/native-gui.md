@@ -10,7 +10,8 @@ M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-
 M1, the read-only shell (#0129), landed on the `gui-m1` branch on 2026-09-30 as `clients/desktop/`.
 #0129 stays open for the live launchd check carried from #0128.
 M2, mutations with the undo hold (#0131), landed on the `gui-m2` branch on 2026-09-30.
-M3, compose through the external editor (#0131), landed on the `gui-m3` branch on 2026-09-30; #0131 stays open for M4.
+M3, compose through the external editor (#0131), landed on the `gui-m3` branch on 2026-09-30.
+M4, calendar, contacts, signatures and config (#0131), landed on the `gui-m4` branch on 2026-09-30; #0131 stays open until M2 to M4 have run in a real window and every parity row that ships in part has a path or a recorded deferral.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -334,14 +335,17 @@ The attachment save and attach take a typed path, since the native file picker n
 
 ### M4: calendar, contacts, signatures and config (#0131)
 
-Prerequisite: the `tauri-plugin-dialog` install that replaces M3's typed path fields with the native picker (#0131, "M3 landed").
-
 - Calendar agenda, invitation rendering, RSVP, organizer reconciliation, updates and cancellation; iMIP send on a Graph account shows as disabled with its reason.
 - Contacts, ranking, copy actions, vCard send, rebuild, and handoff into composition.
 - Signature management and per-account defaults.
 - Settings, account setup, authentication and secret updates through `config.*`.
 - Clipboard copies of the sender address, the message link as the row's `mp://` selector, and the subject, through the Tauri clipboard-manager plugin, with its permission declared in the app capability file.
 - Activity, logs and help.
+
+M4 landed on the `gui-m4` branch on 2026-09-30, in the commits `f888afce` to `41e3b73f`, each tagged `(#0131)`.
+What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M4 landed"](../tickets/0131-gui-full-parity.md#m4-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
+No plugin was installed: the copies go through `navigator.clipboard.writeText` from the key or click handler instead of the clipboard-manager plugin, and M3's typed path fields stay until the dialog plugin is approved.
+The signatures and the vCard are client-side over `mp-core`, since the daemon serves no `signature.*` method and no `contact.vcard`.
 
 ### M5: embedded Neovim (#0130)
 

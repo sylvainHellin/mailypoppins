@@ -156,6 +156,119 @@ Open for M4 and for Sylvain:
 - `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
 - The draft preview's Approve and Back to draft buttons acted on the marks the outbox view hides while it is open (the fix1 review), against `clients/desktop/docs/shell.md`, "What the view hides": fixed in `683bcfac`, they act on the draft shown.
 
+## M4 landed
+
+M4, calendar, contacts, signatures and config, landed on the `gui-m4` branch on 2026-09-30, in the 47 commits from `f888afce` to `41e3b73f`, each tagged `(#0131)`.
+It closes `CAL-01`, `CAL-02`, `CAL-03`, `CAL-05`, `CAL-06`, `SND-05`, `CON-01`, `CON-03`, `CON-05` to `CON-08`, `ACC-01`, `ACC-02`, `ACC-05`, `ACC-06`, `ACC-10`, `INT-01` to `INT-03`, `OBS-01` and `MBX-05`, the signature half of `MSG-07`, and the OAuth half of `INT-04`.
+[docs/parity-matrix.md](../parity-matrix.md) now also records `RD-07`, `OBS-02` and `OBS-03` as shipped in M1 and `INT-06` in M3; `RD-08`, the Markdown rendition path of a search hit, is not built.
+
+What shipped, per unit:
+
+- U1, views, copies and progress (`f888afce` to `3528ecf5`): `state.view` with Mail, Contacts, Calendar and Settings, `switch_view`, the per-view key tables read before any prefix arms (`VIEW_KEYS`, `VIEW_AGNOSTIC_COMBOS`), the sidebar's view entries and palette rows, `src/lib/clipboard.ts`, through which every copy goes, `operation.progress` routed to this window's awaited operations only and kept in `state.progress`, and `FIXTURE_ONLY_METHODS` for the fixture's pseudo-methods.
+- U2, the agenda (`c322720a` to `1748d111`): `calendar_events` and `invite_source_open`, the Calendar view with its agenda and the shared `EventCard`, the past toggle by the TUI's rule, the refresh, the source `invite.ics` in the editor, and the fixture's `calendar.json` with the simulations `invite_update` and `invite_cancel`.
+- U3, RSVP and invitations (`d0969eb7` to `eb5b3c72`): `invite_get`, `calendar_rsvp`, `invite_refusal` and `send_invite`, the reader's invitation card, the RSVP choice from `tv`, `V` and the card, the New invitation form, disabled on a Graph account, the operation kinds `rsvp` and `send_invite`, `error::refusal_sentence` and `daemon_sentence`, and the simulation `rsvp_fail`.
+- U4, contacts (`4c94b299` to `3f3fb3e6`): `contact_search`, `contact_rebuild` awaited as `contact_rebuild` with the TUI's four notices, `contact_vcard_draft`, which builds the vCard in the Tauri layer, the Contacts view with its debounced search, the fixture's `contacts.json`, and the simulation `rebuild_refused`.
+- U5, signatures (`1bf92ed9` to `9c8e2dec`): `signature_read`, `signature_create`, `signature_rename`, `signature_delete` and `signature_set_default` over `mp_core::signatures`, the Signatures dialog with its delete confirmation, the listing the new-draft wizard shares, the fixture's `signature.*` pseudo-methods, and the simulation `signature_changed`.
+- U6, activity log, daemon files and copies (`057faeda` to `98acad6f`, with a U5 test fix in `ae5bff47`): `config_open` and `log_open`, the activity log of the newest 100 lines and its dialog, `!` over the activity area's notices, the reader's Copy menu with its palette rows, and the fixture's `config.json`, `config.toml` and dated log file.
+- U7a, Settings (`b66d1ef2` to `cd2968f1`): `config_get` decoded leniently into `EffectiveConfig`, `config_reload`, `config_set_password` with a redacting `Debug`, the Settings view with the M3 editor setting, the config.toml banner, the password dialog, and the simulation `config_invalid`.
+- U7b, accounts and sign-in (`d830f4d9` to `b87a9e56`): `config_init`, `config_add_account`, `config_oauth2_login` awaited as `oauth2_login` and `config_oauth2_cancel`, the account wizard with the CLI's four presets, the device-code dialog, the first-run setup screen, and the simulations `config_absent`, `oauth_approve` and `oauth_deny`.
+- The TUI's keys `Space m`, `Space c`, `Space a`, `cs`, `sl`, `sc`, `sf`, `!` and `tv`, the CALENDAR keys `j`, `k`, `gg`, `G`, Enter, `e`, `t`, `r` and `V`, and the CONTACTS keys `j`, `k`, `gg`, `G`, `/`, Enter, `n`, `v`, `c` and `r`, each with a palette entry; the palette has no M4 badge left.
+- The desktop's palette rows with no key: "Open settings", "Add account", "New invitation", "Copy sender address" and "Copy subject", with "Copy link (mp://)" on `y`.
+- The daemon methods M4 calls joined `REQUIRED_CAPABILITIES`: `calendar.events`, `message.ics`, `message.invite`, `calendar.rsvp`, `send.invite`, `contact.search`, `contact.rebuild`, `config.get`, `diagnostic.log_path`, `config.reload`, `config.set_password`, `config.init`, `config.add_account` and `config.oauth2_login`.
+- 483 vitest tests in 34 files (286 at M3) and 205 Rust tests (135 at M3), plus the same two ignored.
+
+The unit docs are `clients/desktop/docs/rust-layer.md` ("The calendar", "The contacts", "Signatures", "config.toml and the daemon log", "Configuration and secrets", "Fixture mode"), `clients/desktop/docs/shell.md` ("Views", "Contacts", "Calendar", "Signatures", "Activity log", "Settings", "Account wizard", "First run") and `clients/desktop/docs/reader.md` ("The toolbar", "Invitations").
+
+Decisions taken in M4, each the breakdown's default:
+
+- No plugin was installed: every copy calls `navigator.clipboard.writeText` from its key or click handler, and M3's typed path fields stay until the dialog plugin is approved (D1).
+- The vCard is built in the Tauri layer with `mp_core::contacts::contact_to_vcard` and attached to a `draft.create` draft, since the daemon serves no `contact.vcard` (D2).
+- The signature commands run over `mp_core::signatures` in the Tauri layer, since the daemon serves no `signature.*` method (D3).
+- Settings reads `config.get` and writes no key: a setting changes in config.toml through the editor, then Reload (D4).
+- New invitation is a minimal form with no preview and no UID of its own, disabled on a Graph account (D5).
+- The past and upcoming filter is client-side, the TUI's rule (D6).
+- `Space m`, `Space c` and `Space a`, the sidebar and the palette switch the views, and Settings is a fourth view (D7).
+- The wizard offers the CLI's four presets, writes through `config.add_account`, or `config.init` on first run, then stores a password or signs in, with no connection test and no server mailbox pick (D8).
+- No secret reaches the clipboard; the device-code dialog's Copy copies the user code (D9).
+- Of the stale status lines outside M4, the matrix corrects `RD-07`, `RD-08`, `OBS-02`, `OBS-03` and `INT-06` only (D10).
+- Settings has no key (D11).
+- `!` hides or shows the activity area's notices and never a live hold card (D12).
+- `contact.search` asks for 1000 rows, the empty query included (D13).
+- The copies have no key of their own, and `y` stays the selector (D14).
+
+Decisions taken where the breakdown was silent:
+
+- A settled RSVP says "Replied <response> to <summary>", with the summary captured when the reply was asked, and adds "; queued in the outbox" when no recipient took it yet.
+- The TUI's em-dash in the RSVP refusals is a semicolon on the desktop.
+- Enter in the RSVP choice sends whichever control holds the focus.
+- `contact_vcard_draft` takes a draft name the frontend computes, and the vCard draft carries no signature, the TUI's rule.
+- An empty query's score (`u32::MAX`) is not shown, and the contact list is read again on every switch to the view.
+- `c` on a contact says "Copied <address>" where the TUI says "<address> copied to clipboard".
+- The Contacts header's buttons render only while a contact is under the cursor, since disabled buttons broke the focus following.
+- A second `r` during a rebuild says it is already running, and a dropped rebuild says "Contacts refresh failed: <why>".
+- The signature delete confirmation is the shared confirmation, nested in the Signatures dialog.
+- Signature refusals show in the dialog's alert line and successes on the notice line, and a refused change reads the listing again.
+- `cs` works over the outbox view on the outbox's account, and "No signature named" is `not_found`.
+- The Signatures and RSVP dialogs read their keys in the capture phase, since Base UI stops the arrow keys first.
+- A hold's end is logged through the hold's own transitions, and a sync line is the TUI's `sync_status_line` at the daemon's severity.
+- A `not_found` from `sc` or `sf` is logged as a warning.
+- While `!` hides the notices, every hold card stays and `X` dismisses nothing.
+- "Copy link (mp://)" copies the reader's selector and lists `y`, the copies hide outside Mail and over the outbox view, and a palette copy needs the reader to show the selected message.
+- The keymap ignores keys inside an open menu (`role="menu"`).
+- The fixture's password key is the daemon's, `<kind>-password-<account>`.
+- A reload's notice reuses the `config.changed` wording and is not logged twice.
+- The password field is emptied on every submit and focused again after a refusal, and the configuration is read on every open of Settings.
+- The config.toml banner is a `role="alert"` mounted only while a problem exists.
+- Settings carries M3's editor command field, whose Save with an empty field clears it.
+- A stored token says "OAuth2 token acquired and cached for account '<name>'", `oauth2_stored_line` without its check mark.
+- The wizard's password step stores the SMTP password only, which IMAP falls back to.
+- An account name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`, and an empty IMAP host or username falls back to the SMTP one, as in the CLI.
+- The Graph preset's mailboxes are Inbox, Archive and Sent Items.
+- The first-run wizard sits inline on the setup screen without Cancel, and a window that started with no account selects the first account added and its inbox.
+- Escape and Cancel cancel a running sign-in through the dedicated `config_oauth2_cancel`, and Settings' Sign in reopens a running sign-in.
+
+Review findings fixed before the close-out:
+
+- A failed `r` in the Calendar view with rows shown says "Calendar refresh failed: <why>" (`46c2c67c`).
+- A daemon refusal of an RSVP start reads as the daemon's sentence (`dbe2e2de`).
+- An in-view account switch reads the kept query's contacts again, and an answer asked at an older generation is dropped (`33cd299e`).
+- `markStale` always moves `gen`, so an event during a fetch makes the loader fetch again, and shell.md's Model section says so (`8323e6f5`).
+- The RSVP choice reads the arrow keys in the capture phase (`3f21393c`).
+- The queue depth counts RSVPs and invitations under "sending" (`1d2a5505`).
+- A failed sync this window started is logged once (`07bfc027`).
+- The config.toml banner goes with a daemon restart to another instance and comes from `config.get`'s `invalid` state when the daemon started on a bad file (`95b77372`).
+- A stored password closes only its own dialog, and a wizard dismissed during its write hands over to no dialog (`41e3b73f`).
+
+Known limits carried:
+
+- Search hits streamed from the server are still not laid under the pending changes.
+- App keys stop inside the cross-origin reader frame, and list windowing is off.
+- An editor open on a draft can overwrite an attach, a removal or a `ce` rewrite with its own buffer, as in the TUI.
+- `cX` sends one account's approved drafts, and `send.approved` and `send.outbox_retry` still render their outcome at the end.
+- The activity log holds only what this window heard since it started.
+- The contact list stops at 1000 rows, and the fixture's contact search matches substrings where the daemon's is fuzzy.
+
+Open for M5 and for Sylvain:
+
+- Check by eye with `MP_DESKTOP_FIXTURE=1 pnpm tauri dev`: nothing of M2 to M4 has run in a real window.
+  The M4 checks are `writeText` in WKWebView from a key press and from a Base UI menu click, the focus coming back from the editor after `sc`, `sf`, `e` on an agenda row and a signature's Edit, `editor_open` on a `.ics`, a `.toml` and a `.log`, nested dialogs and Escape in WebKit, the view switch in the narrow layout, the setup screen with a daemon started on an empty config directory, and the device-code flow against a live provider.
+- Install `tauri-plugin-clipboard-manager` only if the window check shows `writeText` refused; the dialog-plugin install from "M3 landed" still waits for approval.
+- Confirm the M4 decisions above, and the M3 ones still open under "M3 landed".
+- `contact_vcard_draft` creates the draft before it writes and attaches the `.vcf`, so a failure after the create leaves a "Contact: <name>" draft in Drafts without the vCard and unopened, while the notice says only "vCard draft failed: <why>"; writing the `.vcf` before `draft.create`, or naming the leftover draft in the notice, would fix it.
+- The queue depth can count a send, an RSVP or an invitation twice, under "sending" and in the outbox, when the outbox listing is read again while the operation runs, as M3's sends already could.
+- `calendarLoaded`, `inviteLoaded` and the generic `loaded()` still take an answer asked at an older generation; the next fetch heals it, and only contacts needed the guard.
+- A failed sync is still logged twice when the operation's end arrives before `sync_trigger` answers.
+- `compose.ts` (lines 300 and 316) and `attachments.ts` (lines 226 and 247), from M2 and M3, still close whatever overlay is open when their call answers; the matching close `close_password` does would fix them.
+- The Rust test's `ACCOUNT_BLOCK_KEYS` is a hand-written copy of the keys the daemon's `account_block` reads at this commit, and does not notice a change there.
+- The fixture's bootstrap sends an empty `operations`, so the device code after a re-bootstrap is covered by TypeScript tests only; an account the fixture adds has no Drafts mailbox; the daemon's `state.invalidate` after `config.add_account` is not modelled.
+- Timed notices do not expire while `!` hides them, so up to 20 reappear, and clipboard refusals and older failure notices are logged at `info`.
+- A failed `operation.cancel` (a timeout) leaves the sign-in dialog's cancelling state set until the operation ends.
+- `ACC-11`'s signature choice for a reply or a forward stays blocked, since `draft.reply` and `draft.forward` take no signature; `ACC-03`'s question whether a password or a token is stored has no answer in `config.get`.
+- The daemon door of the five signature commands has no Rust test, which needs `mp-core`'s test-support override of the config directory.
+- `EmptyView.tsx` is used by no view any more and is kept.
+- The daemon follow-ups M4 worked around are in `BACKLOG.md`: a `signature.*` family with `signature.removed`, `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build.
+- The Tauri layer calls `operation.cancel` through two dedicated commands, `search_server_cancel` and `config_oauth2_cancel`; a generic cancel command would serve a rebuild, an RSVP or an invitation too, and `BACKLOG.md` carries it as optional.
+
 ## Exit gate
 
 - Every GUI-parity row is implemented and validated, or carries a settled deferral recorded in `BACKLOG.md`.
