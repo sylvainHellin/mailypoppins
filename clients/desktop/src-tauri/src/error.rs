@@ -58,6 +58,10 @@ pub enum GuiError {
     Protocol { message: String, code: Option<i32> },
     /// The addressed account, message or operation does not exist.
     NotFound { message: String, code: Option<i32> },
+    /// The desktop's own setup is wrong: an external editor that would not
+    /// start, or a settings file that does not read. `message` names what to
+    /// change.
+    Setup { message: String },
     /// A fault in this process.
     Internal { message: String },
 }
@@ -88,6 +92,7 @@ impl GuiError {
             | GuiError::Timeout { message }
             | GuiError::Protocol { message, .. }
             | GuiError::NotFound { message, .. }
+            | GuiError::Setup { message }
             | GuiError::Internal { message } => message,
         }
     }

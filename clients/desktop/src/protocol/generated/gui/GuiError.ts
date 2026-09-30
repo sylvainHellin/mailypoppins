@@ -4,4 +4,4 @@ import type { ProtocolRange } from "./ProtocolRange";
 /**
  * What a command failed with, tagged by `kind`.
  */
-export type GuiError = { "kind": "daemon_unavailable", message: string, socket: string | null, log: string | null, } | { "kind": "version_mismatch", message: string, daemon_version: string | null, client_protocol: ProtocolRange, } | { "kind": "timeout", message: string, } | { "kind": "protocol", message: string, code: number | null, } | { "kind": "not_found", message: string, code: number | null, } | { "kind": "internal", message: string, };
+export type GuiError = { "kind": "daemon_unavailable", message: string, socket: string | null, log: string | null, } | { "kind": "version_mismatch", message: string, daemon_version: string | null, client_protocol: ProtocolRange, } | { "kind": "timeout", message: string, } | { "kind": "protocol", message: string, code: number | null, } | { "kind": "not_found", message: string, code: number | null, } | { "kind": "setup", message: string, } | { "kind": "internal", message: string, };

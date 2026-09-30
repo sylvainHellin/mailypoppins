@@ -221,7 +221,9 @@ fn answer(path: &str, rendered: Result<Rendered, GuiError>) -> Response<Vec<u8>>
                 }
                 GuiError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
                 GuiError::Protocol { .. } => StatusCode::BAD_GATEWAY,
-                GuiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+                GuiError::Setup { .. } | GuiError::Internal { .. } => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
             };
             tracing::warn!("[reader] {path}: {e}");
             failure(status, e.message())

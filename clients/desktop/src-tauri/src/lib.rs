@@ -9,6 +9,7 @@
 //! - [`connector`]: reaching the daemon, starting it on demand, typed failure.
 //! - [`session`]: the one session, the ordered event pump, re-bootstrap.
 //! - [`commands`]: the narrow Tauri commands.
+//! - [`editor`]: the external editor a draft is opened in.
 //! - [`reader`]: the `mpmsg` scheme serving `message.html`.
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
@@ -16,6 +17,7 @@
 
 pub mod commands;
 pub mod connector;
+pub mod editor;
 pub mod error;
 pub mod fixture;
 pub mod logging;
@@ -149,6 +151,20 @@ pub fn run() {
             commands::message_set_flag,
             commands::message_set_read,
             commands::draft_discard,
+            commands::draft_create,
+            commands::draft_reply,
+            commands::draft_forward,
+            commands::draft_from_message,
+            commands::draft_path,
+            commands::draft_approve,
+            commands::draft_demote,
+            commands::draft_validate,
+            commands::draft_preview,
+            commands::draft_set_recipients,
+            commands::signature_list,
+            editor::editor_open,
+            editor::editor_setting_get,
+            editor::editor_setting_set,
             commands::send_hold_status,
             commands::send_cancel_hold,
             commands::sync_trigger,

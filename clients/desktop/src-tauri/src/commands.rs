@@ -19,8 +19,13 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
 use mp_client::queries;
+use mp_core::draft::DraftRecipientEdit;
 use mp_core::selector::DRAFTS_MAILBOX;
-use mp_protocol::draft::DraftListing;
+use mp_protocol::draft::{
+    DraftCreated, DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview,
+    DraftValidation,
+};
+use mp_protocol::events::{Diagnostic, DraftInvalid};
 use mp_protocol::listing::MessageListRow;
 use mp_protocol::send::HoldListing;
 use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
@@ -43,6 +48,11 @@ const CANCEL_BUDGET: Duration = Duration::from_secs(5);
 /// One message of a mutation batch: a local commit, no server round trip.
 const MUTATION_BUDGET: Duration = Duration::from_secs(10);
 const HOLD_BUDGET: Duration = Duration::from_secs(5);
+/// A draft written from a stored message reads the store and, for a forward,
+/// materialises the original attachments.
+const DRAFT_BUDGET: Duration = Duration::from_secs(20);
+/// A draft query, or one status line rewritten.
+const DRAFT_QUERY_BUDGET: Duration = Duration::from_secs(10);
 
 /// `MP_DESKTOP_STUB_OPENER=1`: `open_external` records instead of opening.
 pub const STUB_OPENER_ENV: &str = "MP_DESKTOP_STUB_OPENER";
@@ -414,6 +424,91 @@ pub struct DraftDiscardBatch {
     pub failed: Vec<DraftDiscardFailure>,
 }
 
+/// The compose wizard's recipients and subject, which replace what the
+/// builder derived. An empty string clears the field.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftHeaders {
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+}
+
+/// A recipient field as the TUI's wizard submits it: trimmed, and without the
+/// trailing separators an autocompleted address leaves.
+fn recipient_field(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches(|c: char| c == ',' || c.is_whitespace())
+        .to_string()
+}
+
+impl DraftHeaders {
+    fn edit(&self) -> DraftRecipientEdit {
+        DraftRecipientEdit {
+            to: recipient_field(&self.to),
+            cc: recipient_field(&self.cc),
+            bcc: recipient_field(&self.bcc),
+            subject: self.subject.trim().to_string(),
+        }
+    }
+
+    fn wire(&self) -> Value {
+        let edit = self.edit();
+        json!({"to": edit.to, "cc": edit.cc, "bcc": edit.bcc, "subject": edit.subject})
+    }
+}
+
+/// The daemon's answer to one `draft.approve` or `draft.demote`, which it
+/// builds inline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftStatusChanged {
+    pub account: String,
+    pub id: String,
+    /// The status now: `approved` or `draft`.
+    pub status: String,
+    pub path: String,
+}
+
+/// One draft of an approve or demote batch the daemon refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftStatusFailure {
+    pub id: String,
+    pub error: GuiError,
+    /// For a file that does not parse (`-32010` `draft_invalid`): the file
+    /// and why, as `draft.invalid` carries them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid: Option<DraftInvalid>,
+}
+
+/// What `draft.approve` or `draft.demote` over a list of ids came to, one call
+/// per id.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct DraftStatusBatch {
+    pub done: Vec<DraftStatusChanged>,
+    pub failed: Vec<DraftStatusFailure>,
+}
+
+/// The signatures a draft can carry, and the account's default.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct SignatureListing {
+    pub account: String,
+    /// The signature names, sorted.
+    pub names: Vec<String>,
+    /// The account's default, `null` when it has none.
+    pub default: Option<String>,
+}
+
 /// The daemon's answer to `send.cancel_hold`, which it builds inline.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -677,6 +772,15 @@ type Outcomes<I, T> = (Vec<T>, Vec<(I, GuiError)>);
 /// says which rows changed.
 fn each_of<I: Clone, T>(
     items: &[I],
+    each: impl FnMut(&I) -> Result<T, GuiError>,
+) -> Result<Outcomes<I, T>, GuiError> {
+    each_of_by(items, about_one_row, each)
+}
+
+/// [`each_of`], with `per_row` deciding which refusals are about one row.
+fn each_of_by<I: Clone, T>(
+    items: &[I],
+    per_row: fn(&GuiError) -> bool,
     mut each: impl FnMut(&I) -> Result<T, GuiError>,
 ) -> Result<Outcomes<I, T>, GuiError> {
     let mut done = Vec::new();
@@ -684,7 +788,7 @@ fn each_of<I: Clone, T>(
     for (i, item) in items.iter().enumerate() {
         match each(item) {
             Ok(answer) => done.push(answer),
-            Err(e) if about_one_row(&e) => failed.push((item.clone(), e)),
+            Err(e) if per_row(&e) => failed.push((item.clone(), e)),
             Err(e) if done.is_empty() => return Err(e),
             Err(e) => {
                 failed.extend(items[i..].iter().map(|rest| (rest.clone(), e.clone())));
@@ -811,6 +915,319 @@ pub fn draft_discard_on(
             .map(|(id, error)| DraftDiscardFailure { id, error })
             .collect(),
     })
+}
+
+/// Decode a daemon answer into `T`.
+fn decode<T: serde::de::DeserializeOwned>(method: &str, answer: Value) -> Result<T, GuiError> {
+    serde_json::from_value(answer)
+        .map_err(|e| GuiError::protocol(format!("{method} did not decode: {e}")))
+}
+
+/// Tell a fixture door that a client wrote a draft file, which the daemon's
+/// watcher would notice on its own.
+fn written(door: &Door, path: &str) {
+    if let Door::Fixture(fixture) = door {
+        fixture.file_written(std::path::Path::new(path));
+    }
+}
+
+/// Rewrite the recipients and the subject of the draft file at `path` in
+/// place, through the helper the TUI's `ce` uses: the body and every other
+/// frontmatter field stay byte for byte.
+fn rewrite_recipients(door: &Door, path: &str, edit: &DraftRecipientEdit) -> Result<(), GuiError> {
+    mp_core::draft::rewrite_draft_recipients(std::path::Path::new(path), edit).map_err(|e| {
+        GuiError::protocol(format!("could not rewrite the recipients of {path}: {e:#}"))
+    })?;
+    written(door, path);
+    Ok(())
+}
+
+/// `draft.create`: a skeleton named `name` in the account's drafts
+/// directory. A name already taken is the daemon's `-32602`, a `protocol`
+/// error whose message names the path. `headers` are written into the new
+/// file client-side, since `draft.create` takes none.
+pub fn draft_create_on(
+    door: &Door,
+    account: &str,
+    name: &str,
+    signature: Option<&str>,
+    no_signature: bool,
+    headers: Option<&DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    let mut params = json!({"account": account, "name": name});
+    if let Some(signature) = signature {
+        params["signature"] = json!(signature);
+    }
+    if no_signature {
+        params["no_signature"] = json!(true);
+    }
+    let answer = call(
+        door,
+        "draft.create",
+        params,
+        DRAFT_QUERY_BUDGET,
+        Addressing::Params,
+    )?;
+    let created: DraftCreated = decode("draft.create", answer)?;
+    if let Some(headers) = headers {
+        rewrite_recipients(door, &created.path, &headers.edit())?;
+    }
+    Ok(created)
+}
+
+/// `draft.reply` or `draft.forward` of the stored message `row_id`.
+fn draft_from_row_on(
+    door: &Door,
+    method: &str,
+    account: &str,
+    row_id: i64,
+    all: Option<bool>,
+    headers: Option<&DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    let mut params = json!({"account": account, "source": {"row_id": row_id}});
+    if let Some(all) = all {
+        params["all"] = json!(all);
+    }
+    if let Some(headers) = headers {
+        params["headers"] = headers.wire();
+    }
+    let answer = call(door, method, params, DRAFT_BUDGET, Addressing::Resource)?;
+    decode(method, answer)
+}
+
+/// A reply (or, with `all`, a reply-all) to the stored message `row_id`.
+pub fn draft_reply_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+    all: bool,
+    headers: Option<&DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    draft_from_row_on(door, "draft.reply", account, row_id, Some(all), headers)
+}
+
+/// A forward of the stored message `row_id`, carrying its attachments.
+pub fn draft_forward_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+    headers: Option<&DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    draft_from_row_on(door, "draft.forward", account, row_id, None, headers)
+}
+
+/// A reply, reply-all or forward of a message the store holds no row for (a
+/// server-only search hit), built from the hit itself. It carries no
+/// attachments.
+pub fn draft_from_message_on(
+    door: &Door,
+    account: &str,
+    kind: DraftKind,
+    message: &DraftMessage,
+) -> Result<DraftCreated, GuiError> {
+    let params = json!({"account": account, "kind": kind, "message": message});
+    let answer = call(
+        door,
+        "draft.create_from_message",
+        params,
+        DRAFT_BUDGET,
+        Addressing::Params,
+    )?;
+    decode("draft.create_from_message", answer)
+}
+
+/// Where the draft `id` is now, from a fresh scan of the drafts directory.
+pub fn draft_path_on(door: &Door, account: &str, id: &str) -> Result<DraftLocation, GuiError> {
+    let answer = call(
+        door,
+        "draft.path",
+        json!({"account": account, "id": id}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("draft.path", answer)
+}
+
+/// One draft's diagnostics: an invalid draft is an answer, not a refusal.
+pub fn draft_validate_on(
+    door: &Door,
+    account: &str,
+    id: &str,
+) -> Result<DraftValidation, GuiError> {
+    let answer = call(
+        door,
+        "draft.validate",
+        json!({"account": account, "id": id}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("draft.validate", answer)
+}
+
+/// What a send of the draft `id` would send.
+pub fn draft_preview_on(door: &Door, account: &str, id: &str) -> Result<DraftPreview, GuiError> {
+    let answer = call(
+        door,
+        "draft.preview",
+        json!({"account": account, "id": id}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("draft.preview", answer)
+}
+
+/// A per-draft refusal of `draft.approve` or `draft.demote`: an id nothing
+/// resolves to or a sent draft (`-32602`), or a file that does not parse
+/// (`-32010`).
+fn about_one_draft(error: &GuiError) -> bool {
+    about_one_row(error)
+        || matches!(
+            error,
+            GuiError::Protocol {
+                code: Some(-32010),
+                ..
+            }
+        )
+}
+
+/// The daemon's own sentence out of a refusal's text.
+fn refusal_message(text: &str) -> &str {
+    const MARK: &str = "the daemon refused the call: ";
+    let tail = text.find(MARK).map_or(text, |at| &text[at + MARK.len()..]);
+    tail.rfind(" (").map_or(tail, |at| &tail[..at])
+}
+
+/// The `draft.invalid` payload of a `-32010` refusal. The session keeps the
+/// refusal's text but not its `data`, so the path comes from the listing's
+/// skipped files, where an unparseable draft sits under its file stem.
+fn invalid_payload(door: &Door, account: &str, id: &str, error: &GuiError) -> Option<DraftInvalid> {
+    if !matches!(
+        error,
+        GuiError::Protocol {
+            code: Some(-32010),
+            ..
+        }
+    ) {
+        return None;
+    }
+    let listing = call(
+        door,
+        "draft.list",
+        json!({"account": account}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )
+    .ok()
+    .and_then(|answer| decode::<DraftListing>("draft.list", answer).ok())?;
+    let skip = listing.skipped.into_iter().find(|skip| {
+        std::path::Path::new(&skip.path)
+            .file_stem()
+            .is_some_and(|stem| stem.to_string_lossy() == id)
+    })?;
+    Some(DraftInvalid {
+        account: account.to_string(),
+        id: id.to_string(),
+        path: skip.path,
+        diagnostics: vec![Diagnostic {
+            line: None,
+            message: refusal_message(error.message()).to_string(),
+        }],
+    })
+}
+
+/// `draft.approve` or `draft.demote` over `ids`, one call per id in order.
+fn draft_status_on(
+    door: &Door,
+    method: &str,
+    account: &str,
+    ids: &[String],
+) -> Result<DraftStatusBatch, GuiError> {
+    let (done, failed) = each_of_by(ids, about_one_draft, |id| {
+        let answer = call(
+            door,
+            method,
+            json!({"account": account, "id": id}),
+            DRAFT_QUERY_BUDGET,
+            Addressing::Resource,
+        )?;
+        decode::<DraftStatusChanged>(method, answer)
+    })?;
+    Ok(DraftStatusBatch {
+        done,
+        failed: failed
+            .into_iter()
+            .map(|(id, error)| DraftStatusFailure {
+                invalid: invalid_payload(door, account, &id, &error),
+                id,
+                error,
+            })
+            .collect(),
+    })
+}
+
+/// Approve every draft of `ids`: a queued send for `send.approved`.
+pub fn draft_approve_on(
+    door: &Door,
+    account: &str,
+    ids: &[String],
+) -> Result<DraftStatusBatch, GuiError> {
+    draft_status_on(door, "draft.approve", account, ids)
+}
+
+/// Put every draft of `ids` back to `draft`.
+pub fn draft_demote_on(
+    door: &Door,
+    account: &str,
+    ids: &[String],
+) -> Result<DraftStatusBatch, GuiError> {
+    draft_status_on(door, "draft.demote", account, ids)
+}
+
+/// The signatures a draft of `account` can carry.
+///
+/// The daemon serves no `signature.list`: the TUI reads the signatures
+/// directory itself (`mp_core::signatures`), and so does this over a daemon.
+/// The fixture answers a `signature.list` of its own.
+pub fn signature_list_on(door: &Door, account: &str) -> Result<SignatureListing, GuiError> {
+    match door {
+        Door::Fixture(_) => {
+            let answer = call(
+                door,
+                "signature.list",
+                json!({"account": account}),
+                DRAFT_QUERY_BUDGET,
+                Addressing::Resource,
+            )?;
+            decode("signature.list", answer)
+        }
+        Door::Daemon(_) => Ok(SignatureListing {
+            account: account.to_string(),
+            names: mp_core::signatures::list(),
+            default: mp_core::signatures::default_signature_name(account),
+        }),
+    }
+}
+
+/// Rewrite the recipients (and, when given, the subject) of the draft `id`
+/// in place, client-side as the TUI's `ce` does; the body is not touched and
+/// the signature is not re-spliced. The daemon's watcher publishes the
+/// change as `draft.changed`.
+pub fn draft_set_recipients_on(
+    door: &Door,
+    account: &str,
+    id: &str,
+    headers: &DraftHeaders,
+    keep_subject: bool,
+) -> Result<DraftLocation, GuiError> {
+    let location = draft_path_on(door, account, id)?;
+    let mut edit = headers.edit();
+    if keep_subject {
+        let draft = mp_core::draft::parse_email_draft(std::path::Path::new(&location.path))
+            .map_err(|e| GuiError::protocol(format!("{} does not parse: {e:#}", location.path)))?;
+        edit.subject = draft.frontmatter.subject;
+    }
+    rewrite_recipients(door, &location.path, &edit)?;
+    Ok(location)
 }
 
 /// Every hold the daemon carries, or `account`'s.
@@ -1062,6 +1479,158 @@ pub async fn draft_discard(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn draft_create(
+    session: State<'_, SessionHandle>,
+    account: String,
+    name: String,
+    signature: Option<String>,
+    no_signature: Option<bool>,
+    headers: Option<DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_create_on(
+            door,
+            &account,
+            &name,
+            signature.as_deref(),
+            no_signature.unwrap_or(false),
+            headers.as_ref(),
+        )
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_reply(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+    all: bool,
+    headers: Option<DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_reply_on(door, &account, row_id, all, headers.as_ref())
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_forward(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+    headers: Option<DraftHeaders>,
+) -> Result<DraftCreated, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_forward_on(door, &account, row_id, headers.as_ref())
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_from_message(
+    session: State<'_, SessionHandle>,
+    account: String,
+    kind: DraftKind,
+    message: DraftMessage,
+) -> Result<DraftCreated, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_from_message_on(door, &account, kind, &message)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_path(
+    session: State<'_, SessionHandle>,
+    account: String,
+    id: String,
+) -> Result<DraftLocation, GuiError> {
+    with_door(&session, move |_, door| draft_path_on(door, &account, &id)).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_approve(
+    session: State<'_, SessionHandle>,
+    account: String,
+    ids: Vec<String>,
+) -> Result<DraftStatusBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_approve_on(door, &account, &ids)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_demote(
+    session: State<'_, SessionHandle>,
+    account: String,
+    ids: Vec<String>,
+) -> Result<DraftStatusBatch, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_demote_on(door, &account, &ids)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_validate(
+    session: State<'_, SessionHandle>,
+    account: String,
+    id: String,
+) -> Result<DraftValidation, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_validate_on(door, &account, &id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_preview(
+    session: State<'_, SessionHandle>,
+    account: String,
+    id: String,
+) -> Result<DraftPreview, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_preview_on(door, &account, &id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn signature_list(
+    session: State<'_, SessionHandle>,
+    account: String,
+) -> Result<SignatureListing, GuiError> {
+    with_door(&session, move |_, door| signature_list_on(door, &account)).await
+}
+
+/// `subject` absent keeps the draft's subject.
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+pub async fn draft_set_recipients(
+    session: State<'_, SessionHandle>,
+    account: String,
+    id: String,
+    to: String,
+    cc: String,
+    bcc: String,
+    subject: Option<String>,
+) -> Result<DraftLocation, GuiError> {
+    with_door(&session, move |_, door| {
+        let keep_subject = subject.is_none();
+        let headers = DraftHeaders {
+            to,
+            cc,
+            bcc,
+            subject: subject.unwrap_or_default(),
+        };
+        draft_set_recipients_on(door, &account, &id, &headers, keep_subject)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn send_hold_status(
     session: State<'_, SessionHandle>,
     account: Option<String>,
@@ -1166,7 +1735,8 @@ pub fn version_info(session: State<'_, SessionHandle>) -> VersionInfo {
 
 /// Fixture mode only: drive a connection state (`disconnect`, `reconnect`,
 /// `restart`, `resync`, `new_mail`, `shutdown`), a rolled-back drain
-/// (`rollback`, `rollback:<n>`) or a send hold (`hold`).
+/// (`rollback`, `rollback:<n>`), a send hold (`hold`) or a save in the
+/// editor of the newest opened draft (`editor_save`, `editor_invalid`).
 #[tauri::command(rename_all = "snake_case")]
 pub fn fixture_simulate(session: State<'_, SessionHandle>, what: String) -> Result<(), GuiError> {
     let fixture = session
@@ -1591,6 +2161,373 @@ mod tests {
         assert!(value["mailbox"].is_string());
         assert!(value["id"].is_i64());
         assert!(value.get("row").is_none());
+    }
+
+    /// A fixture door, the fixture, and its event stream.
+    fn fixture_with_events() -> (
+        Door,
+        Arc<Fixture>,
+        std::sync::mpsc::Receiver<mp_client::events::Incoming>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        (Door::Fixture(Arc::clone(&fixture)), fixture, rx)
+    }
+
+    /// The `(kind, payload)` of every event posted so far.
+    fn drained(
+        rx: &std::sync::mpsc::Receiver<mp_client::events::Incoming>,
+    ) -> Vec<(String, Value)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|i| match i {
+                mp_client::events::Incoming::Event(e) => Some((e.kind, e.payload)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn parsed(path: &str) -> mp_core::types::EmailDraft {
+        mp_core::draft::parse_email_draft(std::path::Path::new(path)).expect("the draft parses")
+    }
+
+    /// Open `path` with the fixture's stubbed editor, `zed --wait`.
+    fn open_in_editor(f: &Fixture, path: &str) -> crate::editor::EditorLaunch {
+        let env =
+            |name: &str| (name == crate::editor::EDITOR_ENV).then(|| "zed --wait".to_string());
+        let none = |_: &std::path::Path| false;
+        let lookup = crate::editor::Lookup {
+            env: &env,
+            setting: None,
+            is_file: &none,
+            macos: true,
+        };
+        crate::editor::open_on(Some(f), &lookup, path, crate::editor::EXIT_WINDOW)
+            .expect("journaled")
+    }
+
+    fn headers(to: &str, cc: &str, subject: &str) -> DraftHeaders {
+        DraftHeaders {
+            to: to.into(),
+            cc: cc.into(),
+            bcc: String::new(),
+            subject: subject.into(),
+        }
+    }
+
+    #[test]
+    fn a_created_draft_is_a_file_with_frontmatter_and_a_taken_name_is_refused() {
+        let (d, _f, rx) = fixture_with_events();
+        let created = draft_create_on(&d, "work", "note", None, false, None).expect("created");
+        assert!(
+            created.path.ends_with("/drafts/work/note.md"),
+            "{}",
+            created.path
+        );
+        assert_eq!(created.selector, format!("mp://work/drafts/{}", created.id));
+        assert_eq!(created.source, None);
+        let draft = parsed(&created.path);
+        assert_eq!(draft.frontmatter.id.as_deref(), Some(created.id.as_str()));
+        assert_eq!(draft.frontmatter.status.to_string(), "draft");
+        assert!(
+            draft.body_markdown.contains("Fixture GmbH"),
+            "the account's default signature: {}",
+            draft.body_markdown
+        );
+        let events = drained(&rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "draft.changed");
+        assert_eq!(events[0].1["id"], created.id.as_str());
+
+        match draft_create_on(&d, "work", "note", None, false, None) {
+            Err(GuiError::Protocol {
+                code: Some(-32602),
+                message,
+            }) => assert!(message.contains(&created.path), "{message}"),
+            other => panic!("expected the collision, got {other:?}"),
+        }
+        assert!(matches!(
+            draft_create_on(&d, "nobody", "x", None, false, None),
+            Err(GuiError::NotFound {
+                code: Some(-32005),
+                ..
+            })
+        ));
+
+        let wizard = headers("robin@example.com, ", "", " Hello ");
+        let bare = draft_create_on(&d, "work", "bare", None, true, Some(&wizard)).expect("bare");
+        let draft = parsed(&bare.path);
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("robin@example.com"));
+        assert_eq!(draft.frontmatter.subject, "Hello");
+        assert!(
+            !draft.body_markdown.contains("Fixture GmbH"),
+            "no_signature"
+        );
+        let short = draft_create_on(&d, "work", "short", Some("short"), false, None).expect("s");
+        assert!(!parsed(&short.path).body_markdown.contains("Fixture GmbH"));
+        match list_messages_on(&d, "work", "drafts").expect("drafts") {
+            MessageList::Drafts { listing, .. } => {
+                assert_eq!(listing.drafts.len(), 5);
+                assert!(listing.drafts.iter().any(|r| r.id == bare.id && r.ready));
+            }
+            other => panic!("expected drafts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reply_carries_in_reply_to_and_the_subject() {
+        let (d, f) = fixture_door();
+        let created = draft_reply_on(&d, "work", 1001, false, None).expect("reply");
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.reply");
+        assert_eq!(
+            params,
+            json!({"account": "work", "source": {"row_id": 1001}, "all": false})
+        );
+        let source = created.source.clone().expect("a reply names its source");
+        assert_eq!(source.id, "inbox/1");
+        assert_eq!(
+            source.selector,
+            "mp://work/inbox/quarterly-ledger-review-1001@fixture.example"
+        );
+        let draft = parsed(&created.path);
+        assert!(draft
+            .frontmatter
+            .in_reply_to
+            .as_deref()
+            .is_some_and(|v| v.contains("quarterly-ledger-review-1001@fixture.example")));
+        assert_eq!(draft.frontmatter.subject, "Re: Quarterly ledger review");
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("ivana@example.com"));
+        assert!(draft.body_markdown.contains("quarterly ledger is attached"));
+        assert!(
+            draft.frontmatter.attachments.unwrap_or_default().is_empty(),
+            "a reply carries no attachments"
+        );
+
+        let all = draft_reply_on(
+            &d,
+            "work",
+            1001,
+            true,
+            Some(&headers("x@example.com", "y@example.com", "Custom")),
+        )
+        .expect("reply-all");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(params["all"], true);
+        assert_eq!(
+            params["headers"],
+            json!({"to": "x@example.com", "cc": "y@example.com", "bcc": "", "subject": "Custom"})
+        );
+        let draft = parsed(&all.path);
+        assert_eq!(
+            (
+                draft.frontmatter.to.as_deref(),
+                draft.frontmatter.subject.as_str()
+            ),
+            (Some("x@example.com"), "Custom")
+        );
+        assert!(
+            draft.frontmatter.in_reply_to.is_some(),
+            "the override keeps the thread"
+        );
+
+        assert!(matches!(
+            draft_reply_on(&d, "work", 424242, false, None),
+            Err(GuiError::NotFound {
+                code: Some(-32602),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_forward_carries_the_attachments_and_a_hit_is_built_from_itself() {
+        let (d, _f) = fixture_door();
+        let forward = draft_forward_on(&d, "work", 1001, None).expect("forward");
+        let draft = parsed(&forward.path);
+        assert!(draft.frontmatter.subject.starts_with("Fwd:"));
+        assert!(draft.frontmatter.forwarded_from.is_some());
+        let attachments = draft.frontmatter.attachments.unwrap_or_default();
+        assert_eq!(attachments.len(), 1);
+        assert!(attachments[0].ends_with("ledger-q3.pdf"));
+        assert!(std::path::Path::new(&attachments[0]).is_file());
+
+        let hit = DraftMessage {
+            from: "Old Colleague <old@example.com>".into(),
+            to: "me@example.com".into(),
+            subject: "Old thread".into(),
+            message_id: Some("<server-only@fixture.example>".into()),
+            date_display: "Mon, 3 Mar 2025 09:00:00 +0100".into(),
+            body_text: "A message only the server holds.\n".into(),
+            ..Default::default()
+        };
+        let reply = draft_from_message_on(&d, "work", DraftKind::Reply, &hit).expect("reply");
+        assert_eq!(reply.source, None);
+        let draft = parsed(&reply.path);
+        assert_eq!(draft.frontmatter.subject, "Re: Old thread");
+        assert!(draft
+            .frontmatter
+            .in_reply_to
+            .as_deref()
+            .is_some_and(|v| v.contains("server-only@fixture.example")));
+        let fwd = draft_from_message_on(&d, "work", DraftKind::Forward, &hit).expect("fwd");
+        assert!(parsed(&fwd.path)
+            .frontmatter
+            .attachments
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[test]
+    fn an_editor_save_publishes_draft_changed_and_bumps_the_row() {
+        let (d, f, rx) = fixture_with_events();
+        let offsite = draft_path_on(&d, "work", "offsite-note").expect("path");
+        let launch = open_in_editor(&f, &offsite.path);
+        assert_eq!(launch.pid, None, "the fixture spawns nothing");
+        assert_eq!(launch.source, crate::editor::EditorSource::Env);
+        assert_eq!(launch.editor, format!("zed --wait {}", offsite.path));
+        let opens = f.editor_opens();
+        assert_eq!(opens.len(), 1);
+        assert_eq!(opens[0].path, offsite.path);
+        assert_eq!(opens[0].command, ["zed", "--wait", offsite.path.as_str()]);
+        assert!(drained(&rx).is_empty(), "opening publishes nothing");
+
+        f.simulate("editor_save").expect("saved");
+        let events = drained(&rx);
+        assert_eq!(events.len(), 1);
+        let (kind, payload) = &events[0];
+        assert_eq!(kind, "draft.changed");
+        assert_eq!(
+            (&payload["account"], &payload["id"], &payload["path"]),
+            (&json!("work"), &json!("offsite-note"), &json!(offsite.path))
+        );
+        let text = std::fs::read_to_string(&offsite.path).expect("file");
+        assert!(text.trim_end().ends_with(crate::fixture::EDITOR_SAVE_LINE));
+        match list_messages_on(&d, "work", "drafts").expect("drafts") {
+            MessageList::Drafts { listing, .. } => {
+                assert_eq!(listing.drafts[0].id, "offsite-note", "the save bumped it")
+            }
+            other => panic!("expected drafts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approve_refuses_an_invalid_draft_with_its_payload_and_goes_on() {
+        let (d, f, rx) = fixture_with_events();
+        let angebot = draft_path_on(&d, "work", "angebot-antwort").expect("path");
+        open_in_editor(&f, &angebot.path);
+        f.simulate("editor_invalid").expect("broken");
+        let events = drained(&rx);
+        assert_eq!(events[0].0, "draft.invalid");
+        assert_eq!(events[0].1["id"], "angebot-antwort");
+
+        let ids = ["angebot-antwort", "offsite-note", "missing"].map(String::from);
+        let batch = draft_approve_on(&d, "work", &ids).expect("batch");
+        assert_eq!(batch.done.len(), 1);
+        assert_eq!(
+            (batch.done[0].id.as_str(), batch.done[0].status.as_str()),
+            ("offsite-note", "approved")
+        );
+        let offsite = parsed(&batch.done[0].path);
+        assert_eq!(offsite.frontmatter.status.to_string(), "approved");
+        assert_eq!(batch.failed.len(), 2);
+        let refused = &batch.failed[0];
+        assert_eq!(refused.id, "angebot-antwort");
+        assert!(matches!(
+            refused.error,
+            GuiError::Protocol {
+                code: Some(-32010),
+                ..
+            }
+        ));
+        let invalid = refused.invalid.as_ref().expect("the validation payload");
+        assert_eq!(invalid.path, angebot.path);
+        assert!(!invalid.diagnostics[0].message.is_empty());
+        assert!(!invalid.diagnostics[0].message.contains("-32010"));
+        assert_eq!(batch.failed[1].id, "missing");
+        assert!(batch.failed[1].invalid.is_none());
+        let value = serde_json::to_value(&batch).expect("json");
+        assert!(
+            value["failed"][1].get("invalid").is_none(),
+            "absent, not null"
+        );
+
+        let demoted = draft_demote_on(&d, "work", &["offsite-note".to_string()]).expect("d");
+        assert_eq!(demoted.done[0].status, "draft");
+        assert!(matches!(
+            draft_approve_on(&d, "nobody", &ids),
+            Err(GuiError::NotFound {
+                code: Some(-32005),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn set_recipients_rewrites_the_header_and_keeps_the_body() {
+        let (d, _f, rx) = fixture_with_events();
+        let angebot = draft_path_on(&d, "work", "angebot-antwort").expect("path");
+        let body_of = |text: &str| text.splitn(3, "---\n").nth(2).map(str::to_string);
+        let before = std::fs::read_to_string(&angebot.path).expect("file");
+        let wizard = headers("a@example.com, b@example.com,", "c@example.com", "");
+        let location =
+            draft_set_recipients_on(&d, "work", "angebot-antwort", &wizard, true).expect("set");
+        assert_eq!(location.path, angebot.path);
+        let after = std::fs::read_to_string(&angebot.path).expect("file");
+        assert_eq!(body_of(&after), body_of(&before), "the body is untouched");
+        let draft = parsed(&angebot.path);
+        assert_eq!(
+            draft.frontmatter.to.as_deref(),
+            Some("a@example.com, b@example.com")
+        );
+        assert_eq!(draft.frontmatter.cc.as_deref(), Some("c@example.com"));
+        assert_eq!(
+            draft.frontmatter.subject, "Re: Angebot Dachsanierung",
+            "kept"
+        );
+        let events = drained(&rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "draft.changed");
+        assert_eq!(events[0].1["to"], "a@example.com, b@example.com");
+
+        draft_set_recipients_on(
+            &d,
+            "work",
+            "angebot-antwort",
+            &headers("a@example.com", "", "Neu"),
+            false,
+        )
+        .expect("set");
+        let draft = parsed(&angebot.path);
+        assert_eq!(draft.frontmatter.subject, "Neu");
+        assert_eq!(draft.frontmatter.cc, None);
+        assert!(matches!(
+            draft_set_recipients_on(&d, "work", "missing", &wizard, true),
+            Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_preview_and_signatures_answer_from_the_files() {
+        let (d, _f) = fixture_door();
+        let offsite = draft_validate_on(&d, "work", "offsite-note").expect("validate");
+        assert_eq!(offsite.reports.len(), 1);
+        assert!(!offsite.reports[0].valid);
+        assert!(offsite.reports[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("No recipients")));
+        let preview = draft_preview_on(&d, "work", "angebot-antwort").expect("preview");
+        assert_eq!(preview.to.as_deref(), Some("robin@example.com"));
+        assert_eq!(preview.subject, "Re: Angebot Dachsanierung");
+        assert!(preview.body.contains("Angebot") && preview.valid && !preview.body_truncated);
+        assert!(matches!(
+            draft_preview_on(&d, "work", "missing"),
+            Err(GuiError::NotFound { .. })
+        ));
+        let signatures = signature_list_on(&d, "work").expect("signatures");
+        assert_eq!(signatures.names, ["short", "work"]);
+        assert_eq!(signatures.default.as_deref(), Some("work"));
+        assert_eq!(signature_list_on(&d, "home").expect("home").default, None);
     }
 
     #[test]
