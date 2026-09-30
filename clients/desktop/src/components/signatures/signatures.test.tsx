@@ -200,7 +200,8 @@ describe("the new-draft wizard's signature select", () => {
     mock.signatures.defaults.work = "short";
     act(() => emitEnvelope("signature.changed", { name: "fresh", path: signaturePath("fresh") }));
     await waitFor(() => expect(options(select)).toEqual(["fresh", "short (default)", "work", "none"]));
-    expect(select.value).toBe("short");
+    // The options render first, and the effect that follows the listing moves the value one render later.
+    await waitFor(() => expect(select.value).toBe("short"));
   });
 
   it("keeps a pick that is still listed, and falls back to the default when it goes", async () => {
@@ -213,6 +214,6 @@ describe("the new-draft wizard's signature select", () => {
     delete mock.signatures.signatures.short;
     act(() => emitEnvelope("signature.changed", { name: "fresh", path: signaturePath("fresh") }));
     await waitFor(() => expect(options(select)).toEqual(["fresh", "work (default)", "none"]));
-    expect(select.value).toBe("work");
+    await waitFor(() => expect(select.value).toBe("work"));
   });
 });
