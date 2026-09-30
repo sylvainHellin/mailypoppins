@@ -13,6 +13,8 @@ const PREFIXES = new Set(["g", "f", "c", "t", "s"]);
 const LINE_PX = 48;
 
 const MESSAGE_KEYS: Record<string, ActionId> = {
+  r: "reply",
+  e: "open_editor",
   a: "archive",
   d: "delete",
   u: "toggle_read",
@@ -21,7 +23,7 @@ const MESSAGE_KEYS: Record<string, ActionId> = {
 };
 
 const BADGE_TEXT: Record<Badge, string> = {
-  M3: "arrives with compose (M3)",
+  M3: "arrives later in M3",
   M4: "arrives in M4",
   soon: "arrives in the next M1 unit",
   key: "is a key binding",
@@ -46,6 +48,20 @@ function scrollReader(by: number | "top" | "bottom"): void {
   else if (by === "bottom") el.scrollTop = el.scrollHeight;
   else el.scrollTop += by;
 }
+
+/**
+ * The `c` compose family's continuations that act on the cursor row: the
+ * TUI's MESSAGE (`cr`, `ca`, `cf`) and List (`ce`, `cA`, `cD`) keys, from
+ * the list or the reader, never the sidebar. `cn` is global.
+ */
+const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
+  cr: "reply",
+  ca: "reply_all",
+  cf: "forward",
+  ce: "edit_recipients",
+  cA: "approve",
+  cD: "demote",
+};
 
 /** Tab cycles panes only from a pane (or nothing); elsewhere it is the browser's. */
 function tabIsOurs(target: EventTarget | null): boolean {
@@ -133,7 +149,13 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("quick_sync");
           case "sS":
             return run("full_sync");
+          case "cn":
+            return run("new_draft");
           default:
+            if (COMPOSE_ROW_KEYS[combo]) {
+              if (s.focus !== "sidebar") run(COMPOSE_ROW_KEYS[combo]);
+              return;
+            }
             return notice(combo);
         }
       }

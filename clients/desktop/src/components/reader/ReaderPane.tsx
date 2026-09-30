@@ -1,31 +1,53 @@
-import { FileText } from "lucide-react";
+import { Cloud, FileText, Forward, Reply, ReplyAll } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DraftPreview } from "@/components/compose/DraftPreview";
 import { ReaderBody } from "@/components/reader/ReaderBody";
 import { ReaderHeader } from "@/components/reader/ReaderHeader";
 import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
 import { READER_SCROLL_ID } from "@/app/actions";
+import * as compose from "@/app/compose";
 import { useAppState, useDispatch } from "@/app/store";
-import { isStale, readerKey } from "@/app/state";
+import { filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
 
-function DraftSummary({ id }: { id: string }) {
-  const s = useAppState();
-  const list = s.messages.data;
-  const d = list?.kind === "drafts" ? list.listing.drafts.find((x) => x.id === id) : undefined;
-  if (!d) return null;
+/**
+ * A server-only search hit: the store holds no row, so there is no body to
+ * show, and a reply or a forward is built from the hit's own headers.
+ */
+function ServerHitSummary({ hit }: { hit: SearchHit }) {
+  const dispatch = useDispatch();
+  const src = hit.source ? { kind: "hit" as const, account: hit.account, message: hit.source } : null;
   return (
-    <div className="flex flex-col gap-3 px-5 py-4 text-sm">
-      <h2 className="text-lg font-semibold">{d.subject || "(no subject)"}</h2>
+    <article aria-label={hit.subject || "(no subject)"} className="flex flex-col gap-3 px-5 py-4 text-sm">
+      <div role="toolbar" aria-label="Message actions" className="flex flex-wrap items-center gap-1">
+        <Button size="sm" variant="ghost" title="Reply (r)" disabled={!src} onClick={() => compose.reply(src, false, dispatch)}>
+          <Reply aria-hidden="true" />
+          Reply
+        </Button>
+        <Button size="sm" variant="ghost" title="Reply all (ca)" disabled={!src} onClick={() => compose.reply(src, true, dispatch)}>
+          <ReplyAll aria-hidden="true" />
+          Reply all
+        </Button>
+        <Button size="sm" variant="ghost" title="Forward (cf)" disabled={!src} onClick={() => compose.forward(src, dispatch)}>
+          <Forward aria-hidden="true" />
+          Forward
+        </Button>
+      </div>
+      <h2 className="text-lg font-semibold break-words">{hit.subject || "(no subject)"}</h2>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-        <dt className="text-muted-foreground">To</dt>
-        <dd>{d.to ?? "(no recipient)"}</dd>
-        <dt className="text-muted-foreground">Status</dt>
-        <dd>{d.ready ? "ready to send" : d.valid ? "draft, not ready" : "does not parse"}</dd>
-        <dt className="text-muted-foreground">File</dt>
-        <dd className="font-mono text-xs break-all">{d.path}</dd>
+        <dt className="text-muted-foreground">From</dt>
+        <dd className="break-words">{hit.from || "(no sender)"}</dd>
+        <dt className="text-muted-foreground">Date</dt>
+        <dd>{hit.date_display || "(no date)"}</dd>
+        <dt className="text-muted-foreground">Mailbox</dt>
+        <dd>{hit.mailbox}</dd>
       </dl>
-      <p className="text-muted-foreground">Drafts open in the editor with compose (M3).</p>
-    </div>
+      <p className="flex items-center gap-2 text-muted-foreground">
+        <Cloud aria-hidden="true" className="size-4" />
+        This message is on the server only; the store has no copy to show. A reply or a forward quotes it with no attachments.
+      </p>
+    </article>
   );
 }
 
@@ -33,6 +55,8 @@ export function ReaderPane() {
   const s = useAppState();
   const dispatch = useDispatch();
   const { account, message, draft } = s.selection;
+  const draftRow = draft ? filteredDrafts(s.messages.data, "").find((d) => d.id === draft) : undefined;
+  const serverHit = s.search && s.selection.hit ? s.search.hits.find((h) => h.key === s.selection.hit) : undefined;
   const key = account && message ? readerKey(account, message.row_id) : null;
   const ready = key !== null && s.reader.key === key && s.reader.meta !== null;
   const loading = key !== null && (!ready || isStale(s.reader.load)) && !s.reader.load.error;
@@ -52,8 +76,10 @@ export function ReaderPane() {
         aria-busy={loading}
         className="flex min-h-0 flex-1 flex-col overflow-y-auto outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
       >
-        {draft ? (
-          <DraftSummary id={draft} />
+        {draft && account ? (
+          draftRow ? <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} /> : null
+        ) : serverHit ? (
+          <ServerHitSummary hit={serverHit} />
         ) : !message ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
             <FileText aria-hidden="true" className="size-6" />

@@ -6,7 +6,7 @@
 
 import { useMemo, type Dispatch } from "react";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type MovedTo, type MutationBatch, type SyncMode } from "@/lib/gui-types";
+import { asGuiError, type DraftStatusFailure, type MovedTo, type MutationBatch, type SyncMode } from "@/lib/gui-types";
 import type { Action } from "@/app/reducer";
 import { useDispatch } from "@/app/store";
 import type { MessageTarget, MutationKind, Target } from "@/app/state";
@@ -24,6 +24,8 @@ export type Mutations = {
   setRead(rows: MessageTarget[], read: boolean): Promise<MutationOutcome>;
   /** Discard local drafts; an approved draft is refused and comes back. */
   discardDrafts(account: string, ids: string[]): Promise<MutationOutcome>;
+  /** Approve drafts, or put them back to draft; a file that does not parse is refused alone. */
+  setDraftStatus(account: string, ids: string[], approve: boolean): Promise<MutationOutcome>;
   cancelHold(operation_id: string): Promise<void>;
   sync(account: string, mode: SyncMode): Promise<void>;
 };
@@ -105,6 +107,41 @@ async function discard(dispatch: Dispatch<Action>, account: string, ids: string[
   }
 }
 
+/**
+ * Why a draft's approve or demote was refused. A file that does not parse
+ * (`-32010`) says where and why, from the `draft.invalid` payload.
+ */
+export function statusRefusal(f: DraftStatusFailure): string {
+  if (!f.invalid) return f.error.message;
+  const why = f.invalid.diagnostics
+    .map((d) => (d.line !== null ? `line ${d.line}: ${d.message}` : d.message))
+    .join("; ");
+  return `does not parse: ${why} (${f.invalid.path})`;
+}
+
+async function draftStatus(dispatch: Dispatch<Action>, account: string, ids: string[], approve: boolean): Promise<MutationOutcome> {
+  if (ids.length === 0) return { done: 0, failed: 0 };
+  const kind: MutationKind = approve ? "approve" : "demote";
+  const batch = nextBatch++;
+  const targets: Target[] = ids.map((draft) => ({ account, draft }));
+  dispatch({ type: "mutation_apply", batch, kind, targets });
+  try {
+    const answer = await (approve ? cmd.draftApprove : cmd.draftDemote)(account, ids);
+    dispatch({
+      type: "mutation_settled",
+      batch,
+      kind,
+      account,
+      done: answer.done.map((d) => ({ account, draft: d.id })),
+      failed: answer.failed.map((f) => ({ target: { account, draft: f.id }, reason: statusRefusal(f) })),
+    });
+    return { done: answer.done.length, failed: answer.failed.length };
+  } catch (e: unknown) {
+    dispatch({ type: "mutation_failed", batch, kind, account, targets, error: asGuiError(e) });
+    return { done: 0, failed: ids.length };
+  }
+}
+
 export function createMutations(dispatch: Dispatch<Action>): Mutations {
   return {
     archive: (rows) => mutateRows(dispatch, "archive", rows, cmd.messageArchive),
@@ -116,6 +153,7 @@ export function createMutations(dispatch: Dispatch<Action>): Mutations {
     setRead: (rows, read) =>
       mutateRows(dispatch, "read", rows, (a, ids) => cmd.messageSetRead(a, ids, read), { value: read }),
     discardDrafts: (account, ids) => discard(dispatch, account, ids),
+    setDraftStatus: (account, ids, approve) => draftStatus(dispatch, account, ids, approve),
     async cancelHold(operation_id) {
       dispatch({ type: "hold_cancel_requested", operation_id });
       try {

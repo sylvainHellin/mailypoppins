@@ -133,7 +133,7 @@ describe("server search", () => {
     expect(status()).toHaveTextContent("2 results so far");
 
     const serverOnly = within(list).getByRole("option", { name: /Server-only match/ });
-    expect(serverOnly).toHaveAttribute("aria-disabled", "true");
+    expect(serverOnly).toHaveAccessibleName(/on the server only/);
     expect(serverOnly.querySelector('[data-slot="mailbox-badge"]')).toHaveTextContent("Archive");
 
     event("operation.finished", {

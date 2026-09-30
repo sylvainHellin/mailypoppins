@@ -4,8 +4,10 @@
 import { useCallback, useRef, type Dispatch, type RefObject } from "react";
 import { listWidthFor } from "@/app/layout";
 import { createMutations } from "@/app/mutations";
+import * as compose from "@/app/compose";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
+  draftsShown,
   liveHolds,
   LIST_WIDTH_MIN,
   LIST_WIDTH_STEP,
@@ -75,7 +77,7 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "prev_message":
       return dispatch({ type: "move_selection", to: -1, relative: true });
     case "open_message":
-      if (s.selection.message || s.selection.draft) dispatch({ type: "focus", pane: "reader" });
+      if (s.selection.message || s.selection.draft || s.selection.hit) dispatch({ type: "focus", pane: "reader" });
       openedRead(s, dispatch);
       return;
     case "select_mailbox":
@@ -187,6 +189,24 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     }
     case "dismiss_all_notices":
       return dispatch({ type: "dismiss_all_notices" });
+    case "new_draft":
+      return compose.newDraft(s, dispatch);
+    case "reply":
+    case "reply_all":
+      return compose.reply(compose.cursorSource(s), id === "reply_all", dispatch);
+    case "forward":
+      return compose.forward(compose.cursorSource(s), dispatch);
+    case "open_editor":
+      // The TUI's `e`: a draft opens in the editor; a received message opens
+      // read-only, which in the desktop client is the reader.
+      if (draftsShown(s) && s.selection.draft) return void compose.editDraft(s, dispatch);
+      if (s.selection.message) return runAction("open_message", s, dispatch, list);
+      return;
+    case "edit_recipients":
+      return void compose.editRecipients(s, dispatch);
+    case "approve":
+    case "demote":
+      return compose.setStatus(s, dispatch, id === "approve");
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;
@@ -352,6 +372,10 @@ export function runDialog(dialog: MutationDialog, dispatch: Dispatch<Action>, de
   dispatch({ type: "overlay", overlay: null });
   if (dialog.kind === "move") {
     if (destination) void m.move(dialog.targets, destination);
+  } else if (dialog.kind === "approve" || dialog.kind === "demote") {
+    const byAccount = new Map<string, string[]>();
+    for (const t of dialog.targets) if ("draft" in t) byAccount.set(t.account, [...(byAccount.get(t.account) ?? []), t.draft]);
+    for (const [account, ids] of byAccount) void m.setDraftStatus(account, ids, dialog.kind === "approve");
   } else if (dialog.kind === "archive") {
     void m.archive(messageTargets(dialog.targets));
   } else {

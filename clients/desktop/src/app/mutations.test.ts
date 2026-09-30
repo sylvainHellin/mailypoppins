@@ -141,3 +141,32 @@ describe("holds and syncs", () => {
     expect(get().activity[0]).toMatchObject({ kind: "sync_failed", account: "nobody" });
   });
 });
+
+describe("draft status (approve, demote)", () => {
+  const statuses = (s: AppState) =>
+    (s.messages.data as Extract<MessageList, { kind: "drafts" }>).listing.drafts.map((d) => `${d.id}:${d.status}`);
+
+  it("changes the status at once, as a pending status axis, and keeps it once confirmed", async () => {
+    const { get, m } = await store("drafts");
+    const done = m.setDraftStatus("work", ["angebot-antwort"], true);
+    expect(statuses(get())).toEqual(["angebot-antwort:approved", "offsite-note:draft"]);
+    expect(get().pending["work#draft:angebot-antwort"]?.status).toMatchObject({ value: "approved", prev: "draft" });
+    expect(await done).toEqual({ done: 1, failed: 0 });
+    expect(get().pending).toEqual({});
+    expect(statuses(get())).toEqual(["angebot-antwort:approved", "offsite-note:draft"]);
+    expect(get().activity.map((n) => n.text)).toEqual(["Approved 1 draft"]);
+  });
+
+  it("puts the status back when the command throws, and a list answer from before shows the pending value", async () => {
+    const { get, dispatch, m } = await store("drafts");
+    const before = await cmd.listMessages("work", "drafts");
+    mock.failing.set("draft_demote", { kind: "timeout", message: "timed out" });
+    dispatch({ type: "mutation_apply", batch: 900, kind: "approve", targets: [{ account: "work", draft: "offsite-note" }] });
+    dispatch({ type: "messages_loaded", key: listKey("work", "drafts"), gen: get().messages.gen, list: before });
+    expect(statuses(get())).toEqual(["angebot-antwort:draft", "offsite-note:approved"]);
+    expect(await m.setDraftStatus("work", ["offsite-note"], false)).toEqual({ done: 0, failed: 1 });
+    // The demote took the axis over and kept the approve's saved `draft`.
+    expect(statuses(get())).toEqual(["angebot-antwort:draft", "offsite-note:draft"]);
+    expect(get().activity[get().activity.length - 1]?.text).toBe("Could not put 1 draft back to draft; it keeps its status");
+  });
+});

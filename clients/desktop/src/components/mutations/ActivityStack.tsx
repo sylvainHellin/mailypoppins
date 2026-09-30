@@ -19,7 +19,13 @@ export const HOLD_END_MS = 3000;
 const ROWS_SHOWN = 5;
 
 /** Kinds that report a failure: they stay until dismissed and are alerts. */
-export const FAILURES: ReadonlySet<ActivityNotice["kind"]> = new Set(["failed", "rolled_back", "hold_cancel_failed", "sync_failed"]);
+export const FAILURES: ReadonlySet<ActivityNotice["kind"]> = new Set([
+  "failed",
+  "rolled_back",
+  "hold_cancel_failed",
+  "sync_failed",
+  "compose_failed",
+]);
 
 export type NoticeToastProps = { notice: ActivityNotice; onDismiss: (id: number) => void };
 

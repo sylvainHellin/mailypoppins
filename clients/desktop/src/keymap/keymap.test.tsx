@@ -106,8 +106,8 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    await user.keyboard("cn");
-    expect(await screen.findByText(/New draft arrives with compose \(M3\)/)).toBeInTheDocument();
+    await user.keyboard("x");
+    expect(await screen.findByText(/Send current draft \(approve \+ send\) arrives later in M3/)).toBeInTheDocument();
   });
 });
 
@@ -272,5 +272,201 @@ describe("mutation keys (the TUI's)", () => {
     await user.keyboard("gm");
     await user.keyboard("*");
     expect(callsOf("message_set_flag")).toEqual([]);
+  });
+});
+
+/** A server-only hit, as `message.server_hit` carries it. */
+function serverOnlyHit(subject: string) {
+  return {
+    account: "work",
+    mailbox: "Archive",
+    message_id: "<server-only@fixture.example>",
+    row_id: null,
+    selector: null,
+    from: "Old Friend <old@example.com>",
+    to: "me@example.com",
+    cc: "cc@example.com",
+    reply_to: "reply@example.com",
+    bcc: null,
+    subject,
+    date_display: "Mon, 3 Mar 2025 09:00:00 +0100",
+    date_sort: "2025-03-03T08:00:00",
+    flags: { seen: true, answered: false, forwarded: false, flagged: false },
+    has_attachments: false,
+    is_invite: false,
+    body_text: "The old thread.",
+    html_body: null,
+  };
+}
+
+async function drafts(user: ReturnType<typeof renderApp>["user"]) {
+  await user.keyboard("2");
+  await screen.findByRole("listbox", { name: "Drafts messages" });
+}
+
+describe("compose keys (the TUI's)", () => {
+  it("cn opens the new-draft wizard for the shown account", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("cn");
+    expect(await screen.findByRole("dialog", { name: "New draft" })).toBeInTheDocument();
+    await waitFor(() => expect(callsOf("signature_list")).toEqual([{ account: "work" }]));
+  });
+
+  it("r and cr reply to the cursor row and open the draft in the editor, ca replies to all", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("r");
+    await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/fixture-draft-1.md"]));
+    await user.keyboard("cr");
+    await user.keyboard("ca");
+    await waitFor(() =>
+      expect(callsOf("draft_reply")).toEqual([
+        { account: "work", row_id: 1001, all: false, headers: null },
+        { account: "work", row_id: 1001, all: false, headers: null },
+        { account: "work", row_id: 1001, all: true, headers: null },
+      ]),
+    );
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(3));
+    expect(callsOf("draft_create")).toEqual([]);
+  });
+
+  it("cf on a stored message asks for the recipients first, with the forward's subject", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jj");
+    await user.keyboard("cf");
+    const dialog = await screen.findByRole("dialog", { name: "Forward" });
+    expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: Angebot Dachsanierung");
+    expect(callsOf("draft_forward")).toEqual([]);
+    await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
+    await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
+    await waitFor(() =>
+      expect(callsOf("draft_forward")).toEqual([
+        { account: "work", row_id: 1002, headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" } },
+      ]),
+    );
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
+  });
+
+  it("on a server-only hit, r, ca and cf build the draft from the hit's own headers", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
+    await user.keyboard("thread{Shift>}{Enter}{/Shift}");
+    await waitFor(() => expect(callsOf("search_server_start")).toHaveLength(1));
+    act(() => emitEnvelope("message.server_hit", { operation_id: "op-1", hit: serverOnlyHit("The old thread") }));
+    const hit = await screen.findByRole("option", { name: /The old thread/ });
+    await user.click(hit);
+    expect(hit).toHaveAttribute("aria-selected", "true");
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    expect(await within(reader).findByText(/This message is on the server only/)).toBeInTheDocument();
+    await user.keyboard("r");
+    await user.keyboard("ca");
+    await user.keyboard("cf");
+    const message = {
+      from: "Old Friend <old@example.com>",
+      to: "me@example.com",
+      cc: "cc@example.com",
+      reply_to: "reply@example.com",
+      subject: "The old thread",
+      message_id: "<server-only@fixture.example>",
+      date_display: "Mon, 3 Mar 2025 09:00:00 +0100",
+      body_text: "The old thread.",
+      html_body: null,
+    };
+    await waitFor(() =>
+      expect(callsOf("draft_from_message")).toEqual([
+        { account: "work", kind: "reply", message },
+        { account: "work", kind: "reply_all", message },
+        { account: "work", kind: "forward", message },
+      ]),
+    );
+    expect(callsOf("draft_reply")).toEqual([]);
+    expect(callsOf("draft_forward")).toEqual([]);
+    expect(screen.queryByRole("dialog", { name: "Forward" })).toBeNull();
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(3));
+  });
+
+  it("e on a draft resolves its path and opens the editor; on a message it opens the reader", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("e");
+    const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
+    await waitFor(() => expect(pane()).toBe("reader"));
+    expect(callsOf("draft_path")).toEqual([]);
+    expect(mock.editorOpens).toEqual([]);
+
+    await user.keyboard("{Escape}");
+    await drafts(user);
+    await user.keyboard("j");
+    await user.keyboard("e");
+    await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/angebot-antwort.md"]));
+    expect(callsOf("draft_path")).toEqual([{ account: "work", id: "angebot-antwort" }]);
+  });
+
+  it("ce, cA and cD act in Drafts only, and say so elsewhere", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("cA");
+    expect(await screen.findByText("Approve (c A) is only available in Drafts")).toBeInTheDocument();
+    await user.keyboard("ce");
+    expect(await screen.findByText("Edit recipients (c e) is only available in Drafts")).toBeInTheDocument();
+    expect(callsOf("draft_approve")).toEqual([]);
+    expect(callsOf("draft_preview")).toEqual([]);
+  });
+
+  it("cA approves the cursor draft and cD puts it back", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    await user.keyboard("cA");
+    await waitFor(() => expect(callsOf("draft_approve")).toEqual([{ account: "work", ids: ["angebot-antwort"] }]));
+    const row = () => document.querySelector('[data-draft-id="angebot-antwort"]');
+    await waitFor(() => expect(row()?.querySelector('[data-slot="draft-status"]')).toHaveTextContent("approved"));
+    await user.keyboard("cD");
+    await waitFor(() => expect(callsOf("draft_demote")).toEqual([{ account: "work", ids: ["angebot-antwort"] }]));
+    await waitFor(() => expect(row()?.querySelector('[data-slot="draft-status"]')).toHaveTextContent("draft"));
+  });
+
+  it("cA over marked drafts asks first, with the TUI's words, and approves the batch", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    await user.keyboard("{Control>}a{/Control}");
+    await user.keyboard("cA");
+    expect(await screen.findByRole("dialog", { name: "Approve 2 drafts?" })).toBeInTheDocument();
+    expect(callsOf("draft_approve")).toEqual([]);
+    await user.keyboard("y");
+    await waitFor(() =>
+      expect(callsOf("draft_approve")).toEqual([{ account: "work", ids: ["angebot-antwort", "offsite-note"] }]),
+    );
+  });
+
+  it("ce opens the recipients dialog filled from the draft file", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    await user.keyboard("ce");
+    const dialog = await screen.findByRole("dialog", { name: "Edit recipients" });
+    expect(within(dialog).getByLabelText("To")).toHaveValue("robin@example.com");
+    expect(within(dialog).getByLabelText("Subject")).toHaveValue("Re: Angebot Dachsanierung");
+    expect(callsOf("draft_preview")).toContainEqual({ account: "work", id: "angebot-antwort" });
+  });
+
+  it("the compose row keys do nothing from the sidebar", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("gm");
+    await user.keyboard("cr");
+    await user.keyboard("r");
+    expect(callsOf("draft_reply")).toEqual([]);
   });
 });

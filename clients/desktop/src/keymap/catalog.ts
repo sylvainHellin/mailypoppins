@@ -52,7 +52,15 @@ export type ActionId =
   | "dismiss_notice"
   | "dismiss_all_notices"
   | "quick_sync"
-  | "full_sync";
+  | "full_sync"
+  | "new_draft"
+  | "reply"
+  | "reply_all"
+  | "forward"
+  | "open_editor"
+  | "edit_recipients"
+  | "approve"
+  | "demote";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -75,7 +83,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Toggle activity log": { badge: "M4" },
   "Send current draft (approve + send)": { badge: "M3" },
   "Search all mail (sender, subject, body)": { id: "search_server" },
-  "New draft": { badge: "M3" },
+  "New draft": { id: "new_draft" },
   "Manage signatures": { badge: "M4" },
   "Go to mailboxes (sidebar)": { id: "focus_sidebar" },
   "Switch account": { id: "next_account" },
@@ -88,10 +96,10 @@ const BY_ACTION: Record<string, Binding> = {
   "Switch to Contacts view": { badge: "M4" },
   "Switch to Calendar view": { badge: "M4" },
   "Next / previous message": { id: "next_message" },
-  "Open in editor (mail read-only)": { id: "open_message" },
-  Reply: { badge: "M3" },
-  "Reply all": { badge: "M3" },
-  Forward: { badge: "M3" },
+  "Open in editor (mail read-only)": { id: "open_editor" },
+  Reply: { id: "reply" },
+  "Reply all": { id: "reply_all" },
+  Forward: { id: "forward" },
   Archive: { id: "archive" },
   Delete: { id: "delete" },
   "Toggle read/unread": { id: "toggle_read" },
@@ -114,10 +122,10 @@ const BY_ACTION: Record<string, Binding> = {
   "Jump to date (e.g. last week)": { badge: "soon" },
   "Toggle selection": { id: "mark_toggle" },
   "Select all visible": { id: "mark_all" },
-  "Edit recipients (Drafts only)": { badge: "M3" },
+  "Edit recipients (Drafts only)": { id: "edit_recipients" },
   "Attach file to draft (Drafts only)": { badge: "M3" },
-  "Approve draft (Drafts only)": { badge: "M3" },
-  "Unapprove, back to draft (Drafts only)": { badge: "M3" },
+  "Approve draft (Drafts only)": { id: "approve" },
+  "Unapprove, back to draft (Drafts only)": { id: "demote" },
   "Send all approved drafts (Drafts only)": { badge: "M3" },
   "Show flagged only (toggle)": { badge: "soon" },
   "Scroll headers": { badge: "key" },
@@ -145,6 +153,9 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Copy the Markdown rendition path": { badge: "later" },
     // The Tauri layer has no `message.fetch` command yet.
     "Fetch a server-only hit into the store": { badge: "later" },
+    // The overlay's own `w`: in the desktop client a hit is a list row, so
+    // `cf` forwards it (MESSAGE).
+    Forward: { badge: "later" },
   },
 };
 

@@ -9,6 +9,7 @@ import { KeyHelp } from "@/components/palette/KeyHelp";
 import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDialog";
 import { ConfirmMutationDialog } from "@/components/mutations/ConfirmMutationDialog";
 import { MovePicker } from "@/components/mutations/MovePicker";
+import { ComposeWizard } from "@/components/compose/ComposeWizard";
 import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
@@ -86,6 +87,7 @@ export function AppShell() {
         onOpenChange={close}
         onPick={(slug) => s.dialog && runDialog(s.dialog, dispatch, slug)}
       />
+      <ComposeWizard dialog={s.overlay === "compose" ? s.composeDialog : null} onOpenChange={close} />
     </>
   );
 }

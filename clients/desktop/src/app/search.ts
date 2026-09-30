@@ -24,6 +24,7 @@ export function localHit(account: string, h: LocalSearchHit): SearchHit {
     has_attachments: h.has_attachments,
     is_invite: h.is_invite,
     origin: "local",
+    source: null,
   };
 }
 
@@ -43,7 +44,23 @@ export function serverHit(h: ServerSearchHit): SearchHit {
     has_attachments: h.has_attachments,
     is_invite: h.is_invite,
     origin: "server",
+    source: {
+      from: h.from ?? "",
+      to: h.to ?? "",
+      cc: h.cc,
+      reply_to: h.reply_to,
+      subject: h.subject ?? "",
+      message_id: h.message_id,
+      date_display: h.date_display ?? "",
+      body_text: h.body_text ?? "",
+      html_body: h.html_body,
+    },
   };
+}
+
+/** A hit the reader can open: the store holds a row for it. */
+export function isOpenable(h: SearchHit): boolean {
+  return h.row_id !== null && h.selector !== null && h.message_id !== null;
 }
 
 /** The hits the reader can open: those the store holds a row for. */

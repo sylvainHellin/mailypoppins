@@ -49,6 +49,62 @@ describe("live events end to end", () => {
   });
 });
 
+describe("draft events and the editor", () => {
+  const banner = () => document.querySelector('[data-slot="editing-banner"]') as HTMLElement;
+
+  it("a draft.changed from the editor re-reads the Drafts list and keeps the editing banner", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("j");
+    await user.keyboard("e");
+    await waitFor(() => expect(banner()).toHaveTextContent("Editing angebot-antwort.md in code --wait"));
+    const before = listCalls();
+    // What the watcher publishes for a save: the row as it now reads.
+    mock.drafts.work.drafts[0].subject = "Re: Angebot Dachsanierung (v2)";
+    act(() =>
+      emitEnvelope("draft.changed", {
+        account: "work",
+        id: "angebot-antwort",
+        path: "/fixture/work/drafts/angebot-antwort.md",
+        to: "robin@example.com",
+        subject: "Re: Angebot Dachsanierung (v2)",
+        status: "draft",
+        valid: true,
+        ready: true,
+      }),
+    );
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+    expect(await screen.findByRole("option", { name: /Angebot Dachsanierung \(v2\)/ })).toBeInTheDocument();
+    expect(banner()).toHaveTextContent("Editing angebot-antwort.md");
+  });
+
+  it("a draft.invalid from the editor turns the row invalid and keeps it selected", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("j");
+    await user.keyboard("e");
+    await waitFor(() => expect(banner()).toHaveTextContent("Editing angebot-antwort.md"));
+    const listing = mock.drafts.work;
+    listing.drafts = listing.drafts.filter((d) => d.id !== "angebot-antwort");
+    listing.skipped = [{ path: "/fixture/work/drafts/angebot-antwort.md", error: "line 1: did not find expected key" }];
+    act(() =>
+      emitEnvelope("draft.invalid", {
+        account: "work",
+        id: "angebot-antwort",
+        path: "/fixture/work/drafts/angebot-antwort.md",
+        diagnostics: [{ line: 1, message: "did not find expected key" }],
+      }),
+    );
+    const row = await screen.findByRole("option", { name: /invalid: line 1: did not find expected key/ });
+    expect(row).toHaveAttribute("aria-selected", "true");
+    expect(banner()).toHaveTextContent("Editing angebot-antwort.md");
+  });
+});
+
 /** The app with a probe that reads the model and holds the bound mutations. */
 function renderProbed() {
   resetMock();

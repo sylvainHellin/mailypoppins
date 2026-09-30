@@ -1,7 +1,7 @@
 // The desktop shell's model: connection, bootstrap, the fetched lists, the
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
-import type { Bootstrap, DraftEntry, HoldStatus, MessageFlags, MessageListRow } from "@/protocol/types";
+import type { Bootstrap, DraftEntry, DraftMessage, HoldStatus, MessageFlags, MessageListRow } from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
@@ -62,6 +62,8 @@ export type Selection = {
   message: MessageRef | null;
   /** A draft id when the Drafts mailbox is selected. */
   draft: string | null;
+  /** The key of a server-only search hit under the cursor, which has no row to open. */
+  hit: string | null;
 };
 
 export type Prefs = {
@@ -78,8 +80,11 @@ export const READER_MIN = 320;
 /** What "Widen list" and "Narrow list" move the splitter by. */
 export const LIST_WIDTH_STEP = 40;
 
-/** `mutation` is the confirmation or the move picker `dialog` describes. */
-export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | null;
+/**
+ * `mutation` is the confirmation or the move picker `dialog` describes;
+ * `compose` is the wizard or the recipients dialog `composeDialog` describes.
+ */
+export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | null;
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
@@ -115,6 +120,11 @@ export type SearchHit = {
   has_attachments: boolean;
   is_invite: boolean;
   origin: "local" | "server";
+  /**
+   * A server hit's headers and bodies under the hit's own names, what
+   * `draft_from_message` builds a reply or a forward from; null for a local hit.
+   */
+  source: DraftMessage | null;
 };
 
 /** What the event stream says about a server search, by operation id. */
@@ -152,8 +162,11 @@ export type SearchState = {
   restore: { selection: Selection; focus: Pane };
 };
 
-/** What a mutation does to a row: leave the list, or change a flag in place. */
-export type MutationKind = "archive" | "delete" | "move" | "flag" | "read" | "discard";
+/**
+ * What a mutation does to a row: leave the list, change a flag in place, or
+ * change a draft's status in place (approve, demote).
+ */
+export type MutationKind = "archive" | "delete" | "move" | "flag" | "read" | "discard" | "approve" | "demote";
 
 /** A message row or a local draft a mutation names. */
 export type Target = { account: string; row_id: number } | { account: string; draft: string };
@@ -202,6 +215,13 @@ export type PendingLeave = {
   counts: CountDelta[];
 };
 
+/** A draft's status change (approve, demote): the status set and the one before. */
+export type PendingStatus = {
+  batch: number;
+  value: string;
+  prev: string | null;
+};
+
 /**
  * One row's optimistic changes, from the moment the user acted until the
  * commands' answers confirm or refuse them. Each axis (the flag, the read
@@ -217,6 +237,8 @@ export type PendingChange = {
   flag: PendingFlag | null;
   read: PendingFlag | null;
   leave: PendingLeave | null;
+  /** A draft's approve or demote. */
+  status: PendingStatus | null;
 };
 
 /** Where a hold stands, from the `send.hold_*` event that last moved it. */
@@ -235,7 +257,8 @@ export type ActivityKind =
   | "rolled_back"
   | "hold_cancelled"
   | "hold_cancel_failed"
-  | "sync_failed";
+  | "sync_failed"
+  | "compose_failed";
 
 /** One line of the activity area, dismissed by `id`. */
 export type ActivityNotice = {
@@ -258,8 +281,31 @@ export const NO_MARKS: Marked = { keys: new Set<string>(), anchor: null };
  * taken when it opens, so what runs is what the dialog named.
  */
 export type MutationDialog =
-  | { kind: "archive" | "delete"; targets: Target[]; title: string; detail: string }
+  | { kind: "archive" | "delete" | "approve" | "demote"; targets: Target[]; title: string; detail: string }
   | { kind: "move"; targets: MessageTarget[]; account: string; source: string | null };
+
+/**
+ * A draft open in the external editor: `opening` until `editor_open`
+ * answers, `editing` once the editor started, `error` when it did not.
+ * The file's saves reach the list through the watcher's `draft.changed`.
+ */
+export type ComposeSession = {
+  account: string;
+  draftId: string;
+  path: string;
+  /** The file name, what the banner calls the draft. */
+  name: string;
+  /** The editor command as it ran, once `editor_open` answered. */
+  editor: string | null;
+  status: "opening" | "editing" | "error";
+  message: string | null;
+};
+
+/** The compose dialogs: the new-draft and forward wizard, and the recipients edit. */
+export type ComposeDialog =
+  | { kind: "new"; account: string }
+  | { kind: "forward"; account: string; row_id: number; subject: string }
+  | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
 
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
@@ -300,6 +346,10 @@ export type AppState = {
   overlay: Overlay;
   /** What the `mutation` overlay shows; null whenever another overlay or none is open. */
   dialog: MutationDialog | null;
+  /** What the `compose` overlay shows; null whenever another overlay or none is open. */
+  composeDialog: ComposeDialog | null;
+  /** Drafts open in the external editor, by `targetKey`. */
+  compose: Record<string, ComposeSession>;
   filter: string;
   notice: string | null;
   lastError: GuiError | null;
@@ -340,7 +390,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     mailboxes: {},
     messages: { ...emptyLoadable<MessageList>(), key: null },
     reader: emptyReader(),
-    selection: { account: null, mailbox: null, message: null, draft: null },
+    selection: { account: null, mailbox: null, message: null, draft: null, hit: null },
     selectionAuto: false,
     search: null,
     sidebarCursor: null,
@@ -352,6 +402,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     prefs,
     overlay: null,
     dialog: null,
+    composeDialog: null,
+    compose: {},
     filter: "",
     notice: null,
     lastError: null,
@@ -430,10 +482,52 @@ export function filteredRows(list: MessageList | null, filter: string): MessageL
   return f ? list.rows.filter((r) => `${r.subject} ${r.from}`.toLowerCase().includes(f)) : list.rows;
 }
 
-export function filteredDrafts(list: MessageList | null, filter: string): DraftEntry[] {
+/**
+ * A row of the Drafts list: a listed draft, or a file the listing skipped
+ * because it does not parse, as an `invalid` row named by its file stem
+ * (the id `draft.invalid` gives it), with why in `diagnostic`.
+ */
+export type DraftItem = DraftEntry & { diagnostic: string | null };
+
+function fileStem(path: string): string {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  return name.replace(/\.md$/i, "");
+}
+
+/** Every row of a Drafts listing: the drafts, then the files that do not parse. */
+export function draftItems(list: MessageList | null): DraftItem[] {
   if (!list || list.kind !== "drafts") return [];
+  const listed = list.listing.drafts.map((d) => ({ ...d, diagnostic: null }));
+  const ids = new Set(listed.map((d) => d.id));
+  const skipped = list.listing.skipped.flatMap((k): DraftItem[] => {
+    const id = fileStem(k.path);
+    if (ids.has(id)) return [];
+    return [
+      {
+        id,
+        selector: `mp://${list.account}/drafts/${id}`,
+        path: k.path,
+        status: "invalid",
+        to: null,
+        cc: null,
+        subject: null,
+        date: null,
+        valid: false,
+        ready: false,
+        diagnostic: k.error,
+      },
+    ];
+  });
+  return [...listed, ...skipped];
+}
+
+export function filteredDrafts(list: MessageList | null, filter: string): DraftItem[] {
+  const all = draftItems(list);
   const f = filter.trim().toLowerCase();
-  return f
-    ? list.listing.drafts.filter((d) => `${d.subject ?? ""} ${d.to ?? ""}`.toLowerCase().includes(f))
-    : list.listing.drafts;
+  return f ? all.filter((d) => `${d.subject ?? ""} ${d.to ?? ""}`.toLowerCase().includes(f)) : all;
+}
+
+/** The Drafts list is shown (not a search over it). */
+export function draftsShown(s: AppState): boolean {
+  return !s.search && s.messages.data?.kind === "drafts";
 }

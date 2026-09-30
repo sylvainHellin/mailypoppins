@@ -108,12 +108,17 @@ function bumpList(s: AppState, keys: Iterable<string | null>): AppState {
   return moved ? { ...s, listGen } : s;
 }
 
-/** The two in-place axes of a row; leaving the list is the third. */
+/** The two in-place axes of a message; leaving the list is the third, a draft's status the fourth. */
 type FlagAxis = "flag" | "read";
-type Axis = FlagAxis | "leave";
+type Axis = FlagAxis | "leave" | "status";
 
-/** The order a rollback puts the axes back in: the row first, then its flags. */
-const AXES: readonly Axis[] = ["leave", "read", "flag"];
+/** The order a rollback puts the axes back in: the row first, then its flags and status. */
+const AXES: readonly Axis[] = ["leave", "status", "read", "flag"];
+
+/** Approve and demote change a draft's status in place. */
+export function changesStatus(kind: MutationKind): boolean {
+  return kind === "approve" || kind === "demote";
+}
 
 function flagAxis(kind: MutationKind): FlagAxis {
   return kind === "flag" ? "flag" : "read";
@@ -167,10 +172,17 @@ const VERB: Record<MutationKind, string> = {
   flag: "Flagged",
   read: "Marked read",
   discard: "Discarded",
+  approve: "Approved",
+  demote: "Put back to draft",
 };
 
+function noun(kind: MutationKind): string {
+  return kind === "discard" || changesStatus(kind) ? "draft" : "message";
+}
+
 function appliedText(s: AppState, kind: MutationKind, account: string, n: number, value: boolean | null, movedTo: MovedTo | null): string {
-  const what = plural(n, kind === "discard" ? "draft" : "message");
+  const what = plural(n, noun(kind));
+  if (kind === "demote") return `Put ${what} back to draft`;
   if (kind === "flag" && value === false) return `Unflagged ${what}`;
   if (kind === "read") return `Marked ${what} ${value === false ? "unread" : "read"}`;
   if (kind === "move" && movedTo) {
@@ -181,8 +193,20 @@ function appliedText(s: AppState, kind: MutationKind, account: string, n: number
 }
 
 function failedText(kind: MutationKind, n: number): string {
-  const what = plural(n, kind === "discard" ? "draft" : "message");
-  const verb = { archive: "archive", delete: "delete", move: "move", flag: "flag", read: "mark", discard: "discard" }[kind];
+  const what = plural(n, noun(kind));
+  const verb = {
+    archive: "archive",
+    delete: "delete",
+    move: "move",
+    flag: "flag",
+    read: "mark",
+    discard: "discard",
+    approve: "approve",
+    demote: "demote",
+  }[kind];
+  const keeps = `${n === 1 ? "it keeps its" : "they keep their"} status`;
+  if (kind === "demote") return `Could not put ${what} back to draft; ${keeps}`;
+  if (kind === "approve") return `Could not approve ${what}; ${keeps}`;
   return `Could not ${verb} ${what}; ${n === 1 ? "it is" : "they are"} back in the list`;
 }
 
@@ -232,7 +256,7 @@ function applyRow(
 
   // Each axis keeps its own saved state and batch. A second change of the
   // same axis restores to before the first; the other axes stay as they are.
-  const base: PendingChange = old ?? { target: t, source, subject: null, flag: null, read: null, leave: null };
+  const base: PendingChange = old ?? { target: t, source, subject: null, flag: null, read: null, leave: null, status: null };
   let entry: PendingChange = { ...base, source, subject: base.subject ?? listRow?.subject ?? hit?.subject ?? null };
   if (leaves(kind)) {
     const prevRow = listRow && s.messages.key ? { key: s.messages.key, row: listRow, index: inList } : null;
@@ -268,7 +292,8 @@ function applyRow(
 
 function applyDraft(s: AppState, batch: number, t: { account: string; draft: string }): AppState {
   const key = targetKey(t);
-  if (s.pending[key]) return s;
+  const old = s.pending[key];
+  if (old?.leave) return s;
   const list = s.messages.data;
   const idx = list?.kind === "drafts" && list.account === t.account ? list.listing.drafts.findIndex((d) => d.id === t.draft) : -1;
   const entry = idx >= 0 && list?.kind === "drafts" ? list.listing.drafts[idx] : null;
@@ -277,9 +302,10 @@ function applyDraft(s: AppState, batch: number, t: { account: string; draft: str
   const change: PendingChange = {
     target: t,
     source,
-    subject: entry?.subject ?? null,
+    subject: old?.subject ?? entry?.subject ?? null,
     flag: null,
     read: null,
+    status: old?.status ?? null,
     leave: {
       batch,
       kind: "discard",
@@ -299,6 +325,37 @@ function applyDraft(s: AppState, batch: number, t: { account: string; draft: str
   return bumpList(next, [entry ? s.messages.key : null, source ? listKey(t.account, source) : null]);
 }
 
+/** Set a draft's status in the shown Drafts list. */
+function setDraftStatus(s: AppState, account: string, id: string, status: string): AppState {
+  const list = s.messages.data;
+  if (list?.kind !== "drafts" || list.account !== account) return s;
+  if (!list.listing.drafts.some((d) => d.id === id && d.status !== status)) return s;
+  const drafts = list.listing.drafts.map((d) => (d.id === id ? { ...d, status } : d));
+  return { ...s, messages: { ...s.messages, data: { ...list, listing: { ...list.listing, drafts } } } };
+}
+
+/** Approve or demote one draft in place; a second change takes the axis over and keeps the first one's `prev`. */
+function applyDraftStatus(s: AppState, batch: number, kind: MutationKind, t: { account: string; draft: string }): AppState {
+  const key = targetKey(t);
+  const old = s.pending[key];
+  if (old?.leave) return s;
+  const list = s.messages.data;
+  const entry = list?.kind === "drafts" && list.account === t.account ? list.listing.drafts.find((d) => d.id === t.draft) : undefined;
+  const value = kind === "approve" ? "approved" : "draft";
+  const base: PendingChange = old ?? {
+    target: t,
+    source: slugByRole(s, t.account, "drafts"),
+    subject: entry?.subject ?? null,
+    flag: null,
+    read: null,
+    leave: null,
+    status: null,
+  };
+  const status = { batch, value, prev: old?.status ? old.status.prev : (entry?.status ?? null) };
+  const next: AppState = { ...s, pending: { ...s.pending, [key]: { ...base, status } } };
+  return bumpList(setDraftStatus(next, t.account, t.draft, value), [entry ? s.messages.key : null]);
+}
+
 /**
  * Apply one batch at once: rows leave the list and the search, or change a
  * flag in place, the sidebar counts move, and each row waits in `pending`.
@@ -314,7 +371,8 @@ export function applyMutation(
 ): AppState {
   let next = s;
   for (const t of targets) {
-    next = "row_id" in t ? applyRow(next, batch, kind, t, destination, value) : applyDraft(next, batch, t);
+    if ("row_id" in t) next = applyRow(next, batch, kind, t, destination, value);
+    else next = changesStatus(kind) ? applyDraftStatus(next, batch, kind, t) : applyDraft(next, batch, t);
   }
   if (leaves(kind) && next.marked.keys.size > 0) {
     const gone = new Set(targets.map(targetKey));
@@ -333,7 +391,7 @@ function axisOf(e: PendingChange, batch: number): Axis | null {
 /** The entry less one axis, or null when nothing of it is left pending. */
 function withoutAxis(e: PendingChange, axis: Axis): PendingChange | null {
   const rest: PendingChange = { ...e, [axis]: null };
-  return rest.flag || rest.read || rest.leave ? rest : null;
+  return rest.flag || rest.read || rest.leave || rest.status ? rest : null;
 }
 
 /** The list keys an entry touches: the list it left, and its source mailbox's. */
@@ -382,6 +440,11 @@ function restoreLeave(s: AppState, l: PendingLeave): AppState {
 function restoreAxis(s: AppState, e: PendingChange, axis: Axis): { s: AppState; rest: PendingChange | null } {
   const t = e.target;
   let rest = withoutAxis(e, axis);
+  if (axis === "status") {
+    const prev = e.status!.prev;
+    if (prev !== null && "draft" in t) s = setDraftStatus(s, t.account, t.draft, prev);
+    return { s, rest };
+  }
   if (axis === "leave") {
     s = restoreLeave(s, e.leave!);
     // The row is back: a flag or read change still pending on it shows again.
@@ -511,9 +574,16 @@ export function overlayPending(s: AppState, list: MessageList): MessageList {
   const entries = Object.values(s.pending).filter((e) => e.target.account === list.account);
   if (entries.length === 0) return list;
   if (list.kind === "drafts") {
-    const gone = new Set(entries.flatMap((e) => ("draft" in e.target ? [e.target.draft] : [])));
-    const drafts = list.listing.drafts.filter((d) => !gone.has(d.id));
-    return drafts.length === list.listing.drafts.length ? list : { ...list, listing: { ...list.listing, drafts } };
+    const byId = new Map(entries.flatMap((e) => ("draft" in e.target ? [[e.target.draft, e] as const] : [])));
+    let changed = false;
+    const drafts = list.listing.drafts.flatMap((d) => {
+      const e = byId.get(d.id);
+      if (!e) return [d];
+      changed = true;
+      if (e.leave) return [];
+      return e.status && e.status.value !== d.status ? [{ ...d, status: e.status.value }] : [d];
+    });
+    return changed ? { ...list, listing: { ...list.listing, drafts } } : list;
   }
   const here = entries.filter((e) => "row_id" in e.target && e.source === list.mailbox);
   if (here.length === 0) return list;

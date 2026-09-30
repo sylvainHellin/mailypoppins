@@ -199,6 +199,7 @@ export function MessageListPane() {
                   <DraftRow
                     key={d.id}
                     draft={d}
+                    editing={draftKey(d.id) in s.compose}
                     cursor={d.id === s.selection.draft}
                     marked={s.marked.keys.has(draftKey(d.id))}
                     anyMarked={anyMarked}

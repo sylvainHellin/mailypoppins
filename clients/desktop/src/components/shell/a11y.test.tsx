@@ -147,6 +147,63 @@ describe("accessibility primitives", () => {
     expect(notices).not.toContainElement(alert);
   });
 
+  it("names the new-draft wizard, starts it in To, and keeps Tab inside it", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("cn");
+    const wizard = await screen.findByRole("dialog", { name: "New draft" });
+    expect(wizard).toHaveAccessibleDescription(/opens in your editor/);
+    await waitFor(() => expect(within(wizard).getByRole("textbox", { name: "To" })).toHaveFocus());
+    // Base UI traps focus with a guard on each side and makes the rest of
+    // the window inert: under jsdom, Tab passes the guard and the body and
+    // wraps to To, and no control outside the dialog ever takes focus.
+    const to = within(wizard).getByRole("textbox", { name: "To" });
+    const trapped = () => {
+      const el = document.activeElement as HTMLElement;
+      return wizard.contains(el) || el.hasAttribute("data-base-ui-focus-guard") || el === document.body;
+    };
+    let wrapped = false;
+    for (let i = 0; i < 12; i++) {
+      await user.tab();
+      expect(trapped()).toBe(true);
+      if (document.activeElement === to) wrapped = true;
+    }
+    expect(wrapped).toBe(true);
+    await user.tab({ shift: true });
+    expect(trapped()).toBe(true);
+    for (const name of ["To", "Cc", "Bcc", "Subject"]) expect(within(wizard).getByRole("textbox", { name })).toBeInTheDocument();
+    expect(within(wizard).getByRole("combobox", { name: "Signature" })).toBeInTheDocument();
+  });
+
+  it("names the forward and the recipients dialogs", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jj");
+    await user.keyboard("cf");
+    expect(await screen.findByRole("dialog", { name: "Forward" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("j");
+    await user.keyboard("ce");
+    const recipients = await screen.findByRole("dialog", { name: "Edit recipients" });
+    await waitFor(() => expect(within(recipients).getByRole("textbox", { name: "To" })).toHaveFocus());
+  });
+
+  it("mounts the editing banner's live region empty, and names its buttons after the draft", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const region = screen.getByRole("status", { name: "Drafts in the editor" });
+    expect(region).toBeEmptyDOMElement();
+    await user.keyboard("jr");
+    await waitFor(() => expect(region).toHaveTextContent("Editing fixture-draft-1.md"));
+    expect(screen.getByRole("status", { name: "Drafts in the editor" })).toBe(region);
+    expect(within(region).getByRole("button", { name: "Reopen in editor: fixture-draft-1.md" })).toBeInTheDocument();
+    expect(within(region).getByRole("button", { name: "Done editing fixture-draft-1.md" })).toBeInTheDocument();
+  });
+
   it("keeps the activity area and its status region mounted with no hold and no notice", () => {
     let dispatch: Dispatch<Action> = () => {};
     function Grab() {

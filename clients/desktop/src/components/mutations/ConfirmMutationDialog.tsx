@@ -13,18 +13,21 @@ import {
 import type { MutationDialog } from "@/app/state";
 
 export type ConfirmMutationDialogProps = {
-  dialog: Extract<MutationDialog, { kind: "archive" | "delete" }> | null;
+  dialog: Exclude<MutationDialog, { kind: "move" }> | null;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 };
 
+const VERB = { archive: "Archive", delete: "Delete", approve: "Approve", demote: "Mark as draft" } as const;
+
 /**
- * The TUI's confirmation before an archive or a delete: `y` or Enter runs
- * it, `n` or Escape cancels. The confirm button has the initial focus.
+ * The TUI's confirmation before an archive, a delete, or an approve or
+ * demote over marked drafts: `y` or Enter runs it, `n` or Escape cancels.
+ * The confirm button has the initial focus.
  */
 export function ConfirmMutationDialog({ dialog, onOpenChange, onConfirm }: ConfirmMutationDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
-  const verb = dialog?.kind === "delete" ? "Delete" : "Archive";
+  const verb = VERB[dialog?.kind ?? "archive"];
   const open = dialog !== null;
   // On the window, so the keys work before the popup has taken focus.
   useEffect(() => {

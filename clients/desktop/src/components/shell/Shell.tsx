@@ -8,6 +8,7 @@ import { NarrowBar } from "@/components/shell/NarrowBar";
 import { Splitter } from "@/components/shell/Splitter";
 import { StatusRegion } from "@/components/shell/StatusRegion";
 import { ActivityStack } from "@/components/mutations/ActivityStack";
+import { EditingBanner } from "@/components/compose/EditingBanner";
 import { useAppState, useDispatch } from "@/app/store";
 import { listWidthFor, useWidth } from "@/app/layout";
 import { LIST_WIDTH_MIN, type Pane } from "@/app/state";
@@ -65,6 +66,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
       {narrow && s.focus === "sidebar" ? null : (
         <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
           <StatusRegion state={s} />
+          <EditingBanner />
           {narrow ? <NarrowBar view={s.focus} onUp={() => dispatch({ type: "up" })} /> : null}
           <div ref={panesRef} className="flex min-h-0 flex-1" data-panes="">
             {showList ? (

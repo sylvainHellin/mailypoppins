@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { SearchHitRow } from "@/components/search/SearchHitRow";
 import { markOpenRead } from "@/app/actions";
+import { isOpenable } from "@/app/search";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey, type SearchHit, type SearchState } from "@/app/state";
 
@@ -14,11 +15,13 @@ export function SearchResults({ search }: { search: SearchState }) {
   const labelOf = (mailbox: string) => listing?.mailboxes.find((m) => m.slug === mailbox)?.label ?? mailbox;
 
   const sel = s.selection.message;
-  const selectedIndex = sel
-    ? search.hits.findIndex((h) => h.message_id === sel.message_id && h.selector === sel.selector)
-    : -1;
-  const firstOpenable = search.hits.findIndex((h) => h.row_id !== null);
-  const tabIndexRow = selectedIndex >= 0 ? selectedIndex : Math.max(0, firstOpenable);
+  const selHit = s.selection.hit;
+  const selectedIndex = selHit
+    ? search.hits.findIndex((h) => h.key === selHit)
+    : sel
+      ? search.hits.findIndex((h) => h.message_id === sel.message_id && h.selector === sel.selector)
+      : -1;
+  const tabIndexRow = Math.max(0, selectedIndex);
 
   useEffect(() => {
     if (selectedIndex < 0) return;
@@ -27,6 +30,8 @@ export function SearchResults({ search }: { search: SearchState }) {
 
   const pick = useCallback(
     (hit: SearchHit, focus?: "reader") => {
+      // A server-only hit has no row: the cursor sits on it by its key.
+      if (!isOpenable(hit)) return dispatch({ type: "select_hit", key: hit.key, ...(focus ? { focus } : {}) });
       if (hit.row_id === null || hit.selector === null || hit.message_id === null) return;
       dispatch({
         type: "select_message",

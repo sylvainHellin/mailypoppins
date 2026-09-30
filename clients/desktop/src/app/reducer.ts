@@ -25,8 +25,8 @@ import type {
 } from "@/lib/gui-types";
 import {
   finishedSignal,
+  isOpenable,
   localHit,
-  openableHits,
   serverHitSignal,
   serverStarted,
   settledSignal,
@@ -49,6 +49,7 @@ import {
   seedHolds,
   settledEnd,
   settleMutation,
+  pushNotice,
   syncRequested,
   syncSignal,
   syncStarted,
@@ -57,6 +58,7 @@ import {
 } from "@/app/pending";
 import {
   accountNames,
+  draftItems,
   emptyLoadable,
   emptyReader,
   filteredDrafts,
@@ -72,6 +74,8 @@ import {
   readerKey,
   targetKey,
   type AppState,
+  type ActivityKind,
+  type ComposeDialog,
   type Layout,
   type Loadable,
   type MessageRef,
@@ -104,6 +108,8 @@ export type Action =
   | { type: "select_mailbox"; account: string; slug: string; focus?: Pane }
   | { type: "select_message"; message: Omit<MessageRef, "verified">; focus?: Pane }
   | { type: "select_draft"; id: string; focus?: Pane }
+  /** A server-only search hit, by its key: it has no row to open. */
+  | { type: "select_hit"; key: string; focus?: Pane }
   | { type: "move_selection"; to: number | "first" | "last"; relative: boolean }
   | { type: "move_sidebar_cursor"; delta: number }
   | { type: "sidebar_enter" }
@@ -122,6 +128,14 @@ export type Action =
   | { type: "set_layout"; layout: Layout }
   | { type: "overlay"; overlay: Overlay }
   | { type: "open_dialog"; dialog: MutationDialog }
+  | { type: "open_compose"; dialog: ComposeDialog }
+  // The external editor sessions (app/compose.ts dispatches these around `editor_open`).
+  | { type: "compose_opening"; account: string; draftId: string; path: string }
+  | { type: "compose_editing"; account: string; draftId: string; editor: string }
+  | { type: "compose_failed"; account: string; draftId: string; error: GuiError }
+  | { type: "compose_done"; account: string; draftId: string }
+  /** A notice of the activity area from outside a mutation batch. */
+  | { type: "activity"; kind: ActivityKind; account: string | null; text: string; rows?: { key: string; label: string; reason: string }[] }
   | { type: "filter"; text: string }
   | { type: "notice"; text: string | null }
   | { type: "error"; error: GuiError | null }
@@ -239,14 +253,26 @@ function selectMailbox(s: AppState, account: string, slug: string): AppState {
   if (s.selection.account === account && s.selection.mailbox === slug) {
     return { ...s, sidebarCursor: { account, slug } };
   }
-  return retarget(s, { account, mailbox: slug, message: null, draft: null });
+  return retarget(s, { account, mailbox: slug, message: null, draft: null, hit: null });
 }
 
-type ListItem = { kind: "message"; ref: Omit<MessageRef, "verified"> } | { kind: "draft"; id: string };
+type ListItem =
+  | { kind: "message"; ref: Omit<MessageRef, "verified"> }
+  | { kind: "draft"; id: string }
+  | { kind: "hit"; key: string };
 
-/** The rows the list pane shows, after the local filter, or the search's hits. */
+/**
+ * The rows the list pane shows, after the local filter, or the search's
+ * hits; a server-only hit is an item of its own, which has no row.
+ */
 export function visibleItems(s: AppState): ListItem[] {
-  if (s.search) return openableHits(s.search).map((ref) => ({ kind: "message", ref }));
+  if (s.search) {
+    return s.search.hits.map((h): ListItem =>
+      isOpenable(h)
+        ? { kind: "message", ref: { row_id: h.row_id!, message_id: h.message_id!, selector: h.selector! } }
+        : { kind: "hit", key: h.key },
+    );
+  }
   const list = s.messages.data;
   if (list?.kind === "drafts") {
     return filteredDrafts(list, s.filter).map((d) => ({ kind: "draft", id: d.id }));
@@ -262,8 +288,10 @@ function currentIndex(s: AppState, items: ListItem[]): number {
   return items.findIndex((it) =>
     it.kind === "draft"
       ? sel.draft === it.id
-      : sel.message !== null && sel.message.message_id === it.ref.message_id &&
-        sel.message.selector === it.ref.selector,
+      : it.kind === "hit"
+        ? sel.hit === it.key
+        : sel.message !== null && sel.message.message_id === it.ref.message_id &&
+          sel.message.selector === it.ref.selector,
   );
 }
 
@@ -274,10 +302,13 @@ function shownAccount(s: AppState): string {
 
 /** A list item's `targetKey`. */
 function itemKey(account: string, it: ListItem): string {
+  if (it.kind === "hit") return `${account}#hit:${it.key}`;
   return it.kind === "draft" ? targetKey({ account, draft: it.id }) : targetKey({ account, row_id: it.ref.row_id });
 }
 
-function itemTarget(account: string, it: ListItem): Target {
+/** What a mutation names an item by; a server-only hit has nothing to name. */
+function itemTarget(account: string, it: ListItem): Target | null {
+  if (it.kind === "hit") return null;
   return it.kind === "draft" ? { account, draft: it.id } : { account, row_id: it.ref.row_id };
 }
 
@@ -288,11 +319,10 @@ function itemTarget(account: string, it: ListItem): Target {
 export function actionTargets(s: AppState): Target[] {
   const account = shownAccount(s);
   const items = visibleItems(s);
-  if (s.marked.keys.size > 0) {
-    return items.filter((it) => s.marked.keys.has(itemKey(account, it))).map((it) => itemTarget(account, it));
-  }
+  const targets = (its: ListItem[]) => its.flatMap((it) => itemTarget(account, it) ?? []);
+  if (s.marked.keys.size > 0) return targets(items.filter((it) => s.marked.keys.has(itemKey(account, it))));
   const cur = currentIndex(s, items);
-  return cur >= 0 ? [itemTarget(account, items[cur])] : [];
+  return cur >= 0 ? targets([items[cur]]) : [];
 }
 
 /**
@@ -309,7 +339,7 @@ function cursorAfterLeave(s: AppState, before: ListItem[], gone: ReadonlySet<str
   const to = cur < 0 ? undefined : (before.slice(cur + 1).find(stays) ?? before.slice(0, cur).reverse().find(stays));
   const next: AppState = to
     ? selectItem(s, to)
-    : { ...s, selection: { ...s.selection, message: null, draft: null }, reader: emptyReader() };
+    : { ...s, selection: { ...s.selection, message: null, draft: null, hit: null }, reader: emptyReader() };
   return { ...next, focusSeq: next.focusSeq + 1 };
 }
 
@@ -318,7 +348,7 @@ function pruneMarks(s: AppState, list: MessageList): AppState {
   if (s.marked.keys.size === 0 || s.search) return s;
   const present = new Set(
     list.kind === "drafts"
-      ? list.listing.drafts.map((d) => targetKey({ account: list.account, draft: d.id }))
+      ? draftItems(list).map((d) => targetKey({ account: list.account, draft: d.id }))
       : list.rows.map((r) => targetKey({ account: list.account, row_id: r.id })),
   );
   const keys = new Set([...s.marked.keys].filter((k) => present.has(k)));
@@ -357,7 +387,8 @@ function marks(s: AppState, a: Extract<Action, { type: `mark_${string}` }>): App
       return { ...s, marked: { keys, anchor } };
     }
     case "mark_all":
-      for (const it of visibleItems(s)) keys.add(itemKey(account, it));
+      // A server-only hit cannot be acted on, so it is not marked.
+      for (const it of visibleItems(s)) if (it.kind !== "hit") keys.add(itemKey(account, it));
       return { ...s, marked: { keys, anchor: s.marked.anchor } };
     case "mark_clear":
       return s.marked.keys.size === 0 && s.marked.anchor === null ? s : { ...s, marked: NO_MARKS };
@@ -366,9 +397,12 @@ function marks(s: AppState, a: Extract<Action, { type: `mark_${string}` }>): App
 
 function selectItem(s: AppState, it: ListItem): AppState {
   if (it.kind === "draft") {
-    return { ...s, selection: { ...s.selection, message: null, draft: it.id } };
+    return { ...s, selection: { ...s.selection, message: null, hit: null, draft: it.id } };
   }
-  return { ...s, selection: { ...s.selection, draft: null, message: { ...it.ref, verified: true } } };
+  if (it.kind === "hit") {
+    return { ...s, selection: { ...s.selection, message: null, draft: null, hit: it.key }, reader: emptyReader() };
+  }
+  return { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...it.ref, verified: true } } };
 }
 
 /** Flattened sidebar entries, for the cursor. */
@@ -434,9 +468,27 @@ function removeAccount(s: AppState, name: string): AppState {
   if (next.selection.account === name) {
     const account = defaultAccount(next, accountNames(next));
     const mailbox = account ? defaultMailbox(next, account) : null;
-    next = retarget(next, { account, mailbox, message: null, draft: null });
+    next = retarget(next, { account, mailbox, message: null, draft: null, hit: null });
   }
   return next;
+}
+
+/** The file name of a path, what the editing banner calls a draft. */
+export function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function composeOpening(s: AppState, account: string, draftId: string, path: string): AppState {
+  const key = targetKey({ account, draft: draftId });
+  const session = { account, draftId, path, name: fileName(path), editor: s.compose[key]?.editor ?? null, status: "opening" as const, message: null };
+  return { ...s, compose: { ...s.compose, [key]: session } };
+}
+
+function composeUpdate(s: AppState, account: string, draftId: string, patch: Partial<AppState["compose"][string]>): AppState {
+  const key = targetKey({ account, draft: draftId });
+  const prev = s.compose[key];
+  if (!prev) return s;
+  return { ...s, compose: { ...s.compose, [key]: { ...prev, ...patch } } };
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +530,7 @@ function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
   const message = same && prev.message ? { ...prev.message, verified: false } : null;
   const draft = same ? prev.draft : null;
 
-  next = retarget(next, { account, mailbox, message, draft });
+  next = retarget(next, { account, mailbox, message, draft, hit: null });
   if (same) next = { ...next, messages: { ...markStale(next.messages), key: next.messages.key } };
   // The reader refetches once the list re-verifies the row.
   next = { ...next, reader: { ...next.reader, load: markStale(next.reader.load) } };
@@ -507,6 +559,7 @@ export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
   if (!names.includes(search.account)) return base;
   const sameInstance = s.bootstrap?.instance_id === bootstrap.instance_id;
   const hit = sameInstance ? s.selection.message : null;
+  const serverHit = sameInstance ? s.selection.hit : null;
   const rerun = search.mode === "local" && !sameInstance;
   return {
     ...base,
@@ -515,7 +568,7 @@ export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
       restore: { ...search.restore, selection: base.selection },
       ...(rerun ? { status: "searching" as const, seq: search.seq + 1, error: null } : {}),
     },
-    selection: { ...base.selection, message: hit, draft: null },
+    selection: { ...base.selection, message: hit, draft: null, hit: serverHit },
     reader: hit ? { ...s.reader, load: markStale(s.reader.load) } : emptyReader(),
   };
 }
@@ -551,7 +604,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
         let next = staleMailboxes(sel.account === account && sel.mailbox === slug ? endSearch(s) : s, account);
         if (next.selection.account === account && next.selection.mailbox === slug) {
           const mailbox = next.mailboxes[account]?.data?.mailboxes.find((m) => m.slug !== slug && m.role === "inbox")?.slug ?? null;
-          next = retarget(next, { account, mailbox, message: null, draft: null });
+          next = retarget(next, { account, mailbox, message: null, draft: null, hit: null });
           next = { ...next, reader: emptyReader() };
         }
         return next;
@@ -561,6 +614,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
         let next = staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
         if (next.selection.account === account && next.selection.draft === id) {
           next = { ...next, selection: { ...next.selection, draft: null } };
+        }
+        // The file is gone: nothing is left to edit.
+        const key = targetKey({ account, draft: id });
+        if (key in next.compose) {
+          const compose = { ...next.compose };
+          delete compose[key];
+          next = { ...next, compose };
         }
         return next;
       }
@@ -630,15 +690,19 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
       const next = applyBootstrap(s, e.bootstrap);
-      // A confirmation or a picker names rows by id: another instance closes it.
+      // A confirmation or a picker names rows by id: another instance closes
+      // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
+      const closeCompose = !sameInstance && next.composeDialog?.kind === "forward";
+      const closeOverlay = (closeDialog && next.overlay === "mutation") || (closeCompose && next.overlay === "compose");
       return {
         ...next,
         pending: {},
         holds: seedHolds(e.bootstrap.snapshot.holds),
         marked: sameInstance ? next.marked : NO_MARKS,
         dialog: closeDialog ? null : next.dialog,
-        overlay: closeDialog && next.overlay === "mutation" ? null : next.overlay,
+        composeDialog: closeCompose ? null : next.composeDialog,
+        overlay: closeOverlay ? null : next.overlay,
       };
     }
     case "event":
@@ -675,7 +739,7 @@ function failed<T>(l: Loadable<T>, gen: number, error: GuiError): Loadable<T> {
 function reverify(s: AppState, list: MessageList): AppState {
   const sel = listSelection(s);
   if (list.kind === "drafts") {
-    if (sel.draft && !list.listing.drafts.some((d) => d.id === sel.draft)) {
+    if (sel.draft && !draftItems(list).some((d) => d.id === sel.draft)) {
       return setListSelection(s, { ...sel, draft: null });
     }
     return s;
@@ -732,7 +796,7 @@ export function reducer(s: AppState, a: Action): AppState {
         const def = a.accounts.find((x) => x.default)?.name;
         if (def && def !== next.selection.account) {
           const mailbox = defaultMailbox(next, def);
-          next = retarget(next, { account: def, mailbox, message: null, draft: null });
+          next = retarget(next, { account: def, mailbox, message: null, draft: null, hit: null });
         }
       }
       return next;
@@ -772,18 +836,23 @@ export function reducer(s: AppState, a: Action): AppState {
       if (a.account === s.selection.account && !s.search) return s;
       s = endSearch(s);
       if (a.account === s.selection.account) return s;
-      return retarget(s, { account: a.account, mailbox: defaultMailbox(s, a.account), message: null, draft: null });
+      return retarget(s, { account: a.account, mailbox: defaultMailbox(s, a.account), message: null, draft: null, hit: null });
     }
     case "select_mailbox": {
       const next = selectMailbox(s, a.account, a.slug);
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "select_message": {
-      const next = { ...s, selection: { ...s.selection, draft: null, message: { ...a.message, verified: true } } };
+      const next = { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...a.message, verified: true } } };
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "select_draft": {
-      const next = { ...s, selection: { ...s.selection, message: null, draft: a.id } };
+      const next = { ...s, selection: { ...s.selection, message: null, hit: null, draft: a.id } };
+      return a.focus ? withFocus(next, a.focus) : next;
+    }
+    case "select_hit": {
+      if (!s.search?.hits.some((h) => h.key === a.key)) return s;
+      const next = selectItem(s, { kind: "hit", key: a.key });
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "move_selection": {
@@ -857,7 +926,7 @@ export function reducer(s: AppState, a: Action): AppState {
       if (s.search) return withFocus(endSearch(s), "list");
       return {
         ...s,
-        selection: { ...s.selection, message: null, draft: null },
+        selection: { ...s.selection, message: null, draft: null, hit: null },
         reader: emptyReader(),
       };
     case "toggle_zoom":
@@ -874,9 +943,35 @@ export function reducer(s: AppState, a: Action): AppState {
     case "set_layout":
       return a.layout === s.layout ? s : { ...s, layout: a.layout };
     case "overlay":
-      return { ...s, overlay: a.overlay, dialog: a.overlay === "mutation" ? s.dialog : null };
+      return {
+        ...s,
+        overlay: a.overlay,
+        dialog: a.overlay === "mutation" ? s.dialog : null,
+        composeDialog: a.overlay === "compose" ? s.composeDialog : null,
+      };
     case "open_dialog":
-      return { ...s, overlay: "mutation", dialog: a.dialog };
+      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null };
+    case "open_compose":
+      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null };
+    case "compose_opening":
+      return composeOpening(s, a.account, a.draftId, a.path);
+    case "compose_editing":
+      return composeUpdate(s, a.account, a.draftId, { status: "editing", editor: a.editor, message: null });
+    case "compose_failed": {
+      const key = targetKey({ account: a.account, draft: a.draftId });
+      const name = s.compose[key]?.name ?? a.draftId;
+      const next = composeUpdate(s, a.account, a.draftId, { status: "error", message: a.error.message });
+      return pushNotice(next, { kind: "compose_failed", account: a.account, text: `The editor did not open ${name}: ${a.error.message}` });
+    }
+    case "compose_done": {
+      const key = targetKey({ account: a.account, draft: a.draftId });
+      if (!(key in s.compose)) return s;
+      const compose = { ...s.compose };
+      delete compose[key];
+      return { ...s, compose };
+    }
+    case "activity":
+      return pushNotice(s, { kind: a.kind, account: a.account, text: a.text, rows: a.rows ?? [] });
     case "filter":
       return { ...s, filter: a.text };
     case "notice":

@@ -26,8 +26,8 @@ export type SearchHitRowProps = {
 
 /**
  * One search result, with the mailbox it was found in as a badge. A hit the
- * store has never ingested (server-only) is listed but cannot open: fetching
- * it into the store is a mutation, which the read-only milestone does not do.
+ * store has never ingested (server-only) has no body to open and cannot be
+ * marked, and the cursor can still sit on it to reply to it or forward it.
  */
 export const SearchHitRow = memo(function SearchHitRow({
   hit,
@@ -48,7 +48,7 @@ export const SearchHitRow = memo(function SearchHitRow({
   const subject = hit.subject || "(no subject)";
   const sender = senderName(hit.from);
   const onClick = (e: MouseEvent) => {
-    if (!openable) return;
+    if (!openable) return onSelect(hit);
     if (e.shiftKey) onMark(hit, true);
     else if (e.metaKey || e.ctrlKey) onMark(hit, false);
     else onSelect(hit);
@@ -69,7 +69,6 @@ export const SearchHitRow = memo(function SearchHitRow({
       aria-busy={pending || undefined}
       aria-posinset={position}
       aria-setsize={setSize}
-      aria-disabled={openable ? undefined : true}
       aria-label={`${sender}, ${subject}, ${hit.date_display || "no date"}, ${state.join(", ")}`}
       tabIndex={tabStop ? 0 : -1}
       data-roving={tabStop ? "active" : undefined}
@@ -78,7 +77,7 @@ export const SearchHitRow = memo(function SearchHitRow({
       data-marked={marked || undefined}
       data-row-id={hit.row_id ?? undefined}
       onClick={onClick}
-      onDoubleClick={() => openable && onOpen(hit)}
+      onDoubleClick={() => onOpen(hit)}
       className={`group flex h-16 cursor-default flex-col justify-center gap-0.5 border-b border-border px-3 text-sm outline-none select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring ${
         cursor
           ? "bg-selection text-selection-foreground"
@@ -86,7 +85,7 @@ export const SearchHitRow = memo(function SearchHitRow({
             ? "bg-accent text-accent-foreground"
             : openable
               ? "hover:bg-accent/60"
-              : "text-muted-foreground"
+              : "text-muted-foreground hover:bg-accent/60"
       }`}
     >
       <div className="flex min-w-0 items-center gap-2">

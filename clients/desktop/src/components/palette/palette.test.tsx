@@ -23,9 +23,9 @@ describe("the command palette", () => {
     await shellReady();
     await user.keyboard(":");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    const reply = within(dialog).getAllByText("Reply")[0].closest("[data-testid='palette-item']");
-    expect(reply).toHaveAttribute("data-disabled", "true");
-    expect(reply).toHaveTextContent("M3");
+    const send = within(dialog).getByText("Send all approved drafts (Drafts only)").closest("[data-testid='palette-item']");
+    expect(send).toHaveAttribute("data-disabled", "true");
+    expect(send).toHaveTextContent("M3");
   });
 
   it("runs every mutation action and no row is left for M2", () => {
@@ -150,6 +150,50 @@ describe("the command palette", () => {
     // The M2 rows lost their badge.
     const archive = within(help).getAllByText("Archive")[0].closest("tr");
     expect(archive).not.toHaveTextContent("M2");
+  });
+
+  it("runs every compose action and keeps only the send and attach rows for later in M3", () => {
+    const entries = [...paletteEntries(), ...GUI_ENTRIES];
+    const ids = new Set(entries.map((e) => e.id));
+    for (const id of ["new_draft", "reply", "reply_all", "forward", "open_editor", "edit_recipients", "approve", "demote"] as const) {
+      expect(ids).toContain(id);
+    }
+    expect(entries.filter((e) => e.badge === "M3").map((e) => e.label)).toEqual([
+      "Send current draft (approve + send)",
+      "Attach file to draft (Drafts only)",
+      "Send all approved drafts (Drafts only)",
+    ]);
+  });
+
+  it("New draft, Reply all and Approve draft run from the palette", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard(":");
+    let dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("Reply all"));
+    await waitFor(() =>
+      expect(mock.calls.filter((c) => c.cmd === "draft_reply").map((c) => c.args)).toEqual([
+        { account: "work", row_id: 1001, all: true, headers: null },
+      ]),
+    );
+    await user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("New draft"));
+    expect(await screen.findByRole("dialog", { name: "New draft" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("j");
+    await user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("Approve draft (Drafts only)"));
+    await waitFor(() =>
+      expect(mock.calls.filter((c) => c.cmd === "draft_approve").map((c) => c.args)).toEqual([
+        // The reply above is the newest draft, at the top.
+        { account: "work", ids: ["fixture-draft-1"] },
+      ]),
+    );
   });
 
   it("merges keys that share an action within a section", () => {
