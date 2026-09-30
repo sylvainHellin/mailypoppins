@@ -49,7 +49,7 @@ The two files hand-write only what has no Rust type: the event payloads the daem
 
 `u64` and `i64` come out as `number`, the way `serde_json` hands them to JavaScript.
 A field under `skip_serializing_if` becomes optional, and a `serde_json::Value` becomes `unknown`.
-`send::OutboxCounts` is exported as `OutboxListingCounts`, since `state::OutboxCounts` holds the name.
+`send::OutboxCounts` (`open`, `failed`, `partial`, under an outbox listing) is exported as `OutboxListingCounts` by a `#[ts(rename)]` in `mp-protocol`, since the bootstrap's `state::OutboxCounts` (`queued`, `failed`) holds the name; only the TypeScript name moves, and the wire JSON of both is unchanged.
 
 `pnpm gen:types` regenerates both directories.
 `generated_bindings_are_current`, in `mp-protocol`'s `tests/ts_bindings.rs` and in `src-tauri/src/ts_bindings.rs`, fails when a Rust type changed and the committed files were not regenerated.
@@ -96,6 +96,9 @@ The type blocks in this document are for reading, and the generated files are th
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
 | `send_draft` | `account`, `id`, `hold` | `SendStarted`; rejects with a `SendRefusal` |
 | `send_approved` | `account`, `hold` | `SendStarted` |
+| `outbox_list` | `account` | `OutboxListing` |
+| `outbox_retry` | `account`, `row_id` | `{ operation_id }` |
+| `outbox_discard` | `account`, `row_id` | `OutboxDiscarded` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
@@ -237,9 +240,30 @@ A cancelled hold cancels the operation too, which then ends `cancelled`.
 | `sync` | `sync_trigger` | `sync.quick`, `sync.full` | the sync outcome |
 | `send` | `send_draft` | `send.draft` | `SendOutcome` |
 | `send_approved` | `send_approved` | `send.approved` | `ApprovedOutcome` |
+| `outbox_retry` | `outbox_retry` | `send.outbox_retry` | `OutboxRetryOutcome` |
 
 Each ends one of three ways, as the event stream below says: `operation.finished` with `{operation_id, state, result?, error?}`, `operation_settled` with the whole `OperationStatus` after a re-query, or `operation_dropped` when the daemon restarted.
 A send's `state` is `succeeded` once the submission ran, with each recipient's verdict in `recipients`, `failed` with the transport's error, or `cancelled`; a `succeeded` send every recipient refused is a failure to show.
+
+## The outbox
+
+`outbox_list` is `mp outbox list`: `send.outbox_list {account}`, answered as an `OutboxListing` with the account's unfinished rows in id order and the counts `open`, `failed` and `partial`.
+An account that never queued anything answers `ever_used: false`, which is a fact and not an error.
+An `OutboxRow` carries its `id`, its `state` as the store spells it (`pending_send`, `failed`, `sent_pending_append`, and `done` for a row listed only because it is `partial`), `never_submitted`, `message_id`, `target_mailbox`, `updated` (a unix timestamp), `last_error` (the partial-delivery note for a partial row), `rejected` as `[address, reason]` pairs, and the `outstanding` addresses.
+
+`outbox_retry` is `mp outbox retry`: `send.outbox_retry {account, row_id}` is an operation, since it re-arms the row and then submits it and files its Sent copy over the network, and the layer awaits it as `kind: "outbox_retry"`.
+The daemon admits a `failed` row, which it re-arms, and a `sent_pending_append` row whose APPEND was already attempted, which it re-drives behind a `Message-ID` search; anything else is refused with `-32602` before an operation starts, as a `protocol` error.
+Its `OutboxRetryOutcome` is `{row_id, state, completed}`: the row's state after the drain, `null` when it finished and is gone, and how many Sent copies were filed on the way.
+A transport that fails again still settles `succeeded`, with `state: "failed"`.
+
+`outbox_discard` is `mp outbox discard`: `send.outbox_discard {account, row_id}` is one committed command, answered at once.
+
+```ts
+type OutboxDiscarded = { discarded: boolean; row_id: number; message_id: string; revision: number };
+```
+
+A row that is gone is `not_found` with code `-32602`.
+Neither command publishes anything of its own: the daemon's `state.invalidate` of `outbox:<account>` follows every change to the outbox.
 
 ## Drafts and the editor
 
@@ -279,7 +303,7 @@ The channel first carries a `connection` event and, once connected, a `rebootstr
 
 ```ts
 type BootstrapCause = "initial" | "subscribed" | "requested" | "resync" | "reconnected" | "instance_changed";
-type PendingKind = "server_search" | "sync" | "send" | "send_approved";
+type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry";
 type GuiEvent =
   | { type: "event"; event: { instance_id: string; revision: number; kind: string; payload: unknown } }
   | { type: "resync"; instance_id: string; reason: string }
@@ -295,7 +319,7 @@ type GuiEvent =
 `event` carries the daemon's envelope verbatim and only when it applied above the watermark; duplicates are dropped in Rust.
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
 A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
-A sync started by `sync_trigger` and a send started by `send_draft` or `send_approved` end the same three ways.
+A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, and a retry started by `outbox_retry` end the same three ways.
 A hit or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 
 ## The reader
@@ -398,6 +422,17 @@ The outbox lives in memory and survives `restart`, as the daemon's store does; `
 The bootstrap's `outbox` counts are read from it, and `home`'s queued message is a `pending_send` row seeded at start.
 `send_fail` fails the next send with a transport error, keeps the draft, and parks a `failed` row; `send_partial` refuses the last recipient (adding `nobody@refused.example` as a second one when the draft has one) and keeps a `partial` row; `send_pending_append` delivers but leaves the Sent copy owed, a `sent_pending_append` row and no copy in Sent.
 Each simulation applies to the next send only.
+
+`send.outbox_retry` refuses what the daemon refuses, with its words: a row it does not have, and a row that is neither `failed` nor `sent_pending_append`.
+It re-arms a `failed` row to `pending_send`, publishes the invalidation, and 0.4 s later runs the row through the next send's simulation and settles with an `OutboxRetryOutcome`:
+
+- with none, the row is delivered and gone, `state: null`, and `completed: 1` when it owes a Sent copy;
+- `send_fail` leaves it `failed` with the transport's error, and a `sent_pending_append` row keeps its state;
+- `send_partial` refuses its last outstanding recipient and leaves a partial `done` row;
+- `send_pending_append` leaves it `sent_pending_append`.
+
+The fixture files no Sent copy for a retried row, and it refuses a second retry of a re-armed row while the first runs, where the daemon admits it and settles on what it finds.
+`send.outbox_discard` removes the row, publishes the invalidation, and answers `{discarded, row_id, message_id, revision}`; a row it does not have is `-32602`.
 
 The drafts are real files in a per-run directory, `<temp>/mp-desktop-fixture-<pid>/drafts/<account>/`, written at start from `drafts.json`'s rows and `draft-bodies.json`.
 Every call rescans that directory, as the daemon's draft queries do, so the listing, the counts and the bootstrap's drafts follow the files.

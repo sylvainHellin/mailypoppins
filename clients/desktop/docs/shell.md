@@ -17,6 +17,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/mutations.ts` | The mutation dispatch: apply, call, reconcile |
 | `src/app/compose.ts` | New draft, reply, forward, edit, recipients, approve and demote, and the editor handoff |
 | `src/app/send.ts` | `x` and `cX`: the send confirmations and what their OK runs |
+| `src/app/outbox.ts` | The outbox listings, the outbox view, retry and discard, and the queue depth |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
 | `src/app/layout.ts`, `prefs.ts`, `store.tsx` | Breakpoints, localStorage preferences, the context store |
@@ -26,6 +27,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/{shell,sidebar,list,search,reader,screens,palette}` | The views; `components/ui` is shadcn's; the reader frame is [reader.md](reader.md) |
 | `src/components/mutations` | The archive, delete, approve, demote and send confirmation, the move picker, and the activity area (notices and send holds) |
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
+| `src/components/outbox` | The outbox view |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -44,15 +46,16 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
-| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended |
+| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it |
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
+| `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
-| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`) settles or says it was interrupted |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`) or a retry (`outbox_retry`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -145,7 +148,7 @@ The activity area is a stack at the bottom right of the window, raised above the
 Held sends come first, then the failures, then the applied notices of `state.activity`:
 
 - An applied batch is a notice that leaves after five seconds.
-- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, and a send that failed, went to only some recipients or was interrupted are `role="alert"` notices that stay until dismissed.
+- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that stay until dismissed.
 - Every notice has a Dismiss button.
 - A cancelled hold's own notice is not shown, since the hold says so itself.
 
@@ -261,6 +264,66 @@ A file the listing skipped because it does not parse is a row too, named by its 
 So a draft whose save broke its frontmatter stays in the list, selected, rather than disappearing.
 Enter on a draft opens its preview in the reader ([reader.md](reader.md), "Drafts and server-only hits").
 
+## Outbox
+
+The outbox is where a send the daemon could not finish waits for a human (`SND-06` to `SND-09`).
+The TUI has no outbox view, and its operator actions are the CLI's `mp outbox list|retry|discard`; the desktop shows the same listing and offers the same two actions behind a confirmation, since a row without a verdict may already have been delivered.
+
+### Entry points
+
+- The sidebar's outbox line under each account, shown while something is queued, failed or partly delivered: "Outbox: 1 queued, 1 failed, 1 partly delivered".
+  It is a button that opens that account's outbox.
+- `go`, from any pane: the selected account's outbox.
+  The TUI's `g` family binds `gg`, `gm`, `ga`, `gj`, `gk` and `gt`, so `go` is free there and in the desktop.
+- The palette's "Open outbox".
+
+The view replaces the list pane's content, as search results do, and focuses the list pane.
+Escape, the palette's "Clear selection / return to list", its "Mailbox" button, a mailbox in the sidebar, a digit key, another account, or a search brings the mailbox list back with its selection as it was.
+The reader keeps what it showed.
+
+### Rows
+
+`state.outbox` holds each account's `outbox_list` answer as a `Loadable`, created on the first open of the view or the first `state.invalidate` of `outbox:<account>`, stale again on the next invalidation and on every bootstrap.
+The header counts "N working, M failed, P partly delivered", `mp outbox list`'s counts line, in a `role="status"` element mounted before the listing lands.
+An account that never queued anything says "Nothing has been queued yet.", and an empty outbox "The outbox is clear.".
+
+Each row shows a state chip, its id, when it last moved in local time, and its `Message-ID`:
+
+| State | Chip | Retry |
+|---|---|---|
+| `pending_send` | Queued | no |
+| `failed` | Failed | yes |
+| `sent_pending_append` | Sent, copy owed | yes |
+| `done` with `partial` | Partly delivered | no |
+
+Under it come the lines `mp outbox list` indents: "Sent copy owed to <mailbox>" or "Sent copy goes to <mailbox>", "Never submitted; the next sync sends it" for a row that never reached the transport, "Never delivered to <address> (<reason>)" per refused recipient, "Still to deliver to <addresses>" unless the row is `done`, and the last error, labelled "Outcome" on a partial row.
+A partly delivered row never reads as a failure (`SND-08`): its chip, its label and its note name the recipients who did not get it, and the others did.
+
+### Retry and discard
+
+Retry shows only on the two states the daemon retries, and Discard on every row; `R` and `d` act on the row under the view's cursor.
+Both ask first, in the archive and delete confirmation, which then carries a warning line:
+
+- Retry of a `failed` row: "Send row N again?", warning that a failed submission may already have been delivered, so its recipients could get it twice (`mp outbox retry`'s "only after checking it did not arrive").
+- Retry of a `sent_pending_append` row: "File the Sent copy of row N?", with no warning, since the daemon searches for the copy before it appends one.
+- Discard: "Discard row N?", warning what the row gives up: a failed or submitted row "ended without a verdict, so it may already have been delivered", a never-submitted row is never sent, a `sent_pending_append` row gives up its Sent copy, and a partial row drops the note of who never got it.
+
+`R` on a row the daemon does not retry names why and asks nothing.
+A confirmed retry calls `outbox_retry`; the row says "Retrying…" and is `aria-busy` until the operation ends, and the end is a notice: "Outbox row N sent" (with "; its Sent copy is filed" when one was), "failed again", "partly delivered", "sent; its Sent copy is still owed", or "is queued again".
+A failed, partial, refused or interrupted retry is an alert; every end re-reads the outbox.
+A confirmed discard hides the row at once, moves the cursor to the next row, and calls `outbox_discard`; the answer takes the row out of the listing and says "Discarded outbox row N (<Message-ID>)", and a refusal puts it back with an alert.
+`state.outboxActions` holds each retry and discard of this window until it ends, as `state.sends` holds sends, and a retry's end that overtakes its answer waits in `outboxEarly`.
+
+### Counts and the queue depth
+
+The sidebar's line reads the outbox listing once this window has one, less the rows a discard is taking away, and before that `list_accounts` or the bootstrap, which have no partial count and move only on a bootstrap.
+Since an `outbox:<account>` invalidation creates the listing, a send that fails or a retry that finishes moves the line without a bootstrap.
+
+The status region shows the queue depth (`SYN-06`) at the bottom left while it is not 0: "3 waiting for the server: 1 in the outbox, 1 sending, 1 change".
+It adds the queued rows of every account's outbox (`pending_send` and `sent_pending_append`), the sends and retries of this window still running, and the optimistic changes whose commands have not answered.
+The daemon publishes no depth of its own pending-operation queue, so a change the daemon took and has not yet replayed against the server is not counted.
+The element sits in the region's polite live area, mounted empty at 0, so a screen reader hears the first depth.
+
 ## Layouts
 
 | Width | Layout | Shows |
@@ -278,14 +341,14 @@ The list is drawn at the stored width only while the reader keeps `READER_MIN` (
 The window has three panes, each one tab stop, in reading order:
 
 1. Sidebar (`<nav aria-label="Accounts and mailboxes">`): the mailbox under the sidebar cursor.
-2. List (`<section aria-label="Message list">` inside `<main>`): the selected row of the `listbox`, or its first row.
+2. List (`<section aria-label="Message list">` inside `<main>`): the selected row of the `listbox`, or its first row; while the outbox shows, `<section aria-label="Outbox of <account>">` and the row under its cursor, a `listitem` named "Row N, <chip>".
 3. Reader (`<aside aria-label="Reader">`, complementary): the scrollable message.
 
 Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, reader, sidebar), starting from the pane the model holds as focused, and only while focus sits in a pane or on the page; anywhere else (a dialog, a screen's buttons, the splitter) they are the browser's.
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote and send confirmation, the move picker, the compose wizard and the recipients dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard and the recipients dialog) are Base UI dialogs: they trap focus while open and return it when closed.
 The compose dialogs start in To.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
@@ -304,13 +367,14 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector.
-- `Escape`: clear the marks when any are set; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
+- `Escape`: clear the marks when any are set; else back to the list from the reader; with the outbox or a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
 - `Enter` in the field: search the store; `Shift+Enter` or `ff`: search the server.
 - `Cmd+[` or `Alt+Left`: back through the focus history.
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
 - `X`: dismiss the newest activity notice, a desktop key.
+- `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, and the other MESSAGE and List keys have no row to act on (see Outbox).
 - `ss`, `sS`: quick and full sync of the selected account.
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
