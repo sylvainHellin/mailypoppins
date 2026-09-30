@@ -1,25 +1,30 @@
 import { Send } from "lucide-react";
-import { SidebarMenuItem } from "@/components/ui/sidebar";
-import type { OutboxCounts } from "@/protocol/types";
+import { SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
+import { summaryText, type OutboxSummary } from "@/app/outbox";
 
-/** The account's outbox, shown only when something waits or failed. */
-export function OutboxState({ outbox }: { outbox: OutboxCounts }) {
-  if (outbox.queued === 0 && outbox.failed === 0) return null;
-  const text = [
-    outbox.queued > 0 ? `${outbox.queued} queued` : null,
-    outbox.failed > 0 ? `${outbox.failed} failed` : null,
-  ]
-    .filter(Boolean)
-    .join(", ");
+/**
+ * The account's outbox line, shown only when something waits, failed or
+ * went to only some of its recipients; it opens the account's outbox (`g o`).
+ */
+export function OutboxState({ account, outbox, active, onOpen }: { account: string; outbox: OutboxSummary; active: boolean; onOpen: (account: string) => void }) {
+  const text = summaryText(outbox);
+  if (!text) return null;
+  const alert = outbox.failed > 0 || outbox.partial > 0;
   return (
     <SidebarMenuItem>
-      <div
-        className={`flex h-8 items-center gap-2 rounded-md px-2 text-xs group-data-[collapsible=icon]:justify-center ${outbox.failed > 0 ? "text-warning" : "text-muted-foreground"}`}
-        title={`Outbox: ${text}`}
+      <SidebarMenuButton
+        isActive={active}
+        aria-current={active ? "page" : undefined}
+        tooltip={`Outbox: ${text}`}
+        tabIndex={-1}
+        data-outbox={account}
+        aria-label={`Outbox of ${account}: ${text}, key g o`}
+        onClick={() => onOpen(account)}
+        className={`text-xs ${alert ? "text-warning" : "text-muted-foreground"}`}
       >
-        <Send className="size-4 shrink-0" aria-hidden="true" />
-        <span className="truncate group-data-[collapsible=icon]:sr-only">Outbox: {text}</span>
-      </div>
+        <Send aria-hidden="true" />
+        <span className="truncate">Outbox: {text}</span>
+      </SidebarMenuButton>
     </SidebarMenuItem>
   );
 }

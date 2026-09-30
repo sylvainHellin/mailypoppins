@@ -136,6 +136,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("focus_sidebar");
           case "ga":
             return run("next_account");
+          // Desktop only: the TUI has no outbox view, and no `go`.
+          case "go":
+            return run("open_outbox");
           case "gj":
             return run("next_message");
           case "gk":
@@ -154,7 +157,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("new_draft");
           default:
             if (COMPOSE_ROW_KEYS[combo]) {
-              if (s.focus !== "sidebar") run(COMPOSE_ROW_KEYS[combo]);
+              const noRow = s.focus === "sidebar" || (s.outboxView !== null && s.focus === "list");
+              if (!noRow) run(COMPOSE_ROW_KEYS[combo]);
               return;
             }
             return notice(combo);
@@ -176,6 +180,17 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         if (f === "sidebar") dispatch({ type: "move_sidebar_cursor", delta });
         else if (f === "list") dispatch({ type: "move_selection", to: delta, relative: true });
         else scrollReader(delta * LINE_PX);
+      }
+
+      // The outbox view owns the list pane's letter keys: `d` discards and
+      // `R` retries the cursor row, Enter opens nothing, and the MESSAGE and
+      // List keys have no row of theirs to act on.
+      if (s.outboxView && s.focus === "list" && e.key.length === 1 && !/^[jkJKG:?z/xX1-9 ]$/.test(e.key)) {
+        handled();
+        if (e.key === "d") return run("outbox_discard");
+        if (e.key === "R") return run("outbox_retry");
+        if (e.key === "u" && liveHolds(s).length > 0) return run("cancel_hold");
+        return;
       }
 
       switch (e.key) {
@@ -210,11 +225,13 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         case "Escape":
           handled();
           if (s.marked.keys.size > 0) return run("mark_clear");
+          if (s.outboxView && s.focus !== "reader") return dispatch({ type: "close_outbox" });
           if (s.search && s.focus !== "reader") return dispatch({ type: "exit_search" });
           if (s.layout === "narrow") return dispatch({ type: "up" });
           return run("clear_selection");
         case "Enter":
           if (s.focus === "sidebar") return handled(), run("select_mailbox");
+          if (s.focus === "list" && s.outboxView) return handled();
           if (s.focus === "list") return handled(), run("open_message");
           return;
         case "j":

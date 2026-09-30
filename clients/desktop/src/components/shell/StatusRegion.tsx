@@ -1,18 +1,21 @@
 import { useEffect } from "react";
 import { CloudOff, RefreshCw, Power } from "lucide-react";
 import { bannerFor, type AppState } from "@/app/state";
+import { queueDepth, queueText } from "@/app/outbox";
 import { useDispatch } from "@/app/store";
 
 const NOTICE_MS = 4000;
 
 /**
- * The connection banners and transient notices, in one polite live region
- * that is always mounted, so a screen reader hears each change.
+ * The connection banners, the transient notices and the queue depth
+ * (SYN-06), in one polite live region that is always mounted, so a screen
+ * reader hears each change.
  */
 export function StatusRegion({ state }: { state: AppState }) {
   const dispatch = useDispatch();
   const banner = bannerFor(state);
   const notice = state.notice;
+  const queue = queueText(queueDepth(state));
   useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => dispatch({ type: "notice", text: null }), NOTICE_MS);
@@ -42,6 +45,13 @@ export function StatusRegion({ state }: { state: AppState }) {
           {notice}
         </div>
       ) : null}
+      {/* Mounted at 0, visually hidden and empty, so the first depth is announced. */}
+      <div
+        data-slot="queue-depth"
+        className={queue ? "pointer-events-none fixed bottom-4 left-4 z-30 rounded-md border border-border bg-card px-2 py-1 text-xs text-muted-foreground tabular-nums shadow-sm" : "sr-only"}
+      >
+        {queue}
+      </div>
     </div>
   );
 }

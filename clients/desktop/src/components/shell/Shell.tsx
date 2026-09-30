@@ -3,6 +3,7 @@ import type { ListGeometry } from "@/app/actions";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/sidebar/AppSidebar";
 import { MessageListPane } from "@/components/list/MessageListPane";
+import { OutboxView } from "@/components/outbox/OutboxView";
 import { ReaderPane } from "@/components/reader/ReaderPane";
 import { NarrowBar } from "@/components/shell/NarrowBar";
 import { Splitter } from "@/components/shell/Splitter";
@@ -74,7 +75,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
                 className="min-h-0 min-w-0 shrink-0"
                 style={narrow || !showReader ? { flex: "1 1 auto" } : { width: list.width }}
               >
-                <MessageListPane />
+                {s.outboxView ? <OutboxView /> : <MessageListPane />}
               </div>
             ) : null}
             {showList && showReader && !narrow ? (

@@ -238,4 +238,23 @@ describe("accessibility primitives", () => {
     expect(within(area).getByRole("status")).toBe(status);
     expect(status).toHaveTextContent("Archived 1 message");
   });
+
+  it("names the outbox view, keeps its counts and the queue depth in live regions, and names the confirmation", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const depth = document.querySelector('[data-slot="queue-depth"]') as HTMLElement;
+    expect(depth.closest('[aria-live="polite"]')).not.toBeNull();
+    await waitFor(() => expect(depth).toHaveTextContent("1 waiting for the server: 1 in the outbox"));
+    await user.click(screen.getByRole("button", { name: /Outbox of home/ }));
+    const region = await screen.findByRole("region", { name: "Outbox of home" });
+    const counts = within(region).getByRole("status");
+    await waitFor(() => expect(counts).toHaveTextContent("1 working, 0 failed, 0 partly delivered"));
+    expect(within(region).getByRole("list", { name: "Outbox rows of home" })).toBeInTheDocument();
+    const row = within(region).getByRole("listitem", { name: "Row 1, Queued" });
+    expect(row).toHaveAttribute("tabindex", "0");
+    await user.keyboard("d");
+    const dialog = await screen.findByRole("dialog", { name: "Discard row 1?" });
+    expect(dialog).toHaveAccessibleDescription("<queued-0@home.fixture.example>");
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Discard" })).toHaveFocus());
+  });
 });

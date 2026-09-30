@@ -4,7 +4,8 @@ import { MailboxItem } from "@/components/sidebar/MailboxItem";
 import { OutboxState } from "@/components/sidebar/OutboxState";
 import { SyncHealthBadge } from "@/components/sidebar/SyncHealthBadge";
 import type { MailboxKind } from "@/lib/gui-types";
-import type { AccountState, OutboxCounts, SyncHealthState } from "@/protocol/types";
+import type { AccountState, SyncHealthState } from "@/protocol/types";
+import type { OutboxSummary } from "@/app/outbox";
 
 export type SidebarMailbox = {
   slug: string;
@@ -18,13 +19,16 @@ export type AccountGroupProps = {
   name: string;
   runtime: AccountState;
   health: SyncHealthState;
-  outbox: OutboxCounts;
+  outbox: OutboxSummary;
+  /** The outbox view shows this account's outbox. */
+  outboxOpen: boolean;
   mailboxes: SidebarMailbox[] | null;
   selected: { account: string | null; mailbox: string | null };
   cursor: { account: string; slug: string } | null;
   /** Whether the digit keys address this account's mailboxes. */
   digits: boolean;
   onSelect: (account: string, slug: string) => void;
+  onOpenOutbox: (account: string) => void;
 };
 
 export function AccountGroup(p: AccountGroupProps) {
@@ -56,12 +60,12 @@ export function AccountGroup(p: AccountGroupProps) {
                   unread={m.unread}
                   total={m.total}
                   digit={p.digits && i < 9 ? i + 1 : null}
-                  active={p.selected.account === p.name && p.selected.mailbox === m.slug}
+                  active={!p.outboxOpen && p.selected.account === p.name && p.selected.mailbox === m.slug}
                   cursor={p.cursor?.account === p.name && p.cursor.slug === m.slug}
                   onSelect={p.onSelect}
                 />
               ))}
-          <OutboxState outbox={p.outbox} />
+          <OutboxState account={p.name} outbox={p.outbox} active={p.outboxOpen} onOpen={p.onOpenOutbox} />
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>

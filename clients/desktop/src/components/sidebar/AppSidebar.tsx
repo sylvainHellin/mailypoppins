@@ -6,13 +6,14 @@ import { FutureEntries } from "@/components/sidebar/FutureEntries";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { useAppState, useDispatch } from "@/app/store";
 import { accountNames, type AppState } from "@/app/state";
-import type { AccountState, OutboxCounts, SyncHealthState } from "@/protocol/types";
+import type { AccountState, SyncHealthState } from "@/protocol/types";
+import { outboxSummary, type OutboxSummary } from "@/app/outbox";
 
 type AccountView = {
   name: string;
   runtime: AccountState;
   health: SyncHealthState;
-  outbox: OutboxCounts;
+  outbox: OutboxSummary;
   mailboxes: SidebarMailbox[] | null;
 };
 
@@ -34,7 +35,9 @@ export function sidebarModel(s: AppState): AccountView[] {
       name,
       runtime: info?.runtime_state ?? snap?.state ?? "opening",
       health: info?.sync_health ?? snap?.sync_health.state ?? "unknown",
-      outbox: info?.outbox ?? s.bootstrap?.snapshot.outbox[name] ?? { queued: 0, failed: 0 },
+      // The listing once this window read it, which moves on every
+      // invalidation; `list_accounts` only moves on a bootstrap.
+      outbox: outboxSummary(s, name),
       mailboxes,
     };
   });
@@ -47,6 +50,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
     (account: string, slug: string) => dispatch({ type: "select_mailbox", account, slug, focus: "list" }),
     [dispatch],
   );
+  const onOpenOutbox = useCallback((account: string) => dispatch({ type: "open_outbox", account }), [dispatch]);
   const cursor =
     s.sidebarCursor ??
     (s.selection.account && s.selection.mailbox ? { account: s.selection.account, slug: s.selection.mailbox } : null);
@@ -74,6 +78,8 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               runtime={a.runtime}
               health={a.health}
               outbox={a.outbox}
+              outboxOpen={s.outboxView?.account === a.name}
+              onOpenOutbox={onOpenOutbox}
               mailboxes={a.mailboxes}
               selected={s.selection}
               cursor={cursor}
