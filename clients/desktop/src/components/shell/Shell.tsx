@@ -7,6 +7,7 @@ import { ReaderPane } from "@/components/reader/ReaderPane";
 import { NarrowBar } from "@/components/shell/NarrowBar";
 import { Splitter } from "@/components/shell/Splitter";
 import { StatusRegion } from "@/components/shell/StatusRegion";
+import { ActivityStack } from "@/components/mutations/ActivityStack";
 import { useAppState, useDispatch } from "@/app/store";
 import { listWidthFor, useWidth } from "@/app/layout";
 import { LIST_WIDTH_MIN, type Pane } from "@/app/state";
@@ -91,6 +92,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
           </div>
         </SidebarInset>
       )}
+      <ActivityStack />
     </SidebarProvider>
   );
 }
