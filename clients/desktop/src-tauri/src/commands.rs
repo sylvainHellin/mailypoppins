@@ -187,6 +187,10 @@ pub struct Attachment {
 
 /// The headers of one message (the `message.get` record without its body)
 /// and the reader URL its HTML is served at.
+///
+/// A header the message did not carry is `null` on the wire
+/// (`read_cmd::ShownMessage`), which `#[serde(default)]` alone does not
+/// accept, so every header is an `Option`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageMeta {
     #[serde(default)]
@@ -203,16 +207,16 @@ pub struct MessageMeta {
     #[serde(default)]
     pub message_id: String,
     #[serde(default)]
-    pub from: String,
+    pub from: Option<String>,
     #[serde(default)]
-    pub to: String,
+    pub to: Option<String>,
     #[serde(default)]
     pub cc: Option<String>,
     #[serde(default)]
-    pub subject: String,
+    pub subject: Option<String>,
     /// The `Date:` header as stored.
     #[serde(default)]
-    pub date: String,
+    pub date: Option<String>,
     /// `read`, `answered`, `flagged`, ... as `mp show --json` prints them.
     #[serde(default)]
     pub flags: Vec<String>,
@@ -761,6 +765,36 @@ mod tests {
             message_text_on(&d, "work", 424242),
             Err(GuiError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn absent_headers_decode_as_none() {
+        let meta = message_html_meta_on(&door(), "home", 1021).expect("meta");
+        assert_eq!(meta.subject, None);
+        assert_eq!(meta.date, None);
+        assert_eq!(meta.cc, None);
+        assert!(meta.from.is_some());
+        let value = serde_json::to_value(&meta).expect("json");
+        assert!(value["subject"].is_null() && value["date"].is_null());
+        // The listing sends the same absent headers as `""`.
+        match list_messages_on(&door(), "home", "newsletters").expect("list") {
+            MessageList::Messages { rows, .. } => {
+                let row = rows.iter().find(|r| r.id == 1021).expect("row 1021");
+                assert_eq!((row.subject.as_str(), row.date_display.as_str()), ("", ""));
+            }
+            other => panic!("expected messages, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_null_header_on_the_wire_decodes() {
+        let wire = json!({
+            "selector": "mp://work/inbox/x", "account": "work", "mailbox": "inbox",
+            "message_id": "<x@example>", "from": null, "to": null, "cc": null,
+            "subject": null, "date": null, "flags": [], "invite": false, "attachments": []
+        });
+        let meta: MessageMeta = serde_json::from_value(wire).expect("decodes");
+        assert_eq!((meta.from, meta.subject, meta.date), (None, None, None));
     }
 
     #[test]

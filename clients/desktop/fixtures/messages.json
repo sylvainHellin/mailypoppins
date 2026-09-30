@@ -515,6 +515,29 @@
     "selector": "mp://home/newsletters/new-arrivals-1020@fixture.example",
     "body": "New arrivals this week.\n",
     "attachments": []
+   },
+   {
+    "id": 1021,
+    "uid": 3,
+    "message_id": "<no-subject-no-date-1021@fixture.example>",
+    "from": "Mailing Robot <robot@list.example>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": null,
+    "date_sort": "2026-09-18T06:00:00",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://home/newsletters/no-subject-no-date-1021@fixture.example",
+    "body": "A message sent without a Subject: or a Date: header.\n",
+    "attachments": []
    }
   ]
  }

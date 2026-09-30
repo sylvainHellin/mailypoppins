@@ -90,7 +90,8 @@ type MessageList =
 type MessageText = { account: string; row_id: number; body: string | null };
 type MessageMeta = {
   row_id: number; html_url: string; selector: string; account: string; mailbox: string;
-  message_id: string; from: string; to: string; cc: string | null; subject: string; date: string;
+  message_id: string; from: string | null; to: string | null; cc: string | null;
+  subject: string | null; date: string | null;
   flags: string[]; invite: boolean; attachments: { name: string; size: number }[];
 };
 
@@ -111,6 +112,7 @@ type VersionInfo = {
 };
 ```
 
+A `MessageMeta` header is `null` when the message did not carry it, where a `MessageListRow` of the same message has `""`.
 `AccountInfo.runtime_state`, `sync_health` and `outbox` and `MailboxListing.runtime_state` and `sync_health` come from the latest bootstrap; later changes arrive as events.
 
 ## The event stream
@@ -182,7 +184,8 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 
 ## Fixture mode
 
-The fixtures hold 2 accounts, 6 mailboxes, 20 messages, 2 drafts and 3 HTML bodies.
+The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts and 3 HTML bodies.
+Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
 `fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds.

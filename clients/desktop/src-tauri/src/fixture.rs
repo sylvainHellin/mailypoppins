@@ -552,6 +552,10 @@ impl Fixture {
     }
 }
 
+/// Row keys a listing sends as `""` when the header was absent, where the
+/// fixtures (like the store) may hold `null` or nothing.
+const LISTED_STRINGS: &[&str] = &["from", "to", "subject", "date_sort", "date_display"];
+
 /// A fixture row as `message.list` sends it.
 fn wire_row(row: &Value) -> Value {
     let mut row = row.clone();
@@ -559,8 +563,27 @@ fn wire_row(row: &Value) -> Value {
         for key in FIXTURE_ONLY_KEYS {
             obj.remove(*key);
         }
+        for key in LISTED_STRINGS {
+            let value = obj.get(*key).and_then(Value::as_str).unwrap_or_default();
+            let value = json!(value);
+            obj.insert((*key).to_string(), value);
+        }
     }
     row
+}
+
+/// A header as a listing or a server hit sends it: the string, or `""`.
+fn listed(row: &Value, key: &str) -> Value {
+    json!(row[key].as_str().unwrap_or_default())
+}
+
+/// A header as `message.get` sends it (`read_cmd::present`): the string, or
+/// `null` when it is absent or empty.
+fn present(row: &Value, key: &str) -> Value {
+    row[key]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .map_or(Value::Null, |v| json!(v))
 }
 
 fn matches(row: &Value, query: &str) -> bool {
@@ -589,8 +612,9 @@ fn shown(account: &str, mailbox: &str, row: &Value, body: bool) -> Value {
     }
     let mut record = json!({
         "selector": row["selector"], "account": account, "mailbox": mailbox,
-        "message_id": row["message_id"], "from": row["from"], "to": row["to"], "cc": row["cc"],
-        "subject": row["subject"], "date": row["date_display"], "flags": flags,
+        "message_id": row["message_id"], "from": present(row, "from"),
+        "to": present(row, "to"), "cc": present(row, "cc"),
+        "subject": present(row, "subject"), "date": present(row, "date_display"), "flags": flags,
         "invite": row["is_invite"], "attachments": row["attachments"],
     });
     if body {
@@ -602,9 +626,10 @@ fn shown(account: &str, mailbox: &str, row: &Value, body: bool) -> Value {
 fn server_hit(account: &str, mailbox: &str, row: &Value) -> Value {
     json!({
         "account": account, "mailbox": mailbox, "message_id": row["message_id"],
-        "row_id": row["id"], "selector": row["selector"], "from": row["from"], "to": row["to"],
-        "cc": row["cc"], "reply_to": null, "bcc": null, "subject": row["subject"],
-        "date_display": row["date_display"], "date_sort": row["date_sort"], "flags": row["flags"],
+        "row_id": row["id"], "selector": row["selector"], "from": listed(row, "from"),
+        "to": listed(row, "to"), "cc": row["cc"], "reply_to": null, "bcc": null,
+        "subject": listed(row, "subject"), "date_display": listed(row, "date_display"),
+        "date_sort": listed(row, "date_sort"), "flags": row["flags"],
         "has_attachments": row["has_attachments"], "is_invite": row["is_invite"],
         "body_text": row["body"], "html_body": null
     })
@@ -669,7 +694,7 @@ mod tests {
             .flat_map(|m| m.values())
             .map(Vec::len)
             .sum();
-        assert_eq!(messages, 20);
+        assert_eq!(messages, 21);
         assert_eq!(s.html.len(), 3);
         let hostile = s
             .html
