@@ -65,7 +65,12 @@ export type ActionId =
   | "send_all"
   | "open_outbox"
   | "outbox_retry"
-  | "outbox_discard";
+  | "outbox_discard"
+  | "open_attachment"
+  | "save_attachment"
+  | "open_html"
+  | "attach_file"
+  | "fetch_hit";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -74,7 +79,8 @@ export type ActionId =
  */
 export type Badge = "M3" | "M4" | "soon" | "key" | "menu" | "later";
 
-type Binding = { id: ActionId } | { badge: Badge };
+/** `keys` replaces the KEYMAP's where the desktop binds the action to another key. */
+type Binding = { id: ActionId; keys?: string[] } | { badge: Badge };
 
 /** By the KEYMAP description, whatever the section. */
 const BY_ACTION: Record<string, Binding> = {
@@ -114,9 +120,9 @@ const BY_ACTION: Record<string, Binding> = {
   "Clear selection / return to list": { id: "clear_selection" },
   "Filter the current list": { id: "focus_filter" },
   "Show conversation (thread)": { badge: "later" },
-  "Open attachment": { badge: "later" },
-  "Save attachment to disk": { badge: "later" },
-  "Open HTML in browser": { badge: "soon" },
+  "Open attachment": { id: "open_attachment" },
+  "Save attachment to disk": { id: "save_attachment" },
+  "Open HTML in browser": { id: "open_html" },
   "RSVP to invitation (Accept/Tentative/Decline)": { badge: "M4" },
   "Navigate mailboxes": { badge: "key" },
   "Select mailbox": { id: "select_mailbox" },
@@ -128,7 +134,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Toggle selection": { id: "mark_toggle" },
   "Select all visible": { id: "mark_all" },
   "Edit recipients (Drafts only)": { id: "edit_recipients" },
-  "Attach file to draft (Drafts only)": { badge: "M3" },
+  "Attach file to draft (Drafts only)": { id: "attach_file" },
   "Approve draft (Drafts only)": { id: "approve" },
   "Unapprove, back to draft (Drafts only)": { id: "demote" },
   "Send all approved drafts (Drafts only)": { id: "send_all" },
@@ -156,8 +162,14 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Open in the mail list": { badge: "later" },
     "Open read-only in $EDITOR": { badge: "later" },
     "Copy the Markdown rendition path": { badge: "later" },
-    // The Tauri layer has no `message.fetch` command yet.
-    "Fetch a server-only hit into the store": { badge: "later" },
+    // `f` is the find family's prefix in the desktop client (`fm`, `ff`), so
+    // the fetch is `F`, free in every mail context of the TUI.
+    "Fetch a server-only hit into the store": { id: "fetch_hit", keys: ["F"] },
+    // The overlay's own `b`, `o` and `O`: a hit is a list row, so the
+    // MESSAGE keys act on it, a server-only hit's markup included.
+    "Open HTML in browser": { id: "open_html", keys: ["tb"] },
+    "Open attachment": { id: "open_attachment", keys: ["to"] },
+    "Save attachment to disk": { id: "save_attachment", keys: ["ts"] },
     // The overlay's own `w`: in the desktop client a hit is a list row, so
     // `cf` forwards it (MESSAGE).
     Forward: { badge: "later" },
@@ -191,14 +203,15 @@ export function paletteEntries(sections: KeymapSection[] = SECTIONS): PaletteEnt
     for (const b of s.bindings) {
       const prev = seen.get(b.action);
       if (prev) {
-        prev.keys.push(b.key);
+        const binding = bindingFor(s.title, b.action);
+        if (!("keys" in binding && binding.keys)) prev.keys.push(b.key);
         continue;
       }
       const binding = bindingFor(s.title, b.action);
       const entry: PaletteEntry = {
         section: s.title,
         label: b.action,
-        keys: [b.key],
+        keys: "keys" in binding && binding.keys ? [...binding.keys] : [b.key],
         id: "id" in binding ? binding.id : null,
         badge: "badge" in binding ? binding.badge : null,
       };

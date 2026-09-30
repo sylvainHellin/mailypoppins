@@ -111,8 +111,8 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    await user.keyboard("ta");
-    expect(await screen.findByText(/Attach file to draft \(Drafts only\) arrives later in M3/)).toBeInTheDocument();
+    await user.keyboard("tv");
+    expect(await screen.findByText(/RSVP to invitation \(Accept\/Tentative\/Decline\) arrives in M4/)).toBeInTheDocument();
   });
 });
 
@@ -596,5 +596,50 @@ describe("send keys (the TUI's x and cX)", () => {
     palette = await screen.findByRole("dialog", { name: "Command palette" });
     await user.click(within(palette).getByText("Send all approved drafts (Drafts only)"));
     expect(await screen.findByRole("dialog", { name: "Send all approved emails?" })).toBeInTheDocument();
+  });
+});
+
+describe("attachment keys (the TUI's t family) and F", () => {
+  it("to, ts and tb act on the cursor message from the list and the reader, never from the sidebar", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("to");
+    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 0 }]));
+    await user.keyboard("{Tab}");
+    await waitFor(() => expect(document.activeElement?.closest("[data-pane]")).toHaveAttribute("data-pane", "reader"));
+    await user.keyboard("tb");
+    await waitFor(() => expect(callsOf("html_open")).toEqual([{ account: "work", row_id: 1001 }]));
+    await user.keyboard("ts");
+    expect(await screen.findByRole("dialog", { name: "Save attachment" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await user.keyboard("gm");
+    for (const combo of ["to", "ts", "tb", "ta", "F"]) await user.keyboard(combo);
+    expect(callsOf("attachment_open")).toHaveLength(1);
+    expect(callsOf("html_open")).toHaveLength(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("F off a search says what it fetches, and the palette runs the attachment rows with their arguments", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("F");
+    expect(await screen.findByText("Fetch works on a server-only search result")).toBeInTheDocument();
+    expect(callsOf("message_fetch")).toEqual([]);
+    await user.keyboard(":");
+    let dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getAllByText("Open attachment")[0]);
+    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 0 }]));
+    await user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getAllByText("Open HTML in browser")[0]);
+    await waitFor(() => expect(callsOf("html_open")).toEqual([{ account: "work", row_id: 1001 }]));
+    await user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    const fetchRow = within(dialog).getByText("Fetch a server-only hit into the store").closest("[data-testid='palette-item']");
+    expect(fetchRow).not.toHaveAttribute("data-disabled", "true");
+    expect(fetchRow).toHaveTextContent("F");
   });
 });

@@ -10,6 +10,7 @@ import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDial
 import { ConfirmMutationDialog } from "@/components/mutations/ConfirmMutationDialog";
 import { MovePicker } from "@/components/mutations/MovePicker";
 import { ComposeWizard } from "@/components/compose/ComposeWizard";
+import { AttachmentsDialog } from "@/components/attachments/AttachmentsDialog";
 import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
@@ -88,6 +89,7 @@ export function AppShell() {
         onPick={(slug) => s.dialog && runDialog(s.dialog, dispatch, slug)}
       />
       <ComposeWizard dialog={s.overlay === "compose" ? s.composeDialog : null} onOpenChange={close} />
+      <AttachmentsDialog dialog={s.overlay === "attachments" ? s.attachDialog : null} onOpenChange={close} />
     </>
   );
 }

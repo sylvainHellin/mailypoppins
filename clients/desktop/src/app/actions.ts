@@ -6,6 +6,7 @@ import { listWidthFor } from "@/app/layout";
 import { createMutations } from "@/app/mutations";
 import * as compose from "@/app/compose";
 import * as send from "@/app/send";
+import * as attachments from "@/app/attachments";
 import { CLOSE_OUTBOX_FIRST, cursorRow, discardDialog, hiddenByOutbox, retryDialog } from "@/app/outbox";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
@@ -246,6 +247,16 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
       return dispatch({ type: "open_dialog", dialog });
     }
+    case "open_attachment":
+      return void attachments.openAttachment(s, dispatch);
+    case "save_attachment":
+      return void attachments.saveAttachment(s, dispatch);
+    case "open_html":
+      return void attachments.openHtml(s, dispatch);
+    case "attach_file":
+      return attachments.attachFile(s, dispatch);
+    case "fetch_hit":
+      return void attachments.fetchHit(s, dispatch);
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;

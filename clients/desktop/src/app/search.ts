@@ -4,7 +4,8 @@
 // `operation.finished`, or with `operation_settled` / `operation_dropped`
 // when a re-bootstrap re-queried it (docs/rust-layer.md, "The event stream").
 
-import type { LocalSearchHit } from "@/lib/gui-types";
+import type { FetchOutcome, LocalSearchHit } from "@/lib/gui-types";
+import { pushNotice } from "@/app/pending";
 import type { OperationFinishedPayload, OperationStatus, ServerHitPayload, ServerSearchHit } from "@/protocol/types";
 import type { AppState, MessageRef, SearchHit, SearchSignal, SearchState } from "@/app/state";
 
@@ -190,4 +191,24 @@ export function serverStarted(s: AppState, seq: number, operationId: string): Ap
   let next: SearchState = { ...search, operationId, status: "running", early: [] };
   for (const sig of search.early) next = applySignal(next, sig);
   return { ...s, search: next };
+}
+
+/**
+ * `message_fetch` of the server-only hit `key` answered: the hit is the row
+ * it landed in, as the TUI's overlay resolves the hit, and the reader opens
+ * it when the cursor is still on it. The row reaches its mailbox's list
+ * through the counts invalidation the daemon publishes.
+ */
+export function hitFetched(s: AppState, key: string, outcome: FetchOutcome): AppState {
+  const text = outcome.already_present ? "Already in the local store" : "Fetched into the local store";
+  const next = pushNotice(s, { kind: "applied", account: outcome.account, text });
+  const search = next.search;
+  const hit = search?.hits.find((h) => h.key === key);
+  if (!search || !hit || search.account !== outcome.account) return next;
+  const fetched = { ...hit, row_id: outcome.row_id, selector: outcome.selector };
+  const hits = search.hits.map((h) => (h === hit ? fetched : h));
+  const withHits: AppState = { ...next, search: { ...search, hits } };
+  if (next.selection.hit !== key || hit.message_id === null) return withHits;
+  const message = { row_id: outcome.row_id, message_id: hit.message_id, selector: outcome.selector, verified: true };
+  return { ...withHits, selection: { ...withHits.selection, hit: null, draft: null, message } };
 }

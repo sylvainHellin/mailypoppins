@@ -23,9 +23,9 @@ describe("the command palette", () => {
     await shellReady();
     await user.keyboard(":");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    const attach = within(dialog).getByText("Attach file to draft (Drafts only)").closest("[data-testid='palette-item']");
-    expect(attach).toHaveAttribute("data-disabled", "true");
-    expect(attach).toHaveTextContent("M3");
+    const rsvp = within(dialog).getAllByText("RSVP to invitation (Accept/Tentative/Decline)")[0].closest("[data-testid='palette-item']");
+    expect(rsvp).toHaveAttribute("data-disabled", "true");
+    expect(rsvp).toHaveTextContent("M4");
   });
 
   it("runs every mutation action and no row is left for M2", () => {
@@ -152,7 +152,7 @@ describe("the command palette", () => {
     expect(archive).not.toHaveTextContent("M2");
   });
 
-  it("runs every compose and send action and keeps only the attach row for later in M3", () => {
+  it("runs every compose, send and attachment action and leaves no row for M3", () => {
     const entries = [...paletteEntries(), ...GUI_ENTRIES];
     const ids = new Set(entries.map((e) => e.id));
     for (const id of [
@@ -166,10 +166,26 @@ describe("the command palette", () => {
       "demote",
       "send",
       "send_all",
+      "open_attachment",
+      "save_attachment",
+      "open_html",
+      "attach_file",
+      "fetch_hit",
     ] as const) {
       expect(ids).toContain(id);
     }
-    expect(entries.filter((e) => e.badge === "M3").map((e) => e.label)).toEqual(["Attach file to draft (Drafts only)"]);
+    // No row is left for M3: the attachment rows and the fetch run.
+    expect(entries.filter((e) => e.badge === "M3").map((e) => e.label)).toEqual([]);
+  });
+
+  it("shows the desktop's key where it binds a search row to another key than the TUI's", () => {
+    const search = paletteEntries().filter((e) => e.section === "SERVER SEARCH");
+    const keysOf = (label: string) => search.find((e) => e.label === label)?.keys;
+    expect(keysOf("Fetch a server-only hit into the store")).toEqual(["F"]);
+    expect(keysOf("Open HTML in browser")).toEqual(["tb"]);
+    expect(keysOf("Open attachment")).toEqual(["to"]);
+    expect(keysOf("Save attachment to disk")).toEqual(["ts"]);
+    expect(search.find((e) => e.label === "Fetch a server-only hit into the store")?.id).toBe("fetch_hit");
   });
 
   it("New draft, Reply all and Approve draft run from the palette", async () => {

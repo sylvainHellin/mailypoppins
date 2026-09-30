@@ -224,6 +224,9 @@ describe("the outbox view hides the mailbox selection", () => {
     "draft_demote",
     "send_draft",
     "send_approved",
+    "attachment_open",
+    "html_open",
+    "message_fetch",
   ];
   const acted = () => mock.calls.filter((c) => acting.includes(c.cmd)).map((c) => c.cmd);
   const marked = () => document.querySelector('[data-slot="marked-count"]')?.textContent ?? "";
@@ -243,7 +246,7 @@ describe("the outbox view hides the mailbox selection", () => {
     await user.keyboard("{Tab}");
     await waitFor(() => expect(document.activeElement?.closest("[data-pane]")).toHaveAttribute("data-pane", "reader"));
     for (const key of ["a", "d", "u", "*", "M", "e", "r", "y", "x", "v"]) await user.keyboard(key);
-    for (const combo of ["cr", "cf", "ce"]) await user.keyboard(combo);
+    for (const combo of ["cr", "cf", "ce", "to", "ts", "tb", "ta", "F"]) await user.keyboard(combo);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(acted()).toEqual([]);
     expect(screen.queryByText(/Close the outbox first/)).toBeNull();

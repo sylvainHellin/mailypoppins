@@ -1,6 +1,9 @@
-import { CalendarDays, Paperclip } from "lucide-react";
+import { CalendarDays, Download, ExternalLink, Paperclip } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { formatSize } from "@/components/list/format";
+import { messageItems, openItem } from "@/app/attachments";
+import { useDispatch } from "@/app/store";
 import type { MessageMeta } from "@/lib/gui-types";
 
 function Field({ name, value }: { name: string; value: string | null }) {
@@ -13,8 +16,15 @@ function Field({ name, value }: { name: string; value: string | null }) {
   );
 }
 
-/** From `message_html_meta`: an absent header is null and is not shown. */
+/**
+ * From `message_html_meta`: an absent header is null and is not shown.
+ * Each attachment opens with the system opener (`to`) or saves into a
+ * directory (`ts`).
+ */
 export function ReaderHeader({ meta }: { meta: MessageMeta }) {
+  const dispatch = useDispatch();
+  const owner = { kind: "message" as const, account: meta.account, row_id: meta.row_id };
+  const items = messageItems(meta.attachments);
   return (
     <header className="flex flex-col gap-3 border-b border-border px-5 py-4">
       <h2 className="text-lg leading-snug font-semibold break-words">{meta.subject ?? "(no subject)"}</h2>
@@ -41,16 +51,40 @@ export function ReaderHeader({ meta }: { meta: MessageMeta }) {
           ) : null}
         </ul>
       ) : null}
-      {meta.attachments.length > 0 ? (
+      {items.length > 0 ? (
         <ul aria-label="Attachments" className="flex flex-wrap gap-2">
-          {meta.attachments.map((a) => (
+          {items.map((item) => (
             <li
-              key={a.name}
-              className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs"
+              key={item.part}
+              data-attachment={item.part}
+              className="flex items-center gap-1.5 rounded-md border border-border bg-card py-0.5 pr-0.5 pl-2 text-xs"
             >
               <Paperclip aria-hidden="true" className="size-3.5 text-muted-foreground" />
-              <span className="max-w-60 truncate">{a.name}</span>
-              <span className="text-muted-foreground tabular-nums">{formatSize(a.size)}</span>
+              <span className="max-w-60 truncate">{item.name}</span>
+              <span className="text-muted-foreground tabular-nums">{formatSize(item.size ?? 0)}</span>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                title="Open (t o)"
+                aria-label={`Open ${item.name}`}
+                onClick={() => void openItem(owner, item, dispatch)}
+              >
+                <ExternalLink aria-hidden="true" />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                title="Save (t s)"
+                aria-label={`Save ${item.name}`}
+                onClick={() =>
+                  dispatch({
+                    type: "open_attachments",
+                    dialog: { kind: "save", account: meta.account, row_id: meta.row_id, subject: meta.subject ?? "(no subject)", items: [item] },
+                  })
+                }
+              >
+                <Download aria-hidden="true" />
+              </Button>
             </li>
           ))}
         </ul>

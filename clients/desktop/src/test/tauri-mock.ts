@@ -7,6 +7,7 @@ import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
 import draftBodiesFx from "../../fixtures/draft-bodies.json";
 import draftsFx from "../../fixtures/drafts.json";
+import htmlFx from "../../fixtures/html.json";
 import messagesFx from "../../fixtures/messages.json";
 import signaturesFx from "../../fixtures/signatures.json";
 import type {
@@ -151,7 +152,23 @@ export const mock = {
   outbox: {} as Record<string, { ever_used: boolean; rows: OutboxRow[] }>,
   /** The next outbox retry's operation id counter. */
   nextRetry: 1,
+  /** Every file the system opener was asked to open, in order. */
+  opened: [] as string[],
+  /** The files on the mock's disk, which `draft_attach` checks; `~` is {@link MOCK_HOME}. */
+  files: new Set<string>(),
+  /** Each draft's `attachments:` entries, by `<account>/<id>`. */
+  draftAttachments: {} as Record<string, string[]>,
+  /** The names each save directory holds, for the `_1` rule. */
+  savedIn: {} as Record<string, string[]>,
+  /** The next materialised handle's counter. */
+  nextHandle: 1,
 };
+
+/** The home directory `~` expands to in the mock. */
+export const MOCK_HOME = "/home/fixture";
+
+/** The files the mock's disk starts with. */
+export const MOCK_FILES = [`${MOCK_HOME}/Documents/report.pdf`, `${MOCK_HOME}/Documents/plan.pdf`];
 
 export function resetMock(): void {
   mock.connection = { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true };
@@ -178,6 +195,48 @@ export function resetMock(): void {
   mock.nextSend = 1;
   mock.outbox = seedOutbox();
   mock.nextRetry = 1;
+  mock.opened = [];
+  mock.files = new Set(MOCK_FILES);
+  mock.draftAttachments = {};
+  mock.savedIn = {};
+  mock.nextHandle = 1;
+}
+
+const expandHome = (p: string) => (p === "~" ? MOCK_HOME : p.startsWith("~/") ? `${MOCK_HOME}/${p.slice(2)}` : p);
+
+/** A draft's attachments as `draft_attachments` answers them. */
+function draftAttachmentsOf(account: string, id: string) {
+  const d = findDraft("draft.path", account, id);
+  const entries = mock.draftAttachments[`${account}/${id}`] ?? [];
+  return {
+    account,
+    id,
+    path: d.path,
+    attachments: entries.map((entry, index) => {
+      const path = expandHome(entry);
+      return { index, entry, path, exists: mock.files.has(path) };
+    }),
+  };
+}
+
+/** The `_1` rule of `mp_core::parse::save_attachment`. */
+function saveName(dir: string, name: string): string {
+  const taken = (mock.savedIn[dir] ??= []);
+  const dot = name.lastIndexOf(".");
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  let candidate = name;
+  for (let n = 1; taken.includes(candidate); n++) candidate = `${stem}_${n}${ext}`;
+  taken.push(candidate);
+  return `${dir}/${candidate}`;
+}
+
+/** Part `part` of a stored row, or the daemon's -32602. */
+function partOf(method: string, account: string, rowId: number, part: number): string {
+  const hit = findRow(account, rowId);
+  if (!hit) throw refusedRow(method, `no message has row_id ${rowId}`);
+  const parts = hit[1].attachments ?? [];
+  if (part >= parts.length) throw refusedRow(method, `row ${rowId} has ${parts.length} attachments, no part ${part}`);
+  return parts[part].name;
 }
 
 /** The hold the mock arms for a send, 20 s as the daemon's default window. */
@@ -675,6 +734,116 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       mock.draftExtra[key] = { body: mock.draftExtra[key]?.body ?? fixtures.draftBodies[d.id] ?? "", bcc: String(args.bcc) };
       draftChanged(account, d);
       return { account, id: d.id, selector: d.selector, path: d.path, status: d.status };
+    }
+    case "attachment_open": {
+      const name = partOf("message.materialise_attachment", account, Number(args.row_id), Number(args.part));
+      const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/${name}`;
+      mock.opened.push(path);
+      return { name, path };
+    }
+    case "attachment_save": {
+      const typed = String(args.dest_dir).trim();
+      const dir = expandHome(typed);
+      if (!dir.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
+      const out: { dir: string; saved: unknown[]; failed: unknown[] } = { dir, saved: [], failed: [] };
+      for (const part of args.parts as number[]) {
+        try {
+          const name = partOf("message.materialise_attachment", account, Number(args.row_id), part);
+          out.saved.push({ part, name, path: saveName(dir, name) });
+        } catch (error) {
+          out.failed.push({ part, error });
+        }
+      }
+      return out;
+    }
+    case "html_open": {
+      const rowId = Number(args.row_id);
+      if (!findRow(account, rowId)) throw refusedRow("message.materialise_html", `no message has row_id ${rowId}`);
+      if (!(String(rowId - mock.rowShift) in htmlFx)) return null;
+      const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/message.html`;
+      mock.opened.push(path);
+      return { name: "message.html", path };
+    }
+    case "hit_html_open": {
+      const path = `/fixture/cache/renditions/hit-${mock.nextHandle++}/message.html`;
+      mock.opened.push(path);
+      return { name: "message.html", path };
+    }
+    case "draft_attachments":
+      knownAccount(cmd, account);
+      return draftAttachmentsOf(account, String(args.id));
+    case "draft_attach": {
+      knownAccount(cmd, account);
+      const id = String(args.id);
+      const typed = String(args.path).trim();
+      const file = expandHome(typed);
+      if (!file.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
+      if (!mock.files.has(file)) throw { kind: "not_found", message: `No such file: ${typed}`, code: null };
+      const entries = (mock.draftAttachments[`${account}/${id}`] ??= []);
+      const dup = entries.find((e) => expandHome(e) === file);
+      if (dup) throw { kind: "protocol", message: `${dup} is already attached`, code: null };
+      entries.push(typed);
+      draftChanged(account, findDraft("draft.path", account, id));
+      return draftAttachmentsOf(account, id);
+    }
+    case "draft_attachment_remove": {
+      knownAccount(cmd, account);
+      const id = String(args.id);
+      const entries = mock.draftAttachments[`${account}/${id}`] ?? [];
+      const index = Number(args.index);
+      if (index >= entries.length) throw { kind: "not_found", message: `the draft lists ${entries.length} attachments, no number ${index + 1}`, code: null };
+      entries.splice(index, 1);
+      draftChanged(account, findDraft("draft.path", account, id));
+      return draftAttachmentsOf(account, id);
+    }
+    case "draft_attachment_open": {
+      knownAccount(cmd, account);
+      const entry = (mock.draftAttachments[`${account}/${String(args.id)}`] ?? [])[Number(args.index)];
+      if (entry === undefined) throw { kind: "not_found", message: `no attachment ${Number(args.index) + 1}`, code: null };
+      const path = expandHome(entry);
+      if (!mock.files.has(path)) throw { kind: "not_found", message: `${entry} is missing: no file at ${path}`, code: null };
+      mock.opened.push(path);
+      return { name: path.slice(path.lastIndexOf("/") + 1), path };
+    }
+    case "message_fetch": {
+      knownAccount(cmd, account);
+      const messageId = String(args.message_id);
+      const label = String(args.mailbox);
+      const box = fixtures.bootstrap.snapshot.mailboxes[account]?.find(
+        (m) => m.label.toLowerCase() === label.toLowerCase() || m.slug === label.toLowerCase(),
+      );
+      if (!box) throw { kind: "protocol", message: `message.fetch: the daemon refused the call: no mailbox \`${label}\` (-32602)`, code: -32602 };
+      for (const [mailbox, rows] of Object.entries(mock.rows[account] ?? {})) {
+        const r = rows.find((x) => x.message_id === messageId);
+        if (r) return { account, mailbox, uid: r.uid, row_id: r.id + mock.rowShift, selector: r.selector, already_present: true };
+      }
+      if (messageId !== "<server-only@fixture.example>") {
+        throw { kind: "protocol", message: `The fetch failed: no message ${messageId} in ${label} on the server`, code: null };
+      }
+      const id = Math.max(...Object.values(mock.rows).flatMap((b) => Object.values(b).flatMap((rs) => rs.map((r) => r.id)))) + 1;
+      const selector = `mp://${account}/${box.slug}/server-only@fixture.example`;
+      const row = {
+        id,
+        uid: id,
+        message_id: messageId,
+        from: "Old Friend <old@example.com>",
+        to: "me@example.com",
+        cc: null,
+        reply_to: null,
+        bcc: null,
+        subject: "The old thread",
+        date_sort: "2025-03-03T08:00:00",
+        date_display: "Mon, 3 Mar 2025 09:00:00 +0100",
+        flags: { seen: true, answered: false, forwarded: false, flagged: false },
+        has_attachments: false,
+        is_invite: false,
+        selector,
+        body: "The old thread.",
+        attachments: [],
+      } as unknown as FixtureRow;
+      ((mock.rows[account] ??= {})[box.slug] ??= []).unshift(row);
+      emitEnvelope("state.invalidate", { resource: `mailbox:${account}/${box.slug}`, scope: { query: "counts" } });
+      return { account, mailbox: box.slug, uid: id, row_id: id + mock.rowShift, selector, already_present: false };
     }
     case "signature_list": {
       knownAccount(cmd, account);

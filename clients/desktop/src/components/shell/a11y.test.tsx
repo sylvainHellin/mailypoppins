@@ -273,4 +273,46 @@ describe("accessibility primitives", () => {
     expect(dialog).toHaveAccessibleDescription("<queued-0@home.fixture.example>");
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Discard" })).toHaveFocus());
   });
+
+  it("names the attach and save dialogs, starts each in its field, ties the picker note to it and keeps the error in an alert", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("ts");
+    const save = await screen.findByRole("dialog", { name: "Save attachment" });
+    expect(save).toHaveAccessibleDescription("Quarterly ledger review");
+    const dir = within(save).getByRole("textbox", { name: "Directory" });
+    await waitFor(() => expect(dir).toHaveFocus());
+    expect(dir).toHaveAccessibleDescription(/start.*~.*A native picker arrives with the dialog plugin/);
+    const alert = within(save).getByRole("alert");
+    expect(alert).toBeEmptyDOMElement();
+    expect(within(save).getByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(within(save).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("j");
+    await user.keyboard("ta");
+    const attach = await screen.findByRole("dialog", { name: "Attach file" });
+    expect(attach).toHaveAccessibleDescription(/^To the draft /);
+    const file = within(attach).getByRole("textbox", { name: "File" });
+    await waitFor(() => expect(file).toHaveFocus());
+    expect(file).toHaveAccessibleDescription(/A native picker arrives with the dialog plugin/);
+    expect(within(attach).getByRole("alert")).toBeEmptyDOMElement();
+    await user.keyboard("relative.pdf{Enter}");
+    await waitFor(() => expect(within(attach).getByRole("alert")).toHaveTextContent("is not an absolute path"));
+    expect(file).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("names each attachment's buttons after the file, in the reader", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    const list = await within(reader).findByRole("list", { name: "Attachments" });
+    expect(within(list).getByRole("button", { name: "Open ledger-q3.pdf" })).toHaveAttribute("title", "Open (t o)");
+    expect(within(list).getByRole("button", { name: "Save ledger-q3.pdf" })).toHaveAttribute("title", "Save (t s)");
+  });
 });

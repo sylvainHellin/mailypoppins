@@ -1,7 +1,8 @@
-import { Archive, FolderInput, Forward, Mail, MailOpen, Reply, ReplyAll, Star, StarOff, Trash2 } from "lucide-react";
+import { Archive, FolderInput, Forward, Globe, Mail, MailOpen, Reply, ReplyAll, Star, StarOff, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { openMessageTarget, runMutation, type MutationActionId } from "@/app/actions";
 import * as compose from "@/app/compose";
+import { openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey } from "@/app/state";
 import type { MessageMeta } from "@/lib/gui-types";
@@ -10,7 +11,8 @@ import type { MessageMeta } from "@/lib/gui-types";
  * The open message's actions, the same the keys run: Reply and Reply all
  * open the editor on the new draft, Forward asks for the recipients first,
  * Archive and Delete ask first, Move opens the picker. They act on this
- * message only, whatever the list has marked.
+ * message only, whatever the list has marked. Open in browser hands the
+ * daemon's rendition to the default browser.
  */
 export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
   const s = useAppState();
@@ -59,6 +61,10 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
       <Button size="sm" variant="ghost" title="Toggle read (u)" onClick={() => run("toggle_read")}>
         {read ? <Mail aria-hidden="true" /> : <MailOpen aria-hidden="true" />}
         {read ? "Mark unread" : "Mark read"}
+      </Button>
+      <Button size="sm" variant="ghost" title="Open HTML in browser (t b)" onClick={() => void openHtml(s, dispatch)}>
+        <Globe aria-hidden="true" />
+        Open in browser
       </Button>
     </div>
   );

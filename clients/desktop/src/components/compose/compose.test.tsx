@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { emitEnvelope, mock } from "@/test/tauri-mock";
+import { emitEnvelope, mock, MOCK_HOME } from "@/test/tauri-mock";
 import { draftName, fwdSubject, normalizeRecipients } from "@/app/compose";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
@@ -301,5 +301,98 @@ describe("while a draft is being sent", () => {
     await user.keyboard("k");
     await user.keyboard("e");
     await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/angebot-antwort.md"]));
+  });
+});
+
+describe("a draft's attachments", () => {
+  it("ta opens the path dialog, which keeps a missing file open and attaches an existing one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+    await user.keyboard("ta");
+    const dialog = await screen.findByRole("dialog", { name: "Attach file" });
+    expect(dialog).toHaveAccessibleDescription("To the draft Re: Angebot Dachsanierung");
+    const field = within(dialog).getByRole("textbox", { name: "File" });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(field).toHaveAccessibleDescription(/A native picker arrives with the dialog plugin/);
+    await user.keyboard("~/nope.pdf{Enter}");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("No such file: ~/nope.pdf");
+    await user.clear(field);
+    await user.keyboard("~/Documents/report.pdf{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(callsOf("draft_attach")).toEqual([
+      { account: "work", id: "angebot-antwort", path: "~/nope.pdf" },
+      { account: "work", id: "angebot-antwort", path: "~/Documents/report.pdf" },
+    ]);
+    const activity = screen.getByRole("region", { name: "Activity" });
+    expect(activity).toHaveTextContent("Attached ~/Documents/report.pdf to angebot-antwort");
+    // The watcher's draft.changed reads the list again.
+    const list = await within(reader()).findByRole("list", { name: "Attachments" });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["~/Documents/report.pdf"]);
+  });
+
+  it("the preview lists the entries in order, opens one, flags a missing one and removes one", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.draftAttachments["work/angebot-antwort"] = ["~/Documents/report.pdf", "/gone/old.pdf", `${MOCK_HOME}/Documents/plan.pdf`];
+    });
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    const list = await within(reader()).findByRole("list", { name: "Attachments" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows.map((li) => li.querySelector(".font-mono")?.textContent)).toEqual([
+      "~/Documents/report.pdf",
+      "/gone/old.pdf",
+      `${MOCK_HOME}/Documents/plan.pdf`,
+    ]);
+    expect(rows[1].querySelector('[data-slot="attachment-missing"]')).toHaveTextContent("missing");
+    expect(within(rows[1]).getByRole("button", { name: "Open /gone/old.pdf" })).toBeDisabled();
+    await user.click(within(rows[2]).getByRole("button", { name: `Open ${MOCK_HOME}/Documents/plan.pdf` }));
+    await waitFor(() => expect(callsOf("draft_attachment_open")).toEqual([{ account: "work", id: "angebot-antwort", index: 2 }]));
+    expect(mock.opened).toEqual([`${MOCK_HOME}/Documents/plan.pdf`]);
+    await user.click(within(rows[1]).getByRole("button", { name: "Remove /gone/old.pdf" }));
+    await waitFor(() => expect(callsOf("draft_attachment_remove")).toEqual([{ account: "work", id: "angebot-antwort", index: 1 }]));
+    // The watcher's draft.changed reads the list again, into a new element.
+    await waitFor(() =>
+      expect(
+        within(within(reader()).getByRole("list", { name: "Attachments" }))
+          .getAllByRole("listitem")
+          .map((li) => li.querySelector(".font-mono")?.textContent),
+      ).toEqual([
+        "~/Documents/report.pdf",
+        `${MOCK_HOME}/Documents/plan.pdf`,
+      ]),
+    );
+  });
+
+  it("to on a draft picks among its files; ta outside Drafts and ts on a draft say why not", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.draftAttachments["work/angebot-antwort"] = ["~/Documents/report.pdf", "~/Documents/plan.pdf"];
+    });
+    await shellReady();
+    await user.keyboard("ta");
+    expect(await screen.findByText("Attach file (t a) is only available in Drafts")).toBeInTheDocument();
+    await drafts(user);
+    await user.keyboard("j");
+    await within(reader()).findByRole("list", { name: "Attachments" });
+    await user.keyboard("ts");
+    expect(await screen.findByText("A draft's attachments are files already; t o opens one")).toBeInTheDocument();
+    await user.keyboard("to");
+    const picker = await screen.findByRole("dialog", { name: "Open attachment" });
+    await user.click(within(picker).getByRole("button", { name: "Open ~/Documents/plan.pdf" }));
+    await waitFor(() => expect(callsOf("draft_attachment_open")).toEqual([{ account: "work", id: "angebot-antwort", index: 1 }]));
+    expect(callsOf("attachment_open")).toEqual([]);
+  });
+
+  it("the preview's Attach file button opens the same dialog", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    const preview = await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+    await user.click(within(preview).getByRole("button", { name: "Attach file" }));
+    expect(await screen.findByRole("dialog", { name: "Attach file" })).toBeInTheDocument();
   });
 });

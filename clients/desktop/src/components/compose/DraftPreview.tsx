@@ -1,20 +1,28 @@
 // The reader pane for a draft: `draft_preview`'s record (the headers, the
-// status and the body the dry run renders) and `draft_validate`'s report,
-// read again whenever the listing's row changes (a save in the editor).
+// status and the body the dry run renders), `draft_validate`'s report and
+// the `attachments:` list `draft_attachments` reads from the file, read
+// again whenever the listing's row changes (a save in the editor).
 
 import { useEffect, useState } from "react";
-import { CircleAlert, CircleCheck, FilePen, Stamp, Undo2, Users } from "lucide-react";
+import { CircleAlert, CircleCheck, ExternalLink, FilePen, Paperclip, Stamp, Undo2, Users, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { runAction } from "@/app/actions";
+import { draftItemsOf, openItem, removeItem } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey, type DraftItem } from "@/app/state";
 import * as cmd from "@/lib/commands";
-import { asGuiError } from "@/lib/gui-types";
+import { asGuiError, type DraftAttachments } from "@/lib/gui-types";
 import type { DraftPreview as Preview, DraftReport } from "@/protocol/types";
 
-type Loaded = { key: string; preview: Preview | null; report: DraftReport | null; error: string | null };
+type Loaded = {
+  key: string;
+  preview: Preview | null;
+  report: DraftReport | null;
+  attachments: DraftAttachments | null;
+  error: string | null;
+};
 
 function Header({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
@@ -48,12 +56,17 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
   useEffect(() => {
     if (invalid) return;
     let live = true;
-    Promise.allSettled([cmd.draftPreview(account, draft.id), cmd.draftValidate(account, draft.id)]).then(([p, v]) => {
+    Promise.allSettled([
+      cmd.draftPreview(account, draft.id),
+      cmd.draftValidate(account, draft.id),
+      cmd.draftAttachments(account, draft.id),
+    ]).then(([p, v, a]) => {
       if (!live) return;
       setLoaded({
         key,
         preview: p.status === "fulfilled" ? p.value : null,
         report: v.status === "fulfilled" ? (v.value.reports.find((r) => r.id === draft.id) ?? null) : null,
+        attachments: a.status === "fulfilled" ? a.value : null,
         error: p.status === "rejected" ? asGuiError(p.reason).message : null,
       });
     });
@@ -70,6 +83,8 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
   const report = loaded?.key === key ? loaded.report : null;
   const subject = p?.subject || draft.subject || (invalid ? draft.id : "(no subject)");
   const status = draft.status;
+  const attachments = loaded?.key === key && loaded.attachments ? draftItemsOf(loaded.attachments) : [];
+  const owner = { kind: "draft" as const, account, draftId: draft.id };
 
   return (
     <article aria-label={`Draft: ${subject}`} data-slot="draft-preview" className="flex flex-col gap-3 px-5 py-4 text-sm">
@@ -83,6 +98,10 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
             <Button size="sm" variant="ghost" title="Edit recipients (ce)" onClick={() => runAction("edit_recipients", s, dispatch)}>
               <Users aria-hidden="true" />
               Edit recipients
+            </Button>
+            <Button size="sm" variant="ghost" title="Attach file (ta)" onClick={() => runAction("attach_file", s, dispatch)}>
+              <Paperclip aria-hidden="true" />
+              Attach file
             </Button>
             {status === "approved" ? (
               <Button size="sm" variant="ghost" title="Back to draft (cD)" onClick={() => runAction("demote", s, dispatch)}>
@@ -149,6 +168,48 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
               </ul>
             ) : null}
           </div>
+          {attachments.length > 0 ? (
+            <ul aria-label="Attachments" data-slot="draft-attachments" className="flex flex-col gap-1">
+              {attachments.map((item) => (
+                <li
+                  key={`${item.part}:${item.name}`}
+                  data-attachment={item.part}
+                  className="flex items-center gap-2 rounded-md border border-border bg-card py-0.5 pr-0.5 pl-2 text-xs"
+                >
+                  <Paperclip aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate font-mono">{item.name}</span>
+                  {item.missing ? (
+                    <Badge variant="destructive" data-slot="attachment-missing">
+                      missing
+                    </Badge>
+                  ) : null}
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    title="Open (t o)"
+                    aria-label={`Open ${item.name}`}
+                    disabled={item.missing}
+                    onClick={() => void openItem(owner, item, dispatch)}
+                  >
+                    <ExternalLink aria-hidden="true" />
+                  </Button>
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
+                    title="Remove from the draft"
+                    aria-label={`Remove ${item.name}`}
+                    onClick={() =>
+                      void removeItem(account, draft.id, item, dispatch).then(
+                        (list) => list && setLoaded((l) => (l && l.key === key ? { ...l, attachments: list } : l)),
+                      )
+                    }
+                  >
+                    <X aria-hidden="true" />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <pre data-slot="draft-body" className="font-sans break-words whitespace-pre-wrap">
             {p.body_truncated ? `${p.body}…` : p.body}
           </pre>

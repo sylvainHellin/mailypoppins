@@ -17,11 +17,13 @@ import type {
 import type {
   AccountInfo,
   ConnectionStatus,
+  DraftAttachments,
   DraftDiscardBatch,
   DraftHeaders,
   DraftStatusBatch,
   EditorLaunch,
   EditorSetting,
+  FetchOutcome,
   FixtureSimulation,
   GuiEvent,
   HoldCancelled,
@@ -33,8 +35,10 @@ import type {
   MessageMeta,
   MessageText,
   MutationBatch,
+  OpenedFile,
   OperationStarted,
   OutboxDiscarded,
+  SavedAttachments,
   SendStarted,
   ServerSearchParams,
   SignatureListing,
@@ -217,6 +221,40 @@ export const outboxDiscard = (account: string, row_id: number): Promise<OutboxDi
 
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });
+
+// Attachments and the browser rendition (docs/rust-layer.md, "Attachments").
+
+/** Open part `part` of a stored message with the system opener. */
+export const attachmentOpen = (account: string, row_id: number, part: number): Promise<OpenedFile> =>
+  invoke<OpenedFile>("attachment_open", { account, row_id, part });
+
+/** Copy `parts` into `dest_dir` (absolute or `~`), with the `_1` rule for a name already taken. */
+export const attachmentSave = (account: string, row_id: number, parts: number[], dest_dir: string): Promise<SavedAttachments> =>
+  invoke<SavedAttachments>("attachment_save", { account, row_id, parts, dest_dir });
+
+/** The daemon's browser rendition, opened; null for a message with no HTML part. */
+export const htmlOpen = (account: string, row_id: number): Promise<OpenedFile | null> =>
+  invoke<OpenedFile | null>("html_open", { account, row_id });
+
+/** A server-only hit's markup, written into the app cache and opened in the browser. */
+export const hitHtmlOpen = (html: string): Promise<OpenedFile> => invoke<OpenedFile>("hit_html_open", { html });
+
+export const draftAttachments = (account: string, id: string): Promise<DraftAttachments> =>
+  invoke<DraftAttachments>("draft_attachments", { account, id });
+
+/** Append an absolute or `~` path to the draft's `attachments:`; a missing file or a duplicate is refused. */
+export const draftAttach = (account: string, id: string, path: string): Promise<DraftAttachments> =>
+  invoke<DraftAttachments>("draft_attach", { account, id, path });
+
+export const draftAttachmentRemove = (account: string, id: string, index: number): Promise<DraftAttachments> =>
+  invoke<DraftAttachments>("draft_attachment_remove", { account, id, index });
+
+export const draftAttachmentOpen = (account: string, id: string, index: number): Promise<OpenedFile> =>
+  invoke<OpenedFile>("draft_attachment_open", { account, id, index });
+
+/** Fetch a server-only message into the store; answers once the fetch has ended. */
+export const messageFetch = (account: string, mailbox: string, message_id: string): Promise<FetchOutcome> =>
+  invoke<FetchOutcome>("message_fetch", { account, mailbox, message_id });
 
 export const restartDaemon = (): Promise<void> => invoke<void>("restart_daemon");
 

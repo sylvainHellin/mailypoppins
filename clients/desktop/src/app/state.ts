@@ -82,9 +82,10 @@ export const LIST_WIDTH_STEP = 40;
 
 /**
  * `mutation` is the confirmation or the move picker `dialog` describes;
- * `compose` is the wizard or the recipients dialog `composeDialog` describes.
+ * `compose` is the wizard or the recipients dialog `composeDialog` describes;
+ * `attachments` is the open, save or attach dialog `attachDialog` describes.
  */
-export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | null;
+export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | "attachments" | null;
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
@@ -347,6 +348,27 @@ export type ComposeDialog =
   | { kind: "forward"; account: string; row_id: number; subject: string }
   | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
 
+/** One attachment a dialog lists: a message's part, or a draft's entry by its index. */
+export type AttachmentItem = { part: number; name: string; size: number | null; missing: boolean };
+
+/** Whose attachments an open dialog lists. */
+export type AttachmentOwner =
+  | { kind: "message"; account: string; row_id: number }
+  | { kind: "draft"; account: string; draftId: string };
+
+/**
+ * The attachment dialogs: pick which attachment to open (the TUI's `to`
+ * picker), which parts to save and where (`ts`), or the path to attach to a
+ * draft (`ta`), a text field until the native file picker is installed.
+ */
+export type AttachmentDialog =
+  | { kind: "open"; owner: AttachmentOwner; subject: string; items: AttachmentItem[] }
+  | { kind: "save"; account: string; row_id: number; subject: string; items: AttachmentItem[] }
+  | { kind: "attach"; account: string; draftId: string; subject: string };
+
+/** The Save dialog's directory until one is used: `attachments.rs`'s `DEFAULT_SAVE_DIR`. */
+export const DEFAULT_SAVE_DIR = "~/Downloads";
+
 /** The outbox view, which replaces the list pane's content: its account and the row under its cursor. */
 export type OutboxView = { account: string; cursor: number | null };
 
@@ -400,6 +422,12 @@ export type AppState = {
   dialog: MutationDialog | null;
   /** What the `compose` overlay shows; null whenever another overlay or none is open. */
   composeDialog: ComposeDialog | null;
+  /** What the `attachments` overlay shows; null whenever another overlay or none is open. */
+  attachDialog: AttachmentDialog | null;
+  /** The directory the last save went to, which the Save dialog offers next (the TUI's `last_save_dir`). */
+  saveDir: string;
+  /** The server-only hits a `message_fetch` is fetching, by hit key. */
+  fetching: string[];
   /** Drafts open in the external editor, by `targetKey`. */
   compose: Record<string, ComposeSession>;
   filter: string;
@@ -467,6 +495,9 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     overlay: null,
     dialog: null,
     composeDialog: null,
+    attachDialog: null,
+    saveDir: DEFAULT_SAVE_DIR,
+    fetching: [],
     compose: {},
     filter: "",
     notice: null,

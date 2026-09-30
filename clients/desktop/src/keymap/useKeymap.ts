@@ -51,9 +51,10 @@ function scrollReader(by: number | "top" | "bottom"): void {
 }
 
 /**
- * The `c` compose family's continuations that act on the cursor row: the
- * TUI's MESSAGE (`cr`, `ca`, `cf`) and List (`ce`, `cA`, `cD`) keys, from
- * the list or the reader, never the sidebar. `cn` is global.
+ * The continuations that act on the cursor row: the `c` compose family's
+ * MESSAGE (`cr`, `ca`, `cf`) and List (`ce`, `cA`, `cD`) keys and the `t`
+ * family's attachment keys, from the list or the reader, never the
+ * sidebar. `cn` is global.
  */
 const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
   cr: "reply",
@@ -63,6 +64,11 @@ const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
   cA: "approve",
   cD: "demote",
   cX: "send_all",
+  // The `t` family's attachment keys (MESSAGE `to`, `ts`, `tb`; List `ta`).
+  to: "open_attachment",
+  ts: "save_attachment",
+  tb: "open_html",
+  ta: "attach_file",
 };
 
 /** Tab cycles panes only from a pane (or nothing); elsewhere it is the browser's. */
@@ -220,6 +226,12 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return run("list_bottom");
         case "y":
           return handled(), run("copy_selector");
+        // Desktop only: the TUI's search overlay fetches with `f`, which is
+        // the find family's prefix here.
+        case "F":
+          handled();
+          if (s.focus !== "sidebar") run("fetch_hit");
+          return;
         // The TUI's `x` is global: it sends the Drafts list's cursor draft from any pane.
         case "x":
           return handled(), run("send");

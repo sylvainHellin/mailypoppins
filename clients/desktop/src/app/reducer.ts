@@ -13,6 +13,7 @@ import type {
 import type {
   AccountInfo,
   ConnectionStatus,
+  FetchOutcome,
   GuiError,
   GuiEvent,
   InterceptedUrl,
@@ -26,6 +27,7 @@ import type {
 } from "@/lib/gui-types";
 import {
   finishedSignal,
+  hitFetched,
   isOpenable,
   localHit,
   serverHitSignal,
@@ -82,6 +84,7 @@ import {
   targetKey,
   type AppState,
   type ActivityKind,
+  type AttachmentDialog,
   type ComposeDialog,
   type Layout,
   type Loadable,
@@ -154,6 +157,13 @@ export type Action =
   | { type: "overlay"; overlay: Overlay }
   | { type: "open_dialog"; dialog: MutationDialog }
   | { type: "open_compose"; dialog: ComposeDialog }
+  | { type: "open_attachments"; dialog: AttachmentDialog }
+  /** A save went to `dir`, which the next Save dialog offers. */
+  | { type: "save_dir"; dir: string }
+  // `f` on a server-only hit (app/attachments.ts dispatches these around `message_fetch`).
+  | { type: "hit_fetch_started"; key: string }
+  | { type: "hit_fetched"; key: string; outcome: FetchOutcome }
+  | { type: "hit_fetch_failed"; key: string; error: GuiError }
   // The external editor sessions (app/compose.ts dispatches these around `editor_open`).
   | { type: "compose_opening"; account: string; draftId: string; path: string }
   | { type: "compose_editing"; account: string; draftId: string; editor: string }
@@ -1013,11 +1023,24 @@ export function reducer(s: AppState, a: Action): AppState {
         overlay: a.overlay,
         dialog: a.overlay === "mutation" ? s.dialog : null,
         composeDialog: a.overlay === "compose" ? s.composeDialog : null,
+        attachDialog: a.overlay === "attachments" ? s.attachDialog : null,
       };
     case "open_dialog":
-      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null };
+      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null };
     case "open_compose":
-      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null };
+      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null };
+    case "open_attachments":
+      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null };
+    case "save_dir":
+      return a.dir.trim() ? { ...s, saveDir: a.dir.trim() } : s;
+    case "hit_fetch_started":
+      return s.fetching.includes(a.key) ? s : { ...s, fetching: [...s.fetching, a.key] };
+    case "hit_fetched":
+      return hitFetched({ ...s, fetching: s.fetching.filter((k) => k !== a.key) }, a.key, a.outcome);
+    case "hit_fetch_failed": {
+      const next = { ...s, fetching: s.fetching.filter((k) => k !== a.key) };
+      return pushNotice(next, { kind: "failed", account: s.search?.account ?? null, text: `Fetch failed: ${a.error.message}`, rows: [] });
+    }
     case "compose_opening":
       return composeOpening(s, a.account, a.draftId, a.path);
     case "compose_editing":

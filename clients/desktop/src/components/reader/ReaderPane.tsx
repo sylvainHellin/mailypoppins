@@ -1,4 +1,4 @@
-import { Cloud, FileText, Forward, Reply, ReplyAll } from "lucide-react";
+import { Cloud, CloudDownload, FileText, Forward, Globe, Reply, ReplyAll } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DraftPreview } from "@/components/compose/DraftPreview";
@@ -8,15 +8,20 @@ import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
 import { READER_SCROLL_ID } from "@/app/actions";
 import * as compose from "@/app/compose";
+import { fetchHit, openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
 
 /**
  * A server-only search hit: the store holds no row, so there is no body to
  * show, and a reply or a forward is built from the hit's own headers.
+ * Fetch (`F`) downloads it into the store, after which the reader opens it;
+ * its markup opens in the browser as it came.
  */
 function ServerHitSummary({ hit }: { hit: SearchHit }) {
+  const s = useAppState();
   const dispatch = useDispatch();
+  const fetching = s.fetching.includes(hit.key);
   const src = hit.source ? { kind: "hit" as const, account: hit.account, message: hit.source } : null;
   return (
     <article aria-label={hit.subject || "(no subject)"} className="flex flex-col gap-3 px-5 py-4 text-sm">
@@ -33,6 +38,23 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
           <Forward aria-hidden="true" />
           Forward
         </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          title="Fetch into the local store (F)"
+          disabled={fetching || hit.message_id === null}
+          aria-busy={fetching || undefined}
+          onClick={() => void fetchHit(s, dispatch)}
+        >
+          <CloudDownload aria-hidden="true" />
+          {fetching ? "Fetching…" : "Fetch"}
+        </Button>
+        {hit.source?.html_body ? (
+          <Button size="sm" variant="ghost" title="Open HTML in browser (t b)" onClick={() => void openHtml(s, dispatch)}>
+            <Globe aria-hidden="true" />
+            Open in browser
+          </Button>
+        ) : null}
       </div>
       <h2 className="text-lg font-semibold break-words">{hit.subject || "(no subject)"}</h2>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
@@ -45,7 +67,8 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
       </dl>
       <p className="flex items-center gap-2 text-muted-foreground">
         <Cloud aria-hidden="true" className="size-4" />
-        This message is on the server only; the store has no copy to show. A reply or a forward quotes it with no attachments.
+        This message is on the server only; the store has no copy to show. Fetch (F) downloads it with its attachments; a reply or a
+        forward before that quotes it with none.
       </p>
     </article>
   );
