@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
 import calendarFx from "../../fixtures/calendar.json";
+import contactsFx from "../../fixtures/contacts.json";
 import draftBodiesFx from "../../fixtures/draft-bodies.json";
 import draftsFx from "../../fixtures/drafts.json";
 import htmlFx from "../../fixtures/html.json";
@@ -29,6 +30,7 @@ import type {
 import type {
   AccountInfo,
   ConnectionStatus,
+  ContactRow,
   GuiError,
   GuiEvent,
   InterceptedUrl,
@@ -52,6 +54,7 @@ export const fixtures = {
   draftBodies: draftBodiesFx as Record<string, string>,
   signatures: signaturesFx as { signatures: Record<string, string>; defaults: Record<string, string> },
   calendar: calendarFx as unknown as { events: Record<string, AgendaEvent[]>; ics: Record<string, string> },
+  contacts: contactsFx as unknown as Record<string, Omit<ContactRow, "recipient">[]>,
 };
 
 export class Channel<T> {
@@ -180,6 +183,14 @@ export const mock = {
   invitesSent: [] as { operation_id: string; account: string; subject: string; to: string[] }[],
   /** The next invitation's operation id counter. */
   nextInvite: 1,
+  /** Each account's contact index, ranked, as `contact.search` rows. */
+  contacts: clone(fixtures.contacts),
+  /** The rebuilds `contact_rebuild` started and no test settled yet, oldest first. */
+  rebuilds: [] as { operation_id: string; account: string }[],
+  /** The next rebuild's operation id counter. */
+  nextRebuild: 1,
+  /** The vCard drafts `contact_vcard_draft` wrote, oldest first. */
+  vcards: [] as { account: string; id: string; vcf: string }[],
 };
 
 /** fixture.rs's `GRAPH_INVITE_REFUSAL`, the daemon's `send.invite` refusal of a Graph account. */
@@ -235,6 +246,49 @@ export function resetMock(): void {
   mock.nextRsvp = 1;
   mock.invitesSent = [];
   mock.nextInvite = 1;
+  mock.contacts = clone(fixtures.contacts);
+  mock.rebuilds = [];
+  mock.nextRebuild = 1;
+  mock.vcards = [];
+}
+
+/** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
+export function formatRecipient(name: string, address: string): string {
+  const n = name.trim();
+  if (!n) return address;
+  const atext = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~. \t]*$/.test(n);
+  const quoted = atext ? n : `"${n.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `${quoted} <${address}>`;
+}
+
+/**
+ * fixture.rs's rebuild end: the oldest rebuild not settled yet settles
+ * `written` with the index's size, or with `saved` the cache guard's
+ * refusal (`refused_shrunk`: 3 found; `refused_empty`: none; the index
+ * kept either way), or with `fail` fails with that message.
+ */
+export function settleRebuild(opts: { saved?: "refused_empty" | "refused_shrunk"; fail?: string } = {}): string {
+  const run = mock.rebuilds.shift();
+  if (!run) throw new Error("no rebuild is waiting to settle");
+  if (opts.fail) {
+    emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: opts.fail } });
+    return run.operation_id;
+  }
+  const indexed = (mock.contacts[run.account] ?? []).length;
+  const saved = opts.saved ?? "written";
+  const found = saved === "refused_shrunk" ? 3 : saved === "refused_empty" ? 0 : indexed;
+  emitEnvelope("operation.finished", {
+    operation_id: run.operation_id,
+    state: "succeeded",
+    result: {
+      account: run.account,
+      contacts: found,
+      kept: saved === "written" ? 0 : indexed,
+      saved,
+      cache_path: `/fixture/accounts/${run.account}/contacts-cache.json`,
+    },
+  });
+  return run.operation_id;
 }
 
 /** fixture.rs's invitation end: the oldest invitation settles with every recipient delivered, or fails with `fail`. */
@@ -1141,6 +1195,43 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const operation_id = `fixture-invite-${mock.nextInvite++}`;
       mock.invitesSent.push({ operation_id, account, subject: text("subject"), to: to.map((a) => a.replace(/^.*<([^>]+)>$/, "$1")) });
       return { operation_id };
+    }
+    case "contact_search": {
+      knownAccount(cmd, account);
+      const query = String(args.query ?? "");
+      const needle = query.trim().toLowerCase();
+      const rows = (mock.contacts[account] ?? [])
+        .filter((c) => !needle || c.address.toLowerCase().includes(needle) || c.display_name.toLowerCase().includes(needle))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Number(args.limit ?? 20))
+        .map((c) => ({ ...clone(c), recipient: formatRecipient(c.display_name, c.address) }));
+      return { account, query, contacts: rows };
+    }
+    case "contact_rebuild": {
+      knownAccount(cmd, account);
+      const operation_id = `fixture-rebuild-${mock.nextRebuild++}`;
+      mock.rebuilds.push({ operation_id, account });
+      emitEnvelope("operation.progress", { operation_id, phase: "contacts", done: 0, total: null, message: account });
+      return { operation_id };
+    }
+    case "contact_vcard_draft": {
+      knownAccount(cmd, account);
+      const address = String(args.address).trim();
+      const display = String(args.display_name).trim();
+      const label = display || address.split("@")[0];
+      const stem = (display || address.split("@")[0]).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "contact";
+      const dir = `/fixture/${account}/drafts/_vcards`;
+      const taken = new Set(mock.vcards.map((v) => v.vcf));
+      let vcf = `${dir}/${stem}.vcf`;
+      for (let n = 1; taken.has(vcf); n++) vcf = `${dir}/${stem}-${n}.vcf`;
+      const draft = writeDraft(
+        account,
+        { name: String(args.name), to: formatRecipient(display, address), cc: null, subject: `Contact: ${label}`, body: "" },
+        null,
+      );
+      mock.draftAttachments[`${account}/${draft.id}`] = [vcf];
+      mock.vcards.push({ account, id: draft.id, vcf });
+      return { draft, vcf };
     }
     case "outbox_retry": {
       knownAccount(cmd, account);

@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
 import { VIEW_KEYS } from "@/keymap/viewKeys";
@@ -667,22 +667,29 @@ describe("views (the TUI's Space m, Space c, Space a)", () => {
     expect(screen.queryByRole("region", { name: "Contacts" })).toBeNull();
   });
 
-  it("in Contacts c arms no compose prefix, so c then n opens no wizard, and Mail's cn still does", async () => {
+  it("in Contacts c copies and arms no compose prefix, so c then n composes to the contact, and Mail's cn still opens a blank draft", async () => {
     const { user } = renderApp();
     await shellReady();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     await user.keyboard(" c");
-    await region("Contacts");
-    await user.keyboard("cn");
+    await screen.findByRole("listbox", { name: "Contacts" });
     await user.keyboard("tv");
     expect(screen.queryByRole("dialog")).toBeNull();
+    await user.keyboard("cn");
+    expect(writeText).toHaveBeenCalledWith("robin@example.com");
+    const wizard = await screen.findByRole("dialog", { name: "New draft" });
+    expect(within(wizard).getByLabelText("To")).toHaveValue("Robin Meyer <robin@example.com>");
     expect(screen.queryByText(/arrives in M4/)).toBeNull();
+    await user.keyboard("{Escape}");
     await user.keyboard(" m");
     await user.keyboard("cn");
-    expect(await screen.findByRole("dialog", { name: "New draft" })).toBeInTheDocument();
+    expect(within(await screen.findByRole("dialog", { name: "New draft" })).getByLabelText("To")).toHaveValue("");
   });
 
   it("a view's own key runs before any prefix arms, and the prefix arms again in Mail", async () => {
     const keys = VIEW_KEYS.contacts.keys as Record<string, ActionId>;
+    const own = keys.c;
     keys.c = "toggle_help";
     try {
       const { user } = renderApp();
@@ -696,7 +703,7 @@ describe("views (the TUI's Space m, Space c, Space a)", () => {
       await user.keyboard("cn");
       expect(await screen.findByRole("dialog", { name: "New draft" })).toBeInTheDocument();
     } finally {
-      delete keys.c;
+      keys.c = own;
     }
   });
 
