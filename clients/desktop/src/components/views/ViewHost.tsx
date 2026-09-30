@@ -1,4 +1,5 @@
 import { CalendarView } from "@/components/calendar/CalendarView";
+import { ContactsView } from "@/components/contacts/ContactsView";
 import { EmptyView } from "@/components/views/EmptyView";
 import type { View } from "@/app/state";
 
@@ -9,7 +10,7 @@ import type { View } from "@/app/state";
 export function ViewHost({ view }: { view: Exclude<View, "mail"> }) {
   switch (view) {
     case "contacts":
-      return <EmptyView view="contacts">The contact list is not in the desktop client yet.</EmptyView>;
+      return <ContactsView />;
     case "calendar":
       return <CalendarView />;
     case "settings":

@@ -80,7 +80,12 @@ export type ActionId =
   | "calendar_refresh"
   | "calendar_rsvp"
   | "rsvp"
-  | "new_invitation";
+  | "new_invitation"
+  | "contacts_search"
+  | "contacts_compose"
+  | "contacts_vcard"
+  | "contacts_copy"
+  | "contacts_rebuild";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -155,7 +160,6 @@ const BY_ACTION: Record<string, Binding> = {
 
 /** A section none of whose rows run in M1 yet. */
 const BY_SECTION: Record<string, Badge> = {
-  CONTACTS: "M4",
   "ACTIVITY LOG": "M4",
 };
 
@@ -171,6 +175,17 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "RSVP to invitation (Accept/Tentative/Decline)": { id: "calendar_rsvp" },
     "Show past events / upcoming only": { id: "calendar_toggle_past" },
     "Refresh events from disk": { id: "calendar_refresh" },
+  },
+  // The Contacts view's own keys (src/keymap/viewKeys.ts); its moves are
+  // the list's, which reach the view's cursor.
+  CONTACTS: {
+    "Navigate contacts": { badge: "key" },
+    "Jump to top / bottom": { id: "list_top" },
+    "Fuzzy search": { id: "contacts_search" },
+    "Compose to contact": { id: "contacts_compose" },
+    "Send contact as vCard": { id: "contacts_vcard" },
+    "Copy email address": { id: "contacts_copy" },
+    "Refresh contact index": { id: "contacts_rebuild" },
   },
   // The results list is the message list pane while a search shows, so its
   // moves are the list's; what acts on a hit arrives with its milestone.

@@ -9,6 +9,7 @@ import { onMenu, subscribe } from "@/lib/events";
 import type { Action } from "@/app/reducer";
 import { accountNames, isStale, readerKey, type AppState } from "@/app/state";
 import { refusalsWanted } from "@/app/rsvp";
+import { CONTACT_LIMIT } from "@/app/contacts";
 
 /** Subscribe once, read the connection and version, and route menu items. */
 export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => void): void {
@@ -125,6 +126,24 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .catch((e: unknown) => dispatch({ type: "calendar_failed", account, gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, calendarAccount, agenda, dispatch]);
+
+  // The contacts the Contacts view shows, and only while it shows, for the
+  // view's query; a list that went stale behind another view is read when
+  // the view comes back.
+  const contactsAccount = state.view === "contacts" ? (state.contactsView?.account ?? null) : null;
+  const contactsQuery = state.contactsView?.query ?? "";
+  const contacts = contactsAccount ? state.contacts[contactsAccount] : undefined;
+  useEffect(() => {
+    if (!hasBootstrap || !contactsAccount || !contacts || !isStale(contacts)) return;
+    const gen = contacts.gen;
+    const account = contactsAccount;
+    run(`contacts:${account}@${gen}`, () =>
+      cmd
+        .contactSearch(account, contactsQuery, CONTACT_LIMIT)
+        .then((search) => dispatch({ type: "contacts_loaded", account, gen, search }))
+        .catch((e: unknown) => dispatch({ type: "contacts_failed", account, gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, contactsAccount, contactsQuery, contacts, dispatch]);
 
   // The selected mailbox's list.
   // The answer carries the list generation it was asked at, so a reload that

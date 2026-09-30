@@ -154,6 +154,25 @@ import {
   isInviteOperation,
   openInviteDialog,
 } from "@/app/invite";
+import {
+  contactsFailed,
+  contactsLoaded,
+  dropContacts,
+  followContacts,
+  isRebuildOperation,
+  moveContactsCursor,
+  rebuildRequested,
+  rebuildSignal,
+  rebuildStarted,
+  rebuildStartFailed,
+  rebuildStarting,
+  reopenContacts,
+  selectContact,
+  setContactsQuery,
+  setContactsSearching,
+  staleAllContacts,
+} from "@/app/contacts";
+import type { ContactSearch } from "@/lib/gui-types";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -290,6 +309,15 @@ export type Action =
   | { type: "invite_send_requested"; token: number; account: string; subject: string }
   | { type: "invite_send_started"; token: number; operation_id: string }
   | { type: "invite_send_failed"; token: number }
+  // The Contacts view (app/contacts.ts).
+  | { type: "contacts_loaded"; account: string; gen: number; search: ContactSearch }
+  | { type: "contacts_failed"; account: string; gen: number; error: GuiError }
+  | { type: "contacts_select"; address: string }
+  | { type: "contacts_query"; query: string }
+  | { type: "contacts_searching"; searching: boolean }
+  | { type: "rebuild_requested"; token: number; account: string }
+  | { type: "rebuild_started"; token: number; operation_id: string }
+  | { type: "rebuild_failed"; token: number; error: GuiError }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -560,7 +588,7 @@ function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): A
 function removeAccount(s: AppState, name: string): AppState {
   if (s.search?.account === name) s = endSearch(s);
   if (s.outboxView?.account === name) s = closeOutbox(s);
-  s = dropCalendar(s, name);
+  s = dropContacts(dropCalendar(s, name), name);
   const mailboxes = { ...s.mailboxes };
   delete mailboxes[name];
   let next: AppState = {
@@ -807,6 +835,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (isOutboxOperation(s, sig.operation_id)) return outboxSignal(s, end);
       if (isRsvpOperation(s, sig.operation_id)) return rsvpSignal(s, end);
       if (isInviteOperation(s, sig.operation_id)) return inviteSignal(s, end);
+      if (isRebuildOperation(s, sig.operation_id)) return rebuildSignal(s, end);
       // An unknown id may be a sync, a send, a retry or an RSVP whose start
       // has not answered yet, or the search's: each holds it until its id is known.
       let next = s.syncStarting > 0 ? syncSignal(s, end) : s;
@@ -814,6 +843,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (retryStarting(next)) next = outboxSignal(next, end);
       if (rsvpStarting(next)) next = rsvpSignal(next, end);
       if (inviteSending(next)) next = inviteSignal(next, end);
+      if (rebuildStarting(next)) next = rebuildSignal(next, end);
       return signal(next, sig);
     }
     default:
@@ -837,7 +867,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // Row ids are per daemon instance, and the reloaded lists are the
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
-      const next = bootstrapInvites(staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance);
+      const next = staleAllContacts(bootstrapInvites(staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance));
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
@@ -874,6 +904,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "outbox_retry") return outboxSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "rsvp") return rsvpSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send_invite") return inviteSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "contact_rebuild") return rebuildSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       s = endProgress(s, e.operation_id);
@@ -882,6 +913,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "outbox_retry") return outboxSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "rsvp") return rsvpSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "send_invite") return inviteSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "contact_rebuild") return rebuildSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -968,9 +1000,9 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_server",
 ]);
 
-/** The reducer; the Calendar view follows the selection's account after every action. */
+/** The reducer; the Calendar and Contacts views follow the selection's account after every action. */
 export function reducer(s: AppState, a: Action): AppState {
-  return followCalendar(reduce(s, a));
+  return followContacts(followCalendar(reduce(s, a)));
 }
 
 function reduce(s: AppState, a: Action): AppState {
@@ -1060,6 +1092,7 @@ function reduce(s: AppState, a: Action): AppState {
     case "move_selection": {
       // A full-pane view moves its own cursor, once its unit gives it one.
       if (s.view === "calendar") return moveCalendarCursor(s, a.to, a.relative);
+      if (s.view === "contacts") return moveContactsCursor(s, a.to, a.relative);
       if (s.view !== "mail") return s;
       if (s.outboxView) return moveOutboxCursor(s, a.to, a.relative);
       const items = visibleItems(s);
@@ -1157,7 +1190,8 @@ function reduce(s: AppState, a: Action): AppState {
       // Leaving Mail ends a search, as choosing a mailbox does; the
       // selection, the marks and the outbox view wait for Mail's return.
       const next = a.view === "mail" ? toMail(s) : { ...endSearch(s), view: a.view, zoomed: false };
-      return withFocus(next, "list");
+      // No event says a contact index changed: the list is read on every open.
+      return withFocus(a.view === "contacts" ? reopenContacts(next) : next, "list");
     }
     case "overlay":
       return {
@@ -1351,6 +1385,22 @@ function reduce(s: AppState, a: Action): AppState {
       return inviteSendStarted(s, a.token, a.operation_id);
     case "invite_send_failed":
       return inviteSendFailed(s, a.token);
+    case "contacts_loaded":
+      return contactsLoaded(s, a.account, a.gen, a.search);
+    case "contacts_failed":
+      return contactsFailed(s, a.account, a.gen, a.error);
+    case "contacts_select":
+      return selectContact(s, a.address);
+    case "contacts_query":
+      return setContactsQuery(s, a.query);
+    case "contacts_searching":
+      return setContactsSearching(s, a.searching);
+    case "rebuild_requested":
+      return rebuildRequested(s, { token: a.token, account: a.account });
+    case "rebuild_started":
+      return rebuildStarted(s, a.token, a.operation_id);
+    case "rebuild_failed":
+      return rebuildStartFailed(s, a.token, a.error.message);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

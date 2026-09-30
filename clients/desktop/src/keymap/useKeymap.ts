@@ -7,6 +7,7 @@ import type { Action } from "@/app/reducer";
 import { liveHolds, screenFor, type AppState } from "@/app/state";
 import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
+import { CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
 import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
 
@@ -114,6 +115,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             // Out of the field, and out of a search: the mailbox list returns.
             dispatch(s.search ? { type: "exit_search" } : { type: "focus", pane: "list" });
           }
+          // Out of the contacts search, which keeps its query: the list takes the keys.
+          if ((e.target as HTMLElement).id === CONTACTS_SEARCH_ID) dispatch({ type: "focus", pane: "list" });
         }
         return;
       }

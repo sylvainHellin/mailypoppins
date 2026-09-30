@@ -45,6 +45,7 @@ const SUBMIT: Record<ComposeDialog["kind"], string> = {
 
 function initialFields(dialog: ComposeDialog | null): ComposeFields {
   if (dialog?.kind === "recipients") return { to: dialog.to, cc: dialog.cc, bcc: dialog.bcc, subject: dialog.subject };
+  if (dialog?.kind === "new") return { to: dialog.to ?? "", cc: "", bcc: "", subject: "" };
   return { to: "", cc: "", bcc: "", subject: dialog?.kind === "forward" ? dialog.subject : "" };
 }
 
@@ -65,6 +66,9 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
   const [busy, setBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const toRef = useRef<HTMLInputElement>(null);
+  const subjectRef = useRef<HTMLInputElement>(null);
+  // A draft to a contact comes with its recipient: the subject is next, as in the TUI.
+  const seeded = dialog?.kind === "new" && Boolean(dialog.to);
   const open = dialog !== null;
   const kind = dialog?.kind ?? "new";
   const account = dialog?.account ?? null;
@@ -128,7 +132,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
       </label>
       <Input
         id={`${id}-${name}`}
-        ref={name === "to" ? toRef : undefined}
+        ref={name === "to" ? toRef : name === "subject" ? subjectRef : undefined}
         data-field={name}
         value={fields[name] ?? ""}
         autoComplete="off"
@@ -141,7 +145,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent initialFocus={toRef} data-slot="compose-wizard" data-kind={kind} className="sm:max-w-lg">
+      <DialogContent initialFocus={seeded ? subjectRef : toRef} data-slot="compose-wizard" data-kind={kind} className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{TITLE[kind]}</DialogTitle>
           <DialogDescription>{DESCRIPTION[kind]}</DialogDescription>

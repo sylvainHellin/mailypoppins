@@ -29,6 +29,7 @@ export const FAILURES: ReadonlySet<ActivityNotice["kind"]> = new Set([
   "compose_failed",
   "send_failed",
   "send_partial",
+  "rebuild_refused",
 ]);
 
 export type NoticeToastProps = { notice: ActivityNotice; onDismiss: (id: number) => void };

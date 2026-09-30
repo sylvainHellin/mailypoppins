@@ -15,7 +15,8 @@ export type * from "@/protocol/generated/gui";
  * `send_hold:<secs>` is the fixture's `email.send_hold_secs`.
  * `invite_update` and `invite_cancel` change `work`'s steering committee
  * (row 1008) the way a new version or a cancellation of it arriving would;
- * `rsvp_fail` fails the next RSVP with an SMTP error.
+ * `rsvp_fail` fails the next RSVP with an SMTP error; `rebuild_refused`
+ * makes the next contact index rebuild settle `refused_shrunk`.
  */
 export type FixtureSimulation =
   | "disconnect"
@@ -35,7 +36,8 @@ export type FixtureSimulation =
   | `send_hold:${number}`
   | "invite_update"
   | "invite_cancel"
-  | "rsvp_fail";
+  | "rsvp_fail"
+  | "rebuild_refused";
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {

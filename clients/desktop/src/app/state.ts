@@ -16,6 +16,7 @@ import type {
 import type {
   AccountInfo,
   ConnectionStatus,
+  ContactSearch,
   GuiError,
   InterceptedUrl,
   MailboxListing,
@@ -310,7 +311,8 @@ export type ActivityKind =
   | "sync_failed"
   | "compose_failed"
   | "send_failed"
-  | "send_partial";
+  | "send_partial"
+  | "rebuild_refused";
 
 /** One line of the activity area, dismissed by `id`. */
 export type ActivityNotice = {
@@ -363,9 +365,13 @@ export type ComposeSession = {
   message: string | null;
 };
 
-/** The compose dialogs: the new-draft and forward wizard, and the recipients edit. */
+/**
+ * The compose dialogs: the new-draft and forward wizard, and the recipients
+ * edit. A new draft to a contact (the Contacts view's Enter and `n`) comes
+ * with its recipient in `to`.
+ */
 export type ComposeDialog =
-  | { kind: "new"; account: string }
+  | { kind: "new"; account: string; to?: string }
   | { kind: "forward"; account: string; row_id: number; subject: string }
   | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
 
@@ -429,6 +435,17 @@ export type InviteDialog = { account: string };
 
 /** A new invitation this window sent, until it settles or is dropped; `operation_id` is null until `send_invite` answers. */
 export type InviteSendRun = { token: number; account: string; subject: string; operation_id: string | null };
+
+/**
+ * The Contacts view: the account whose contacts it lists (the selection's),
+ * the query the list was asked for (the search field's, once its typing
+ * paused), the row under its cursor by address, and whether the search
+ * field has the focus.
+ */
+export type ContactsView = { account: string; query: string; cursor: string | null; searching: boolean };
+
+/** A contact index rebuild this window started, until it settles or is dropped; `operation_id` is null until `contact_rebuild` answers. */
+export type RebuildRun = { token: number; account: string; operation_id: string | null };
 
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
@@ -556,6 +573,18 @@ export type AppState = {
   /** Operation ends that arrived while a `send_invite` was unanswered, for its id. */
   inviteSendEarly: OperationEnd[];
   /**
+   * Each account's contacts (`contact_search` of the view's query), created
+   * on the first open of the Contacts view for it, stale again on every
+   * open, query, written rebuild and bootstrap; only the shown one is read.
+   */
+  contacts: Record<string, Loadable<ContactSearch>>;
+  /** The Contacts view's account, query and cursor, kept while another view shows. */
+  contactsView: ContactsView | null;
+  /** Contact index rebuilds this window started, in start order. */
+  rebuilds: RebuildRun[];
+  /** Operation ends that arrived while a `contact_rebuild` was unanswered, for its id. */
+  rebuildEarly: OperationEnd[];
+  /**
    * The last `operation.progress` of each operation this window awaits, by
    * `operation_id`, until it finishes, settles or is dropped. The Rust layer
    * passes only its awaited operations' reports, so another client's never land here.
@@ -623,6 +652,10 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     inviteDialog: null,
     inviteSends: [],
     inviteSendEarly: [],
+    contacts: {},
+    contactsView: null,
+    rebuilds: [],
+    rebuildEarly: [],
     progress: {},
   };
 }

@@ -10,6 +10,7 @@ import * as attachments from "@/app/attachments";
 import { openEventSource } from "@/app/calendar";
 import { openAgendaRsvp, openRsvp } from "@/app/rsvp";
 import { newInvitation } from "@/app/invite";
+import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { hiddenNotice, viewPanes } from "@/app/views";
 import { actionTargets, type Action } from "@/app/reducer";
@@ -282,6 +283,17 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void openRsvp(s, dispatch);
     case "new_invitation":
       return newInvitation(s, dispatch);
+    case "contacts_search":
+      document.getElementById(CONTACTS_SEARCH_ID)?.focus();
+      return;
+    case "contacts_compose":
+      return composeToContact(s, dispatch);
+    case "contacts_vcard":
+      return void sendVcard(s, dispatch);
+    case "contacts_copy":
+      return copyContactAddress(s, dispatch);
+    case "contacts_rebuild":
+      return void rebuildContacts(s, dispatch);
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;

@@ -58,12 +58,21 @@ function listView(keys: Record<string, ActionId> = {}): ViewKeyTable {
   return { keys, prefixes: new Set([...ARM_ALWAYS, "g"]), combos: { gg: "list_top" } };
 }
 
-/**
- * Each full-pane view's table. The units that fill a view add its keys here:
- * Contacts `/`, Enter, `n`, `v`, `c`, `r` (U4). Settings owns no letter keys.
- */
+/** Each full-pane view's table. Settings owns no letter keys. */
 export const VIEW_KEYS: Readonly<Record<Exclude<View, "mail">, ViewKeyTable>> = {
-  contacts: listView(),
+  // The TUI's CONTACTS (keymap.rs): `/` focuses the search field, Enter and
+  // `n` compose to the cursor contact, `v` sends it as a vCard, `c` copies
+  // its address and never arms the `c` family (so `cn` and `cs` are not
+  // reachable here, as in the TUI), `r` rebuilds the index; `j`/`k`, `gg`,
+  // `G` move its cursor.
+  contacts: listView({
+    "/": "contacts_search",
+    Enter: "contacts_compose",
+    n: "contacts_compose",
+    v: "contacts_vcard",
+    c: "contacts_copy",
+    r: "contacts_rebuild",
+  }),
   // The TUI's CALENDAR (keymap.rs): Enter and `e` open the entry's
   // invite.ics, `t` shows or hides past events and never arms the `t`
   // family, `r` reads the agenda again, `V` opens the RSVP choice for the

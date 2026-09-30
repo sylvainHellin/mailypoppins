@@ -19,6 +19,7 @@ import type {
 import type {
   AccountInfo,
   ConnectionStatus,
+  ContactSearch,
   DraftAttachments,
   DraftDiscardBatch,
   DraftHeaders,
@@ -46,6 +47,7 @@ import type {
   ServerSearchParams,
   SignatureListing,
   SyncMode,
+  VcardDraft,
   VersionInfo,
 } from "@/lib/gui-types";
 
@@ -262,6 +264,20 @@ export type InviteFields = {
 /** Send a new invitation; the end arrives as `send_invite`, its result a `SendOutcome`. A refusal's message is the daemon's sentence. */
 export const sendInvite = (account: string, fields: InviteFields): Promise<OperationStarted> =>
   invoke<OperationStarted>("send_invite", { account, ...fields });
+
+// The contacts (docs/rust-layer.md, "The contacts").
+
+/** `account`'s contacts matching `query` (all of them for an empty one), at most `limit`, best first. */
+export const contactSearch = (account: string, query: string, limit: number): Promise<ContactSearch> =>
+  invoke<ContactSearch>("contact_search", { account, query, limit });
+
+/** Rebuild `account`'s contact index; the end arrives as `contact_rebuild`, its result a `ContactRebuilt`. */
+export const contactRebuild = (account: string): Promise<OperationStarted> =>
+  invoke<OperationStarted>("contact_rebuild", { account });
+
+/** A new draft named `name` to the contact, its vCard written beside the drafts and attached. */
+export const contactVcardDraft = (account: string, name: string, address: string, display_name: string): Promise<VcardDraft> =>
+  invoke<VcardDraft>("contact_vcard_draft", { account, name, address, display_name });
 
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });
