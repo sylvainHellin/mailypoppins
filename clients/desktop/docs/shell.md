@@ -432,7 +432,8 @@ An account whose store is not ready (`-32006`) says that it has no local store y
 
 The header's search field (`mp-contacts-search`, labelled "Search contacts") asks the daemon, whose match is fuzzy over the name and the address.
 `/` focuses it.
-It asks 150 ms after the typing pauses, so a burst of keys is one `contact_search`, and each new query takes a new generation, so the answer to a query typed over never settles the list.
+It asks 150 ms after the typing pauses, so a burst of keys is one `contact_search`, and each new query takes a new generation.
+An answer asked at an older generation is dropped, so the answer to a query typed over never shows.
 Enter asks at once and hands the keys back to the list; Escape leaves the field with its query kept, where the TUI's Escape clears it, and the focus goes to the cursor row.
 
 ### Keys and actions
@@ -464,7 +465,7 @@ The settle says the TUI's words:
 ### Staleness
 
 No daemon event names a contact index.
-So the shown account's list is read on every switch to the view, after a written rebuild, on a new query, and on every bootstrap, which also drops the lists of accounts that are gone.
+So the shown account's list is read on every switch to the view, when the view follows the selection to another account, after a written rebuild, on a new query, and on every bootstrap, which also drops the lists of accounts that are gone.
 Only the shown list is read: one that went stale behind another view is read when the Contacts view comes back.
 
 ## Calendar

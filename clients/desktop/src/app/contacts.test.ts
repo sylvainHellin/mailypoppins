@@ -79,6 +79,23 @@ describe("the Contacts view's model", () => {
     s = run(s, { type: "contacts_query", query: "ro" });
     s = run(s, { type: "contacts_loaded", account: "work", gen: asked, search: search("work") });
     expect(isStale(s.contacts.work)).toBe(true);
+    expect(s.contacts.work.data).toBeNull();
+    s = run(s, { type: "contacts_loaded", account: "work", gen: s.contacts.work.gen, search: search("work", "ro") });
+    const settled = s.contacts.work;
+    s = run(s, { type: "contacts_loaded", account: "work", gen: asked, search: search("work") });
+    s = run(s, { type: "contacts_failed", account: "work", gen: asked, error: { kind: "timeout", message: "late" } });
+    expect(s.contacts.work).toBe(settled);
+  });
+
+  it("reads an account's list again when the view comes back to it with another query", () => {
+    let s = run(withContacts(), { type: "select_account", account: "home" });
+    s = run(s, { type: "contacts_loaded", account: "home", gen: s.contacts.home.gen, search: search("home") });
+    s = run(s, { type: "contacts_query", query: "rob" });
+    s = run(s, { type: "contacts_loaded", account: "home", gen: s.contacts.home.gen, search: search("home", "rob") });
+    expect(isStale(s.contacts.work)).toBe(false);
+    s = run(s, { type: "select_account", account: "work" });
+    expect(s.contactsView).toMatchObject({ account: "work", query: "rob" });
+    expect(isStale(s.contacts.work)).toBe(true);
   });
 
   it("moves its cursor with j, k, G and gg, by address, and the mail selection stays", () => {

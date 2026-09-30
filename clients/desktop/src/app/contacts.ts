@@ -78,13 +78,19 @@ export function dropContacts(s: AppState, account: string): AppState {
   return { ...s, contacts, contactsView: s.contactsView?.account === account ? null : s.contactsView };
 }
 
+/**
+ * An answer asked at an older generation is dropped: it may be for a query
+ * typed over, and the read of the current one is already under way.
+ */
 export function contactsLoaded(s: AppState, account: string, gen: number, search: ContactSearch): AppState {
   const l = loadableOf(s, account);
+  if (gen < l.gen) return s;
   return { ...s, contacts: { ...s.contacts, [account]: { ...l, data: search, loadedGen: gen, error: null } } };
 }
 
 export function contactsFailed(s: AppState, account: string, gen: number, error: GuiError): AppState {
   const l = loadableOf(s, account);
+  if (gen < l.gen) return s;
   return { ...s, contacts: { ...s.contacts, [account]: { ...l, loadedGen: gen, error } } };
 }
 
@@ -94,11 +100,15 @@ export function contactsFailed(s: AppState, account: string, gen: number, error:
 
 /**
  * Show `account`'s contacts: its Loadable is created on the first open, and
- * the view keeps its query; the cursor stays on the same account only.
+ * the view keeps its query; the cursor stays on the same account only. A
+ * list this window read before is read again when the view comes to its
+ * account, since it was asked for whatever query the view had then.
  */
 export function openContacts(s: AppState, account: string): AppState {
-  const next = s.contacts[account] ? s : { ...s, contacts: { ...s.contacts, [account]: emptyLoadable<ContactSearch>() } };
   const prev = s.contactsView;
+  if (prev?.account === account && s.contacts[account]) return s;
+  const l = s.contacts[account];
+  const next = { ...s, contacts: { ...s.contacts, [account]: l ? markStale(l) : emptyLoadable<ContactSearch>() } };
   if (prev?.account === account) return next;
   const view: ContactsView = { account, query: prev?.query ?? "", cursor: null, searching: false };
   return { ...next, contactsView: view };
