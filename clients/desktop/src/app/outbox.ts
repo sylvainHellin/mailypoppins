@@ -145,8 +145,9 @@ function openInListing(s: AppState, account: string, rowId: number): boolean {
 
 /**
  * What waits to reach a server (SYN-06): the queued outbox rows of every
- * account, the sends and retries of this window still running, and the
- * optimistic changes whose commands have not answered. A retry of a row the
+ * account, the sends, RSVPs, invitations and retries of this window still
+ * running, and the optimistic changes whose commands have not answered.
+ * Each of those sends is a message on its way out. A retry of a row the
  * listing already counts as open (a `sent_pending_append` row) is counted
  * once, in the outbox.
  */
@@ -154,7 +155,7 @@ export function queueDepth(s: AppState): { outbox: number; sending: number; chan
   const accounts = s.bootstrap?.snapshot.accounts.map((a) => a.name) ?? [];
   const outbox = accounts.reduce((n, a) => n + outboxSummary(s, a).queued, 0);
   const retries = s.outboxActions.filter((a) => a.kind === "retry" && !openInListing(s, a.account, a.row_id));
-  const sending = s.sends.length + retries.length;
+  const sending = s.sends.length + s.rsvps.length + s.inviteSends.length + retries.length;
   const changes = Object.keys(s.pending).length;
   return { outbox, sending, changes, total: outbox + sending + changes };
 }

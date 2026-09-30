@@ -225,6 +225,9 @@ describe("the confirmations and the words", () => {
     s = run(s, { type: "send_requested", token: 1, kind: "draft", account: "work", drafts: ["d"], subject: null });
     s = run(s, { type: "mutation_apply", batch: 1, kind: "flag", targets: [{ account: "work", row_id: 1001 }], value: true });
     expect(queueText(queueDepth(s))).toBe("3 waiting for the server: 1 in the outbox, 1 sending, 1 change");
+    s = run(s, { type: "rsvp_requested", token: 2, account: "work", row_id: 1008, response: "accept", summary: "x" });
+    s = run(s, { type: "invite_send_requested", token: 3, account: "work", subject: "Kick-off" });
+    expect(queueText(queueDepth(s))).toBe("5 waiting for the server: 1 in the outbox, 3 sending, 1 change");
   });
 
   it("counts a retry of a row the listing already counts as open once, and a failed row's retry as sending", () => {

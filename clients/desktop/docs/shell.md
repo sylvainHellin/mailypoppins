@@ -370,7 +370,7 @@ The sidebar's line reads the outbox listing once this window has one, less the r
 Since an `outbox:<account>` invalidation creates the listing, a send that fails or a retry that finishes moves the line without a bootstrap.
 
 The status region shows the queue depth (`SYN-06`) at the bottom left while it is not 0: "3 waiting for the server: 1 in the outbox, 1 sending, 1 change".
-It adds the queued rows of every account's outbox (`pending_send` and `sent_pending_append`), the sends and retries of this window still running, and the optimistic changes whose commands have not answered.
+It adds the queued rows of every account's outbox (`pending_send` and `sent_pending_append`), the sends, RSVPs, invitations and retries of this window still running, and the optimistic changes whose commands have not answered.
 The daemon publishes no depth of its own pending-operation queue, so a change the daemon took and has not yet replayed against the server is not counted.
 The element sits in the region's polite live area, mounted empty at 0, so a screen reader hears the first depth.
 
