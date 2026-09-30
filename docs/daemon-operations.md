@@ -125,6 +125,9 @@ The table is what routes and through what:
 | `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |
 | `mp sync`'s post-sync retention sweep | `diagnostic.store_gc`, on the connection the sync already follows | P4-U15 |
+| `mp hooks list [--json]` | one `hook.list` per account, in configuration order | #0135 |
+| `mp hooks test <hook> <selector> [--mailbox] [--json]` | `hook.test` | #0135 |
+| `mp hooks replay <hook> <selector> [--mailbox]` | `hook.replay` | #0135 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 | `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
 | `mp`'s mailbox list, sidebar counts and preview body | `message.list` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
@@ -389,6 +392,14 @@ A drain that rolled ops back publishes `mutations.rolled_back` `{account, failed
 Every drain that ran then publishes one count change per mailbox whose counts differ from the canonical state's, so the sidebar converges on what the mutations left.
 An op that fails and still has retries left stays queued with its backoff, and the next tick (at the latest the scheduled one), or the next drain a later mutation asks for, retries it.
 
+### The hook runner
+
+A ready runtime of an IMAP account with at least one `[[accounts.hooks]]` entry also runs a hook runner (`src/daemon/runtime/hook_runner.rs`, #0135), bound to the runtime the same way.
+It scans once when it starts and again after every tick that ran a body, whatever asked for the tick, and runs what the scan claimed one command at a time, in UID order.
+A blocked runtime, a local-only account and a Graph account (whose rows carry no raw message to authenticate) get no runner, and the log says why for an account that has hooks.
+Editing a hook changes the effective account, so `config.reload` restarts the runtime and the runner comes back with the new hooks.
+What it runs, and why only once, is [Mail hooks](#mail-hooks) below.
+
 ### The engine lock
 
 A ready runtime holds `<account_dir>/store.lock` for its whole lifetime, not for the length of one operation, which is what makes the daemon *the* engine for that account.
@@ -416,6 +427,69 @@ Each tick carries the account's `imap.body_fetch_deadline_secs` as its per-mailb
 
 A runtime ticks when its watcher sees the mailbox move, when a client asks, and when its scheduler finds it has gone `sync_interval_secs` without a tick (see the scheduler above).
 The queues do not wait for a tick any more: the drainer above empties them after an interactive mutation without one.
+
+## Mail hooks
+
+A hook runs a command once for every message that arrives in a mailbox after the hook was first seen and passes the hook's `match` table (#0135).
+Hooks are per account, in `config.toml`:
+
+```toml
+[[accounts]]
+name = "assistant"
+# ...
+
+[[accounts.hooks]]
+name = "pi-remote"              # letters, digits, - and _; unique within the account
+mailbox = "INBOX"               # a role or a configured server name; default "inbox"
+exec = ["/home/me/.local/bin/pi-remote"]   # argv, no shell; ~ is expanded in the first element
+timeout_secs = 60               # default 60; the command is killed after it
+
+[accounts.hooks.match]          # every criterion given must pass; at least one is required
+authenticated_from = ["me@example.org", "me@work.example"]
+authserv_id = "mx.google.com"   # required with authenticated_from
+to = ["assistant+pi@gmail.com"] # To, Cc or Delivered-To, exact, +tag included
+subject = "^\\[pi\\]"            # a regular expression on the decoded subject
+headers = { "X-Task" = "^yes$" }  # header name to a regular expression
+```
+
+**The sender check is the one to get right**, because a hook may run anything with the user's rights and `From:` alone proves nothing.
+`authenticated_from` passes only when `From:` carries exactly one address, that address is on the list, and the *topmost* `Authentication-Results` header carries `authserv_id` and records a DKIM pass whose signing domain, or an SPF pass whose envelope-sender domain, is exactly the `From:` domain.
+The receiving server prepends its own header above everything the message arrived with, so a forged one never reaches the top, and a verdict from another hop (a forwarder, or Exchange Online, which writes no authserv-id) is not trusted.
+Exact domain equality is stricter than DMARC's relaxed alignment on purpose: a department's `xyz.tum.de` server cannot vouch for a `tum.de` address.
+Two limits follow from the design.
+`authserv_id` must name a server that stamps every message it accepts, as Gmail does, since on a server that stamps nothing the topmost header is whatever the sender wrote.
+And a pass proves the domain, not the local part, so the check trusts the sending domain's provider not to let one user send as another, which is the model DMARC rests on.
+`mp hooks test <hook> <selector>` shows every criterion's verdict for a stored message, which is how to check a new hook before trusting it.
+
+**Once per message, and never for old mail.**
+The cursor lives in `<account_dir>/hooks-state.json`, outside the store, because the store is a cache a schema bump rebuilds.
+It counts in server UIDs under one UIDVALIDITY.
+A hook seen for the first time, or whose mailbox changed, is armed at the mailbox's current top, so nothing already there fires; a hook removed from the configuration forgets its cursor, so adding it back arms it afresh.
+A renumbered mailbox (a new UIDVALIDITY) re-arms the hook at the new top, and whatever arrived during the renumbering does not fire; the log says so.
+The cursor never passes the store's arrival mark, so a message that lands out of UID order is still considered, and the last 512 Message-IDs a hook fired for are remembered, so a message moved out and back in under a new UID does not fire twice.
+The claim is written before the command starts: a daemon that dies mid-run loses that run rather than repeating it, and `mp hooks replay` is how to run it again.
+
+**What the command gets.**
+Its working directory is the home directory, and it inherits the daemon's environment plus `MP_HOOK_NAME`, `MP_HOOK_ACCOUNT`, `MP_HOOK_MAILBOX`, `MP_HOOK_MESSAGE_ID`, `MP_HOOK_SELECTOR`, `MP_HOOK_DIR` and `MP_HOOK_REPLAY` (`1` or `0`).
+A daemon started on demand inherits the environment of whatever command started it, so a hook should set its own `PATH` rather than rely on one.
+`MP_HOOK_DIR` is a private temporary directory holding `message.eml` (the raw message), `message.md` (the Markdown rendition `mp show` prints), `attachments/` and `message.json`; the daemon deletes it when the command exits, so the command copies what it wants to keep.
+Stdin carries the same JSON as `message.json`:
+
+```json
+{"hook", "account", "mailbox", "uid", "message_id", "selector",
+ "from", "authenticated_sender", "to", "cc", "reply_to", "subject", "date",
+ "headers": [{"name", "value"}], "text",
+ "dir", "eml_path", "markdown_path",
+ "attachments": [{"name", "size", "path"}], "replay"}
+```
+
+The command's stdout and stderr are captured, so it must not leave a background child holding them open, or the daemon waits for that child until the timeout: redirect a detached child's output, or use a launcher that closes it.
+Commands of one account run one at a time, so a slow hook delays the next.
+
+**Logs and CLI.**
+Every scan and run logs a `[hooks]` line: armed, did not match (with the failing criterion), matched but already fired, and `exit N`, `timed out after Ns` or `did not start` with the tail of stderr; `mp daemon logs | rg hooks` follows them.
+`mp hooks list` prints each account's hooks with the cursor and the last run, `mp hooks test` is the dry run above, and `mp hooks replay <hook> <selector>` runs the command now, in the daemon, behind the same `match` table, without moving the cursor.
+The `hook.*` methods behind them are in [daemon-protocol.md](daemon-protocol.md#the-hook-family).
 
 ## The undo-send hold
 

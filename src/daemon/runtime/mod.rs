@@ -59,6 +59,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod account;
 pub mod drainer;
+pub mod hook_runner;
 pub mod pool;
 pub mod publish;
 pub mod scheduler;

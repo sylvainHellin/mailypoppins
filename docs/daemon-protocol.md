@@ -100,6 +100,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `contact.*` for listing, ranking, rebuilding, and statistics. This build serves `contact.rebuild`, `contact.search` and `contact.stats`, whose rows are `{address, display_name, sent_to, sent_cc, received, score}`.
 - `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.events`, `calendar.rebuild` and `calendar.rsvp`.
 - `signature.*` for list, read, create, update, rename, delete, and per-account default selection.
+- `hook.*` for the mail hooks of `[[accounts.hooks]]` (#0135). This build serves `hook.list`, `hook.replay` and `hook.test`.
 - `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes. This build serves nine methods: `config.add_account`, `config.cutover`, `config.get`, `config.init`, `config.oauth2_login`, `config.reload`, `config.reset_secrets`, `config.set_password` and `config.validate`.
 - `operation.*` for long-running operation status and cancellation.
 - `diagnostic.*` for logs, health, and support information. This build serves five methods: `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `diagnostic.store_gc` and `diagnostic.support_bundle`. The sweep is here rather than under a `store.*` family because there is no such family, which is the name `docs/parity-matrix.md` SYN-08 already carried.
@@ -112,9 +113,9 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path` and `diagnostic.logs` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list` and `hook.test` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the seven `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover` and `config.oauth2_login` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
 A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
@@ -781,6 +782,25 @@ The watch is validated before an id is issued - the account, the mailbox, the tr
 A Graph account has no IDLE to offer and is `-32603`.
 No timeout crosses the socket: a client that wants to stop waiting calls `operation.cancel`.
 
+### The `hook.*` family
+
+The daemon runs an account's mail hooks itself, after every tick that ingested (#0135); this family is how a client inspects them, checks one against a stored message, and runs one again.
+The configuration, the cursor and the sender check are described in [daemon-operations.md](daemon-operations.md#mail-hooks).
+
+| method | kind | params | result |
+|---|---|---|---|
+| `hook.list` | query | `{account}` | `{account, hooks: [{name, mailbox, mailbox_key, exec, timeout_secs, match, cursor, last_run}]}` |
+| `hook.test` | query | `{account, hook, row_id\|id\|selector, mailbox?}` | `{hook, account, matched, fired_before, checks: [{criterion, passed, detail}], payload}` |
+| `hook.replay` | operation | `{account, hook, row_id\|id\|selector, mailbox?}` | settles `{account, hook, message_id, outcome, ok, duration_ms, stdout, stderr}` |
+
+`hook.list` takes any configured account, store or not, since the hooks are configuration; `mailbox_key` is the store key the hook's `mailbox` resolves to and `null` for a mailbox the account does not configure, `cursor` is `{armed_at, uidvalidity, last_uid, fired}` or `null` before the runner armed the hook, and `last_run` is `{at, message_id, uid, outcome, ok, duration_ms}` or `null`.
+`hook.test` and `hook.replay` address a message the way `message.get` does and need a ready account; an unknown hook, a message the account does not hold and a parameter neither takes are `-32602`.
+`hook.test`'s `payload` is the JSON the command would read, with `dir`, `eml_path`, `markdown_path` and every attachment `path` `null`, because a dry run materialises nothing; it runs nothing and moves no cursor, and `fired_before` says whether the hook already fired for that `Message-ID`.
+`hook.replay` materialises the message and runs the command in the daemon, with the daemon's environment, exactly as a live run would; a message the `match` table rejects fails the operation with the failing criterion, so a replay cannot get past the sender check a live run faces.
+It moves no cursor and records itself as the hook's `last_run` once the hook has a cursor.
+`outcome` is `exit N`, `killed by signal N`, `timed out after Ns` or `did not start: <why>`, `ok` is true for exit 0 alone, and `stdout` and `stderr` are the last 4 KiB of each.
+A replay is `durable`: a CLI that stops waiting leaves the command running to its own timeout.
+
 ### The server search leg
 
 Two operations carry what the TUI's search overlay still does in process: the merged server search behind `ff` (`LST-08`, and with it `LST-06`'s unmigrated CLI residue) and the `f` that ingests a server-only hit (`LST-09`).
@@ -1263,3 +1283,8 @@ The desktop-client groundwork added one query, additively, and no existing shape
 A rendition over 8 MiB is `-32004 frame_too_large` with `{limit, seen, fallback}`, `fallback` naming `message.materialise_html`; `fallback` is a new optional member of that code's `data`, which every other `frame_too_large` still answers without.
 It is declared in `MESSAGE_HTML_METHOD_SPECS`, an array of its own for the reason `MESSAGE_THREAD_METHOD_SPECS` is one, and the capability list grew by its name.
 The types are `mp_protocol::rendition`, and the fixtures are `crates/mp-protocol/fixtures/message.html.{request,response}.json` and `error.message_html_too_large.json`.
+
+#0135 added the `hook.*` family, three methods, all additive; no field was renamed, none was dropped, and no command's output moved.
+`hook.list` `{account}` and `hook.test` `{account, hook, row_id|id|selector, mailbox?}` are queries, `hook.replay` with the same parameters is a durable operation, and their shapes are in [the family's section](#the-hook-family).
+`config.get`'s account gained `hooks`, the account's `[[accounts.hooks]]` entries with their defaults applied, which is also what makes a reload that edits a hook restart that account's runtime; `tests/daemon_config.rs` pins the account at ten keys.
+The capability list a handshake advertises grew by the three names, which is the derivation working rather than a change to it.

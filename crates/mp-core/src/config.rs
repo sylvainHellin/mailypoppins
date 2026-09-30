@@ -97,6 +97,143 @@ pub struct AccountConfig {
     /// client. See [`SaveToSent`]; `auto` is almost always right.
     #[serde(default)]
     pub save_to_sent: SaveToSent,
+    /// Commands the daemon runs when a matching message arrives in one of
+    /// this account's mailboxes (`[[accounts.hooks]]`, #0135). See
+    /// [`HookConfig`].
+    #[serde(default)]
+    pub hooks: Vec<HookConfig>,
+}
+
+/// One `[[accounts.hooks]]` entry (#0135): run `exec` once for every message
+/// that arrives in `mailbox` after the hook was first seen and passes every
+/// criterion of `match`.
+///
+/// The account is the table the entry sits in, so a hook cannot name an
+/// account the file does not configure.
+#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
+pub struct HookConfig {
+    /// Unique within the account; the key of the hook's cursor, the name the
+    /// log and `mp hooks` use.
+    #[serde(default)]
+    pub name: String,
+    /// The mailbox watched, as a role (`inbox`) or a configured server name
+    /// (`INBOX`). Defaults to the inbox.
+    #[serde(default = "default_hook_mailbox")]
+    pub mailbox: String,
+    /// Every criterion given must pass; an absent one is not checked.
+    #[serde(default, rename = "match")]
+    pub criteria: HookMatch,
+    /// The command and its arguments, run without a shell. The message travels
+    /// as JSON on stdin.
+    #[serde(default)]
+    pub exec: Vec<String>,
+    /// How long the command may run before it is killed.
+    #[serde(default = "default_hook_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+/// The `match` table of a hook.
+#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
+pub struct HookMatch {
+    /// The `From:` address must be one of these, case-insensitively, *and*
+    /// the receiving server's own `Authentication-Results` must show a DKIM or
+    /// SPF pass for exactly that address's domain. Needs `authserv_id`.
+    #[serde(default)]
+    pub authenticated_from: Vec<String>,
+    /// The authserv-id the receiving server stamps its
+    /// `Authentication-Results` with (`mx.google.com` for Gmail). Only the
+    /// topmost such header is read, and only when it carries this id.
+    #[serde(default)]
+    pub authserv_id: Option<String>,
+    /// At least one `To:`, `Cc:` or `Delivered-To:` address must be one of
+    /// these, case-insensitively and with any `+tag` compared literally.
+    #[serde(default)]
+    pub to: Vec<String>,
+    /// A regular expression the decoded subject must match.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Header name to a regular expression some value of that header must
+    /// match.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+impl HookMatch {
+    /// True when no criterion is set, which [`validate_hooks`] refuses.
+    pub fn is_empty(&self) -> bool {
+        self.authenticated_from.is_empty()
+            && self.to.is_empty()
+            && self.subject.is_none()
+            && self.headers.is_empty()
+    }
+}
+
+fn default_hook_mailbox() -> String {
+    "inbox".to_string()
+}
+
+/// A minute: long enough to save a message and hand it to another process,
+/// short enough that a hung command does not hold the hooks behind it.
+fn default_hook_timeout_secs() -> u64 {
+    60
+}
+
+/// Refuse a hook the daemon could not run as written: a missing or duplicate
+/// name, an empty `exec`, a regular expression that does not compile, a
+/// sender check with no server to trust, or no criterion at all (a hook that
+/// would fire on every message is far more likely a typo than a wish).
+pub fn validate_hooks(config: &GlobalConfig) -> Result<()> {
+    for account in &config.accounts {
+        let mut seen: Vec<&str> = Vec::new();
+        for hook in &account.hooks {
+            let at = format!("account {:?}, hook {:?}", account.name, hook.name);
+            let name = hook.name.as_str();
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                anyhow::bail!("{at}: a hook name is non-empty and only letters, digits, - and _");
+            }
+            if seen.contains(&name) {
+                anyhow::bail!("{at}: two hooks of one account share this name");
+            }
+            seen.push(name);
+            if hook.exec.is_empty() || hook.exec[0].trim().is_empty() {
+                anyhow::bail!("{at}: exec names no command");
+            }
+            if hook.timeout_secs == 0 {
+                anyhow::bail!("{at}: timeout_secs is at least 1");
+            }
+            let criteria = &hook.criteria;
+            if criteria.is_empty() {
+                anyhow::bail!(
+                    "{at}: match sets no criterion; set authenticated_from, to, subject or headers"
+                );
+            }
+            if !criteria.authenticated_from.is_empty()
+                && criteria
+                    .authserv_id
+                    .as_deref()
+                    .is_none_or(|id| id.trim().is_empty())
+            {
+                anyhow::bail!(
+                    "{at}: authenticated_from needs match.authserv_id, the id the receiving \
+                     server stamps its Authentication-Results with (mx.google.com for Gmail)"
+                );
+            }
+            if let Some(subject) = &criteria.subject {
+                regex::Regex::new(subject)
+                    .with_context(|| format!("{at}: match.subject is not a regular expression"))?;
+            }
+            for (header, pattern) in &criteria.headers {
+                regex::Regex::new(pattern).with_context(|| {
+                    format!("{at}: match.headers.{header} is not a regular expression")
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl AccountConfig {
@@ -882,6 +1019,8 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     validate_retention(&config)
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
     validate_account_names(&config)
+        .with_context(|| format!("Invalid config file: {}", path.display()))?;
+    validate_hooks(&config)
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
     debug!("Loaded global config from {}", path.display());
     Ok(config)
@@ -1907,6 +2046,49 @@ name = "test"
             },
             ..Default::default()
         }
+    }
+
+    fn hooks_config(hook: &str) -> Result<GlobalConfig> {
+        let text = format!(
+            "[[accounts]]\nname = \"assistant\"\n\n[[accounts.hooks]]\n{hook}\n"
+        );
+        let config: GlobalConfig = toml::from_str(&text)?;
+        validate_hooks(&config)?;
+        Ok(config)
+    }
+
+    /// A hook entry with its defaults: the inbox, a minute, and the `match`
+    /// table read from the key TOML spells `match` (#0135).
+    #[test]
+    fn a_hook_parses_with_its_defaults() {
+        let config = hooks_config(
+            "name = \"pi\"\nexec = [\"pi-remote\"]\nmatch = { authenticated_from = [\"a@b.c\"], authserv_id = \"mx.google.com\", headers = { X-Task = \"^go$\" } }",
+        )
+        .unwrap();
+        let hook = &config.accounts[0].hooks[0];
+        assert_eq!(hook.mailbox, "inbox");
+        assert_eq!(hook.timeout_secs, 60);
+        assert_eq!(hook.criteria.authenticated_from, vec!["a@b.c".to_string()]);
+        assert_eq!(hook.criteria.headers["X-Task"], "^go$");
+    }
+
+    #[test]
+    fn a_hook_the_daemon_could_not_run_is_refused() {
+        let refused = |hook: &str| format!("{:#}", hooks_config(hook).unwrap_err());
+        assert!(refused("name = \"pi\"\nmatch = { subject = \"x\" }").contains("exec"));
+        assert!(refused("name = \"p i\"\nexec = [\"x\"]\nmatch = { subject = \"x\" }")
+            .contains("hook name"));
+        assert!(refused("name = \"pi\"\nexec = [\"x\"]").contains("no criterion"));
+        assert!(refused("name = \"pi\"\nexec = [\"x\"]\nmatch = { subject = \"(\" }")
+            .contains("regular expression"));
+        assert!(refused(
+            "name = \"pi\"\nexec = [\"x\"]\nmatch = { authenticated_from = [\"a@b.c\"] }"
+        )
+        .contains("authserv_id"));
+        assert!(refused(
+            "name = \"pi\"\nexec = [\"x\"]\nmatch = { subject = \"x\" }\n\n[[accounts.hooks]]\nname = \"pi\"\nexec = [\"y\"]\nmatch = { subject = \"y\" }"
+        )
+        .contains("share this name"));
     }
 
     /// `mp sync --mailbox projects` must file its rows under the key the

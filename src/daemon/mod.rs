@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod fake_transport;
 pub mod handles;
 pub mod hold;
+pub mod hooks;
 pub mod lifecycle;
 pub mod methods;
 pub mod operations;

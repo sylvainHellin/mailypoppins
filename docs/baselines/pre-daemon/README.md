@@ -146,6 +146,7 @@ The sync and send slices (`tests/daemon_sync_slice.rs`, `tests/daemon_send_slice
 - `mp outbox list` and `mp list-mailboxes` gained `--json`.
 - `mp completions <shell>` is new: it prints a clap_complete script and is on the no-daemon list.
 - `mp daemon` and `mp account` are listed in `mp --help` (both carried `hide = true` in the capture); the debug `--daemon` flag stays hidden.
+- `mp hooks list|test|replay` is new (#0135): it inspects, dry-runs and replays the mail hooks of `[[accounts.hooks]]` through the `hook.*` methods.
 
 ## What is deliberately absent
 

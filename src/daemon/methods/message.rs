@@ -327,7 +327,7 @@ pub fn get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError
 /// is on by `messages.id` and nothing else, and resolving it back through
 /// `"<mailbox>/<uid>"` would make the client carry a second identity for the
 /// same row and re-derive it on every cursor move.
-fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, RpcError> {
+pub(super) fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, RpcError> {
     let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
     if addressed("row_id") {
         if addressed("id") || addressed("selector") {

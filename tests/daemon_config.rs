@@ -350,9 +350,10 @@ const CONFIG_KEYS: [&str; 6] = [
 ];
 
 /// The keys of one account inside that.
-const ACCOUNT_KEYS: [&str; 9] = [
+const ACCOUNT_KEYS: [&str; 10] = [
     "auth_method",
     "default_from",
+    "hooks",
     "imap",
     "mailboxes",
     "name",

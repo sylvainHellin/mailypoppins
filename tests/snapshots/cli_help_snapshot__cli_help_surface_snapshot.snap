@@ -34,6 +34,7 @@ Commands:
   config          Manage configuration
   contacts        Contact index operations
   calendar        Calendar / iMIP invite operations
+  hooks           Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
   outbox          Inspect and unblock the durable send queue
   store           Local store maintenance (retention garbage collection)
   cutover         Report what is left of the file-era `.md` tree, and import its drafts
@@ -699,6 +700,77 @@ Report what the stored attendee REPLY emails resolve on the stored invitations. 
 Usage: mp calendar rebuild [OPTIONS]
 
 Options:
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp hooks --help
+Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
+
+Usage: mp hooks [OPTIONS] <COMMAND>
+
+Commands:
+  list    List the hooks with their cursor and last run (every configured account unless `-A` names one)
+  test    Check a hook against a stored message; runs nothing, moves no cursor
+  replay  Run a hook for a stored message now, whatever its cursor says (the `match` table still has to pass)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+The daemon runs a hook's command once for every message that arrives after
+the hook was first seen and passes its `match` table. See
+docs/daemon-operations.md for the configuration and the JSON on stdin.
+
+Examples:
+  mp hooks list
+  mp hooks test pi-remote 'mp://assistant/inbox/abc@example.com'
+  mp hooks replay pi-remote 'mp://assistant/inbox/abc@example.com'
+
+$ mp hooks list --help
+List the hooks with their cursor and last run (every configured account unless `-A` names one)
+
+Usage: mp hooks list [OPTIONS]
+
+Options:
+      --json                   Print the daemon's answer as JSON
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp hooks test --help
+Check a hook against a stored message; runs nothing, moves no cursor
+
+Usage: mp hooks test [OPTIONS] <HOOK> <SELECTOR>
+
+Arguments:
+  <HOOK>      The hook's name
+  <SELECTOR>  The message: an `mp://` selector or a Message-ID
+
+Options:
+      --mailbox <MAILBOX>      Narrow the selector to one mailbox
+      --json                   Print the verdict and the payload the command would read, as JSON
+  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
+      --no-signature           Skip signature entirely
+  -A, --account <ACCOUNT>      Account to use
+  -h, --help                   Print help
+
+$ mp hooks replay --help
+Run a hook for a stored message now, whatever its cursor says (the `match` table still has to pass)
+
+Usage: mp hooks replay [OPTIONS] <HOOK> <SELECTOR>
+
+Arguments:
+  <HOOK>      The hook's name
+  <SELECTOR>  The message: an `mp://` selector or a Message-ID
+
+Options:
+      --mailbox <MAILBOX>      Narrow the selector to one mailbox
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use

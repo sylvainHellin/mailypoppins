@@ -242,6 +242,10 @@ pub fn validate_document(text: &str, path: &Path) -> Result<GlobalConfig, Diagno
         line: None,
         message: format!("{e:#}"),
     })?;
+    crate::config::validate_hooks(&config).map_err(|e| Diagnostic {
+        line: None,
+        message: format!("{e:#}"),
+    })?;
     check_secrets_backend(&config, crate::secrets::active_backend())?;
     Ok(config)
 }
@@ -368,6 +372,27 @@ pub fn effective_account(config: &GlobalConfig, account: &AccountConfig) -> Valu
             SaveToSent::Auto => "auto",
             SaveToSent::Always => "always",
             SaveToSent::Never => "never",
+        },
+        // Part of the comparison a reload makes, so an edited hook restarts
+        // the account's runtime and with it the hook runner (#0135).
+        "hooks": account.hooks.iter().map(hook_json).collect::<Vec<_>>(),
+    })
+}
+
+/// One `[[accounts.hooks]]` entry with its defaults applied.
+fn hook_json(hook: &crate::config::HookConfig) -> Value {
+    let criteria = &hook.criteria;
+    json!({
+        "name": hook.name,
+        "mailbox": hook.mailbox,
+        "exec": hook.exec,
+        "timeout_secs": hook.timeout_secs,
+        "match": {
+            "authenticated_from": criteria.authenticated_from,
+            "authserv_id": criteria.authserv_id,
+            "to": criteria.to,
+            "subject": criteria.subject,
+            "headers": criteria.headers,
         },
     })
 }
@@ -607,6 +632,8 @@ pub async fn start_account(
                 // The periodic quick tick for what the watcher cannot hear
                 // (#0134), bound the same way again.
                 super::runtime::scheduler::spawn(&runtime, Arc::clone(canonical), &cfg_for_watch);
+                // The mail hooks, run after every tick that ingested (#0135).
+                super::runtime::hook_runner::spawn(&runtime, &cfg_for_watch);
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);
             }
             change
@@ -772,6 +799,31 @@ mod tests {
         );
         let plan = Reconcile::between(&previous, &next);
         assert_eq!(plan.updated, vec!["alpha".to_string()]);
+    }
+
+    /// A hook is part of the effective account too, so editing one restarts
+    /// the runtime and its hook runner (#0135); a hook that does not validate
+    /// is refused before anything is swapped.
+    #[test]
+    fn a_changed_hook_updates_the_account_and_a_broken_one_is_refused() {
+        let hook = |exec: &str| {
+            format!(
+                "[[accounts]]\nname = \"alpha\"\n\n[[accounts.hooks]]\nname = \"h\"\nexec = [\"{exec}\"]\nmatch = {{ subject = \"x\" }}\n"
+            )
+        };
+        let previous = parse(&hook("a"));
+        let next = parse(&hook("b"));
+        assert_eq!(
+            effective_account(&previous, &previous.accounts[0])["hooks"][0]["timeout_secs"],
+            json!(60)
+        );
+        assert_eq!(
+            Reconcile::between(&previous, &next).updated,
+            vec!["alpha".to_string()]
+        );
+        let broken = hook("a").replace("subject = \"x\"", "subject = \"(\"");
+        let refused = validate_document(&broken, Path::new("config.toml")).unwrap_err();
+        assert!(refused.message.contains("regular expression"), "{refused:?}");
     }
 
     /// A reformatted file is not a change.

@@ -2203,3 +2203,18 @@ So `<meta content=0;url=https://evil.example/?a"b http-equiv=refresh>` matched n
 `crates/mp-core/src/parse.rs` now walks each tag with the tokenizer's states (`scan_meta_attrs`) and examines every `<meta` occurrence, since a scanner that skipped past a "tag" that was really comment text would hide the live tag after it.
 Examining every occurrence makes overlapping unclosed tags quadratic, so scans are memoized by attribute-start position, where two scans that reach the same byte are in the same state.
 When a sanitizer has to agree with a browser about where a tag ends, follow the tokenizer's state machine, and test it with the malformed input the tokenizer tolerates rather than with well-formed markup.
+
+## Only the topmost `Authentication-Results` is the receiving server's
+
+A mail hook that runs a command with the user's rights has to know who sent the message, and `From:` is whatever the sender typed (#0135).
+The receiving server records its DKIM, SPF and DMARC verdicts in an `Authentication-Results` header, but the header is an ordinary header: a sender can write one claiming `mx.google.com; dkim=pass` for any domain, and a forwarder adds its own.
+What the sender cannot do is put a header *above* the receiving server's, which prepends its own on acceptance, so `src/daemon/hooks/auth.rs` reads the topmost `Authentication-Results` and nothing below it, and trusts it only when it carries the configured authserv-id.
+That rule has one precondition: the named server must stamp every message it accepts (Gmail does), because on a server that stamps nothing the topmost header is the sender's.
+The pass also has to be for exactly the `From:` domain: DMARC's relaxed alignment would let any subdomain's mail server vouch for the parent domain's addresses.
+When a message header is evidence, ask who can write it and where in the header block they can put it.
+
+## `rustfmt` on a test file formats the whole `mod support` tree
+
+`rustfmt --edition 2021 tests/daemon_hooks.rs` also rewrote `tests/support/parity.rs`, because `mod support;` pulls the shared test support modules into the file's module tree and rustfmt formats every module it reaches.
+The tree as a whole is not rustfmt-clean, so formatting one new test file produced an unrelated diff in a file other suites own.
+Format a new file with `rustfmt --edition 2021 --config skip_children=true` (nightly) or check `git status` afterwards and undo whatever it touched beyond the new file.

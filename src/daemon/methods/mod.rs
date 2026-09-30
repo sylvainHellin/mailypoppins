@@ -26,6 +26,7 @@ pub mod config;
 pub mod contact;
 pub mod diagnostic;
 pub mod draft;
+pub mod hook;
 pub mod mailbox;
 pub mod message;
 pub mod message_server;
@@ -146,6 +147,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     );
     self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
+    self::hook::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::diagnostic::register(
         dispatcher,
         Arc::clone(&config),

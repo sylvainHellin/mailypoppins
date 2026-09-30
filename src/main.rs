@@ -410,6 +410,20 @@ enum Commands {
         #[command(subcommand)]
         action: CalendarAction,
     },
+    /// Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
+    #[command(after_help = "\
+The daemon runs a hook's command once for every message that arrives after
+the hook was first seen and passes its `match` table. See
+docs/daemon-operations.md for the configuration and the JSON on stdin.
+
+Examples:
+  mp hooks list
+  mp hooks test pi-remote 'mp://assistant/inbox/abc@example.com'
+  mp hooks replay pi-remote 'mp://assistant/inbox/abc@example.com'")]
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
     /// Inspect and unblock the durable send queue
     Outbox {
         #[command(subcommand)]
@@ -544,6 +558,42 @@ enum StoreAction {
         /// Sweep every configured account rather than just the default / `-A`.
         #[arg(long, conflicts_with = "account")]
         all_accounts: bool,
+    },
+}
+
+/// The mail hooks of `[[accounts.hooks]]` (#0135).
+#[derive(Subcommand)]
+enum HooksAction {
+    /// List the hooks with their cursor and last run (every configured
+    /// account unless `-A` names one)
+    List {
+        /// Print the daemon's answer as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a hook against a stored message; runs nothing, moves no cursor
+    Test {
+        /// The hook's name
+        hook: String,
+        /// The message: an `mp://` selector or a Message-ID
+        selector: String,
+        /// Narrow the selector to one mailbox
+        #[arg(long)]
+        mailbox: Option<String>,
+        /// Print the verdict and the payload the command would read, as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a hook for a stored message now, whatever its cursor says (the
+    /// `match` table still has to pass)
+    Replay {
+        /// The hook's name
+        hook: String,
+        /// The message: an `mp://` selector or a Message-ID
+        selector: String,
+        /// Narrow the selector to one mailbox
+        #[arg(long)]
+        mailbox: Option<String>,
     },
 }
 
@@ -2591,6 +2641,229 @@ async fn routed_calendar_rebuild(accounts: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The account a hook command means: the one `-A` names, or else the one
+/// account that configures a hook of that name.
+fn account_for_hook(global: &GlobalConfig, named: Option<&str>, hook: &str) -> Result<String> {
+    if named.is_some() {
+        return Ok(pick_account_named(global, named)?.name.clone());
+    }
+    let owners: Vec<&str> = global
+        .accounts
+        .iter()
+        .filter(|account| account.hooks.iter().any(|h| h.name == hook))
+        .map(|account| account.name.as_str())
+        .collect();
+    match owners.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => Err(anyhow!("no account configures a hook named {hook:?}")),
+        many => Err(anyhow!(
+            "{} accounts configure a hook named {hook:?} ({}); name one with -A",
+            many.len(),
+            many.join(", ")
+        )),
+    }
+}
+
+/// `mp hooks list`: one block per account, in configuration order.
+async fn routed_hooks_list(accounts: &[String], json: bool) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let mut answers = Vec::new();
+    for account in accounts {
+        let result = daemon_try_call(
+            &mut connection,
+            "hook.list",
+            serde_json::json!({"account": account}),
+        )
+        .await
+        .map_err(|error| refusal(account, error))?;
+        answers.push(result);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&answers)?);
+        return Ok(());
+    }
+    let mut any = false;
+    for answer in &answers {
+        let hooks = answer["hooks"].as_array().cloned().unwrap_or_default();
+        if hooks.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("{}", wire_str(&answer["account"]).bold());
+        for hook in &hooks {
+            print!("{}", render_hook(hook));
+        }
+    }
+    if !any {
+        println!("No hooks configured");
+    }
+    Ok(())
+}
+
+/// One `hook.list` entry as `mp hooks list` prints it.
+fn render_hook(hook: &serde_json::Value) -> String {
+    let strings = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|items| items.iter().map(|item| wire_str(item).to_string()).collect())
+            .unwrap_or_default()
+    };
+    let mut out = format!(
+        "  {}  {}  {}  (timeout {}s)\n",
+        wire_str(&hook["name"]),
+        wire_str(&hook["mailbox"]),
+        strings(&hook["exec"]).join(" "),
+        hook["timeout_secs"].as_u64().unwrap_or_default(),
+    );
+    let criteria = &hook["match"];
+    let senders = strings(&criteria["authenticated_from"]);
+    if !senders.is_empty() {
+        out.push_str(&format!(
+            "    from     {} (authenticated by {})\n",
+            senders.join(", "),
+            wire_str(&criteria["authserv_id"])
+        ));
+    }
+    let to = strings(&criteria["to"]);
+    if !to.is_empty() {
+        out.push_str(&format!("    to       {}\n", to.join(", ")));
+    }
+    if let Some(subject) = criteria["subject"].as_str() {
+        out.push_str(&format!("    subject  {subject}\n"));
+    }
+    if let Some(headers) = criteria["headers"].as_object() {
+        for (name, pattern) in headers {
+            out.push_str(&format!("    header   {name}: {}\n", wire_str(pattern)));
+        }
+    }
+    if hook["mailbox_key"].is_null() {
+        out.push_str(&format!(
+            "    {} mailbox {:?} is not configured for this account\n",
+            "\u{2717}".red(),
+            wire_str(&hook["mailbox"])
+        ));
+    }
+    match hook["cursor"].as_object() {
+        Some(cursor) => out.push_str(&format!(
+            "    cursor   armed {}, last uid {}, fired {}\n",
+            wire_str(&cursor["armed_at"]),
+            cursor["last_uid"].as_i64().unwrap_or_default(),
+            cursor["fired"].as_u64().unwrap_or_default(),
+        )),
+        None => out.push_str("    cursor   not armed yet (arms at the next sync)\n"),
+    }
+    if let Some(run) = hook["last_run"].as_object() {
+        let mark = if run["ok"].as_bool().unwrap_or(false) {
+            "\u{2713}".green()
+        } else {
+            "\u{2717}".red()
+        };
+        out.push_str(&format!(
+            "    last run {mark} {} {} {} in {}ms\n",
+            wire_str(&run["at"]),
+            wire_str(&run["message_id"]),
+            wire_str(&run["outcome"]),
+            run["duration_ms"].as_u64().unwrap_or_default(),
+        ));
+    }
+    out
+}
+
+/// The parameters `hook.test` and `hook.replay` share.
+fn hook_params(
+    account: &str,
+    hook: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({"account": account, "hook": hook, "selector": selector});
+    if let Some(mailbox) = mailbox {
+        params["mailbox"] = serde_json::json!(mailbox);
+    }
+    params
+}
+
+/// `mp hooks test`: every criterion with its verdict, and whether it would run.
+async fn routed_hooks_test(
+    account: &str,
+    hook: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call(
+        &mut connection,
+        "hook.test",
+        hook_params(account, hook, selector, mailbox),
+    )
+    .await
+    .map_err(|error| refusal(account, error))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    for check in result["checks"].as_array().cloned().unwrap_or_default() {
+        let mark = if check["passed"].as_bool().unwrap_or(false) {
+            "\u{2713}".green()
+        } else {
+            "\u{2717}".red()
+        };
+        println!(
+            "  {mark} {}  {}",
+            wire_str(&check["criterion"]),
+            wire_str(&check["detail"])
+        );
+    }
+    let matched = result["matched"].as_bool().unwrap_or(false);
+    let fired_before = result["fired_before"].as_bool().unwrap_or(false);
+    println!(
+        "{}",
+        match (matched, fired_before) {
+            (true, false) => format!("{hook} matches this message"),
+            (true, true) => format!("{hook} matches this message and has already fired for it"),
+            (false, _) => format!("{hook} does not match this message"),
+        }
+    );
+    Ok(())
+}
+
+/// `mp hooks replay`: run it in the daemon and print what the command did.
+async fn routed_hooks_replay(
+    account: &str,
+    hook: &str,
+    selector: &str,
+    mailbox: Option<&str>,
+) -> Result<()> {
+    let mut connection = operation_session().await;
+    let started = daemon_try_call(
+        &mut connection,
+        "hook.replay",
+        hook_params(account, hook, selector, mailbox),
+    )
+    .await
+    .map_err(|error| refusal(account, error))?;
+    let result = settle(&mut connection, &started).await?;
+    let ok = result["ok"].as_bool().unwrap_or(false);
+    let mark = if ok { "\u{2713}".green() } else { "\u{2717}".red() };
+    println!(
+        "{mark} {hook} for {}: {} in {}ms",
+        wire_str(&result["message_id"]),
+        wire_str(&result["outcome"]),
+        result["duration_ms"].as_u64().unwrap_or_default()
+    );
+    for stream in ["stdout", "stderr"] {
+        let text = wire_str(&result[stream]);
+        if !text.is_empty() {
+            println!("{stream}:\n{text}");
+        }
+    }
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// `mp invite accept|tentative|decline`: the reply is built, submitted and
 /// filed by the daemon; the one line it prints is this process's.
 async fn routed_rsvp(
@@ -3900,6 +4173,33 @@ async fn main() -> Result<()> {
                 routed_calendar_rebuild(&accounts_for(&global_config, acct.as_deref())?).await?;
             }
         },
+
+        Some(Commands::Hooks { action }) => {
+            let acct = cli.account.clone();
+            match action {
+                HooksAction::List { json } => {
+                    routed_hooks_list(&accounts_for(&global_config, acct.as_deref())?, json)
+                        .await?;
+                }
+                HooksAction::Test {
+                    hook,
+                    selector,
+                    mailbox,
+                    json,
+                } => {
+                    let account = account_for_hook(&global_config, acct.as_deref(), &hook)?;
+                    routed_hooks_test(&account, &hook, &selector, mailbox.as_deref(), json).await?;
+                }
+                HooksAction::Replay {
+                    hook,
+                    selector,
+                    mailbox,
+                } => {
+                    let account = account_for_hook(&global_config, acct.as_deref(), &hook)?;
+                    routed_hooks_replay(&account, &hook, &selector, mailbox.as_deref()).await?;
+                }
+            }
+        }
 
         Some(Commands::Outbox { action }) => {
             cmd_outbox(&account_config, action).await?;

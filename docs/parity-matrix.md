@@ -1020,6 +1020,16 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: not started
 - Note: every row still parked on a listed UID the pass did not itself ingest moves to the `-id` sentinel, which frees the UID for the message that now wears it and leaves the row rebindable; rows on UIDs the server does not list are left alone, and recovery completes on the next full sync because the download window is positional and the repaired rows sit below it (#0117).
 
+### SYN-17 Mail hooks: run a command when a matching message arrives
+
+- Classification: CLI automation
+- Source anchor: none, new after the migration (#0135); `[[accounts.hooks]]` in `config.toml`, `src/daemon/hooks/`, `src/daemon/runtime/hook_runner.rs`, entry points `mp hooks list`, `mp hooks test` and `mp hooks replay`
+- Daemon surface: the account runtime's hook runner, daemon-internal, and `hook.list`, `hook.test` and `hook.replay`
+- GUI location: not required (CLI automation)
+- Validation: unit tests in `src/daemon/hooks/` (the sender check against spoofed, missing and foreign `Authentication-Results`, the cursor, the run), `tests/daemon_hooks.rs`
+- Status: shipped (#0135)
+- Note: the sender is authenticated from the receiving server's own topmost `Authentication-Results` with exact domain equality, the cursor lives outside the store in `<account_dir>/hooks-state.json`, and a hook never fires for mail older than itself.
+
 ## Contacts
 
 ### CON-01 Fuzzy contact search over name and address
