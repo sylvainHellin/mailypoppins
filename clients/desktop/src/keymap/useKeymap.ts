@@ -5,9 +5,10 @@
 import { useEffect, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { liveHolds, screenFor, type AppState } from "@/app/state";
-import { hiddenByOutbox } from "@/app/outbox";
+import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
+import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
 
 const PREFIX_TIMEOUT_MS = 1200;
 const PREFIXES = new Set(["g", "f", "c", "t", "s"]);
@@ -84,10 +85,10 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
   const prefix = useRef<{ key: string; at: number } | null>(null);
 
   useEffect(() => {
-    // Over the outbox view, a key for an action on the hidden mailbox
-    // selection does nothing, from any pane.
+    // Over a full-pane view or the outbox view, a key for an action on the
+    // hidden mailbox selection does nothing, from any pane.
     const run = (id: ActionId) => {
-      if (!hiddenByOutbox(ref.current, id)) runAction(id, ref.current, dispatch);
+      if (!hiddenNotice(ref.current, id)) runAction(id, ref.current, dispatch);
     };
     const notice = (combo: string) => {
       const entry = describeKey(combo);
@@ -134,12 +135,19 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         return;
       }
 
+      // A full-pane view's table (Contacts, Calendar, Settings); null in Mail.
+      const view = viewKeyTable(s.view);
+
       // A pending family prefix (`g`, `f`, `c`, `t`, `s`, Space).
       const pending = prefix.current;
       prefix.current = null;
       if (pending && Date.now() - pending.at < PREFIX_TIMEOUT_MS) {
         handled();
         const combo = pending.key === " " ? `Space ${e.key}` : `${pending.key}${e.key}`;
+        const own = view?.combos[combo] ?? VIEW_AGNOSTIC_COMBOS[combo];
+        if (own) return run(own);
+        // A view binds nothing else under a prefix, as the TUI's views do not.
+        if (view) return;
         switch (combo) {
           case "gg":
             return run("list_top");
@@ -158,12 +166,6 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("focus_filter");
           case "ff":
             return run("search_server");
-          case "Space m":
-            return run("focus_list");
-          case "ss":
-            return run("quick_sync");
-          case "sS":
-            return run("full_sync");
           case "cn":
             return run("new_draft");
           default:
@@ -174,7 +176,28 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return notice(combo);
         }
       }
-      if (PREFIXES.has(e.key) || e.key === " ") {
+
+      // A full-pane view reads its own keys before any prefix arms, so it can
+      // bind `c`, `t` or `r` without arming the mail families; only the
+      // prefixes it names still arm, and what it neither binds nor shares
+      // does nothing, as the TUI's views ignore the mail keys.
+      if (view) {
+        const id = view.keys[e.key];
+        if (id) return handled(), run(id);
+        if (view.prefixes.has(e.key)) {
+          handled();
+          prefix.current = { key: e.key, at: Date.now() };
+          return;
+        }
+        if (e.key === "Escape") return handled(), run("view_mail");
+        if (e.key === "Enter" && s.focus === "sidebar") return handled(), run("select_mailbox");
+        // While a send is held, `u` cancels it from every view (the TUI's rule).
+        if (e.key === "u" && liveHolds(s).length > 0) return handled(), run("cancel_hold");
+        if (!VIEW_SHARED_KEYS.has(e.key)) {
+          if (e.key.length === 1) handled();
+          return;
+        }
+      } else if (PREFIXES.has(e.key) || e.key === " ") {
         handled();
         prefix.current = { key: e.key, at: Date.now() };
         return;
@@ -195,7 +218,7 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       // The outbox view owns the list pane's letter keys: `d` discards and
       // `R` retries the cursor row, Enter opens nothing, and the MESSAGE and
       // List keys have no row of theirs to act on.
-      if (s.outboxView && s.focus === "list" && e.key.length === 1 && !/^[jkJKG:?z/xX1-9 ]$/.test(e.key)) {
+      if (!view && s.outboxView && s.focus === "list" && e.key.length === 1 && !/^[jkJKG:?z/xX1-9 ]$/.test(e.key)) {
         handled();
         if (e.key === "d") return run("outbox_discard");
         if (e.key === "R") return run("outbox_retry");

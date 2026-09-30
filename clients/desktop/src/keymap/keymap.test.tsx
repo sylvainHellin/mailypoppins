@@ -2,6 +2,8 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
+import { VIEW_KEYS } from "@/keymap/viewKeys";
+import type { ActionId } from "@/keymap/catalog";
 
 function lastRow(list: HTMLElement): HTMLElement {
   const rows = within(list).getAllByRole("option");
@@ -641,5 +643,128 @@ describe("attachment keys (the TUI's t family) and F", () => {
     const fetchRow = within(dialog).getByText("Fetch a server-only hit into the store").closest("[data-testid='palette-item']");
     expect(fetchRow).not.toHaveAttribute("data-disabled", "true");
     expect(fetchRow).toHaveTextContent("F");
+  });
+});
+
+describe("views (the TUI's Space m, Space c, Space a)", () => {
+  const region = (name: string) => screen.findByRole("region", { name });
+
+  it("Space c, Space a and Space m switch the view, and Escape comes back to Mail", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(" c");
+    expect(await region("Contacts")).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Reader" })).toBeNull();
+    expect(document.activeElement?.closest("[data-pane]")?.getAttribute("data-view")).toBe("contacts");
+    await user.keyboard(" a");
+    expect(await region("Calendar")).toBeInTheDocument();
+    await user.keyboard(" m");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    await user.keyboard(" c");
+    await region("Contacts");
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Contacts" })).toBeNull();
+  });
+
+  it("in Contacts c arms no compose prefix, so c then n opens no wizard, and Mail's cn still does", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(" c");
+    await region("Contacts");
+    await user.keyboard("cn");
+    await user.keyboard("tv");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText(/arrives in M4/)).toBeNull();
+    await user.keyboard(" m");
+    await user.keyboard("cn");
+    expect(await screen.findByRole("dialog", { name: "New draft" })).toBeInTheDocument();
+  });
+
+  it("a view's own key runs before any prefix arms, and the prefix arms again in Mail", async () => {
+    const keys = VIEW_KEYS.contacts.keys as Record<string, ActionId>;
+    keys.c = "toggle_help";
+    try {
+      const { user } = renderApp();
+      await shellReady();
+      await user.keyboard(" c");
+      await region("Contacts");
+      await user.keyboard("c");
+      expect(await screen.findByRole("dialog", { name: "Keys" })).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      await user.keyboard(" m");
+      await user.keyboard("cn");
+      expect(await screen.findByRole("dialog", { name: "New draft" })).toBeInTheDocument();
+    } finally {
+      delete keys.c;
+    }
+  });
+
+  it("ss syncs from Calendar", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(" a");
+    await region("Calendar");
+    await user.keyboard("ss");
+    await waitFor(() => expect(callsOf("sync_trigger")).toEqual([{ account: "work", mode: "quick" }]));
+  });
+
+  it("u cancels a held send from Contacts, and the mail keys do nothing there", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard(" c");
+    await region("Contacts");
+    await user.keyboard("u");
+    await waitFor(() => expect(callsOf("send_cancel_hold")).toEqual([{ operation_id: "fixture-hold-seed" }]));
+    fireSeededHold();
+    await user.keyboard("u*adyx2");
+    expect(callsOf("message_set_read")).toEqual([]);
+    expect(callsOf("message_set_flag")).toEqual([]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(await region("Contacts")).toBeInTheDocument();
+  });
+
+  it("r in Calendar does not reply", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard(" a");
+    await region("Calendar");
+    await user.keyboard("r");
+    expect(callsOf("draft_reply")).toEqual([]);
+    expect(callsOf("editor_open")).toEqual([]);
+  });
+
+  it("Tab cycles the sidebar and the view, and Enter on a mailbox brings Mail back", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(" c");
+    await region("Contacts");
+    const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
+    await user.keyboard("{Tab}");
+    expect(pane()).toBe("sidebar");
+    await user.keyboard("{Tab}");
+    expect(pane()).toBe("list");
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    await user.keyboard("j{Enter}");
+    expect(await screen.findByRole("listbox", { name: "Drafts messages" })).toBeInTheDocument();
+  });
+
+  it("the palette's action on the mailbox selection says to go back to Mail first, and Open settings shows Settings", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard(" c");
+    await region("Contacts");
+    await user.keyboard(":");
+    await user.keyboard("Archive");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("Go back to Mail first (Escape): this acts on the mailbox selection")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: /Archive/ })).toBeNull();
+    await user.keyboard(":");
+    await user.keyboard("Open settings");
+    await user.keyboard("{Enter}");
+    expect(await region("Settings")).toBeInTheDocument();
   });
 });

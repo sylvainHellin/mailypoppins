@@ -50,6 +50,26 @@ describe("the adaptive layout", () => {
     expect(await screen.findByRole("navigation", { name: /mailboxes/ })).toBeInTheDocument();
   });
 
+  it("narrow: a view stands in the list's place, titled, with the way up to the sidebar", async () => {
+    const { user } = renderApp(600);
+    await shellReady();
+    await user.keyboard(" a");
+    expect(await screen.findByRole("region", { name: "Calendar" })).toBeInTheDocument();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Back to Mailboxes/ }));
+    const nav = await screen.findByRole("navigation", { name: /mailboxes/ });
+    expect(nav.querySelector('[data-view-entry="calendar"]')).toHaveAttribute("aria-current", "page");
+  });
+
+  it("wide and medium: a view takes the list's and the reader's place, the splitter too", async () => {
+    const { user } = renderApp(900);
+    await shellReady();
+    await user.keyboard(" c");
+    expect(await screen.findByRole("region", { name: "Contacts" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Reader" })).toBeNull();
+    expect(screen.queryByRole("separator", { name: /Resize/ })).toBeNull();
+  });
+
   it("persists the list width and the collapsed sidebar", async () => {
     const { user } = renderApp(1400);
     await shellReady();
