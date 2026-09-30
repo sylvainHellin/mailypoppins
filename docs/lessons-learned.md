@@ -2291,3 +2291,10 @@ The run and what it could not cover are in `clients/desktop/docs/reader.md`.
 
 `Session::start_operation` holds the pump lock across the `message.search_server` call and registers the id before it returns, so hits are never dropped in Rust; but the Channel message carrying a hit and the `invoke` answer carrying the id travel separately, and the hit can reach the webview first.
 The desktop reducer holds server signals that arrive while the start is in flight (`search.early`) and replays those of the answered id (`src/app/search.ts`, `serverStarted`).
+
+## ts-rs's own export tests read the environment and default to `bigint`
+
+`#[ts(export)]` generates one test per type that builds its `Config` from `TS_RS_LARGE_INT` and `TS_RS_EXPORT_DIR`, so a plain `cargo test` writes `u64` fields as `bigint` into `./bindings` unless the environment says otherwise, and `serde_json` hands those fields to JavaScript as a `number`.
+The bindings are exported instead by one explicit test per crate (`crates/mp-protocol/tests/ts_bindings.rs`, `clients/desktop/src-tauri/src/ts_bindings.rs`) through `Config::new().with_large_int("number").with_out_dir(..)`, which needs no shell variable and no `.cargo/config.toml` entry.
+A derived type exports to `<TsName>.ts` whether or not it carries `#[ts(export)]`, so two Rust types with one name (`state::OutboxCounts`, `send::OutboxCounts`) merge into one file; one of them takes `#[ts(rename = ..)]`.
+ts-rs also leaves a trailing space after each opening `{`, which the export test trims so the committed files pass `git diff --check`.

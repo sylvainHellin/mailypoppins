@@ -32,6 +32,7 @@ It is the way to iterate on the screens without a mail server.
 pnpm test                               # vitest under jsdom, the Tauri API mocked from the fixtures
 pnpm build                              # type-check and bundle the frontend
 pnpm gen:keymap                         # regenerate src/keymap/keymap.json from `mp dump-keys --json` (MP_BIN or `mp` on PATH)
+pnpm gen:types                          # regenerate src/protocol/generated/ from the Rust types with ts-rs (runs cargo)
 pnpm contrast                           # rewrite the contrast table in docs/design-tokens.md
 
 cd src-tauri
@@ -56,7 +57,7 @@ The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, 
 
 ## Documentation
 
-- [docs/rust-layer.md](docs/rust-layer.md): the Tauri commands, the event stream, the reader scheme, links, the app CSP and fixture mode.
+- [docs/rust-layer.md](docs/rust-layer.md): the Tauri commands, the generated TypeScript types, the event stream, the reader scheme, links, the app CSP and fixture mode.
 - [docs/shell.md](docs/shell.md): the frontend modules, the model, the layouts, focus order and keys.
 - [docs/reader.md](docs/reader.md): the reader frame, refused links, and the navigation guard's verification with its manual steps.
 - [docs/design-tokens.md](docs/design-tokens.md): the semantic tokens and their contrast table.

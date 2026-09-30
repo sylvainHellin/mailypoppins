@@ -36,6 +36,23 @@ type GuiError =
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
 
+## Types
+
+The TypeScript types are generated from the Rust ones with ts-rs 12 into `src/protocol/generated/`.
+The wire types come from `mp-protocol`, which derives `TS` behind its `ts` feature, so the daemon and the CLI never compile ts-rs.
+This layer's result, argument and event types go into `generated/gui/` and derive `TS` under `cfg(test)` only, with ts-rs a dev-dependency, so the app build does not compile it either.
+The frontend imports them through `src/protocol/types.ts` and `src/lib/gui-types.ts`, which re-export the generated files.
+The two files hand-write only what has no Rust type: the event payloads the daemon assembles inline, and `FixtureSimulation`.
+
+`u64` and `i64` come out as `number`, the way `serde_json` hands them to JavaScript.
+A field under `skip_serializing_if` becomes optional, and a `serde_json::Value` becomes `unknown`.
+`send::OutboxCounts` is exported as `OutboxListingCounts`, since `state::OutboxCounts` holds the name.
+
+`pnpm gen:types` regenerates both directories.
+`generated_bindings_are_current`, in `mp-protocol`'s `tests/ts_bindings.rs` and in `src-tauri/src/ts_bindings.rs`, fails when a Rust type changed and the committed files were not regenerated.
+A second test fails when a type derives `TS` without being in the export list.
+The type blocks in this document are for reading, and the generated files are the contract.
+
 ## Commands
 
 | Command | Arguments | Resolves to |
@@ -72,7 +89,7 @@ type ConnectionStatus =
 type AccountState = "opening" | "ready" | "blocked";
 type SyncHealthState = "unknown" | "ok" | "failed";
 type AccountInfo = {
-  name: string; default: boolean; backend: "imap" | "graph"; store_state: string;
+  name: string; default: boolean; backend: string; store_state: string;
   runtime_state: AccountState; sync_health: SyncHealthState;
   outbox: { queued: number; failed: number };
 };
@@ -217,8 +234,10 @@ Its meta refresh is kept on purpose, where the daemon would strip it, so the rea
 ```sh
 export CARGO_TARGET_DIR=/var/tmp/mp-desktop-target
 cd clients/desktop/src-tauri
-cargo test
+cargo test                              # includes the stale check of src/protocol/generated/gui
 cargo clippy --all-targets -- -D warnings
+# the protocol bindings' stale check, from the repository root:
+cargo test -p mp-protocol --features ts
 # against a real daemon in a scratch data directory, including a restart:
 cargo build --manifest-path ../../../Cargo.toml --bin mp
 MP_DESKTOP_MP_BIN=$CARGO_TARGET_DIR/debug/mp cargo test -- --ignored live_daemon

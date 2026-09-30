@@ -37,13 +37,17 @@ Each of these makes the GUI the second consumer of something only the CLI or the
 
 The read-only shell landed as `clients/desktop/` on the `gui-m1` branch on 2026-09-30, in the commits from `40db682c` on, each tagged `(#0129)`.
 The plan's M1 section lists what it covers, and `clients/desktop/docs/` documents the Rust layer, the shell, the reader and the design tokens.
-The desktop client runs 78 vitest tests (`pnpm test`) and 55 Rust tests (`cargo test` in `src-tauri`), plus one ignored test against a live daemon.
+The desktop client runs 79 vitest tests (`pnpm test`) and 57 Rust tests (`cargo test` in `src-tauri`), plus one ignored test against a live daemon.
+
+The TypeScript protocol types are generated with ts-rs 12 into `clients/desktop/src/protocol/generated/`: the wire types from `mp-protocol` behind its `ts` feature, and the Tauri layer's result, argument and event types into `gui/` under `cfg(test)`.
+`pnpm gen:types` regenerates them, and a test on each side fails when the committed files are stale.
+`schemars` is not adopted: ts-rs reads the serde attributes directly, and no consumer needs JSON Schema.
+The hand-written set had two wire mismatches, both in `ServerSearchHit`: `message_id` is nullable and `body_text` is never null.
 
 ## Open
 
-The ticket stays open for the first three items; the rest are known limits of M1.
+The ticket stays open for the first two items; the rest are known limits of M1.
 
-- The TypeScript protocol types are hand-written in `clients/desktop/src/protocol/types.ts`; generating them with ts-rs waits for Sylvain's approval, and the `schemars` question stays deferred.
 - The three guard cases that need a real click inside the reader frame (a plain link, a `target=_blank` link, a form submit) are unverified; the manual steps are in `clients/desktop/docs/reader.md`.
 - The live launchd check below is not taken.
 - `mp dump-keys --json` carries no action ids, so the palette matches keymap rows by their description; an `id` per row in the dump would replace that match.
