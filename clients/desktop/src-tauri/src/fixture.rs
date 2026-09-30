@@ -23,7 +23,10 @@
 //! sentence before anything else, then settles after [`RSVP_DELAY`] with
 //! the agenda row's own reply changed and `state.invalidate` of the
 //! account's Sent mailbox, or, after `rsvp_fail`, fails with an SMTP error
-//! and parks a `failed` outbox row.
+//! and parks a `failed` outbox row. `send.invite` refuses `home` with the
+//! daemon's Graph sentence, then the CLI's refusals in the daemon's order,
+//! and settles a `SendOutcome` after the send delay, the invitation filed
+//! in Sent and added to the agenda as the user's own; `send_fail` fails it.
 //!
 //! `send.draft` and `send.approved` arm a hold of the fixture's own
 //! `email.send_hold_secs` when asked for one, count it down through the same
@@ -133,6 +136,11 @@ pub const SEND_FAIL_REASON: &str = "421 4.7.0 fixture: the server closed the con
 /// How long an RSVP's submission takes.
 pub const RSVP_DELAY: Duration = Duration::from_millis(500);
 
+/// The daemon's `GRAPH_REFUSAL` for `send.invite` (`ANO-4`), word for word.
+pub const GRAPH_INVITE_REFUSAL: &str =
+    "`mp send --invite` is not supported for Graph accounts yet \
+     (Graph calendar send is tracked by #0036, blocked on #0035). Use an SMTP-configured account.";
+
 /// The daemon's `GRAPH_RSVP_REFUSAL` (`ANO-4`), word for word.
 pub const GRAPH_RSVP_REFUSAL: &str =
     "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)";
@@ -183,6 +191,16 @@ pub const SIMULATIONS: &[&str] = &[
 struct CalendarSeed {
     events: BTreeMap<String, Vec<AgendaEvent>>,
     ics: BTreeMap<String, String>,
+}
+
+/// An invitation the fixture is sending.
+struct InviteSend {
+    account: String,
+    subject: String,
+    start: String,
+    end: Option<String>,
+    location: Option<String>,
+    recipients: Vec<RecipientOutcome>,
 }
 
 /// An RSVP the fixture is submitting.
@@ -2491,6 +2509,93 @@ impl Fixture {
                 });
                 Ok(json!({"operation_id": id}))
             }
+            "send.invite" => {
+                only(
+                    method,
+                    &params,
+                    &[
+                        "account",
+                        "cc",
+                        "description",
+                        "duration",
+                        "end",
+                        "location",
+                        "no_signature",
+                        "signature",
+                        "start",
+                        "subject",
+                        "to",
+                        "uid",
+                    ],
+                )?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                let text = |key: &str| {
+                    params[key]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string)
+                };
+                // `plan_invite`'s order: the account first, then the
+                // subject, the start, the times and the recipients.
+                let refusal = |message: &str| refused(method, -32602, message);
+                if s.backend(&account) == "graph" {
+                    return Err(refusal(GRAPH_INVITE_REFUSAL));
+                }
+                let subject = text("subject").ok_or_else(|| {
+                    refusal("--invite requires --subject (used as the event summary)")
+                })?;
+                let start = text("start").ok_or_else(|| refusal("--invite requires --start"))?;
+                let (end, duration) = (text("end"), text("duration"));
+                match (&end, &duration) {
+                    (Some(_), Some(_)) => {
+                        return Err(refusal(
+                            "Provide exactly one of --end or --duration, not both",
+                        ))
+                    }
+                    (None, None) => return Err(refusal("An invite needs --end or --duration")),
+                    _ => {}
+                }
+                let mut recipients = recipients_of(text("to").as_deref(), "To");
+                recipients.extend(recipients_of(text("cc").as_deref(), "Cc"));
+                if recipients.is_empty() {
+                    return Err(refusal(
+                        "--invite requires at least one recipient via --to/--cc",
+                    ));
+                }
+                let id = s.next_operation_id("fixture-invite");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                let fail = s.send_next == Some(SendSimulation::Fail);
+                if fail {
+                    s.send_next = None;
+                }
+                let delay = s.send_delay;
+                drop(s);
+                let invite = InviteSend {
+                    account,
+                    subject,
+                    start,
+                    end,
+                    location: text("location"),
+                    recipients,
+                };
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    if fixture.running(&op) {
+                        fixture.finish_invite(&op, invite, fail);
+                    }
+                });
+                Ok(json!({"operation_id": id}))
+            }
             "send.outbox_list" => {
                 only(method, &params, &["account"])?;
                 let account = param_str(method, &params, "account")?;
@@ -2756,6 +2861,108 @@ impl Fixture {
             "message_id": message_id,
             "delivered": true,
         });
+        self.settle(op, "succeeded", Some(result));
+    }
+
+    /// An invitation's submission is over: after `send_fail` the transport
+    /// error fails the operation and a `failed` outbox row keeps it; else
+    /// the invitation is on the agenda as the user's own, `state.invalidate`
+    /// of the Sent mailbox says its copy was filed, and the operation
+    /// settles with a `SendOutcome` every recipient took.
+    fn finish_invite(&self, op: &str, invite: InviteSend, fail: bool) {
+        let InviteSend {
+            account,
+            subject,
+            start,
+            end,
+            location,
+            recipients,
+        } = invite;
+        let mut s = self.state();
+        let outbox_row = s.next_outbox_row;
+        s.next_outbox_row += 1;
+        let message_id = format!("<fixture-invite-{outbox_row}@fixture.example>");
+        if fail {
+            let row = OutboxRow {
+                id: outbox_row,
+                state: "failed".into(),
+                partial: false,
+                never_submitted: false,
+                message_id,
+                target_mailbox: Some("Sent".into()),
+                updated: unix_now(),
+                last_error: Some(SEND_FAIL_REASON.into()),
+                rejected: Vec::new(),
+                outstanding: recipients.iter().map(|r| r.address.clone()).collect(),
+            };
+            let outbox = s.outbox.entry(account.clone()).or_default();
+            outbox.ever_used = true;
+            outbox.rows.push(row);
+            self.emit_locked(&mut s, "state.invalidate", outbox_invalidate(&account));
+            drop(s);
+            self.fail(op, SEND_FAIL_REASON);
+            return;
+        }
+        let row_id = s.next_row;
+        s.next_row += 1;
+        // A wall-clock `YYYY-MM-DDTHH:MM[:SS]` read as the sort key it
+        // would be in UTC; the fixture has no zone to convert from.
+        let sort_key = |t: &str| {
+            let t = t.get(..19).unwrap_or(t);
+            if t.len() == 16 {
+                format!("{t}:00")
+            } else {
+                t.to_string()
+            }
+        };
+        let event = AgendaEvent {
+            row_id,
+            event: EventFrontmatter {
+                uid: Some(format!("fixture-invite-{outbox_row}@fixture.example")),
+                method: Some("REQUEST".into()),
+                summary: Some(subject.clone()),
+                start: Some(start.clone()),
+                end: end.clone(),
+                location,
+                organizer: Some("me@example.com".into()),
+                attendees: recipients
+                    .iter()
+                    .map(|r| mp_protocol::calendar::EventAttendee {
+                        address: r.address.clone(),
+                        status: "needs-action".into(),
+                    })
+                    .collect(),
+                ..EventFrontmatter::default()
+            },
+            subject: subject.clone(),
+            start_sort: sort_key(&start),
+            end_sort: end.as_deref().map(sort_key).unwrap_or_default(),
+            start_display: sort_key(&start)
+                .get(..16)
+                .unwrap_or_default()
+                .replace('T', " "),
+            is_organizer: true,
+            cancelled: false,
+        };
+        s.calendar.entry(account.clone()).or_default().push(event);
+        let outbox = s.outbox.entry(account.clone()).or_default();
+        outbox.ever_used = true;
+        self.emit_locked(
+            &mut s,
+            "state.invalidate",
+            json!({"resource": format!("mailbox:{account}/sent"), "scope": {"query": "counts"}}),
+        );
+        drop(s);
+        let outcome = SendOutcome {
+            account,
+            selector: None,
+            message_id,
+            status_line: "sent + saved".into(),
+            recipients,
+            sent_copy: SentCopy::Filed,
+            settle_error: None,
+        };
+        let result = serde_json::to_value(outcome).unwrap_or_default();
         self.settle(op, "succeeded", Some(result));
     }
 
@@ -3987,6 +4194,97 @@ mod tests {
         let events = f.state().agenda("calendar.events", "work").expect("work");
         let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
         assert_eq!(row.event.rsvp, "tentative");
+    }
+
+    #[test]
+    fn send_invite_refuses_in_the_daemon_order_then_files_the_invitation_on_the_agenda() {
+        let (f, rx) = fixture();
+        f.set_send_delay(Duration::ZERO);
+        let sentence = |params: Value| {
+            let e = f.call("send.invite", params).expect_err("refused");
+            crate::error::refusal_sentence(&format!("{e:#}"))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(sentence(json!({"account": "home"})), GRAPH_INVITE_REFUSAL);
+        assert_eq!(
+            sentence(json!({"account": "work"})),
+            "--invite requires --subject (used as the event summary)"
+        );
+        assert_eq!(
+            sentence(json!({"account": "work", "subject": "Kick-off"})),
+            "--invite requires --start"
+        );
+        let timed = json!({"account": "work", "subject": "Kick-off", "start": "2099-12-01T10:00"});
+        assert_eq!(
+            sentence(timed.clone()),
+            "An invite needs --end or --duration"
+        );
+        let mut both = timed.clone();
+        both["end"] = json!("2099-12-01T11:00");
+        both["duration"] = json!("1h");
+        assert_eq!(
+            sentence(both),
+            "Provide exactly one of --end or --duration, not both"
+        );
+        let mut nobody = timed.clone();
+        nobody["duration"] = json!("1h");
+        assert_eq!(
+            sentence(nobody.clone()),
+            "--invite requires at least one recipient via --to/--cc"
+        );
+        assert_eq!(f.operation_count(), 0);
+        let mut invite = nobody;
+        invite["to"] = json!("Robin <robin@example.com>, kim@example.com");
+        invite["location"] = json!("Room 4.12");
+        let started = f.call("send.invite", invite).expect("started");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+        assert_eq!(next_event(&rx).payload["resource"], "mailbox:work/sent");
+        let finished = next_event(&rx);
+        assert_eq!(finished.payload["operation_id"], id.as_str());
+        let outcome: SendOutcome =
+            serde_json::from_value(finished.payload["result"].clone()).expect("SendOutcome");
+        let to: Vec<&str> = outcome
+            .recipients
+            .iter()
+            .map(|r| r.address.as_str())
+            .collect();
+        assert_eq!(to, ["robin@example.com", "kim@example.com"]);
+        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let mine = events
+            .iter()
+            .find(|e| e.subject == "Kick-off")
+            .expect("on the agenda");
+        assert!(mine.is_organizer);
+        assert_eq!(mine.start_sort, "2099-12-01T10:00:00");
+        assert_eq!(mine.start_display, "2099-12-01 10:00");
+        assert_eq!(mine.event.location.as_deref(), Some("Room 4.12"));
+        assert_eq!(mine.event.attendees.len(), 2);
+    }
+
+    #[test]
+    fn send_fail_fails_the_next_invitation_too() {
+        let (f, rx) = fixture();
+        f.set_send_delay(Duration::ZERO);
+        f.simulate("send_fail").expect("armed");
+        let started = f
+            .call(
+                "send.invite",
+                json!({
+                    "account": "work", "subject": "Kick-off", "start": "2099-12-01T10:00",
+                    "duration": "1h", "to": "robin@example.com"
+                }),
+            )
+            .expect("started");
+        assert_eq!(next_event(&rx).payload["resource"], "outbox:work");
+        let finished = next_event(&rx);
+        assert_eq!(finished.payload["operation_id"], started["operation_id"]);
+        assert_eq!(finished.payload["state"], "failed");
+        let parked = f.outbox_rows("work");
+        assert_eq!(
+            parked.last().map(|r| r.outstanding.clone()),
+            Some(vec!["robin@example.com".to_string()])
+        );
     }
 
     #[test]

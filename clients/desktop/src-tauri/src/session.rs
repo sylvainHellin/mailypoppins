@@ -130,6 +130,8 @@ pub enum PendingKind {
     OutboxRetry,
     /// `calendar.rsvp`: its `result` is an `RsvpSettled`.
     Rsvp,
+    /// `send.invite`: its `result` is a `SendOutcome`.
+    SendInvite,
 }
 
 /// Where an intercepted URL came from.
@@ -1270,6 +1272,62 @@ mod tests {
             .cloned()
             .expect("dropped");
         assert_eq!(dropped["kind"], "rsvp");
+        assert_eq!(dropped["operation_id"], started.operation_id.as_str());
+    }
+
+    fn invitation() -> crate::calendar::InviteFields {
+        crate::calendar::InviteFields {
+            subject: "Kick-off".into(),
+            start: "2099-12-01T10:00".into(),
+            to: Some("Robin <robin@example.com>".into()),
+            end: Some("2099-12-01T11:00".into()),
+            ..crate::calendar::InviteFields::default()
+        }
+    }
+
+    #[test]
+    fn an_invitation_settled_by_the_requery_carries_its_kind_and_outcome() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_send_delay(Duration::ZERO);
+        let started = crate::calendar::send_invite_on(&session, &door, "work", &invitation())
+            .expect("started");
+        let id = started.operation_id;
+        await_terminal(&door, &id);
+        while rx.try_recv().is_ok() {}
+        session.handle(
+            &door,
+            Incoming::Resync {
+                instance_id: fixture.instance_id(),
+                reason: "event_queue_overflow".into(),
+            },
+        );
+        let settled = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_settled")
+            .cloned()
+            .expect("settled by the requery");
+        assert_eq!(settled["kind"], "send_invite");
+        let outcome: mp_protocol::send::SendOutcome =
+            serde_json::from_value(settled["status"]["result"].clone()).expect("a SendOutcome");
+        assert_eq!(outcome.recipients.len(), 1);
+        assert_eq!(outcome.recipients[0].address, "robin@example.com");
+        assert!(outcome.recipients[0].delivered);
+    }
+
+    #[test]
+    fn a_restart_drops_an_invitation_as_send_invite() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_send_delay(Duration::from_secs(5));
+        let started = crate::calendar::send_invite_on(&session, &door, "work", &invitation())
+            .expect("started");
+        fixture.simulate("restart").expect("restart");
+        drain(&session, &door, &rx);
+        let dropped = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_dropped")
+            .cloned()
+            .expect("dropped");
+        assert_eq!(dropped["kind"], "send_invite");
         assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 

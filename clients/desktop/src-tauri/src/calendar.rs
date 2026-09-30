@@ -15,6 +15,13 @@
 //! refuses an RSVP from a Graph account before it reads anything else, so
 //! [`invite_refusal_on`] asks it with `{account}` alone and shows its
 //! sentence without a message in hand; an IMAP account is never asked.
+//!
+//! A new invitation (SND-05) is `send.invite`, awaited as `send_invite`: the
+//! daemon builds the `VEVENT` and the iMIP message and submits it through
+//! its outbox. Its refusals are the CLI's (`--invite requires --subject`),
+//! so the three a form can check (a subject, a start, one recipient) are
+//! checked here before the call, in the form's words; any other refusal is
+//! passed on as the daemon's sentence.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -49,6 +56,14 @@ const RSVP_START_BUDGET: Duration = Duration::from_secs(10);
 
 /// The Graph probe: a refusal before any read.
 const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Starting `send.invite`: the daemon plans the invitation first.
+const INVITE_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// What a new invitation lacks, checked before `send.invite` is asked.
+pub const NO_SUBJECT: &str = "An invitation needs a subject";
+pub const NO_START: &str = "An invitation needs a start";
+pub const NO_RECIPIENT: &str = "An invitation needs at least one recipient in To or Cc";
 
 /// The three answers `calendar.rsvp` takes.
 pub const RSVP_RESPONSES: [&str; 3] = ["accept", "tentative", "decline"];
@@ -221,9 +236,143 @@ pub fn invite_refusal_on(door: &Door, account: &str) -> Result<InviteRefusal, Gu
     }
 }
 
+/// A new invitation, the form's fields: every one but `account`, `subject`
+/// and `start` may be empty, and an empty one is not sent. `end` and
+/// `duration` are exclusive, which the daemon checks.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct InviteFields {
+    pub subject: String,
+    pub start: String,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub end: Option<String>,
+    pub duration: Option<String>,
+    pub location: Option<String>,
+    pub description: Option<String>,
+}
+
+/// The `send.invite` parameters for `fields`, or the form's sentence for
+/// what it lacks: a subject, a start, then one recipient in To or Cc.
+pub fn invite_params(account: &str, fields: &InviteFields) -> Result<serde_json::Value, GuiError> {
+    let filled = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let subject = fields.subject.trim();
+    if subject.is_empty() {
+        return Err(GuiError::protocol(NO_SUBJECT));
+    }
+    let start = fields.start.trim();
+    if start.is_empty() {
+        return Err(GuiError::protocol(NO_START));
+    }
+    let to = filled(&fields.to);
+    let cc = filled(&fields.cc);
+    let addressed = |v: &Option<String>| {
+        v.as_deref()
+            .is_some_and(|s| s.split([',', ';']).any(|a| !a.trim().is_empty()))
+    };
+    if !addressed(&to) && !addressed(&cc) {
+        return Err(GuiError::protocol(NO_RECIPIENT));
+    }
+    let mut params = json!({"account": account, "subject": subject, "start": start});
+    for (key, value) in [
+        ("to", to),
+        ("cc", cc),
+        ("end", filled(&fields.end)),
+        ("duration", filled(&fields.duration)),
+        ("location", filled(&fields.location)),
+        ("description", filled(&fields.description)),
+    ] {
+        if let Some(value) = value {
+            params[key] = json!(value);
+        }
+    }
+    Ok(params)
+}
+
+/// Send a new invitation from `account`, awaited as `send_invite`, whose
+/// `result` is a `SendOutcome`. What the form can check is refused before
+/// the call ([`invite_params`]); a daemon refusal comes back as its own
+/// sentence, the Graph one first of all.
+pub fn send_invite_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    fields: &InviteFields,
+) -> Result<OperationStarted, GuiError> {
+    let params = invite_params(account, fields)?;
+    let operation_id = session
+        .start_operation(
+            door,
+            "send.invite",
+            params,
+            PendingKind::SendInvite,
+            INVITE_START_BUDGET,
+        )
+        .map_err(daemon_sentence)?;
+    Ok(OperationStarted { operation_id })
+}
+
+/// A daemon refusal with its message cut to the daemon's own sentence, the
+/// code kept; any other error as it was.
+fn daemon_sentence(error: GuiError) -> GuiError {
+    let cut = |message: String| refusal_sentence(&message).map_or(message.clone(), str::to_string);
+    match error {
+        GuiError::Protocol {
+            message,
+            code: Some(code),
+        } => GuiError::Protocol {
+            message: cut(message),
+            code: Some(code),
+        },
+        GuiError::NotFound {
+            message,
+            code: Some(code),
+        } => GuiError::NotFound {
+            message: cut(message),
+            code: Some(code),
+        },
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The commands
 // ---------------------------------------------------------------------------
+
+/// Send a new invitation, awaited as `send_invite`.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_invite(
+    session: State<'_, SessionHandle>,
+    account: String,
+    subject: String,
+    start: String,
+    to: Option<String>,
+    cc: Option<String>,
+    end: Option<String>,
+    duration: Option<String>,
+    location: Option<String>,
+    description: Option<String>,
+) -> Result<OperationStarted, GuiError> {
+    let fields = InviteFields {
+        subject,
+        start,
+        to,
+        cc,
+        end,
+        duration,
+        location,
+        description,
+    };
+    with_door(&session, move |session, door| {
+        send_invite_on(session, door, &account, &fields)
+    })
+    .await
+}
 
 /// The invitation card of a row: its event, or null.
 #[tauri::command(rename_all = "snake_case")]
@@ -478,6 +627,85 @@ mod tests {
             calendar_rsvp_on(&session, &door, "home", 9201, "accept"),
             Err(GuiError::Protocol { .. })
         ));
+    }
+
+    fn fields() -> InviteFields {
+        InviteFields {
+            subject: "Kick-off".into(),
+            start: "2099-12-01T10:00".into(),
+            to: Some("robin@example.com".into()),
+            duration: Some("1h".into()),
+            ..InviteFields::default()
+        }
+    }
+
+    #[test]
+    fn a_new_invitation_is_checked_for_a_subject_a_start_and_a_recipient_in_that_order() {
+        let none = InviteFields::default();
+        assert_eq!(
+            invite_params("work", &none),
+            Err(GuiError::protocol(NO_SUBJECT))
+        );
+        let no_start = InviteFields {
+            subject: " Kick-off ".into(),
+            ..InviteFields::default()
+        };
+        assert_eq!(
+            invite_params("work", &no_start),
+            Err(GuiError::protocol(NO_START))
+        );
+        let nobody = InviteFields {
+            to: Some(" , ".into()),
+            cc: Some("".into()),
+            ..fields()
+        };
+        assert_eq!(
+            invite_params("work", &nobody),
+            Err(GuiError::protocol(NO_RECIPIENT))
+        );
+        let cc_only = InviteFields {
+            to: None,
+            cc: Some("kim@example.com".into()),
+            location: Some("  ".into()),
+            ..fields()
+        };
+        assert_eq!(
+            invite_params("work", &cc_only).expect("params"),
+            json!({
+                "account": "work", "subject": "Kick-off", "start": "2099-12-01T10:00",
+                "cc": "kim@example.com", "duration": "1h"
+            })
+        );
+    }
+
+    #[test]
+    fn send_invite_starts_send_invite_and_passes_a_daemon_refusal_on_as_its_sentence() {
+        let (door, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let err = send_invite_on(&session, &door, "work", &InviteFields::default())
+            .expect_err("no subject");
+        assert_eq!(err, GuiError::protocol(NO_SUBJECT));
+        assert!(f.calls().is_empty(), "checked before any call");
+        let graph = send_invite_on(&session, &door, "home", &fields()).expect_err("graph");
+        assert_eq!(
+            graph,
+            GuiError::Protocol {
+                message: crate::fixture::GRAPH_INVITE_REFUSAL.to_string(),
+                code: Some(-32602)
+            }
+        );
+        let open_ended = InviteFields {
+            duration: None,
+            ..fields()
+        };
+        let err = send_invite_on(&session, &door, "work", &open_ended).expect_err("no end");
+        assert_eq!(err.message(), "An invite needs --end or --duration");
+        assert_eq!(f.operation_count(), 0);
+        let started = send_invite_on(&session, &door, "work", &fields()).expect("started");
+        assert_eq!(
+            session.pending_kind(&started.operation_id),
+            Some(PendingKind::SendInvite)
+        );
     }
 
     #[test]

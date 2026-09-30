@@ -119,6 +119,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "message.ics",
     "message.invite",
     "calendar.rsvp",
+    "send.invite",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -838,6 +839,7 @@ mod tests {
             "message.ics",
             "message.invite",
             "calendar.rsvp",
+            "send.invite",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }

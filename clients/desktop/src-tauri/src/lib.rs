@@ -190,6 +190,7 @@ pub fn run() {
             calendar::invite_get,
             calendar::calendar_rsvp,
             calendar::invite_refusal,
+            calendar::send_invite,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,
