@@ -19,6 +19,8 @@ import type {
   DraftPreview,
   HoldStatus,
   MessageListRow,
+  OutboxListing,
+  OutboxRow,
 } from "@/protocol/types";
 import type {
   AccountInfo,
@@ -52,6 +54,50 @@ export class Channel<T> {
 }
 
 const clone = <T,>(v: T): T => structuredClone(v);
+
+/**
+ * The outbox rows the fixture seeds from the bootstrap's counts: `home`
+ * has one message queued and never submitted, row 1.
+ */
+function seedOutbox(): Record<string, { ever_used: boolean; rows: OutboxRow[] }> {
+  const out: Record<string, { ever_used: boolean; rows: OutboxRow[] }> = {};
+  let id = 1;
+  for (const [account, counts] of Object.entries(fixtures.bootstrap.snapshot.outbox)) {
+    if (counts.queued === 0) continue;
+    out[account] = {
+      ever_used: true,
+      rows: Array.from({ length: counts.queued }, (_, n) => ({
+        id: id++,
+        state: "pending_send",
+        partial: false,
+        never_submitted: true,
+        message_id: `<queued-${n}@${account}.fixture.example>`,
+        target_mailbox: null,
+        updated: 1_790_000_000,
+        last_error: null,
+        rejected: [],
+        outstanding: ["friend@example.com"],
+      })),
+    };
+  }
+  return out;
+}
+
+/** A listing as the fixture's `send.outbox_list` answers it, counts from the rows. */
+export function outboxListing(account: string): OutboxListing {
+  const o = mock.outbox[account];
+  const rows = clone(o?.rows ?? []).filter((r) => r.state !== "done" || r.partial);
+  return {
+    account,
+    ever_used: o?.ever_used ?? false,
+    rows,
+    counts: {
+      open: rows.filter((r) => r.state === "pending_send" || r.state === "sent_pending_append").length,
+      failed: rows.filter((r) => r.state === "failed").length,
+      partial: rows.filter((r) => r.partial).length,
+    },
+  };
+}
 
 export const mock = {
   connection: { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true } as ConnectionStatus,
@@ -101,6 +147,10 @@ export const mock = {
   sendHeld: true,
   /** The next send's operation id counter. */
   nextSend: 1,
+  /** Each account's outbox rows; `outbox_retry` leaves them as they are, a test settles it. */
+  outbox: {} as Record<string, { ever_used: boolean; rows: OutboxRow[] }>,
+  /** The next outbox retry's operation id counter. */
+  nextRetry: 1,
 };
 
 export function resetMock(): void {
@@ -126,6 +176,8 @@ export function resetMock(): void {
   mock.editorSetting = null;
   mock.sendHeld = true;
   mock.nextSend = 1;
+  mock.outbox = seedOutbox();
+  mock.nextRetry = 1;
 }
 
 /** The hold the mock arms for a send, 20 s as the daemon's default window. */
@@ -672,6 +724,29 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const held = mock.sendHeld && first !== undefined;
       if (held) armSendHold(operation_id, account, first);
       return { operation_id, held, approved: false };
+    }
+    case "outbox_list":
+      knownAccount(cmd, account);
+      return outboxListing(account);
+    case "outbox_retry": {
+      knownAccount(cmd, account);
+      const rowId = Number(args.row_id);
+      const row = mock.outbox[account]?.rows.find((r) => r.id === rowId);
+      if (!row) throw { kind: "protocol", code: -32602, message: `send.outbox_retry: no outbox row ${rowId} (-32602)` };
+      if (row.state !== "failed" && row.state !== "sent_pending_append") {
+        throw { kind: "protocol", code: -32602, message: `outbox row ${rowId} is ${row.state}, and only a failed row can be retried` };
+      }
+      return { operation_id: `fixture-op-retry-${mock.nextRetry++}` };
+    }
+    case "outbox_discard": {
+      knownAccount(cmd, account);
+      const rowId = Number(args.row_id);
+      const rows = mock.outbox[account]?.rows ?? [];
+      const at = rows.findIndex((r) => r.id === rowId);
+      if (at < 0) throw refusedRow("send.outbox_discard", `no outbox row ${rowId}`);
+      const [row] = rows.splice(at, 1);
+      emitEnvelope("state.invalidate", { resource: `outbox:${account}`, scope: { query: "counts" } });
+      return { discarded: true, row_id: rowId, message_id: row.message_id, revision: mock.revision };
     }
     default:
       throw { kind: "internal", message: `the mock does not answer ${cmd}` };

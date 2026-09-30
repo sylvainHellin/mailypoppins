@@ -12,6 +12,7 @@ import type {
   DraftPreview,
   DraftValidation,
   HoldListing,
+  OutboxListing,
 } from "@/protocol/types";
 import type {
   AccountInfo,
@@ -33,6 +34,7 @@ import type {
   MessageText,
   MutationBatch,
   OperationStarted,
+  OutboxDiscarded,
   SendStarted,
   ServerSearchParams,
   SignatureListing,
@@ -199,6 +201,19 @@ export const sendDraft = (account: string, id: string, hold: boolean): Promise<S
 /** Send every approved draft of `account`, one operation. */
 export const sendApproved = (account: string, hold: boolean): Promise<SendStarted> =>
   invoke<SendStarted>("send_approved", { account, hold });
+
+// The outbox (docs/rust-layer.md, "The outbox"): the listing, a retry the
+// Rust layer awaits as `outbox_retry`, and a discard that answers at once.
+
+export const outboxList = (account: string): Promise<OutboxListing> =>
+  invoke<OutboxListing>("outbox_list", { account });
+
+/** Rejects with `-32602` for a row the daemon will not retry; the end arrives as `outbox_retry`. */
+export const outboxRetry = (account: string, row_id: number): Promise<OperationStarted> =>
+  invoke<OperationStarted>("outbox_retry", { account, row_id });
+
+export const outboxDiscard = (account: string, row_id: number): Promise<OutboxDiscarded> =>
+  invoke<OutboxDiscarded>("outbox_discard", { account, row_id });
 
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });

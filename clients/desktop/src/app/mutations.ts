@@ -42,10 +42,15 @@ export type Mutations = {
   sendDraft(account: string, id: string, subject: string | null): Promise<void>;
   /** Send every approved draft of `account` (the TUI's `cX`); `ids` are those the list shows. */
   sendApproved(account: string, ids: string[]): Promise<void>;
+  /** Retry one outbox row: an operation the row shows as retrying until it ends. */
+  retryOutboxRow(account: string, row_id: number): Promise<void>;
+  /** Discard one outbox row: it leaves the view at once and comes back if refused. */
+  discardOutboxRow(account: string, row_id: number): Promise<void>;
 };
 
 let nextBatch = 1;
 let nextSend = 1;
+let nextOutbox = 1;
 
 /** The `draft.invalid` payload a `send_draft` refusal carries, if any. */
 function refusalInvalid(e: unknown): NonNullable<SendRefusal["invalid"]> | null {
@@ -202,6 +207,26 @@ export function createMutations(dispatch: Dispatch<Action>): Mutations {
         dispatch({ type: "send_started", token, operation_id: started.operation_id, held: started.held });
       } catch (e: unknown) {
         dispatch({ type: "send_failed", token, error: asGuiError(e), invalid: null });
+      }
+    },
+    async retryOutboxRow(account, row_id) {
+      const token = nextOutbox++;
+      dispatch({ type: "outbox_action_requested", token, kind: "retry", account, row_id });
+      try {
+        const { operation_id } = await cmd.outboxRetry(account, row_id);
+        dispatch({ type: "outbox_retry_started", token, operation_id });
+      } catch (e: unknown) {
+        dispatch({ type: "outbox_action_failed", token, error: asGuiError(e) });
+      }
+    },
+    async discardOutboxRow(account, row_id) {
+      const token = nextOutbox++;
+      dispatch({ type: "outbox_action_requested", token, kind: "discard", account, row_id });
+      try {
+        const answer = await cmd.outboxDiscard(account, row_id);
+        dispatch({ type: "outbox_discarded", token, message_id: answer.message_id });
+      } catch (e: unknown) {
+        dispatch({ type: "outbox_action_failed", token, error: asGuiError(e) });
       }
     },
     async sync(account, mode) {

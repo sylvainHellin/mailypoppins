@@ -1,7 +1,7 @@
 // The desktop shell's model: connection, bootstrap, the fetched lists, the
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
-import type { Bootstrap, DraftEntry, DraftMessage, HoldStatus, MessageFlags, MessageListRow } from "@/protocol/types";
+import type { Bootstrap, DraftEntry, DraftMessage, HoldStatus, MessageFlags, MessageListRow, OutboxListing } from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
@@ -316,7 +316,13 @@ export type MutationDialog =
   | { kind: "send"; targets: [{ account: string; draft: string }]; subject: string | null; title: string; detail: string }
   /** `cX`: every approved draft of `account`; `targets` are those the Drafts list shows. */
   | { kind: "send_approved"; account: string; targets: { account: string; draft: string }[]; title: string; detail: string }
-  | { kind: "move"; targets: MessageTarget[]; account: string; source: string | null };
+  | { kind: "move"; targets: MessageTarget[]; account: string; source: string | null }
+  /**
+   * An outbox row's retry or discard: both ask first, and `warning` says
+   * what the row may already have done (SND-07).
+   */
+  | { kind: "outbox_retry"; account: string; row_id: number; title: string; detail: string; warning: string | null }
+  | { kind: "outbox_discard"; account: string; row_id: number; title: string; detail: string; warning: string | null };
 
 /**
  * A draft open in the external editor: `opening` until `editor_open`
@@ -340,6 +346,16 @@ export type ComposeDialog =
   | { kind: "new"; account: string }
   | { kind: "forward"; account: string; row_id: number; subject: string }
   | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
+
+/** The outbox view, which replaces the list pane's content: its account and the row under its cursor. */
+export type OutboxView = { account: string; cursor: number | null };
+
+/**
+ * An outbox row action this window started: a retry until its operation
+ * ends (`operation_id` null until `outbox_retry` answers), a discard until
+ * its command answers. The row shows it, and a discarded row is hidden.
+ */
+export type OutboxAction = { token: number; kind: "retry" | "discard"; account: string; row_id: number; operation_id: string | null };
 
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
@@ -416,6 +432,14 @@ export type AppState = {
   sends: SendRun[];
   /** Operation ends that arrived while a send was unanswered, for its id. */
   sendEarly: OperationEnd[];
+  /** Each account's `outbox_list`, created on the first open or invalidation of its outbox. */
+  outbox: Record<string, Loadable<OutboxListing>>;
+  /** The outbox view, while it replaces the mailbox list. */
+  outboxView: OutboxView | null;
+  /** Retries and discards of outbox rows this window started, in start order. */
+  outboxActions: OutboxAction[];
+  /** Operation ends that arrived while an `outbox_retry` was unanswered, for its id. */
+  outboxEarly: OperationEnd[];
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -460,6 +484,10 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     syncEarly: [],
     sends: [],
     sendEarly: [],
+    outbox: {},
+    outboxView: null,
+    outboxActions: [],
+    outboxEarly: [],
   };
 }
 

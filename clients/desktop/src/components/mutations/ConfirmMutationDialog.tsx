@@ -18,11 +18,21 @@ export type ConfirmMutationDialogProps = {
   onConfirm: () => void;
 };
 
-const VERB = { archive: "Archive", delete: "Delete", approve: "Approve", demote: "Mark as draft", send: "Send", send_approved: "Send" } as const;
+const VERB = {
+  archive: "Archive",
+  delete: "Delete",
+  approve: "Approve",
+  demote: "Mark as draft",
+  send: "Send",
+  send_approved: "Send",
+  outbox_retry: "Retry",
+  outbox_discard: "Discard",
+} as const;
 
 /**
  * The TUI's confirmation before an archive, a delete, an approve or
- * demote over marked drafts, or a send: `y` or Enter runs it, `n` or Escape cancels.
+ * demote over marked drafts, a send, or an outbox row's retry or discard, which
+ * also says what the row may already have done: `y` or Enter runs it, `n` or Escape cancels.
  * The confirm button has the initial focus.
  */
 export function ConfirmMutationDialog({ dialog, onOpenChange, onConfirm }: ConfirmMutationDialogProps) {
@@ -57,12 +67,17 @@ export function ConfirmMutationDialog({ dialog, onOpenChange, onConfirm }: Confi
         <DialogHeader>
           <DialogTitle>{dialog?.title ?? ""}</DialogTitle>
           <DialogDescription className="break-words">{dialog?.detail ?? ""}</DialogDescription>
+          {dialog && "warning" in dialog && dialog.warning ? (
+            <p data-slot="confirm-warning" className="text-sm text-warning">
+              {dialog.warning}
+            </p>
+          ) : null}
         </DialogHeader>
         <DialogFooter>
           <DialogClose render={<Button variant="outline" />}>
             Cancel <Kbd aria-hidden="true">n</Kbd>
           </DialogClose>
-          <Button ref={confirmRef} variant={dialog?.kind === "delete" ? "destructive" : "default"} onClick={onConfirm}>
+          <Button ref={confirmRef} variant={dialog?.kind === "delete" || dialog?.kind === "outbox_discard" ? "destructive" : "default"} onClick={onConfirm}>
             {verb} <Kbd aria-hidden="true">y</Kbd>
           </Button>
         </DialogFooter>

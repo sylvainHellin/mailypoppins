@@ -62,7 +62,10 @@ export type ActionId =
   | "approve"
   | "demote"
   | "send"
-  | "send_all";
+  | "send_all"
+  | "open_outbox"
+  | "outbox_retry"
+  | "outbox_discard";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -224,6 +227,11 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   // names the notice's close button.
   { section: "ACTIVITY", label: "Dismiss the newest notice", keys: ["X"], id: "dismiss_notice", badge: null },
   { section: "ACTIVITY", label: "Dismiss all notices", keys: [], id: "dismiss_all_notices", badge: null },
+  // The TUI has no outbox view: `go` is free in its `g` go family, and `R`
+  // in every context; `d` is the view's own reading of Delete.
+  { section: "OUTBOX", label: "Open outbox", keys: ["go"], id: "open_outbox", badge: null },
+  { section: "OUTBOX", label: "Retry outbox row", keys: ["R"], id: "outbox_retry", badge: null },
+  { section: "OUTBOX", label: "Discard outbox row", keys: ["d"], id: "outbox_discard", badge: null },
 ];
 
 /** The KEYMAP row a single printable key names in the mail sections, if any. */

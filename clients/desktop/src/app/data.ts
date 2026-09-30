@@ -91,6 +91,24 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     }
   }, [hasBootstrap, names, mailboxes, dispatch]);
 
+  // Each outbox this window reads: created on the first open of the view
+  // or the first `state.invalidate` of `outbox:<account>`, and stale again
+  // on the next one and on every bootstrap.
+  const outbox = state.outbox;
+  useEffect(() => {
+    if (!hasBootstrap) return;
+    for (const [account, l] of Object.entries(outbox)) {
+      if (!isStale(l)) continue;
+      const gen = l.gen;
+      run(`outbox:${account}@${gen}`, () =>
+        cmd
+          .outboxList(account)
+          .then((listing) => dispatch({ type: "outbox_loaded", account, gen, listing }))
+          .catch((e: unknown) => dispatch({ type: "outbox_failed", account, gen, error: asGuiError(e) })),
+      );
+    }
+  }, [hasBootstrap, outbox, dispatch]);
+
   // The selected mailbox's list.
   // The answer carries the list generation it was asked at, so a reload that
   // started before an optimistic mutation is dropped when it lands.

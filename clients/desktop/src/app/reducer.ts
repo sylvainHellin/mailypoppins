@@ -93,6 +93,24 @@ import {
   type Selection,
   type Target,
 } from "@/app/state";
+import {
+  closeOutbox,
+  isOutboxOperation,
+  moveOutboxCursor,
+  openOutbox,
+  outboxActionFailed,
+  outboxActionRequested,
+  outboxDiscarded,
+  outboxFailed,
+  outboxLoaded,
+  outboxRetryStarted,
+  outboxSignal,
+  retryStarting,
+  selectOutboxRow,
+  staleAllOutboxes,
+  staleOutbox,
+} from "@/app/outbox";
+import type { OutboxListing } from "@/protocol/types";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -189,6 +207,16 @@ export type Action =
   | { type: "send_failed"; token: number; error: GuiError; invalid: DraftInvalid | null }
   | { type: "dismiss_notice"; id: number }
   | { type: "dismiss_all_notices" }
+  // The outbox (app/outbox.ts; app/mutations.ts dispatches the row actions around their commands).
+  | { type: "open_outbox"; account: string }
+  | { type: "close_outbox" }
+  | { type: "outbox_loaded"; account: string; gen: number; listing: OutboxListing }
+  | { type: "outbox_failed"; account: string; gen: number; error: GuiError }
+  | { type: "outbox_select"; row_id: number }
+  | { type: "outbox_action_requested"; token: number; kind: "retry" | "discard"; account: string; row_id: number }
+  | { type: "outbox_retry_started"; token: number; operation_id: string }
+  | { type: "outbox_discarded"; token: number; message_id: string }
+  | { type: "outbox_action_failed"; token: number; error: GuiError }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -458,6 +486,7 @@ function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): A
 
 function removeAccount(s: AppState, name: string): AppState {
   if (s.search?.account === name) s = endSearch(s);
+  if (s.outboxView?.account === name) s = closeOutbox(s);
   const mailboxes = { ...s.mailboxes };
   delete mailboxes[name];
   let next: AppState = {
@@ -594,7 +623,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
         const slug = parts[1] ?? "";
         return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === slug);
       }
-      if (family === "outbox") return { ...s, accounts: markStale(s.accounts) };
+      if (family === "outbox") return { ...staleOutbox(s, account), accounts: markStale(s.accounts) };
       if (family === "draft") {
         return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
       }
@@ -676,10 +705,12 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const end = { operation_id: sig.operation_id, state: sig.state, error: sig.error, result: sig.result };
       if (isSyncOperation(s, sig.operation_id)) return syncSignal(s, end);
       if (isSendOperation(s, sig.operation_id)) return sendSignal(s, end);
-      // An unknown id may be a sync or a send whose start has not answered
-      // yet, or the search's: each holds it until its id is known.
+      if (isOutboxOperation(s, sig.operation_id)) return outboxSignal(s, end);
+      // An unknown id may be a sync, a send or a retry whose start has not
+      // answered yet, or the search's: each holds it until its id is known.
       let next = s.syncStarting > 0 ? syncSignal(s, end) : s;
       if (sendStarting(next)) next = sendSignal(next, end);
+      if (retryStarting(next)) next = outboxSignal(next, end);
       return signal(next, sig);
     }
     default:
@@ -703,7 +734,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // Row ids are per daemon instance, and the reloaded lists are the
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
-      const next = applyBootstrap(s, e.bootstrap);
+      const next = staleAllOutboxes(applyBootstrap(s, e.bootstrap));
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
@@ -734,10 +765,12 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
     case "operation_settled":
       if (e.kind === "sync") return syncSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "outbox_retry") return outboxSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       if (e.kind === "sync") return syncSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "outbox_retry") return outboxSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -795,8 +828,19 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "exit_search",
 ]);
 
+/** The intents that bring the mailbox list back over the outbox view. */
+const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
+  "select_account",
+  "select_mailbox",
+  "sidebar_enter",
+  "jump_mailbox",
+  "search_local",
+  "search_server",
+]);
+
 export function reducer(s: AppState, a: Action): AppState {
   if (s.selectionAuto && USER_SELECTION.has(a.type)) s = { ...s, selectionAuto: false };
+  if (s.outboxView && LEAVES_OUTBOX.has(a.type)) s = closeOutbox(s);
   switch (a.type) {
     case "gui_event":
       return applyGuiEvent(s, a.event);
@@ -875,6 +919,7 @@ export function reducer(s: AppState, a: Action): AppState {
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "move_selection": {
+      if (s.outboxView) return moveOutboxCursor(s, a.to, a.relative);
       const items = visibleItems(s);
       if (items.length === 0) return s;
       const cur = currentIndex(s, items);
@@ -942,6 +987,7 @@ export function reducer(s: AppState, a: Action): AppState {
     }
     case "clear_selection":
       if (s.focus === "reader") return withFocus(s, "list");
+      if (s.outboxView) return withFocus(closeOutbox(s), "list");
       if (s.search) return withFocus(endSearch(s), "list");
       return {
         ...s,
@@ -1086,6 +1132,24 @@ export function reducer(s: AppState, a: Action): AppState {
       return s.activity.some((n) => n.id === a.id) ? { ...s, activity: s.activity.filter((n) => n.id !== a.id) } : s;
     case "dismiss_all_notices":
       return s.activity.length > 0 ? { ...s, activity: [] } : s;
+    case "open_outbox":
+      return withFocus(openOutbox(endSearch(s), a.account), "list");
+    case "close_outbox":
+      return s.outboxView ? withFocus(closeOutbox(s), "list") : s;
+    case "outbox_loaded":
+      return outboxLoaded(s, a.account, a.gen, a.listing);
+    case "outbox_failed":
+      return outboxFailed(s, a.account, a.gen, a.error);
+    case "outbox_select":
+      return selectOutboxRow(s, a.row_id);
+    case "outbox_action_requested":
+      return outboxActionRequested(s, { token: a.token, kind: a.kind, account: a.account, row_id: a.row_id });
+    case "outbox_retry_started":
+      return outboxRetryStarted(s, a.token, a.operation_id);
+    case "outbox_discarded":
+      return outboxDiscarded(s, a.token, a.message_id);
+    case "outbox_action_failed":
+      return outboxActionFailed(s, a.token, a.error.message);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

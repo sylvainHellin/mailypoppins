@@ -6,6 +6,7 @@ import { listWidthFor } from "@/app/layout";
 import { createMutations } from "@/app/mutations";
 import * as compose from "@/app/compose";
 import * as send from "@/app/send";
+import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftsShown,
@@ -213,6 +214,27 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return send.sendCursor(s, dispatch);
     case "send_all":
       return send.sendAll(s, dispatch);
+    case "open_outbox": {
+      const account = s.outboxView?.account ?? s.search?.account ?? s.selection.account;
+      if (account) dispatch({ type: "open_outbox", account });
+      return;
+    }
+    case "outbox_retry":
+    case "outbox_discard": {
+      const view = s.outboxView;
+      const row = cursorRow(s);
+      if (!view || !row) {
+        dispatch({ type: "notice", text: view ? "The outbox has no row to act on" : "Open the outbox first (g o)" });
+        return;
+      }
+      if (s.outboxActions.some((x) => x.account === view.account && x.row_id === row.id)) {
+        dispatch({ type: "notice", text: `Row ${row.id} is already being retried or discarded` });
+        return;
+      }
+      const dialog = id === "outbox_retry" ? retryDialog(view.account, row) : discardDialog(view.account, row);
+      if (typeof dialog === "string") return dispatch({ type: "notice", text: dialog });
+      return dispatch({ type: "open_dialog", dialog });
+    }
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;
@@ -382,6 +404,10 @@ export function runDialog(dialog: MutationDialog, dispatch: Dispatch<Action>, de
   if (dialog.kind === "send" || dialog.kind === "send_approved") return send.runSend(dialog, dispatch);
   const m = createMutations(dispatch);
   dispatch({ type: "overlay", overlay: null });
+  if (dialog.kind === "outbox_retry" || dialog.kind === "outbox_discard") {
+    const run = dialog.kind === "outbox_retry" ? m.retryOutboxRow : m.discardOutboxRow;
+    return void run(dialog.account, dialog.row_id);
+  }
   if (dialog.kind === "move") {
     if (destination) void m.move(dialog.targets, destination);
   } else if (dialog.kind === "approve" || dialog.kind === "demote") {
