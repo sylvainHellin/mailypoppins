@@ -12,12 +12,14 @@
 //! - [`reader`]: the `mpmsg` scheme serving `message.html`.
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
+//! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
 
 pub mod commands;
 pub mod connector;
 pub mod error;
 pub mod fixture;
 pub mod logging;
+pub mod menu;
 pub mod navigation;
 pub mod paths;
 pub mod reader;
@@ -66,6 +68,8 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(session)
+        .menu(menu::build)
+        .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .manage(InterceptLog::default())
         .register_asynchronous_uri_scheme_protocol("mpmsg", |ctx, request, responder| {
             let app = ctx.app_handle().clone();

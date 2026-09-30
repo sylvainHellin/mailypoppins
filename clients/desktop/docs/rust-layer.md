@@ -15,6 +15,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
+| `menu.rs` | The native menus (App, File, Edit, View, Window, Help) and their `menu` event |
 | `error.rs` | `GuiError` |
 
 ## Conventions
@@ -151,6 +152,22 @@ The scheme answers:
 - 404 for an unknown account or row, 400 for a malformed URL, 503 while no daemon answers, 504 on a timeout.
 
 A rendition over 8 MiB goes through `message.materialise_html`, and the handle is released as soon as the file is read.
+
+## Menus
+
+`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the App, Edit and Window menus are the predefined macOS items, and File, View and Help carry our own.
+Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by `core:default`), and the frontend runs the same action its key runs (`MENU_ACTIONS` in `src/app/actions.ts`, pinned by a Rust test that reads that file):
+
+| Id | Menu | Runs |
+|---|---|---|
+| `restart_daemon` | File | the confirm dialog, then `restart_daemon` |
+| `toggle_sidebar` | View | collapse or expand the sidebar |
+| `zoom_pane` | View | `z` |
+| `command_palette` | View | `:` |
+| `key_help` | View | `?` |
+| `keyboard_shortcuts` | Help | `?` |
+
+No item takes an accelerator the webview's keymap owns, since a menu key equivalent reaches AppKit before the page and a bare `z` would stop the user typing one.
 
 ## Links
 

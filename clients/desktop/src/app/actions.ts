@@ -16,6 +16,7 @@ export const MENU_ACTIONS: Record<string, ActionId> = {
   zoom_pane: "toggle_zoom",
   command_palette: "open_palette",
   key_help: "toggle_help",
+  keyboard_shortcuts: "toggle_help",
 };
 
 const HALF_PAGE = 10;
