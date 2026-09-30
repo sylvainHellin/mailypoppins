@@ -621,6 +621,7 @@ The lines come from:
 - a hold that fires, "Hold over, sending <subject> from <account>", and one that is cancelled, through its own "Send of <subject> cancelled" notice, each once whichever of the event and this window's cancel answer lands first.
 
 These events arrive whichever client caused them, so another client's sync or reload is in this window's log too.
+A sync this window started whose account had a failed `sync.completed` while it ran shows its "Sync of <account> failed" notice without logging it, since the tick's "Fetch failed" line already did.
 The log holds only what this window heard since it started; the daemon's own log is `sf`.
 
 ### The dialog

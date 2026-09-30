@@ -628,6 +628,21 @@ describe("mutations and pending state", () => {
       expect(last(s)).toMatchObject({ kind: "sync_failed", text: "Sync of home failed: login refused" });
     });
 
+    it("logs a failed sync of this window once: the tick's line, and the notice without a second line", () => {
+      let s = run(booted(), { type: "sync_requested" }, { type: "sync_started", operation_id: "op-1", account: "work", mode: "quick" });
+      const before = s.activityLog.length;
+      const tick = { account: "work", severity: "error", error: "login refused", saved: 0, new_inbox_mail: [] };
+      s = run(s, envelope("sync.completed", tick, 501));
+      s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "failed", error: { code: -32000, message: "login refused" } }, 502));
+      expect(last(s)).toMatchObject({ kind: "sync_failed", text: "Sync of work failed: login refused" });
+      expect(s.activityLog.slice(before).map((e) => e.text)).toEqual(["Fetch failed (work): login refused"]);
+      // Another account's failed tick leaves this window's sync of work alone.
+      s = run(s, { type: "sync_requested" }, { type: "sync_started", operation_id: "op-2", account: "work", mode: "quick" });
+      s = run(s, envelope("sync.completed", { ...tick, account: "home" }, 503));
+      s = run(s, envelope("operation.finished", { operation_id: "op-2", state: "failed", error: { code: -32000, message: "timeout" } }, 504));
+      expect(s.activityLog.slice(-2).map((e) => e.text)).toEqual(["Fetch failed (home): login refused", "Sync of work failed: timeout"]);
+    });
+
     it("settles quietly on success and reports a dropped sync", () => {
       let s = run(booted(), { type: "sync_requested" }, { type: "sync_started", operation_id: "op-1", account: "work", mode: "full" });
       s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "succeeded", result: {} }));

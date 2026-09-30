@@ -167,10 +167,15 @@ function setFlagEverywhere(s: AppState, account: string, rowId: number, axis: Fl
   return s;
 }
 
-export function pushNotice(s: AppState, notice: Omit<ActivityNotice, "id" | "rows"> & { rows?: ActivityNotice["rows"] }): AppState {
+export function pushNotice(
+  s: AppState,
+  notice: Omit<ActivityNotice, "id" | "rows"> & { rows?: ActivityNotice["rows"] },
+  log = true,
+): AppState {
   const id = s.activitySeq + 1;
   const entry: ActivityNotice = { rows: [], ...notice, id };
   const activity = [...s.activity, entry].slice(-ACTIVITY_CAP);
+  if (!log) return { ...s, activity, activitySeq: id };
   // The log keeps the line after the notice is dismissed or dropped.
   return logActivity({ ...s, activity, activitySeq: id }, noticeLevel(entry.kind), noticeLine(entry));
 }
@@ -718,9 +723,23 @@ function syncEnded(s: AppState, end: OperationEnd): AppState {
   }
   if (end.state === "failed" || end.state === "cancelled") {
     const why = end.error ?? end.state;
-    return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} failed: ${why}` });
+    // The tick's own `sync.completed` already logged this failure.
+    return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} failed: ${why}` }, !run.tickLogged);
   }
   return next;
+}
+
+/**
+ * A `sync.completed` of `account` that failed, which logs its own line: the
+ * syncs this window awaits for that account report their failure as a notice
+ * and leave the log alone, so one failure is one line.
+ */
+export function syncTickFailed(s: AppState, account: string): AppState {
+  const hit = Object.entries(s.syncs).filter(([, run]) => run.account === account && !run.tickLogged);
+  if (hit.length === 0) return s;
+  const syncs = { ...s.syncs };
+  for (const [id, run] of hit) syncs[id] = { ...run, tickLogged: true };
+  return { ...s, syncs };
 }
 
 /**

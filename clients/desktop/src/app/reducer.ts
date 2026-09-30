@@ -64,6 +64,7 @@ import {
   syncRequested,
   syncSignal,
   syncStarted,
+  syncTickFailed,
   syncStartFailed,
   type Refusal,
 } from "@/app/pending";
@@ -821,6 +822,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "sync.completed": {
       const p = payload as SyncCompletedPayload;
       const health = p.error === null ? "ok" : "failed";
+      if (p.error !== null && p.error !== undefined) s = syncTickFailed(s, p.account);
       const next = staleMailboxes(patchAccount(staleInvitations(s, p.account), p.account, { sync_health: health }), p.account);
       return staleListIf(next, (a) => a === p.account);
     }

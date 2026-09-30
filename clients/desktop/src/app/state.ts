@@ -484,8 +484,12 @@ export type SignaturesDialog = { account: string };
 /** A contact index rebuild this window started, until it settles or is dropped; `operation_id` is null until `contact_rebuild` answers. */
 export type RebuildRun = { token: number; account: string; operation_id: string | null };
 
-/** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
-export type RunningSync = { account: string; mode: SyncMode };
+/**
+ * A sync `sync_trigger` started, until it finishes, settles or is dropped.
+ * `tickLogged` is set once a failed `sync.completed` of its account logged
+ * a line while it ran, so its own failure is not logged twice.
+ */
+export type RunningSync = { account: string; mode: SyncMode; tickLogged?: boolean };
 
 /** How an operation ended, as `operation.finished` or `operation_settled` says, with its `result`. */
 export type OperationEnd =
