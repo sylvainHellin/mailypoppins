@@ -61,9 +61,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config init`, `src/main.rs`, `src/config_cmd/init.rs`
 - Daemon surface: `config.get` before the first prompt, then `config.reload` once the wizard has written; `config.init`, `config.set_password`, `operation.*` for the multi-step pass, `state.event` once the account exists
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/daemon_admin_slice.rs` (`mp_config_init_prompts_in_the_client`), otherwise manual
-- Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15)
+- GUI location: clients/desktop: the Settings view's and the palette's "Add account" open the account wizard with the CLI's four presets (IMAP and SMTP, Proton Bridge, Microsoft 365 OAuth2, Microsoft 365 Graph), then identity, servers, mailboxes and a review that calls `config_add_account`, or `config_init` from the first-run setup screen a daemon with no config.toml shows; a password preset then asks for the SMTP password, and a Microsoft 365 preset starts the device-code sign-in (M4, #0131; shell.md, "Account wizard" and "First run")
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_init_prompts_in_the_client`); `clients/desktop/src/components/settings/wizard.test.tsx` (`refuses to move on without a name, with a taken one, and without the SMTP host`, `adds a password account, then stores its SMTP password with no password in the store`, `shows the setup screen on a daemon with no config.toml, and its wizard writes the first one`), `clients/desktop/src/app/wizard.test.ts` (`every preset's draft has only account_block's keys and no password`, `follows the CLI's presets and fallbacks`), `clients/desktop/src-tauri/src/configuration.rs` (`every_presets_draft_serialises_to_account_block_keys_and_nothing_else`, `config_init_after_config_absent_writes_the_first_configuration`)
+- Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15); GUI shipped (M4, #0131) without the connection test and the server mailbox pick, which both need an account the daemon already serves
 - Note: the wizard writes `config.toml` and one secret in a single pass, so the GUI drives it through `config.*` rather than spawning the CLI.
   P4-U14 routed the branch a parity test can reach - the overwrite question, which the client asks after `config.get` has told it whether a configuration exists and where - and left the wizard's own writes in the client, which reload the daemon when they finish; the pass past the first prompt dials a mail server and is pinned by nothing.
   P4-U15 kept it there and recorded why: the prompting, the connection test the answers steer, and the write are one interactive transaction, and splitting it needs a wizard protocol no unit of Phase 4 contracted. It is five rows of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs` (`set_secret`, `imap_client::` twice, `GraphClient::`, `device_code_flow`, `SmtpTransport::`).
@@ -73,9 +73,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config add-account`, `src/config_cmd/init.rs`
 - Daemon surface: `config.get` before the first prompt, then `config.reload`; `config.add_account`, `state.event`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/daemon_admin_slice.rs` (`mp_config_add_account_refuses_without_a_configuration`), otherwise manual
-- Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15)
+- GUI location: clients/desktop: the account wizard's review calls `config_add_account` while config.toml exists, a refusal such as a taken name stays in the wizard's alert, and the daemon's `config.changed` brings the account and its mailboxes into the sidebar (M4, #0131; shell.md, "Account wizard")
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_add_account_refuses_without_a_configuration`); `clients/desktop/src/components/settings/wizard.test.tsx` (`adds a password account, then stores its SMTP password with no password in the store`, `shows the daemon's refusal and stays open`), `clients/desktop/src/app/settings.test.ts` (`config.changed reads the updated account's mailboxes and list again, and leaves the others`), `clients/desktop/src-tauri/src/configuration.rs` (`config_add_account_appends_the_block_and_serves_a_ready_account`, `a_draft_with_a_password_or_any_unknown_key_is_refused`)
+- Status: routed (P4-U14) at the edges; the wizard itself is client-side, recorded (P4-U15); GUI shipped (M4, #0131)
 - Note: the refusal when there is no configuration to add to is the daemon's answer, rendered here; the wizard past it is `ACC-01`'s note.
 
 ### ACC-03 Show the effective configuration
@@ -106,19 +106,19 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp config set-password <smtp|imap> [--account]`, `src/main.rs`, `src/config_cmd/password.rs`
 - Daemon surface: `config.set_password`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/secrets_integration.rs` for the backend, `tests/daemon_admin_slice.rs` (`mp_config_set_password_reads_the_password_in_the_client`)
-- Status: routed (P4-U14)
+- GUI location: clients/desktop: a password account's card in the Settings view has "Set SMTP password" and "Set IMAP password", which open a masked dialog whose Enter calls `config_set_password`; the value lives in the dialog's own state only and is emptied on every submit and close (M4, #0131; shell.md, "The password dialog")
+- Validation: `tests/secrets_integration.rs` for the backend, `tests/daemon_admin_slice.rs` (`mp_config_set_password_reads_the_password_in_the_client`); `clients/desktop/src/components/settings/settings.test.tsx` (`takes a masked, unremembered value in a labelled field, focused on open`, `stores the password, says so without the value, and keeps it nowhere in the model`, `clears the value when it closes, and shows a refusal with the field empty for a retry`), `clients/desktop/src-tauri/src/configuration.rs` (`a_stored_password_is_in_no_journal_no_debug_and_no_tracing_line`, `a_refused_password_names_the_account_and_never_the_value`)
+- Status: routed (P4-U14); GUI shipped (M4, #0131); the card does not say whether a password is stored, since `config.get` never probes a secret (`ACC-03`)
 - Note: secret values travel only on the local socket and never appear in logs, diagnostics, or protocol errors.
 
 ### ACC-06 OAuth2 device-code login
 
 - Classification: GUI parity
 - Source anchor: `mp config oauth2-login [--account]`, `src/config_cmd/oauth2.rs`, `src/oauth2.rs`
-- Daemon surface: `config.oauth2_login` as an `operation.*` with the user code and verification URL on `state.event`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/daemon_admin_slice.rs` pins the three refusals and the rendering; the flow itself is manual and requires a live provider
-- Status: routed (P4-U14)
+- Daemon surface: `config.oauth2_login` as an `operation.*` whose one `operation.progress` event, phase `device_code`, carries the verification URL and the user code; `operation.cancel` settles it `cancelled` and leaves the provider's poll running
+- GUI location: clients/desktop: "Sign in" on an OAuth2 or Graph account's card in the Settings view, and the account wizard's two Microsoft 365 presets, call `config_oauth2_login`, awaited as `oauth2_login`; the device-code dialog shows the code from that operation's progress with "Copy code" and "Open verification page", says "OAuth2 token acquired and cached for account '<name>'" once stored, and its "Cancel sign-in" and Escape call `config_oauth2_cancel` (M4, #0131; shell.md, "The device-code dialog")
+- Validation: `tests/daemon_admin_slice.rs` pins the three refusals and the rendering; `clients/desktop/src/components/settings/wizard.test.tsx` (`a Microsoft 365 account signs in next: the code from the progress, Copy, the verification page, stored`, `shows the code a re-bootstrap's operation status carries when the progress event was missed`, `Cancel cancels the operation and says the sign-in may still complete`), `clients/desktop/src/app/signin.test.ts` (`reads the code from its own operation's progress and settles stored`), `clients/desktop/src-tauri/src/session.rs` (`a_device_code_reaches_only_its_awaited_sign_in_which_settles_as_oauth2_login`, `a_denied_sign_in_fails_with_the_providers_sentence`, `a_cancelled_sign_in_stays_awaited_until_its_cancelled_finish`), `clients/desktop/src-tauri/src/configuration.rs` (`a_sign_in_is_refused_with_the_daemons_sentences`); the flow against a live provider is manual
+- Status: routed (P4-U14); GUI shipped (M4, #0131) against the fixture's simulated provider
 - Note: the client renders the code and opens the browser as a client-side integration (`INT-04`).
   The progress payload is `{phase: "device_code", done: 0, total: null, message: "<verification_uri> <user_code>"}`, and `mp_client::format::{oauth2_start_line, oauth2_device_code_lines, oauth2_stored_line}` are the three lines a GUI reproduces.
   The IMAP, SMTP and Graph connection tests the command ran after acquiring a token are not on the routed path: they need the token the daemon now holds, and they belong to the account slice.
@@ -156,12 +156,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ACC-10 Signature file management
 
 - Classification: GUI parity
-- Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs:588`), `src/signatures.rs`, the per-account default recorded in `state.json`
+- Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs:603`), `crates/mp-core/src/signatures.rs`, the per-account default recorded in `state.json`
 - Daemon surface: `signature.list`, `signature.read`, `signature.write`, `signature.create`, `signature.rename`, `signature.delete`, `signature.set_default`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: manual
-- Status: not started
-- Note: there is no CLI equivalent, so the GUI takes this capability from the TUI, and inline-text signatures are edited through a temporary copy.
+- GUI location: clients/desktop: `cs` in Mail and the palette's "Manage signatures" open the Signatures dialog, which lists every signature with the account's default, previews the cursor one, and creates (`n`), renames (`r`), edits in the external editor (`e`), deletes behind a confirmation (`d`) and sets or clears the default (Enter), through the Tauri layer over `mp_core::signatures`, since the daemon serves no `signature.*` method (M4, #0131; shell.md, "Signatures", rust-layer.md, "Signatures")
+- Validation: `clients/desktop/src/components/signatures/signatures.test.tsx` (`cs lists every signature with the account's default marked and previews the selected one`, `Enter makes the selected signature the default, and clears it when it already is`, `n asks for a name, Enter creates the signature and opens it in the editor`, `r renames from a field seeded with the name, and the default follows`, `d asks first with the file's path; n keeps it, y deletes it`, `signature.changed reads the listing and the preview again while it is open`), `clients/desktop/src/app/signatures.test.ts` (`signature.changed, the dialog's own change and a bootstrap make every listing stale`), `clients/desktop/src-tauri/src/signatures.rs` (`create_writes_an_empty_file_and_refuses_a_name_taken`, `rename_carries_the_default_and_moves_the_file`, `deleting_the_default_clears_it_and_publishes_nothing`, `set_default_sets_and_clears_the_accounts_default`)
+- Status: GUI shipped (M4, #0131), client-side over `mp_core::signatures`; another client's delete shows on the next open of the dialog, since the daemon publishes no `signature.removed`
+- Note: there is no CLI equivalent, so the GUI takes this capability from the TUI.
+  Every signature is a file under `signatures/`: the startup migration of #0107 turned the inline-text entries of `config.toml` into files, so none is edited through a temporary copy.
 
 ### ACC-11 Signature injection into a draft
 
@@ -227,9 +228,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Space m`, `Space c`, `Space a` (`clients/tui/src/app/keymap.rs:601-603`)
 - Daemon surface: client-side; the view switch reads data already bootstrapped
-- GUI location: clients/desktop (M1, #0129)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `Space m`, `Space c` and `Space a`, the sidebar's Contacts, Calendar and Settings entries and the palette's "Switch to Mail view", "Switch to Contacts view", "Switch to Calendar view" and "Open settings" switch between Mail and the full-pane views, which keep the selection, the marks and the outbox view; Settings is a fourth view with no key (M4, #0131; shell.md, "Views")
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`Space c, Space a and Space m switch the view, and Escape comes back to Mail`, `a view's own key runs before any prefix arms, and the prefix arms again in Mail`), `clients/desktop/src/app/reducer.test.ts` (`switches to a view and back keeping the selection and the marks, with focus on the view's pane`), `clients/desktop/src/components/shell/a11y.test.tsx` (`makes the views sidebar buttons, one of them or a mailbox the current page, and names each view's region`)
+- Status: GUI shipped (M4, #0131)
 
 ### MBX-06 Cycle pane focus and zoom the focused pane
 
@@ -463,9 +464,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `y` (`clients/tui/src/app/keymap.rs:618`)
 - Daemon surface: `selector` on the `message.list` row and on the `message.search` hit, then a client-side clipboard write
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: `tests/cli_selector_contract.rs` for the selector shape
-- Status: routed (P5-U10c-I1); GUI not started
+- GUI location: clients/desktop: `y` copies the selected message's `mp://` selector and says "Copied <selector>" (M1, #0129); the copy goes through `copyText`, and the reader's Copy menu and the palette's "Copy link (mp://)" copy the same selector (M4, #0131; reader.md, "The toolbar")
+- Validation: `tests/cli_selector_contract.rs` for the selector shape; `clients/desktop/src/lib/clipboard.test.ts` (`writes the text and says what it copied`), `clients/desktop/src/components/activity/activity.test.tsx` (`the Copy menu copies the sender's address, the mp:// link and the subject`); no test presses `y` itself
+- Status: routed (P5-U10c-I1); GUI shipped (M1, #0129)
 - Note: the row carries it rather than a `message.selector` query answering it, because the daemon already had the string in hand when it built the row.
   The TUI's `EmailEntry` carries the daemon's string, so `y` costs neither a round trip nor a store read; a parse-skipped draft and a server-only hit carry `None`, which are the two rows with no name to copy.
   `message.get` would answer it too, at the price of a whole-message read per clipboard copy.
@@ -477,7 +478,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the search overlay `y`, the action set in `clients/tui/src/app/types.rs`
 - Daemon surface: `message.materialise_markdown`, then a client-side clipboard write
-- GUI location: clients/desktop (M1, #0131 read slice)
+- GUI location: clients/desktop, not built in M1 to M4: the palette lists the search overlay's "Copy the Markdown rendition path" with the badge "later", and the desktop calls no `message.materialise_markdown`
 - Validation: TUI golden frames
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the path a `y` copies now names a file inside a handle directory, which the family releases after ten minutes: nothing reads a yanked path back, so what changed is how long a pasted one resolves.
@@ -555,9 +556,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the confirm variants in `clients/tui/src/app/types.rs`, covering approve, demote, archive, delete, send, send-approved, and signature deletion
 - Daemon surface: client-side, over the same methods
-- GUI location: clients/desktop: archive and delete ask first in a dialog ("Archive this email?" with the sender and subject, "Delete 3 emails?" over marks), `y` or Enter confirms and `n` or Escape cancels (M2, #0131); the same dialog asks "Approve 2 drafts?" and "Mark 2 drafts as draft?" over marks, "Draft is not approved. Approve and send?" or "Send this email?" before `x`, "Send all approved emails?" before `cX`, and before an outbox retry or discard, with a warning line (M3, #0131; shell.md, "Approve and demote", "Send" and "Retry and discard"); the signature deletion confirmation arrives with signature management (M4, #0131)
-- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`, `n cancels the confirmation and nothing is called`, `cA over marked drafts asks first, with the TUI's words, and approves the batch`, `x on a draft asks the TUI's approve-and-send question, and y sends it with the hold`, `x on received mail says it needs a draft, and n cancels a send`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`Archive asks first and archives on confirm`, `Delete asks first, and Cancel deletes nothing`), `clients/desktop/src/components/outbox/outbox.test.tsx` (`R retries the cursor row after the warning, and the settle says how it ended`)
-- Status: GUI shipped (M2, #0131) for archive and delete, and (M3, #0131) for approve, demote, send and send-approved; signature deletion not started
+- GUI location: clients/desktop: archive and delete ask first in a dialog ("Archive this email?" with the sender and subject, "Delete 3 emails?" over marks), `y` or Enter confirms and `n` or Escape cancels (M2, #0131); the same dialog asks "Approve 2 drafts?" and "Mark 2 drafts as draft?" over marks, "Draft is not approved. Approve and send?" or "Send this email?" before `x`, "Send all approved emails?" before `cX`, and before an outbox retry or discard, with a warning line (M3, #0131; shell.md, "Approve and demote", "Send" and "Retry and discard"); the Signatures dialog's `d` raises it over the dialog as "Delete signature '<name>'?" with the file's path (M4, #0131; shell.md, "Signatures")
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`, `n cancels the confirmation and nothing is called`, `cA over marked drafts asks first, with the TUI's words, and approves the batch`, `x on a draft asks the TUI's approve-and-send question, and y sends it with the hold`, `x on received mail says it needs a draft, and n cancels a send`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`Archive asks first and archives on confirm`, `Delete asks first, and Cancel deletes nothing`), `clients/desktop/src/components/outbox/outbox.test.tsx` (`R retries the cursor row after the warning, and the settle says how it ended`), `clients/desktop/src/components/signatures/signatures.test.tsx` (`d asks first with the file's path; n keeps it, y deletes it`)
+- Status: GUI shipped (M2, #0131) for archive and delete, (M3, #0131) for approve, demote, send and send-approved, and (M4, #0131) for signature deletion
 - Note: archive asks for confirmation in the desktop as the TUI does, since the daemon has no undo for it.
 
 ### MSG-08 Mark a message read on an explicit open
@@ -820,9 +821,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp send --invite --to --cc --subject --start --end|--duration --location --description`, `src/main.rs`, `src/calendar.rs`
 - Daemon surface: `send.invite`, refused on Microsoft Graph with the reason in the error
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/imip_integration.rs`, `tests/daemon_send_slice.rs`
-- Status: routed (P4-U12); GUI not started
+- GUI location: clients/desktop: the Calendar view's "New invitation" button and the palette open a form with To, Cc, Subject, Start, End or Duration, Location and Description, which asks for a subject, a start and a recipient before `send_invite` starts `send.invite`, awaited as `send_invite`; on a Graph account the form takes no input and shows the daemon's sentence, read through `invite_refusal` (M4, #0131; shell.md, "New invitation")
+- Validation: `tests/imip_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/components/calendar/invitation.test.tsx` (`opens from the Calendar view's toolbar in To, sends send_invite and closes; the settle says so`, `asks for a subject, a start and a recipient before any call, and keeps what was typed`, `is disabled on a Graph account with the probe's sentence, from the palette`), `clients/desktop/src/app/invite.test.ts` (`names a partial and an undelivered invitation, a failure and an interruption`), `clients/desktop/src-tauri/src/calendar.rs` (`a_new_invitation_is_checked_for_a_subject_a_start_and_a_recipient_in_that_order`, `send_invite_starts_send_invite_and_passes_a_daemon_refusal_on_as_its_sentence`, `the_graph_probe_answers_the_daemon_sentence_and_starts_nothing`), `clients/desktop/src-tauri/src/fixture.rs` (`send_invite_refuses_in_the_daemon_order_then_files_the_invitation_on_the_agenda`)
+- Status: routed (P4-U12); GUI shipped (M4, #0131) as a minimal form with no preview, and the daemon mints the UID, since the form sends none
 - Note: start and end accept local time or RFC3339, duration accepts ISO8601 or the short form, and Graph accounts are refused by `mailypoppins::invite::plan_invite`, which both the client and `send.invite` validate through, so the GUI shows a disabled action with its reason rather than a late failure (`ANO-4`); `send.invite` makes that refusal before it looks at anything else about the invitation.
   The client mints the `UID` while it previews and sends it as a parameter, so the UID a user read is the UID that goes out.
 
@@ -1054,9 +1055,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp contacts search [query] [-n] [--account]` (`src/main.rs`), the TUI contacts view `/`, `src/contacts/matcher.rs`
 - Daemon surface: `contact.search`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: unit tests in `src/contacts/matcher.rs`, `tests/daemon_admin_slice.rs`
-- Status: routed (P4-U14)
+- GUI location: clients/desktop: `Space c`, the sidebar's Contacts entry and the palette show the Contacts view, the selection account's ranked contacts from `contact_search` in a listbox named "Contacts"; `/` focuses its search field, which asks 150 ms after the typing pauses and drops the answer to a query typed over (M4, #0131; shell.md, "Contacts")
+- Validation: unit tests in `src/contacts/matcher.rs`, `tests/daemon_admin_slice.rs`; `clients/desktop/src/components/contacts/contacts.test.tsx` (`lists the selected account's ranked contacts in a listbox named Contacts, with their counts and scores`, `/ focuses the search field, typing asks once per pause, and Escape leaves it with the query kept`), `clients/desktop/src/app/contacts.test.ts` (`drops the answer of a query typed over, so the list is asked again for the new one`, `reads an account's list again when the view comes back to it with another query`), `clients/desktop/src-tauri/src/contacts.rs` (`rows_decode_with_the_recipient_quoted_where_the_name_needs_it`), `clients/desktop/src-tauri/src/fixture.rs` (`contact_search_matches_address_and_name_in_score_order_up_to_the_limit`)
+- Status: routed (P4-U14); GUI shipped (M4, #0131) with at most 1000 rows per search, where the TUI lists its whole index
 
 ### CON-02 Tab-delimited `email` and `name` output for mutt, aerc, and vim
 
@@ -1074,9 +1075,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp contacts rebuild [--account]` (`src/main.rs`), the TUI contacts view `r`
 - Daemon surface: `contact.rebuild` as an `operation.*`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: unit tests in `src/contacts/`, `tests/daemon_admin_slice.rs`
-- Status: routed (P4-U14)
+- GUI location: clients/desktop: `r`, the Contacts view's "Rebuild index" and the palette's "Refresh contact index" call `contact_rebuild` for the view's account, awaited as `contact_rebuild`; the header says a rebuild runs, and the settle says the TUI's four notices (M4, #0131; shell.md, "Rebuild")
+- Validation: unit tests in `src/contacts/`, `tests/daemon_admin_slice.rs`; `clients/desktop/src/components/contacts/contacts.test.tsx` (`r rebuilds the index with the pending state in the header, then says the TUI's four outcomes`), `clients/desktop/src/app/contacts.test.ts` (`says how many a written index holds, and the cache guard's two refusals with what it kept`, `a failed, a dropped and a refused start each say the refresh failed`), `clients/desktop/src-tauri/src/contacts.rs` (`a_rebuild_is_awaited_as_contact_rebuild`), `clients/desktop/src-tauri/src/session.rs` (`a_contact_rebuild_passes_its_progress_and_settles_as_contact_rebuild`), `clients/desktop/src-tauri/src/fixture.rs` (`rebuild_refused_settles_the_next_rebuild_refused_shrunk_once`)
+- Status: routed (P4-U14); GUI shipped (M4, #0131) for the account the view shows
 - Note: the all-accounts default of the CLI form is automation, while the single-account refresh is the user-facing capability.
   The loop is the client's, over the configured accounts in configuration order; the method takes one required `account` and no `all_accounts`.
   The TUI's `r` joined it in P5-U10c-I2 (#0126): an `Action::RefreshContacts` starting the same operation, where it walked the store on the UI thread and rendered its verdict in place.
@@ -1095,36 +1096,36 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Enter` and `n` in the CONTACTS keymap section
 - Daemon surface: `draft.create` seeded from the contact
-- GUI location: clients/desktop (M4, #0131)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: Enter, `n`, a double-click and the header's "Compose" in the Contacts view open the new-draft wizard with the contact's recipient in To and the focus in Subject (M4, #0131; shell.md, "Contacts", "Keys and actions")
+- Validation: TUI golden frames; `clients/desktop/src/components/contacts/contacts.test.tsx` (`Enter and n open the new-draft wizard with the contact in To, a comma name quoted, the focus in Subject`), `clients/desktop/src/keymap/keymap.test.tsx` (`in Contacts c copies and arms no compose prefix, so c then n composes to the contact, and Mail's cn still opens a blank draft`)
+- Status: GUI shipped (M4, #0131)
 
 ### CON-06 Send a contact as a vCard
 
 - Classification: GUI parity
 - Source anchor: TUI `v` in the contacts view, `src/contacts/vcard.rs`
-- Daemon surface: `contact.vcard`, then `draft.create`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: unit tests in `src/contacts/vcard.rs`
-- Status: not started
+- Daemon surface: client-side vCard: the Tauri layer builds it with `mp_core::contacts::contact_to_vcard`, writes the `.vcf` under the drafts' `_vcards/` directory, and attaches it to a draft made by `draft.create`; the daemon serves no `contact.vcard`
+- GUI location: clients/desktop: `v`, the header's "Send vCard" and the palette's "Send contact as vCard" call `contact_vcard_draft`, which writes a "Contact: <name>" draft to the contact with the `.vcf` attached, then the draft opens in the external editor (M4, #0131; shell.md, "Contacts", "Keys and actions", rust-layer.md, "The contacts")
+- Validation: unit tests in `src/contacts/vcard.rs`; `clients/desktop/src/components/contacts/contacts.test.tsx` (`v writes a vCard draft to the contact and opens it in the editor`), `clients/desktop/src-tauri/src/contacts.rs` (`a_vcard_draft_writes_the_vcf_beside_the_drafts_and_attaches_it_once`, `a_vcard_name_is_the_display_name_else_the_local_part`)
+- Status: GUI shipped (M4, #0131); a failure after `draft.create` leaves the draft in Drafts without its `.vcf`
 
 ### CON-07 Copy a contact's email address
 
 - Classification: GUI parity
 - Source anchor: TUI `c` in the CONTACTS keymap section
 - Daemon surface: client-side clipboard write
-- GUI location: clients/desktop (M4, #0131)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `c`, the header's "Copy address" and the palette's "Copy email address" copy the contact's address through `copyText` and say "Copied <address>" (M4, #0131; shell.md, "Contacts", "Keys and actions")
+- Validation: TUI golden frames; `clients/desktop/src/components/contacts/contacts.test.tsx` (`c copies the address through the clipboard and arms no c family key`)
+- Status: GUI shipped (M4, #0131)
 
 ### CON-08 Address extraction and frecency ranking from the message store
 
 - Classification: GUI parity
 - Source anchor: `src/contacts/extractor.rs`, `src/contacts/rank.rs`, `src/contacts/hooks.rs`
 - Daemon surface: daemon-internal, with `state.event` when the index changes
-- GUI location: clients/desktop (M4, #0131)
-- Validation: unit tests in `src/contacts/rank.rs`, `src/contacts/extractor.rs`
-- Status: routed (P4-U14)
+- GUI location: clients/desktop: the Contacts view lists the daemon's ranking in its order, with each row's To, Cc and received counts and a query's match score; no event names the index, so the view reads the list on every open and after a written rebuild (M4, #0131; shell.md, "Contacts", "Staleness")
+- Validation: unit tests in `src/contacts/rank.rs`, `src/contacts/extractor.rs`; `clients/desktop/src/components/contacts/contacts.test.tsx` (`lists the selected account's ranked contacts in a listbox named Contacts, with their counts and scores`, `j, k, G and gg move the cursor, and each open reads the list again`)
+- Status: routed (P4-U14); GUI shipped (M4, #0131) as the display of the daemon's ranking; the index-changed event is not built
 - Note: implicit workflow that keeps the index current as mail arrives.
   Since the admin slice the extraction, the ranking and the cache guard (#0067) all run in the daemon; no client opens the index.
 
@@ -1135,9 +1136,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp invite accept|tentative|decline <selector> [--mailbox]` (`src/main.rs`), TUI `tv` in the message context and `V` in the calendar view, `src/invite.rs`, `tests/imip_integration.rs`
 - Daemon surface: `calendar.rsvp` as an `operation.*`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, and the successful reply through the daemon's fake transport)
-- Status: routed (P5-U6)
+- GUI location: clients/desktop: the reader's invitation card has Accept, Tentative and Decline, disabled with the TUI's sentence for an invitation that cannot be answered; `tv` from the list or the reader, and `V` or the card's RSVP button in the Calendar view, open the RSVP choice (`a`, `t`, `d`, Enter), which calls `calendar_rsvp`, awaited as `rsvp`, and the settle says "Replied <response> to <summary>" (M4, #0131; reader.md, "Invitations", shell.md, "RSVP")
+- Validation: `tests/imip_integration.rs`, `tests/daemon_admin_slice.rs` (`mp_invite_refusals_match_the_oracle`, and the successful reply through the daemon's fake transport); `clients/desktop/src/components/reader/invite.test.tsx` (`shows the event under the header with three enabled replies, and Accept sends and settles`, `tv opens the choice: a, t, d pick, j, k and Tab move, Enter sends the choice`, `opens the choice for the cursor row and sends it; the agenda row follows`, `a Graph account's row shows the daemon's sentence, from the probe`), `clients/desktop/src/app/rsvp.test.ts` (`names the reasons in the TUI's order and words: not a REQUEST, cancelled, superseded, the user's own, then Graph`), `clients/desktop/src-tauri/src/fixture.rs` (`calendar_rsvp_refuses_graph_first_then_settles_with_the_reply`, `rsvp_fail_fails_the_next_rsvp_and_parks_a_failed_outbox_row`), `clients/desktop/src-tauri/src/session.rs` (`an_rsvp_settled_by_the_requery_carries_its_kind_and_reply`)
+- Status: routed (P5-U6); GUI shipped (M4, #0131)
 - Note: whole-series only in v1, the reply travels as iMIP over SMTP, and the target message must carry an `invite.ics` blob.
   The Graph refusal (`ANO-4`) is made before anything about the selector is examined, so a surface that shows the RSVP buttons disabled can say why without naming a resolvable message.
   P5-U6 routed the TUI's `V` through it and gave the method a `row_id` address beside the selector, because an agenda row carries a `messages.id` and nothing else (#0050).
@@ -1148,18 +1149,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `t` and `r` in the calendar view, `src/agenda.rs`, `clients/tui/src/ui/calendar.rs`
 - Daemon surface: `calendar.events` (the name `calendar.agenda` this row carried until P5-U10; the served method is `calendar.events`)
-- GUI location: clients/desktop (M4, #0131)
-- Validation: unit tests in `src/agenda.rs`, TUI golden frames, `src/tui_tests/invites.rs`
-- Status: routed (P5-U10) - the TUI's agenda is built by the daemon; the view itself is still GUI-parity work
+- GUI location: clients/desktop: `Space a`, the sidebar's Calendar entry and the palette show the Calendar view, the selection account's agenda from `calendar_events` in a listbox named "Agenda" beside the event card; `t` or "Past events" shows the past events by the TUI's rule, client-side, and `r` or "Refresh" reads the agenda again (M4, #0131; shell.md, "Calendar")
+- Validation: unit tests in `src/agenda.rs`, TUI golden frames, `src/tui_tests/invites.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`lists the upcoming agenda of the selected account with its badges, and the card of the cursor row`, `t shows the past events with the TUI's status line and arms no t family key`, `r reads the agenda again and says how many events it shows, without replying`), `clients/desktop/src/app/calendar.test.ts` (`hides past events by default, keeps a running one until its end and an undated one always`, `r that fails with rows shown keeps them and says so in the notice line`), `clients/desktop/src-tauri/src/calendar.rs` (`calendar_events_on_decodes_the_fixture_agenda`), `clients/desktop/src-tauri/src/fixture.rs` (`the_agenda_decodes_sorted_with_the_undated_row_last`)
+- Status: routed (P5-U10) - the TUI's agenda is built by the daemon; GUI shipped (M4, #0131)
 
 ### CAL-03 Open the source email of an agenda entry
 
 - Classification: GUI parity
 - Source anchor: TUI `Enter` and `e` in the calendar view
 - Daemon surface: `message.ics`, whose bytes the client writes to a temp file for the editor session
-- GUI location: clients/desktop (M4, #0131)
-- Validation: TUI golden frames, `src/tui_tests/invites.rs`
-- Status: routed (P5-U10c-I2) - what `$EDITOR` gets is the row's `invite.ics` blob and not the message (#0052 scope item 10), so the method is the invitation read rather than a rendition
+- GUI location: clients/desktop: Enter, `e` or a double-click on an agenda row calls `invite_source_open`, which writes the row's `invite.ics` from `message.ics` into an owner-only file and opens it in the external editor (M4, #0131; shell.md, "Calendar", "Keys and actions")
+- Validation: TUI golden frames, `src/tui_tests/invites.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`Enter and e open the cursor row's invite.ics in the editor`, `a row with no ics says so in the TUI's words, and a failed editor names why`), `clients/desktop/src-tauri/src/calendar.rs` (`invite_source_open_writes_a_private_file_and_journals_the_editor`, `a_row_without_an_ics_is_not_found_and_opens_nothing`), `clients/desktop/src-tauri/src/fixture.rs` (`message_ics_answers_the_source_in_base64_or_null`)
+- Status: routed (P5-U10c-I2) - what `$EDITOR` gets is the row's `invite.ics` blob and not the message (#0052 scope item 10), so the method is the invitation read rather than a rendition; GUI shipped (M4, #0131)
 
 ### CAL-04 Report what stored attendee replies resolve on stored invitations
 
@@ -1176,18 +1177,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/invite.rs`
 - Daemon surface: `calendar.events` and `message.invite` carry the derived statuses; `message.ics` hands out the raw payload an RSVP is built from
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`, `src/tui_tests/invites.rs`
-- Status: routed (P5-U10) - the fold crosses the socket; the rendering is still GUI-parity work
+- GUI location: clients/desktop: an agenda row carries one badge in the TUI's order (cancelled, organizer, else the user's reply), and the shared event card shows When, Repeats, Where, Organizer, "Your RSVP", every attendee with their status, the cancelled occurrences and a cancelled or superseded version, in the Calendar view and as the reader's invitation card from `invite_get` (M4, #0131; shell.md, "Rows and the card", reader.md, "Invitations")
+- Validation: `tests/imip_integration.rs`, unit tests in `src/invite.rs`, `src/tui_tests/invites.rs`; `clients/desktop/src/app/calendar.test.ts` (`badges cancelled first, then organizer, then the user's reply`), `clients/desktop/src/components/calendar/calendar.test.tsx` (`j, k, G and gg move the cursor and the card follows; the organizer's card has no RSVP and names its cancelled occurrence`), `clients/desktop/src/components/reader/invite.test.tsx` (`shows the event under the header with three enabled replies, and Accept sends and settles`), `clients/desktop/src-tauri/src/calendar.rs` (`invite_get_on_answers_the_card_of_an_invitation_and_null_for_a_plain_email`), `clients/desktop/src-tauri/src/fixture.rs` (`message_invite_answers_the_agenda_event_and_the_version_an_email_carried`)
+- Status: routed (P5-U10) - the fold crosses the socket; GUI shipped (M4, #0131)
 
 ### CAL-06 Invitation updates and cancellations reflected in the agenda and the reader
 
 - Classification: GUI parity
 - Source anchor: implicit workflow driven by newly synced iMIP messages
 - Daemon surface: `state.event`
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/imip_integration.rs`
-- Status: not started
+- GUI location: clients/desktop: an account's agenda and invitation cards go stale on a `state.invalidate` or `state.remove` of its mail and on its `sync.completed`, so an update or a cancellation reaches the agenda and an open card without a refresh (M4, #0131; shell.md, "Calendar", "Staleness")
+- Validation: `tests/imip_integration.rs`; `clients/desktop/src/components/calendar/calendar.test.tsx` (`follows a cancellation and an update without a manual refresh`), `clients/desktop/src/components/reader/invite.test.tsx` (`follows invite_cancel: the card says cancelled and the replies are disabled with the TUI's sentence`, `follows invite_update: the card shows the new time`), `clients/desktop/src/app/calendar.test.ts` (`goes stale with its own account's mail and syncs only`), `clients/desktop/src-tauri/src/fixture.rs` (`invite_update_moves_the_start_and_raises_the_sequence`, `invite_cancel_flips_the_agenda_row_and_delivers_the_cancellation`)
+- Status: GUI shipped (M4, #0131) against the fixture's `invite_update` and `invite_cancel`, which change the agenda row in place where the daemon folds the new email in
 
 ## Client-side integrations
 
@@ -1195,10 +1196,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `sc` (`clients/tui/src/app/keymap.rs:596`)
-- Daemon surface: `config.path` for the location; the daemon reloads the file either way
-- GUI location: clients/desktop (M4, #0131)
-- Validation: manual
-- Status: not started
+- Daemon surface: `config.get`'s `path` for the location; the daemon reloads the file either way
+- GUI location: clients/desktop: `sc` from every view, the palette's "Open config.toml in $EDITOR", and "Open config.toml" in the Settings view and on the config.toml banner call `config_open`, which opens `config.get`'s `path` in the external editor; the Settings view's Reload then calls `config_reload` (M4, #0131; shell.md, "config.toml and the daemon log" and "Settings")
+- Validation: `clients/desktop/src/components/activity/activity.test.tsx` (`s c and s f open them from Mail and from Contacts, and s l works there too`, `says why when there is no config.toml or no log yet, and logs it as a warning`), `clients/desktop/src/components/settings/settings.test.tsx` (`Open config.toml hands the daemon's file to the editor`, `Reload says what the swap did, logs it once, and reads the configuration again`), `clients/desktop/src-tauri/src/daemon_files.rs` (`config_open_on_journals_the_editor_on_the_daemons_path`, `config_open_on_an_absent_configuration_is_not_found_and_opens_nothing`, `config_open_on_an_invalid_configuration_still_opens_it`)
+- Status: GUI shipped (M4, #0131)
 - Note: the GUI equivalent is the settings surface plus an explicit reveal or open action.
 
 ### INT-02 Open the log file in the editor
@@ -1206,9 +1207,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `sf` (`clients/tui/src/app/keymap.rs:597`), the `OpenLogFile` action (`clients/tui/src/app/types.rs:1597`)
 - Daemon surface: `diagnostic.log_path`, which answers the dated file the daemon is writing (`<data_dir>/logs/mailypoppins-<date>.log`), the same file the TUI's `sf` opens
-- GUI location: clients/desktop (M4, #0131)
-- Validation: `tests/daemon_diagnostics.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
-- Status: routed (P6-U8)
+- GUI location: clients/desktop: `sf` from every view and the palette's "Open log file in $EDITOR" call `log_open`, which opens the file `diagnostic.log_path` names in the external editor (M4, #0131; shell.md, "config.toml and the daemon log")
+- Validation: `tests/daemon_diagnostics.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7); `clients/desktop/src/components/activity/activity.test.tsx` (`s c and s f open them from Mail and from Contacts, and s l works there too`, `the palette's rows run them`), `clients/desktop/src-tauri/src/daemon_files.rs` (`log_open_on_journals_the_editor_on_the_dated_log`, `log_open_on_a_missing_log_is_not_found_and_opens_nothing`)
+- Status: routed (P6-U8); GUI shipped (M4, #0131) as the open-in-editor action; the desktop shows the daemon's log only in the editor
 - Note: the GUI provides a log view plus an explicit reveal or open-in-editor action; `mp daemon logs` is the same file paged over the socket.
 
 ### INT-03 Clipboard writes for selectors, paths, and addresses
@@ -1216,18 +1217,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the clipboard actions in `clients/tui/src/actions.rs`
 - Daemon surface: client-side in every client
-- GUI location: clients/desktop (M4, #0131)
-- Validation: manual
-- Status: not started
+- GUI location: clients/desktop: every copy goes through `copyText` in `src/lib/clipboard.ts`, which calls `navigator.clipboard.writeText` from the key or click handler and says "Copied <what>" or "The clipboard refused <what>": `y` and the reader's Copy menu (sender address, `mp://` link, subject) with their palette rows, `c` on a contact, a refused link's Copy and the device-code dialog's "Copy code"; the clipboard-manager plugin is not installed (M4, #0131; shell.md, "Modules", reader.md, "The toolbar")
+- Validation: `clients/desktop/src/lib/clipboard.test.ts` (`writes the text and says what it copied`, `calls the clipboard before it returns, while the key press still counts as a user action`, `says the clipboard refused it when the write is rejected`), `clients/desktop/src/components/activity/activity.test.tsx` (`the Copy menu copies the sender's address, the mp:// link and the subject`, `the palette's copy rows act on the open message, and say so without one`), `clients/desktop/src/components/contacts/contacts.test.tsx` (`c copies the address through the clipboard and arms no c family key`)
+- Status: GUI shipped (M4, #0131) against the tests' clipboard stand-in; whether WKWebView takes the write from a key press has not been checked in a real window
 
 ### INT-04 Browser launch for HTML parts and OAuth verification URLs
 
 - Classification: GUI parity
 - Source anchor: the browser actions in `clients/tui/src/actions.rs`, `src/config_cmd/oauth2.rs`
 - Daemon surface: client-side in every client
-- GUI location: clients/desktop (M1 for reader links, M4 for the OAuth verification URL, #0131)
-- Validation: manual
-- Status: not started
+- GUI location: clients/desktop: a refused link's "Open in browser" in the reader footer calls `open_external` for http, https and mailto only (M1, #0129); `tb` and the toolbar's Open in browser hand the daemon's HTML rendition to the default browser (M3, #0131; reader.md, "The browser rendition"); the device-code dialog's "Open verification page" opens the provider's https URL through `open_external` (M4, #0131; shell.md, "The device-code dialog")
+- Validation: `clients/desktop/src/components/reader/reader.test.tsx` (`shows a refused link in the reader footer and opens it only on the click, once`, `cannot hand a non-web scheme to the opener, and the notice dismisses`, `tb and the toolbar open the daemon's rendition in the browser, and a message without markup says so`), `clients/desktop/src/components/settings/wizard.test.tsx` (`a Microsoft 365 account signs in next: the code from the progress, Copy, the verification page, stored`)
+- Status: GUI shipped (M1, #0129) for reader links, (M3, #0131) for HTML parts, and (M4, #0131) for the OAuth verification URL
 
 ### INT-05 Desktop notifications for new mail
 
@@ -1244,9 +1245,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `Action::suspends_terminal` (`clients/tui/src/app/types.rs:1716`) and the suspend path in `clients/tui/src/lib.rs`
 - Daemon surface: client-side
-- GUI location: clients/desktop (M3, #0131)
-- Validation: unit tests in `clients/tui/src/app/types.rs`
-- Status: not started
+- GUI location: clients/desktop: nothing is suspended; `editor_open` starts the resolved external editor and never waits for it to exit, and the editing banner names the draft and the editor until Done (M3, #0131; rust-layer.md, "Drafts and the editor", shell.md, "The editing banner")
+- Validation: unit tests in `clients/tui/src/app/types.rs`; `clients/desktop/src-tauri/src/editor.rs` (`the_env_and_the_setting_win_over_visual_editor_and_the_probes`, `a_nonzero_exit_inside_the_window_is_a_setup_error`), `clients/desktop/src/components/compose/compose.test.tsx` (`names the draft and the editor; Reopen runs the editor again and Done ends the session`)
+- Status: GUI shipped (M3, #0131) as the external-editor handoff, which M5 (#0130) replaces with the embedded session
 - Note: the GUI replaces suspension with the embedded PTY session.
 
 ## Status, activity, logging, and help
@@ -1256,27 +1257,27 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `!` (`clients/tui/src/app/keymap.rs:570`), `sl` (`clients/tui/src/app/keymap.rs:595`), and `/` inside the overlay (ACTIVITY LOG keymap section)
 - Daemon surface: `state.event` activity stream; the overlay itself is client-side
-- GUI location: clients/desktop (M4, #0131)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `sl`, the sidebar's Activity entry and the palette's "Activity log overlay" open the activity log dialog, the newest 100 lines this window reported (its notices, `sync.completed`, `config.changed`, `config.invalid` and the end of a hold) with their level, scrolled with `j`/`k`, `d`/`u`, `gg`/`G` and filtered with `/`; `!` hides or shows the activity area's notices and never a live hold card, since the desktop has no bottom log pane (M4, #0131; shell.md, "Activity log")
+- Validation: TUI golden frames; `clients/desktop/src/components/activity/activity.test.tsx` (`s l lists what the window reported, oldest first, with each level, and Escape closes it`, `filters on text and level: / goes to the field, Enter back to the lines, Escape clears, then closes`, `opens at the end and scrolls with j/k, d/u, gg and G`, `hides the notices and never the live hold card, and shows them again`), `clients/desktop/src/app/activity.test.ts` (`keeps the newest ACTIVITY_LOG_CAP lines, oldest first, with rising ids`, `logs sync.completed at the daemon's severity, config.changed and config.invalid`)
+- Status: GUI shipped (M4, #0131); the log holds only what this window heard since it started
 
 ### OBS-02 Command palette over every runnable action
 
 - Classification: GUI parity
 - Source anchor: TUI `:` (`clients/tui/src/app/keymap.rs:564`) and `Ctrl+p` (`clients/tui/src/app/keymap.rs:565`), `palette_actions()` (`clients/tui/src/app/keymap.rs:841`)
 - Daemon surface: client-side, derived from `KEYMAP` so it cannot drift from the bindings
-- GUI location: clients/desktop (M1, #0129)
-- Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `:` or `Ctrl+p` opens the command palette over every row of the generated `keymap.json` and the desktop's own rows, each runnable or disabled with its badge (M1, #0129)
+- Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames; `clients/desktop/src/components/palette/palette.test.tsx` (`lists every action of the generated keymap`, `marks what this build cannot run as disabled with its milestone`, `runs an enabled action`), `clients/desktop/src/keymap/keymap.test.tsx` (`: and Ctrl+p open the palette, ? the key help`)
+- Status: GUI shipped (M1, #0129)
 
 ### OBS-03 Help overlay and hint bar
 
 - Classification: GUI parity
 - Source anchor: TUI `?` (`clients/tui/src/app/keymap.rs:561`), `help_sections()` (`clients/tui/src/app/keymap.rs:787`)
 - Daemon surface: client-side, generated from the same `KEYMAP`
-- GUI location: clients/desktop (M1, #0129)
-- Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `?` opens the key help, the generated `keymap.json`'s sections followed by the desktop's own keys (M1, #0129)
+- Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`: and Ctrl+p open the palette, ? the key help`), `clients/desktop/src/components/palette/palette.test.tsx` (`the key help lists the desktop client's own keys after the TUI's`)
+- Status: GUI shipped (M1, #0129) for the help overlay; the desktop has no hint bar
 
 ### OBS-04 Status line carrying counts, badges, operation progress, and persistent errors
 
@@ -1461,6 +1462,8 @@ Four moved or were imprecise in the plan's inventory and are corrected here.
 - `MSG-08`: `queue_mark_open_read` is defined at `clients/tui/src/app/mod.rs:1230`; `clients/tui/src/app/keys.rs` calls it (lines 322 and 336), which is what the inventory's wording describes.
 - `OBS-07`: there is no `[theme]` config section; `theme` is a top-level key (`src/config.rs:25`).
   `clients/tui/src/theme.rs` resolves.
+
+`ACC-10` was resolved again against the tree of M4 (#0131): the `cs` binding is at `clients/tui/src/app/keymap.rs:603`, and the signature files are `crates/mp-core/src/signatures.rs`.
 
 `RD-05` has no resolvable anchor by design: `clients/tui/src/images.rs` was deleted when #0109 retired the capability.
 
