@@ -69,6 +69,15 @@ The type blocks in this document are for reading, and the generated files are th
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
 | `search_server_start` | `params: ServerSearchParams` | `{ operation_id }` |
 | `search_server_cancel` | `operation_id` | `"cancelled" \| "already_settled"` |
+| `message_archive` | `account`, `row_ids` | `MutationBatch` |
+| `message_delete` | `account`, `row_ids` | `MutationBatch` |
+| `message_move` | `account`, `row_ids`, `destination` (slug or label) | `MutationBatch` |
+| `message_set_flag` | `account`, `row_ids`, `flagged` | `MutationBatch` |
+| `message_set_read` | `account`, `row_ids`, `read` | `MutationBatch` |
+| `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
+| `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
+| `send_cancel_hold` | `operation_id` | `HoldCancelled` |
+| `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
 | `open_external` | `url` (http, https or mailto) | nothing; opens it in the default handler |
@@ -123,6 +132,16 @@ type ServerSearchParams = {
   account: string; query: string; mailboxes?: string[]; limit?: number; exclude_message_ids?: string[];
 };
 
+type MutationAck = {
+  row_id: number; account: string; id: string; selector: string; mailbox: string;
+  moved_to?: { mailbox: string; selector: string }; read?: boolean; flagged?: boolean;
+};
+type MutationBatch = { done: MutationAck[]; failed: { row_id: number; error: GuiError }[] };
+type DraftDiscarded = { account: string; id: string; selector: string; status: string };
+type DraftDiscardBatch = { done: DraftDiscarded[]; failed: { id: string; error: GuiError }[] };
+type HoldCancelled = { cancelled: boolean; operation_id: string; revision: number };
+type SyncMode = "quick" | "full";
+
 type InterceptedUrl = { url: string; at: number; source: "navigation" | "new_window" | "open_external_stub" };
 type VersionInfo = {
   app_version: string; protocol_min: number; protocol_max: number; fixture: boolean;
@@ -132,6 +151,25 @@ type VersionInfo = {
 
 A `MessageMeta` header is `null` when the message did not carry it, where a `MessageListRow` of the same message has `""`.
 `AccountInfo.runtime_state`, `sync_health` and `outbox` and `MailboxListing.runtime_state` and `sync_health` come from the latest bootstrap; later changes arrive as events.
+`HoldListing` is the protocol's `{ holds: HoldStatus[] }`.
+
+## Mutations
+
+The five message commands send one daemon call per row id, in the order given, each with `settle: false`, the TUI's contract.
+The daemon commits the row change and the server op it owes in one transaction and answers at once; it drains the queue once the account's mutations have been quiet for 1.5 s.
+`MutationAck` is the daemon's inline answer plus the `row_id` the call named; `id` and `selector` name the message before the mutation, and `moved_to` where an archive or a move put it.
+A row the daemon refused (gone, in another account, or a destination it cannot move to) lands in `failed` with its `GuiError`, and the next row goes ahead.
+An error about the whole batch (no daemon, an unknown account, a timeout) rejects the command when no row was done yet, and otherwise stops the batch and fills `failed` with every row not done, so the answer always says which rows changed.
+`draft_discard` follows the same rules over draft ids and never forces: an approved draft is refused.
+The daemon has no undo for any of them; a server refusal arrives later as `mutations.rolled_back { account, failed }`, which names no row, so the frontend re-reads the account's lists.
+
+A mutation publishes no event of its own.
+Once the drain runs, each mailbox whose counts moved gets a `state.invalidate` with scope `{ query: "counts" }`; a flag change moves no count and so publishes nothing.
+`draft_discard` is followed by `state.remove` for `draft:<account>/<id>`.
+
+`send_cancel_hold` stops a hold whichever client armed it; a hold that already fired, or never existed, is `not_found`.
+The countdown itself comes from the bootstrap's `holds` and the `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` events, each carrying one `HoldStatus` with the daemon's `remaining_secs`.
+`sync_trigger` starts `sync.quick` or `sync.full` and awaits it like a server search (`kind: "sync"`); the pass publishes `sync.completed` to every client before its `operation.finished`.
 
 ## The event stream
 
@@ -147,8 +185,8 @@ type GuiEvent =
   | { type: "disconnected"; reason: string }
   | { type: "reconnected"; instance_id: string }
   | { type: "rebootstrapped"; cause: BootstrapCause; bootstrap: Bootstrap }
-  | { type: "operation_settled"; operation_id: string; kind: "server_search"; status: OperationStatus }
-  | { type: "operation_dropped"; operation_id: string; kind: "server_search"; reason: string }
+  | { type: "operation_settled"; operation_id: string; kind: "server_search" | "sync"; status: OperationStatus }
+  | { type: "operation_dropped"; operation_id: string; kind: "server_search" | "sync"; reason: string }
   | { type: "connection"; status: ConnectionStatus }
   | { type: "link_intercepted"; url: InterceptedUrl };
 ```
@@ -156,6 +194,7 @@ type GuiEvent =
 `event` carries the daemon's envelope verbatim and only when it applied above the watermark; duplicates are dropped in Rust.
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
 A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
+A sync started by `sync_trigger` ends the same three ways.
 A hit or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 
 ## The reader
@@ -223,11 +262,25 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 
 ## Fixture mode
 
-The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts and 3 HTML bodies.
+The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies and 1 armed send hold.
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
 `fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds.
+
+The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
+Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
+A call without `settle: false` drains before it answers, as `mp archive` does.
+`draft.discard` removes the draft and publishes `state.remove`.
+`sync.quick` and `sync.full` run for 0.8 s, drain, publish `sync.completed` and settle; `home` fails its login, as its sync health says.
+
+`rollback` puts back every fixture mutation since the last rollback or restart, and `rollback:<n>` only the last `n`.
+Each account then gets `mutations.rolled_back` with its count, followed by the counts that moved.
+With nothing to roll back it is an error, since the daemon publishes nothing for a drain that failed nothing.
+
+The bootstrap's seeded hold is on `work`'s first draft with a 60 s window, counting from the app's start.
+`hold` arms another one, 10 s long, as the TUI would: `send.hold_started` at once, a `send.hold_tick` each second down to 1, then `send.hold_fired` (the fixture sends nothing).
+`send_cancel_hold` stops either with `send.hold_cancelled`, and `restart` forgets every hold and the rollback journal.
 
 ## Tests
 

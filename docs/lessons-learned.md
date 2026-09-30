@@ -2298,3 +2298,10 @@ The desktop reducer holds server signals that arrive while the start is in fligh
 The bindings are exported instead by one explicit test per crate (`crates/mp-protocol/tests/ts_bindings.rs`, `clients/desktop/src-tauri/src/ts_bindings.rs`) through `Config::new().with_large_int("number").with_out_dir(..)`, which needs no shell variable and no `.cargo/config.toml` entry.
 A derived type exports to `<TsName>.ts` whether or not it carries `#[ts(export)]`, so two Rust types with one name (`state::OutboxCounts`, `send::OutboxCounts`) merge into one file; one of them takes `#[ts(rename = ..)]`.
 ts-rs also leaves a trailing space after each opening `{`, which the export test trims so the committed files pass `git diff --check`.
+
+## A message mutation publishes no event of its own, and a flag change none at all
+
+`server.rs` drops a command's `revision` and `affected` resources after dispatch (its comment still says no command exists yet), so `message.archive`, `delete`, `move`, `set_read` and `set_flag` answer their caller and publish nothing.
+What other clients hear comes from the drainer 1.5 s after the account's last mutation: one `state.invalidate` with scope `{"query": "counts"}` per mailbox whose `(total, unread)` moved, and a `mutations.rolled_back` when the server refused something.
+A `set_flag` moves no count, so no other client learns about a star until it re-reads the list; a client that shows flags from events alone shows a stale star.
+The desktop fixture (`clients/desktop/src-tauri/src/fixture.rs`) publishes the same way, so the GUI is built against what the daemon actually sends.
