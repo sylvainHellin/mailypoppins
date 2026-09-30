@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use ts_rs::{Config, TS};
 
 use crate::{
-    attachments, calendar, commands, connector, contacts, editor, error, session, signatures,
+    attachments, calendar, commands, configuration, connector, contacts, editor, error, session,
+    signatures,
 };
 
 /// Exports each listed type, and its dependencies, into `$cfg`'s directory.
@@ -95,6 +96,15 @@ fn export_into(dir: &Path) -> usize {
         contacts::ContactSearch,
         contacts::ContactRebuilt,
         contacts::VcardDraft,
+        configuration::ConfigSnapshot,
+        configuration::EffectiveConfig,
+        configuration::ConfigEmail,
+        configuration::ConfigAccount,
+        configuration::ConfigServer,
+        configuration::ConfigOAuth2,
+        configuration::ConfigSwap,
+        configuration::SecretKind,
+        configuration::SecretStored,
         editor::EditorSource,
         editor::EditorLaunch,
         editor::EditorSetting,

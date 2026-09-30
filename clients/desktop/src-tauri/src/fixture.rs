@@ -41,6 +41,13 @@
 //! `accounts.json`'s), with state `ok` and `config.json` as the effective
 //! configuration; `diagnostic.log_path` answers
 //! `<root>/logs/mailypoppins-2026-09-30.log`, written at load with ten lines.
+//! `config.reload` re-reads that file: it publishes `config.changed` with
+//! nothing added, updated or removed and answers the same three empty lists,
+//! or, once `config_invalid` appended [`CONFIG_INVALID_LINE`], publishes
+//! `config.invalid` naming that line and refuses with `-32007`, the daemon's
+//! configuration left as it was. `config.set_password` journals the account
+//! and the kind with the value redacted ([`Fixture::password_writes`]) and
+//! answers `stored: true` under the daemon's key, `<kind>-password-<account>`.
 //!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
@@ -226,6 +233,13 @@ pub const SIGNATURE_EDIT_LINE: &str = "Edited behind the fixture's back.";
 /// The file `config.get` names, under the per-run root.
 const CONFIG_FILE: &str = "config.toml";
 
+/// The line `config_invalid` appends to `config.toml`: a bare key, which no
+/// TOML parser takes.
+pub const CONFIG_INVALID_LINE: &str = "this line is not toml";
+
+/// Why `config.reload` refuses that line, the toml parser's words.
+pub const CONFIG_INVALID_MESSAGE: &str = "key with no value, expected `=`";
+
 /// The directory under the per-run root the daemon log lives in.
 const LOGS_DIR: &str = "logs";
 
@@ -250,6 +264,7 @@ pub const SIMULATIONS: &[&str] = &[
     "rsvp_fail",
     "rebuild_refused",
     "signature_changed",
+    "config_invalid",
 ];
 
 /// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
@@ -421,6 +436,10 @@ struct State {
     config: Value,
     /// `config.get`'s `state`: `ok`, `absent` or `invalid`.
     config_state: String,
+    /// `config.get`'s `revision`, which every accepted reload moves.
+    config_revision: u64,
+    /// Every `config.set_password`, its value redacted, oldest first.
+    password_writes: Vec<Value>,
 }
 
 impl State {
@@ -2148,6 +2167,8 @@ impl Fixture {
             rebuild_delay: REBUILD_DELAY,
             config,
             config_state: "ok".to_string(),
+            config_revision: 0,
+            password_writes: Vec::new(),
         };
         state.rescan();
         state.seed_outbox();
@@ -2292,7 +2313,12 @@ impl Fixture {
     pub fn call(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
         #[cfg(test)]
         if let Ok(mut calls) = self.calls.lock() {
-            calls.push((method.to_string(), params.clone()));
+            // A password is recorded as the daemon logs it: not at all.
+            let mut recorded = params.clone();
+            if method == "config.set_password" && recorded.get("value").is_some() {
+                recorded["value"] = json!(crate::configuration::REDACTED);
+            }
+            calls.push((method.to_string(), recorded));
         }
         // Fixture mode skips the handshake, so under test every call is
         // held against the list a real daemon is asked for there, less the
@@ -2317,10 +2343,74 @@ impl Fixture {
             "config.get" => {
                 only(method, &params, &[])?;
                 Ok(json!({
-                    "revision": 0,
+                    "revision": s.config_revision,
                     "path": s.root.join(CONFIG_FILE).display().to_string(),
                     "state": s.config_state,
                     "config": s.config,
+                }))
+            }
+            // The daemon's `config.reload`: the file read again, and either a
+            // swap (here always an empty one) or `config.invalid` then
+            // `-32007`, with what it served left as it was.
+            "config.reload" => {
+                only(method, &params, &[])?;
+                let path = s.root.join(CONFIG_FILE);
+                let text = fs::read_to_string(&path).map_err(|e| {
+                    refused(method, -32603, &format!("reading {}: {e}", path.display()))
+                })?;
+                if let Some(at) = text.lines().position(|l| l.trim() == CONFIG_INVALID_LINE) {
+                    let payload = json!({
+                        "path": path.display().to_string(),
+                        "line": at + 1,
+                        "message": CONFIG_INVALID_MESSAGE,
+                    });
+                    self.emit_locked(&mut s, "config.invalid", payload);
+                    return Err(refused(method, -32007, CONFIG_INVALID_MESSAGE));
+                }
+                s.config_revision += 1;
+                let revision = s.config_revision;
+                let swap = json!({"added": [], "updated": [], "removed": []});
+                let mut changed = swap.clone();
+                changed["config_revision"] = json!(revision);
+                self.emit_locked(&mut s, "config.changed", changed);
+                Ok(swap)
+            }
+            // The daemon's `config.set_password`, its refusals in its order
+            // and words; the value is journaled redacted and goes nowhere.
+            "config.set_password" => {
+                only(method, &params, &["account", "kind", "value"])?;
+                let account = param_str(method, &params, "account")?;
+                let kind = param_str(method, &params, "kind")?;
+                if kind != "smtp" && kind != "imap" {
+                    return Err(refused(method, -32602, "kind is one of \"smtp\", \"imap\""));
+                }
+                if !params["value"].is_string() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "value is a required string parameter",
+                    ));
+                }
+                let known = s.config["accounts"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|c| c["name"] == account));
+                if !known {
+                    return Err(refused(
+                        method,
+                        -32005,
+                        &format!("no account named {account} is configured"),
+                    ));
+                }
+                s.password_writes.push(json!({
+                    "account": account,
+                    "kind": kind,
+                    "value": crate::configuration::REDACTED,
+                }));
+                Ok(json!({
+                    "stored": true,
+                    "account": account,
+                    "kind": kind,
+                    "key": format!("{kind}-password-{account}"),
                 }))
             }
             "diagnostic.log_path" => {
@@ -3584,6 +3674,7 @@ impl Fixture {
                 return Ok(());
             }
             "signature_changed" => return self.simulate_signature_changed(),
+            "config_invalid" => return self.simulate_config_invalid(),
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
                 self.state().send_next = Some(match what {
@@ -3836,6 +3927,26 @@ impl Fixture {
     #[cfg(test)]
     pub fn set_config_state(&self, state: &str) {
         self.state().config_state = state.to_string();
+    }
+
+    /// Every `config.set_password` the fixture took, oldest first, each
+    /// `{account, kind, value}` with the value [`crate::configuration::REDACTED`].
+    pub fn password_writes(&self) -> Vec<Value> {
+        self.state().password_writes.clone()
+    }
+
+    /// `config_invalid`: append [`CONFIG_INVALID_LINE`] to `config.toml`, as
+    /// a bad edit would, for the next `config.reload` to refuse.
+    fn simulate_config_invalid(&self) -> Result<()> {
+        let path = self.state().root.join(CONFIG_FILE);
+        let mut text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(CONFIG_INVALID_LINE);
+        text.push('\n');
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
     }
 
     /// A client wrote the draft file at `path` (a recipient rewrite): publish

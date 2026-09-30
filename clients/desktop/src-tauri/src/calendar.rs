@@ -320,7 +320,7 @@ pub fn send_invite_on(
 
 /// A daemon refusal with its message cut to the daemon's own sentence, the
 /// code kept; any other error as it was.
-fn daemon_sentence(error: GuiError) -> GuiError {
+pub(crate) fn daemon_sentence(error: GuiError) -> GuiError {
     let cut = |message: String| refusal_sentence(&message).map_or(message.clone(), str::to_string);
     match error {
         GuiError::Protocol {

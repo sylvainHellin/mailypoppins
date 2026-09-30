@@ -13,6 +13,7 @@
 //! - [`attachments`]: attachments, a draft's list, the browser rendition.
 //! - [`calendar`]: the agenda and an entry's `invite.ics` in the editor.
 //! - [`daemon_files`]: `config.toml` and the daemon log in the editor.
+//! - [`configuration`]: the Settings view's `config.get`, reload and passwords.
 //! - [`reader`]: the `mpmsg` scheme serving `message.html`.
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
@@ -21,6 +22,7 @@
 pub mod attachments;
 pub mod calendar;
 pub mod commands;
+pub mod configuration;
 pub mod connector;
 pub mod contacts;
 pub mod daemon_files;
@@ -205,6 +207,9 @@ pub fn run() {
             contacts::contact_vcard_draft,
             daemon_files::config_open,
             daemon_files::log_open,
+            configuration::config_get,
+            configuration::config_reload,
+            configuration::config_set_password,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

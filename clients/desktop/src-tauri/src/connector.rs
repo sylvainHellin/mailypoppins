@@ -124,6 +124,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "contact.rebuild",
     "config.get",
     "diagnostic.log_path",
+    "config.reload",
+    "config.set_password",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -848,6 +850,8 @@ mod tests {
             "contact.rebuild",
             "config.get",
             "diagnostic.log_path",
+            "config.reload",
+            "config.set_password",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }
