@@ -23,7 +23,7 @@ A capability classified as GUI parity may be deferred only when a settled decisi
 ### Stack
 
 - A Tauri 2 application with a React and TypeScript frontend built with Vite.
-- shadcn/ui components on Radix primitives.
+- shadcn/ui components on Base UI primitives (the shadcn default since mid-2026).
 - Tailwind using semantic CSS tokens.
 - A narrow Tauri command layer backed by `mp-client`.
 - Generated TypeScript protocol types and generated keymap data.
