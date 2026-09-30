@@ -17,7 +17,8 @@ export type * from "@/protocol/generated/gui";
  * (row 1008) the way a new version or a cancellation of it arriving would;
  * `rsvp_fail` fails the next RSVP with an SMTP error; `rebuild_refused`
  * makes the next contact index rebuild settle `refused_shrunk`;
- * `signature_changed` edits the signature `work` as another window would.
+ * `signature_changed` edits the signature `work` as another window would;
+ * `config_invalid` appends a line to config.toml the next reload refuses.
  */
 export type FixtureSimulation =
   | "disconnect"
@@ -39,7 +40,8 @@ export type FixtureSimulation =
   | "invite_cancel"
   | "rsvp_fail"
   | "rebuild_refused"
-  | "signature_changed";
+  | "signature_changed"
+  | "config_invalid";
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {

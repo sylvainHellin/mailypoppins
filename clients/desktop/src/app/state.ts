@@ -4,6 +4,7 @@
 import type {
   AgendaEvent,
   Bootstrap,
+  ConfigInvalid,
   EventFrontmatter,
   DraftEntry,
   DraftMessage,
@@ -15,6 +16,7 @@ import type {
 } from "@/protocol/types";
 import type {
   AccountInfo,
+  ConfigSnapshot,
   ConnectionStatus,
   ContactSearch,
   GuiError,
@@ -22,6 +24,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  SecretKind,
   SignatureListing,
   SyncMode,
   VersionInfo,
@@ -114,7 +117,8 @@ export const LIST_WIDTH_STEP = 40;
  * `attachments` is the open, save or attach dialog `attachDialog` describes;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
  * invitation form `inviteDialog` describes; `signatures` is the Signatures
- * dialog `signaturesDialog` describes; `activity` is the activity log.
+ * dialog `signaturesDialog` describes; `activity` is the activity log;
+ * `password` is the password dialog `passwordDialog` describes.
  */
 export type Overlay =
   | "palette"
@@ -128,6 +132,7 @@ export type Overlay =
   | "invite"
   | "signatures"
   | "activity"
+  | "password"
   | null;
 
 /**
@@ -481,6 +486,12 @@ export type ContactsView = { account: string; query: string; cursor: string | nu
  */
 export type SignaturesDialog = { account: string };
 
+/**
+ * The password dialog: which password of which account it stores. The
+ * value itself lives in the dialog's own state and never in the model.
+ */
+export type PasswordDialog = { account: string; kind: SecretKind };
+
 /** A contact index rebuild this window started, until it settles or is dropped; `operation_id` is null until `contact_rebuild` answers. */
 export type RebuildRun = { token: number; account: string; operation_id: string | null };
 
@@ -647,6 +658,20 @@ export type AppState = {
   signatures: Record<string, Loadable<SignatureListing>>;
   /** What the `signatures` overlay shows; null whenever another overlay or none is open. */
   signaturesDialog: SignaturesDialog | null;
+  /**
+   * The daemon's configuration (`config_get`), read when the Settings view
+   * opens and while it shows, stale again on every `config.changed` and
+   * every bootstrap.
+   */
+  config: Loadable<ConfigSnapshot>;
+  /**
+   * The last `config.invalid`: the file, the line and why the daemon
+   * refused it, shown as a banner until a `config.changed` says a
+   * configuration loaded.
+   */
+  configProblem: ConfigInvalid | null;
+  /** What the `password` overlay shows; null whenever another overlay or none is open. */
+  passwordDialog: PasswordDialog | null;
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -718,6 +743,9 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     progress: {},
     signatures: {},
     signaturesDialog: null,
+    config: emptyLoadable(),
+    configProblem: null,
+    passwordDialog: null,
   };
 }
 

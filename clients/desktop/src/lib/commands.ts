@@ -18,6 +18,8 @@ import type {
 } from "@/protocol/types";
 import type {
   AccountInfo,
+  ConfigSnapshot,
+  ConfigSwap,
   ConnectionStatus,
   ContactSearch,
   DraftAttachments,
@@ -43,6 +45,8 @@ import type {
   OperationStarted,
   OutboxDiscarded,
   SavedAttachments,
+  SecretKind,
+  SecretStored,
   SendStarted,
   ServerSearchParams,
   SignatureFile,
@@ -215,6 +219,20 @@ export const configOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("con
 
 /** Opens the daemon's log file (`diagnostic.log_path`) in the resolved editor; `not_found` when it does not exist yet. */
 export const logOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("log_open");
+
+/** The daemon's configuration (`config.get`): its file, its state and the part the Settings view shows. */
+export const configGet = (): Promise<ConfigSnapshot> => invoke<ConfigSnapshot>("config_get");
+
+/**
+ * Reload config.toml. A file that does not load rejects with a `protocol`
+ * error of code -32007 carrying the daemon's sentence, after its
+ * `config.invalid` event named the line.
+ */
+export const configReload = (): Promise<ConfigSwap> => invoke<ConfigSwap>("config_reload");
+
+/** Store the SMTP or IMAP password of `account` through the daemon's secrets backend. */
+export const configSetPassword = (account: string, kind: SecretKind, value: string): Promise<SecretStored> =>
+  invoke<SecretStored>("config_set_password", { account, kind, value });
 
 export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetting>("editor_setting_get");
 

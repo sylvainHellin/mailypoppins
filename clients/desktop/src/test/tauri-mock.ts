@@ -6,6 +6,7 @@ import { vi } from "vitest";
 import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
 import calendarFx from "../../fixtures/calendar.json";
+import configFx from "../../fixtures/config.json";
 import contactsFx from "../../fixtures/contacts.json";
 import draftBodiesFx from "../../fixtures/draft-bodies.json";
 import draftsFx from "../../fixtures/drafts.json";
@@ -29,6 +30,7 @@ import type {
 } from "@/protocol/types";
 import type {
   AccountInfo,
+  ConfigSnapshot,
   ConnectionStatus,
   ContactRow,
   GuiError,
@@ -55,6 +57,7 @@ export const fixtures = {
   signatures: signaturesFx as { signatures: Record<string, string>; defaults: Record<string, string> },
   calendar: calendarFx as unknown as { events: Record<string, AgendaEvent[]>; ics: Record<string, string> },
   contacts: contactsFx as unknown as Record<string, Omit<ContactRow, "recipient">[]>,
+  config: configFx as unknown as ConfigSnapshot["config"],
 };
 
 export class Channel<T> {
@@ -197,7 +200,19 @@ export const mock = {
   configState: "ok" as "ok" | "absent" | "invalid",
   /** Whether the daemon's log file exists, which `log_open` checks. */
   logExists: true,
+  /** `config.get`'s `revision`, which every accepted `config_reload` moves. */
+  configRevision: 0,
+  /** fixture.rs's `config_invalid`: config.toml holds a line the next `config_reload` refuses. */
+  configInvalid: false,
+  /** Every `config_set_password`, as fixture.rs journals it: the value redacted. */
+  passwords: [] as { account: string; kind: string; value: string }[],
 };
+
+/** fixture.rs's `CONFIG_INVALID_MESSAGE`, why `config_reload` refuses after `config_invalid`. */
+export const CONFIG_INVALID_MESSAGE = "key with no value, expected `=`";
+
+/** The line of config.toml the mock's `config_invalid` breaks: the template's 29 lines, then the appended one. */
+export const CONFIG_INVALID_AT = 30;
 
 /** Where `config_open` opens config.toml in the mock, `config.get`'s `path`. */
 export const MOCK_CONFIG_PATH = "/fixture/config.toml";
@@ -268,6 +283,9 @@ export function resetMock(): void {
   mock.signatures = clone(fixtures.signatures);
   mock.configState = "ok";
   mock.logExists = true;
+  mock.configRevision = 0;
+  mock.configInvalid = false;
+  mock.passwords = [];
 }
 
 /** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
@@ -1212,6 +1230,30 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       mock.editorFailure = null;
       if (failure) throw failure;
       return { editor: `code --wait '${path}'`, source: "probe" };
+    }
+    case "config_get":
+      return {
+        revision: mock.configRevision,
+        path: MOCK_CONFIG_PATH,
+        state: mock.configState,
+        config: clone(fixtures.config),
+      } satisfies ConfigSnapshot;
+    case "config_reload": {
+      if (mock.configInvalid) {
+        emitEnvelope("config.invalid", { path: MOCK_CONFIG_PATH, line: CONFIG_INVALID_AT, message: CONFIG_INVALID_MESSAGE });
+        throw { kind: "protocol", message: CONFIG_INVALID_MESSAGE, code: -32007 };
+      }
+      mock.configRevision += 1;
+      emitEnvelope("config.changed", { added: [], updated: [], removed: [], config_revision: mock.configRevision });
+      return { added: [], updated: [], removed: [] };
+    }
+    case "config_set_password": {
+      const kind = String(args.kind);
+      if (!fixtures.config.accounts.some((a) => a.name === account)) {
+        throw { kind: "not_found", message: `no account named ${account} is configured`, code: -32005 };
+      }
+      mock.passwords.push({ account, kind, value: "<redacted>" });
+      return { stored: true, account, kind, key: `${kind}-password-${account}` };
     }
     case "editor_setting_get":
     case "editor_setting_set": {

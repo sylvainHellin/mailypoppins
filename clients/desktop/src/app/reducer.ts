@@ -175,7 +175,9 @@ import {
   setContactsSearching,
   staleAllContacts,
 } from "@/app/contacts";
-import type { ContactSearch, SignatureListing } from "@/lib/gui-types";
+import type { ConfigSnapshot, ContactSearch, SecretKind, SignatureListing } from "@/lib/gui-types";
+import type { ConfigChanged, ConfigInvalid } from "@/protocol/types";
+import { configChanged, configFailed, configInvalid, configLoaded, openPasswordDialog, openSettings } from "@/app/settings";
 import {
   dropSignatures,
   openSignaturesDialog,
@@ -338,6 +340,12 @@ export type Action =
   | { type: "signatures_failed"; account: string; gen: number; error: GuiError }
   /** A change of the dialog's own, answered or refused: every listing is read again. */
   | { type: "signatures_changed" }
+  // The Settings view (app/settings.ts).
+  | { type: "config_loaded"; gen: number; snapshot: ConfigSnapshot }
+  | { type: "config_failed"; gen: number; error: GuiError }
+  /** A reload answered: the notice line says so, and the daemon's own event already logged it. */
+  | { type: "config_reloaded"; text: string }
+  | { type: "open_password"; account: string; kind: SecretKind }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -835,6 +843,15 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     // the files are global, so every account's listing is stale.
     case "signature.changed":
       return staleAllSignatures(s);
+    case "config.invalid":
+      return configInvalid(s, payload as ConfigInvalid);
+    case "config.changed":
+      return configChanged(
+        s,
+        payload as ConfigChanged,
+        (st, account) => staleListIf(staleMailboxes(st, account), (a) => a === account),
+        removeAccount,
+      );
     case "mutations.rolled_back": {
       const p = payload as MutationsRolledBackPayload;
       return staleListIf(staleMailboxes(rolledBack(s, p), p.account), (a) => a === p.account);
@@ -912,6 +929,8 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         marked: sameInstance ? next.marked : NO_MARKS,
         // Operation ids are per daemon instance.
         progress: sameInstance ? next.progress : {},
+        // Another daemon may serve another configuration.
+        config: markStale(next.config),
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
         overlay: closeOverlay ? null : next.overlay,
@@ -1220,7 +1239,10 @@ function reduce(s: AppState, a: Action): AppState {
       // selection, the marks and the outbox view wait for Mail's return.
       const next = a.view === "mail" ? toMail(s) : { ...endSearch(s), view: a.view, zoomed: false };
       // No event says a contact index changed: the list is read on every open.
-      return withFocus(a.view === "contacts" ? reopenContacts(next) : next, "list");
+      // The configuration is read on every open too, in case config.toml was
+      // edited and reloaded by another client with no event this window saw.
+      const opened = a.view === "contacts" ? reopenContacts(next) : a.view === "settings" ? openSettings(next) : next;
+      return withFocus(opened, "list");
     }
     case "overlay":
       return {
@@ -1232,6 +1254,7 @@ function reduce(s: AppState, a: Action): AppState {
         rsvpDialog: a.overlay === "rsvp" ? s.rsvpDialog : null,
         inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
+        passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
       };
     case "open_dialog":
       return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
@@ -1444,6 +1467,14 @@ function reduce(s: AppState, a: Action): AppState {
       return signaturesFailed(s, a.account, a.gen, a.error);
     case "signatures_changed":
       return staleAllSignatures(s);
+    case "config_loaded":
+      return configLoaded(s, a.gen, a.snapshot);
+    case "config_failed":
+      return configFailed(s, a.gen, a.error);
+    case "config_reloaded":
+      return { ...s, notice: a.text };
+    case "open_password":
+      return openPasswordDialog(s, { account: a.account, kind: a.kind });
     case "mark_toggle":
     case "mark_set":
     case "mark_range":
