@@ -8,7 +8,7 @@ On 2026-09-29 and 2026-09-30 the client kernel moved from the TUI into `crates/m
 The GUI itself is open, as tickets #0129 to #0132.
 M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-m0.md](../baselines/gui-spike-m0.md).
 M1, the read-only shell (#0129), landed on the `gui-m1` branch on 2026-09-30 as `clients/desktop/`.
-#0129 stays open for three reader-guard cases that need a real click and the live launchd check carried from #0128.
+#0129 stays open for the live launchd check carried from #0128.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -169,7 +169,7 @@ The rendering rule, decided on 2026-09-30 from the M0 findings:
 - A `<meta http-equiv="refresh">` does nothing inside the sandbox, and no navigation from it reaches `on_navigation`.
 
 M0 saw the `target=_blank` path with `allow-scripts allow-popups`, because its probe needed a script to click.
-M1 drove the plain-link and `window.open` paths from the app document, but a real user click in the script-free frame on a plain link, a `target=_blank` link and a form submit is still unverified; the manual steps are in `clients/desktop/docs/reader.md`.
+M1 drove the plain-link and `window.open` paths from the app document, and the owner then clicked a plain link, a `target=_blank` link and a form submit in the script-free frame by hand on 2026-09-30: all three were refused, recorded with the steps in `clients/desktop/docs/reader.md`.
 Admitting `https:` and `http:` in `frame-src` leaves `on_navigation` as the only guard against a web page loading in the reader frame, a risk listed below.
 
 ### What the CSP does not cover
@@ -286,8 +286,8 @@ What landed:
 
 What is open:
 
-- The three guard cases that need a real click inside the frame (a plain link, a `target=_blank` link, a form submit) are a manual step in `clients/desktop/docs/reader.md`.
 - The live launchd check carried from #0128 is not taken.
+- The three guard cases that need a real click inside the frame were verified by hand on 2026-09-30 (`clients/desktop/docs/reader.md`) and are repeated after any change to the reader's guards.
 - `mp dump-keys --json` carries no action ids, so the palette matches keymap rows by their description; an `id` per row in the dump would replace that match.
 - App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
 - List windowing is off, so every row of a mailbox is mounted.

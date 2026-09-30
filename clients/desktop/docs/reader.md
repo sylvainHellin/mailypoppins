@@ -41,9 +41,9 @@ It reports through the Rust log: each step creates a hidden subframe on `https:/
 
 | Case | What was exercised | Mechanical | Outcome |
 |---|---|---|---|
-| (a) plain `<a href=https://…>` click | Not a click. The app document set the reader frame's `src` to `https://evil.example/?from=probe-parent-nav`, which is the same subframe navigation a click in the frame produces | Partly: the navigation, not the click | Refused by `on_navigation`, logged, sent as `link_intercepted`; the footer notice showed the URL; what the frame displayed afterwards was not read back |
-| (b) `target=_blank` click | Not a click. `window.open("https://evil.example/?from=probe-window-open")` from the app document, without a user gesture | Partly: `on_new_window`, not the frame's popup path | Refused by `on_new_window` (`source: new_window`), `window.open` returned `null`, no window opened |
-| (c) `<form>` submit | Nothing: a submit needs a click or Enter inside the frame | No | Not verified in a webview; `form-action 'none'` in the header CSP and the missing `allow-forms` are the defences, pinned by the unit tests only |
+| (a) plain `<a href=https://…>` click | The probe set the reader frame's `src` to `https://evil.example/?from=probe-parent-nav`; the owner then clicked the link itself on 2026-09-30 | Partly, then by hand | Refused by `on_navigation`, logged, sent as `link_intercepted`; the footer notice showed `https://evil.example/?from=plain-link`; the message stayed in the frame |
+| (b) `target=_blank` click | The probe called `window.open` from the app document; the owner then clicked the link itself on 2026-09-30 | Partly, then by hand | Refused by `on_new_window`, no window opened; the footer notice showed `https://evil.example/?from=target-blank` |
+| (c) `<form>` submit | The owner typed into the password field and clicked "Verify" on 2026-09-30 | By hand | Nothing happened: no notice, no navigation, the message stayed in the frame; `form-action 'none'` in the header CSP and the missing `allow-forms` hold |
 | (d) `<meta http-equiv=refresh content=0>` | The real message loaded in the real frame; the probe waited 4 s after `load` | Yes | No `from=meta-refresh` refusal in the log, so no navigation reached `on_navigation`; the fixture keeps its meta refresh on purpose |
 | (e) remote `<img>` | The real message loaded | No | Not observed: no network capture without root, and a blocked image leaves no trace in our log. The header CSP (`img-src data:`) is pinned by `reader.rs`'s tests |
 
@@ -63,7 +63,8 @@ Escape, `j`/`k`, `:` and every other app key do nothing until focus returns to t
 
 ## Manual verification
 
-Cases (a), (b) and (c) of the table above need a real click, which the agent could not post (see the run above).
+Cases (a), (b) and (c) of the table above need a real click, which the agent cannot post (see the run above); the owner ran these steps on 2026-09-30 and all three held, including step 6, whose stub line replaces the browser.
+Repeat them after any change to the scheme handler, the navigation hooks or the frame's `sandbox`.
 
 1. In a herdr tab: `cd clients/desktop && MP_DESKTOP_STUB_OPENER=1 MP_DESKTOP_FIXTURE=1 pnpm tauri dev`, and keep its output in view (it also goes to `<data>/logs/mp-desktop.log`).
 2. In the Inbox of `work`, click row 1006, "Action required: verify your account" from Security Team, the sixth row, and wait for the body.
