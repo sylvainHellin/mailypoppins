@@ -9,7 +9,8 @@ The GUI itself is open, as tickets #0129 to #0132.
 M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-m0.md](../baselines/gui-spike-m0.md).
 M1, the read-only shell (#0129), landed on the `gui-m1` branch on 2026-09-30 as `clients/desktop/`.
 #0129 stays open for the live launchd check carried from #0128.
-M2, mutations with the undo hold (#0131), landed on the `gui-m2` branch on 2026-09-30; #0131 stays open for M3 and M4.
+M2, mutations with the undo hold (#0131), landed on the `gui-m2` branch on 2026-09-30.
+M3, compose through the external editor (#0131), landed on the `gui-m3` branch on 2026-09-30; #0131 stays open for M4.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -317,8 +318,6 @@ What is open:
 
 - There is no undo for archive, delete or move, since the daemon has none; the rollback notice is the only undo surface.
 - App keys still stop at the cross-origin reader frame, and list windowing is still off.
-- The outbox view and a mutation queue depth wait for M3.
-- Fetching a server-only search hit needs a `message.fetch` command, which waits for M3.
 - Search hits streamed from the server are not laid under the pending changes.
 - A row moved into a mailbox the window shows appears there only after the drain.
 
@@ -329,7 +328,13 @@ What is open:
 - Attachment add, open, save and remove; a save goes to a directory chosen in a native file picker, sent as an absolute path.
 - Send confirmation, approve-and-send, partial-recipient outcomes and outbox state, through `send.*`.
 
+M3 landed on the `gui-m3` branch on 2026-09-30, in the commits `b765c620` to `efe865b5`, each tagged `(#0131)`.
+What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M3 landed"](../tickets/0131-gui-full-parity.md#m3-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
+The attachment save and attach take a typed path, since the native file picker needs `tauri-plugin-dialog`, which is not installed yet.
+
 ### M4: calendar, contacts, signatures and config (#0131)
+
+Prerequisite: the `tauri-plugin-dialog` install that replaces M3's typed path fields with the native picker (#0131, "M3 landed").
 
 - Calendar agenda, invitation rendering, RSVP, organizer reconciliation, updates and cancellation; iMIP send on a Graph account shows as disabled with its reason.
 - Contacts, ranking, copy actions, vCard send, rebuild, and handoff into composition.
