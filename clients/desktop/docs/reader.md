@@ -19,6 +19,24 @@ The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, 
 - Remote content stays blocked by the reader CSP; M1 has no "load remote images" toggle.
 - The body scrolls inside the frame; the header block above it is unchanged.
 
+## The toolbar
+
+The open message's toolbar (`ReaderToolbar.tsx`, `role="toolbar"`, "Message actions") runs the same actions as the keys, on this message only, whatever the list has marked.
+Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward opens the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
+
+## Drafts and server-only hits
+
+The reader pane shows no frame for these two.
+
+A selected draft shows `DraftPreview.tsx` (`src/components/compose/`): the `draft_preview` record, which is the headers (From, To, Cc, Bcc), the status pill, the body as the dry run cuts it at 500 characters, and the file path.
+Under the headers, `draft_validate`'s report says "Valid" or "Not sendable" with the error, and lists the warnings.
+The two are read again whenever the listing's row or the list itself changes, which is what a save in the editor does through `draft.changed`.
+Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), and Approve (`cA`) or Back to draft (`cD`).
+A file that does not parse gets no preview call: the pane says "This draft does not parse" with the listing's diagnostic, and only Edit in editor stays, since the editor is where it gets fixed.
+
+A server-only search hit has no row, so there is no body to load.
+The pane shows its sender, date and mailbox, says the message is on the server only, and offers Reply, Reply all and Forward, which `draft_from_message` builds from the hit's own headers, with no attachments.
+
 ## Refused links
 
 Every navigation the webview refuses arrives as a `link_intercepted` GuiEvent and lands in `state.intercepted` (the last 100).
