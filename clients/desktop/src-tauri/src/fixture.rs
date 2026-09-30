@@ -36,6 +36,9 @@ const MESSAGES: &str = include_str!("../../fixtures/messages.json");
 const DRAFTS: &str = include_str!("../../fixtures/drafts.json");
 const HTML: &str = include_str!("../../fixtures/html.json");
 
+/// The default gap between two server-search hits.
+const HIT_DELAY: Duration = Duration::from_millis(150);
+
 /// Keys a fixture row carries that a `message.list` row does not.
 const FIXTURE_ONLY_KEYS: &[&str] = &["body", "attachments"];
 
@@ -62,6 +65,8 @@ struct State {
     next_op: u64,
     next_row: i64,
     operations: BTreeMap<String, Value>,
+    /// The gap before each server-search hit, so a user sees them stream.
+    hit_delay: Duration,
 }
 
 impl State {
@@ -181,6 +186,7 @@ impl Fixture {
                 next_op: 1,
                 next_row,
                 operations: BTreeMap::new(),
+                hit_delay: HIT_DELAY,
             }),
             events: Mutex::new(events),
         })
@@ -191,6 +197,12 @@ impl Fixture {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    /// Stream server-search hits `delay` apart; a test sets zero.
+    #[cfg(test)]
+    pub fn set_hit_delay(&self, delay: Duration) {
+        self.state().hit_delay = delay;
     }
 
     /// The instance id the fixture answers as.
@@ -418,10 +430,11 @@ impl Fixture {
         };
         let fixture = Arc::clone(self);
         let op = id.clone();
+        let delay = self.state().hit_delay;
         std::thread::spawn(move || {
             let total = hits.len();
             for hit in hits {
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(delay);
                 if !fixture.running(&op) {
                     return;
                 }

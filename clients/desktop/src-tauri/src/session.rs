@@ -45,6 +45,9 @@ use crate::connector::{self, ConnectError, ConnectFailure};
 use crate::error::{Addressing, GuiError};
 use crate::fixture::Fixture;
 
+/// A server search's hit, which carries the search's `operation_id`.
+const KIND_SERVER_HIT: &str = "message.server_hit";
+
 const BOOTSTRAP_BUDGET: Duration = Duration::from_secs(10);
 const STATUS_BUDGET: Duration = Duration::from_secs(5);
 
@@ -640,8 +643,25 @@ impl SessionHandle {
                     .map(|t| t.observe(event.revision, &event.instance_id));
                 match verdict {
                     Some(Observe::Apply) => {
-                        if event.kind == KIND_OPERATION_FINISHED {
-                            if let Some(id) = event.payload["operation_id"].as_str() {
+                        // The TUI's `apply_finished` and `apply_server_hit`:
+                        // an operation this layer no longer awaits is not
+                        // this client's, or was already settled by a
+                        // re-bootstrap's `operation.status`, and a hit or a
+                        // finish after its `operation_settled` would reopen it.
+                        let operation = matches!(
+                            event.kind.as_str(),
+                            KIND_OPERATION_FINISHED | KIND_SERVER_HIT
+                        );
+                        if operation {
+                            let id = event.payload["operation_id"].as_str().unwrap_or_default();
+                            if !pump.pending.contains_key(id) {
+                                tracing::debug!(
+                                    "[session] dropped {} for operation `{id}`, not awaited",
+                                    event.kind
+                                );
+                                return;
+                            }
+                            if event.kind == KIND_OPERATION_FINISHED {
                                 pump.pending.remove(id);
                             }
                         }
@@ -829,21 +849,68 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_finish_lost_to_a_resync_is_settled_by_the_requery() {
-        let (session, door, _fixture, rx, seen) = harness();
-        let id = session
+    /// Start a server search on the fixture, its hits streamed without a gap.
+    fn search(session: &SessionHandle, door: &Door, fixture: &Fixture, query: &str) -> String {
+        fixture.set_hit_delay(Duration::ZERO);
+        session
             .start_operation(
-                &door,
+                door,
                 "message.search_server",
-                json!({"account": "work", "query": "offsite"}),
+                json!({"account": "work", "query": query}),
                 PendingKind::ServerSearch,
                 Duration::from_secs(1),
             )
-            .expect("started");
+            .expect("started")
+    }
+
+    /// Wait for the fixture to finish `id`, by its `operation.status` rather
+    /// than by a guessed sleep.
+    fn await_terminal(door: &Door, id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = door
+                .call_within(
+                    "operation.status",
+                    json!({"operation_id": id}),
+                    Duration::from_secs(1),
+                )
+                .expect("status");
+            if status["state"] != "running" {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{id} never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The events the fixture queued for `id`, hits up to its finish. The
+    /// finish is posted just after the status turns terminal, so it is
+    /// waited for.
+    fn queued_for(rx: &Receiver<Incoming>, id: &str) -> Vec<EventEnvelope> {
+        let mut out = Vec::new();
+        loop {
+            let incoming = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the operation's finish");
+            if let Incoming::Event(e) = incoming {
+                if e.payload["operation_id"] == id {
+                    let finished = e.kind == KIND_OPERATION_FINISHED;
+                    out.push(e);
+                    if finished {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_finish_lost_to_a_resync_is_settled_by_the_requery() {
+        let (session, door, fixture, rx, seen) = harness();
+        let id = search(&session, &door, &fixture, "offsite");
         // Let the operation finish without applying its events: the queue
         // was lost, as a resync loses it.
-        std::thread::sleep(Duration::from_millis(1200));
+        await_terminal(&door, &id);
         while rx.try_recv().is_ok() {}
         session.handle(
             &door,
@@ -859,6 +926,81 @@ mod tests {
             .expect("settled by the requery");
         assert_eq!(settled["operation_id"], id.as_str());
         assert_eq!(settled["status"]["state"], "succeeded");
+        assert!(session.pending().is_empty());
+    }
+
+    /// The search finished between the bootstrap and the `operation.status`
+    /// reply: its hits and its finish sit above the new watermark, and would
+    /// reach the frontend after `operation_settled`.
+    #[test]
+    fn hits_and_a_finish_after_the_requery_settled_them_are_dropped() {
+        let (session, door, fixture, rx, seen) = harness();
+        let id = search(&session, &door, &fixture, "offsite");
+        await_terminal(&door, &id);
+        let queued = queued_for(&rx, &id);
+        assert!(queued.len() >= 2, "hits and a finish: {queued:?}");
+        session.handle(
+            &door,
+            Incoming::Resync {
+                instance_id: fixture.instance_id(),
+                reason: "event_queue_overflow".into(),
+            },
+        );
+        let bootstrap = session.last_bootstrap().expect("bootstrapped");
+        let mark = lock(&seen).len();
+        // Replay them above the watermark, as the race delivers them, then
+        // one unrelated event to show the stream is still applying.
+        let mut revision = bootstrap.revision;
+        for mut event in queued {
+            revision += 1;
+            event.revision = revision;
+            event.instance_id = bootstrap.instance_id.clone();
+            session.handle(&door, Incoming::Event(event));
+        }
+        session.handle(
+            &door,
+            Incoming::Event(EventEnvelope {
+                instance_id: bootstrap.instance_id.clone(),
+                revision: revision + 1,
+                kind: "state.invalidate".into(),
+                payload: json!({"resource": "mailbox:work/inbox"}),
+            }),
+        );
+        let t = types(&seen);
+        assert!(
+            t[..mark].contains(&"operation_settled".to_string()),
+            "{t:?}"
+        );
+        assert_eq!(t[mark..], ["event:state.invalidate"], "{t:?}");
+    }
+
+    #[test]
+    fn only_awaited_operations_reach_the_frontend() {
+        let (session, door, _fixture, _rx, seen) = harness();
+        let bootstrap = session.last_bootstrap().expect("bootstrapped");
+        lock(&session.shared.pump)
+            .pending
+            .insert("op-mine".into(), PendingKind::ServerSearch);
+        let mark = lock(&seen).len();
+        let event = |revision: u64, kind: &str, id: &str| {
+            Incoming::Event(EventEnvelope {
+                instance_id: bootstrap.instance_id.clone(),
+                revision: bootstrap.revision + revision,
+                kind: kind.into(),
+                payload: json!({"operation_id": id}),
+            })
+        };
+        session.handle(&door, event(1, KIND_SERVER_HIT, "op-mine"));
+        session.handle(&door, event(2, KIND_SERVER_HIT, "op-other-window"));
+        session.handle(&door, event(3, KIND_OPERATION_FINISHED, "op-other-window"));
+        session.handle(&door, event(4, KIND_OPERATION_FINISHED, "op-mine"));
+        session.handle(&door, event(5, KIND_SERVER_HIT, "op-mine"));
+        let t = types(&seen);
+        assert_eq!(
+            t[mark..],
+            ["event:message.server_hit", "event:operation.finished"],
+            "{t:?}"
+        );
         assert!(session.pending().is_empty());
     }
 
