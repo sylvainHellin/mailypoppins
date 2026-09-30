@@ -52,6 +52,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - `routed (<unit>)`: the CLI surface answers from the daemon, byte-identically to the pre-daemon binary, with the unit that moved it named.
 - `retired`: the capability was removed from the product; the identifier stays reserved.
 - `deferred`: parity is agreed but scheduled out of the first GUI release, with the deferral recorded in the backlog.
+- `GUI shipped (<milestone>, <ticket>)`: the desktop client delivers the capability, validated by the `clients/desktop` tests the entry names, which run against the Tauri layer's fixture daemon unless the entry says otherwise.
 
 ## Accounts, configuration, secrets, and signatures
 
@@ -339,9 +340,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the SERVER SEARCH keymap section (`clients/tui/src/app/keymap.rs`): `Enter`, `e`, `y`, `f`, `r`, `R`, `w`, `a`, `b`, `o`, `O`
 - Daemon surface: `message.get`, `message.materialise_html`, `message.materialise_attachment`, `message.fetch`, `message.archive`, `draft.reply`, `draft.forward`
-- GUI location: clients/desktop (M1 for open and copy, M2 for archive, M3 for reply, forward and attachments, #0131)
-- Validation: TUI golden frames
-- Status: routed (P5-U6, completed by P5-U10c-I1); GUI not started
+- GUI location: clients/desktop (M1 for open and copy, M3 for reply, forward and attachments, #0131); archive is `a` on a result with a local row, which asks first like a list row and takes the hit out of the results (M2, #0131)
+- Validation: TUI golden frames; the desktop's archive of a hit runs the list's path (`actionTargets` over the results), with no search-specific test
+- Status: routed (P5-U6, completed by P5-U10c-I1); GUI shipped (M2, #0131) for archive; the rest not started
+- Note: a server-only hit has no row to archive, and `f` waits on a `message.fetch` command the Tauri layer does not have yet (M3).
 - Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6; `f` and the three rendition keys joined them in P5-U10c-I1.
   `f` is `message.fetch` `{account, mailbox, message_id}`, a durable operation that is idempotent over a message the store already holds: it answers with that row and `already_present: true` and opens no session, so the overlay keeps its "Already in the local store" line by branching on a boolean rather than matching a refusal.
   `Enter` / `e` / `y` are `RD-06`'s `message.materialise_markdown`.
@@ -486,30 +488,31 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:613`)
 - Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false` it queues the pair for the next sync tick, which is the TUI's contract (P5-U6)
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames
-- Status: routed (P4-U8, TUI P5-U6); GUI not started
+- GUI location: clients/desktop: `a` in the list or the reader, the palette's "Archive" and the reader toolbar's Archive, each asking "Archive this email?" first; the row leaves the list at once and comes back on a refusal or a rollback (M2, #0131)
+- Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`), `clients/desktop/src/app/events.test.tsx` (`archives a row, and the drain's invalidation keeps it gone`), `clients/desktop/src-tauri/src/commands.rs` (`an_archive_moves_every_row_in_order_and_queues`)
+- Status: routed (P4-U8, TUI P5-U6); GUI shipped (M2, #0131)
 - Note: over an account with no credentials the backend refuses before the store is touched, which is the half the fixture reaches; the successful drain and its rollback wait on a fake IMAP backend.
+  The desktop's rollback path is covered against the fixture's `rollback` simulation only, for the same reason.
 
 ### MSG-02 Delete a received message or a local draft
 
 - Classification: GUI parity
 - Source anchor: `mp delete <selector> [--mailbox] [--force]`, `mp delete --sent` (`src/main.rs`), TUI `d`
 - Daemon surface: `message.delete` for received mail, `draft.discard` for a draft and for the `--sent` sweep, which is a parameter of the same method rather than one of its own
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`
-- Status: routed (P4-U8, TUI P5-U6); GUI not started
+- GUI location: clients/desktop: `d`, the palette's "Delete" and the reader toolbar's Delete, after "Delete this email?"; a draft row is discarded through `draft_discard`, and a batch holding messages and drafts calls both (M2, #0131)
+- Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`v marks and steps, and d with Enter deletes the marked rows in list order`, `d on a draft discards it after the confirmation`), `clients/desktop/src/app/events.test.tsx` (`discards a draft, and the state.remove that follows reloads the list without it`), `clients/desktop/src-tauri/src/fixture.rs` (`a_discarded_draft_is_removed_and_an_approved_one_refused`)
+- Status: routed (P4-U8, TUI P5-U6); GUI shipped (M2, #0131)
 - Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
-- Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
+  The desktop never forces, so an approved draft is refused and put back, and it has no `--sent` sweep.
 
 ### MSG-03 Toggle read and unread
 
 - Classification: GUI parity
 - Source anchor: TUI `u` (`clients/tui/src/app/keymap.rs:615`)
 - Daemon surface: `message.set_read` `{account, row_id, read, settle}`
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `src/tui_tests/actions.rs`, TUI golden frames
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `u` in the list or the reader, the row's "Unread" toggle, the reader toolbar and the palette; over marks, marking read wins when any marked row is unread (M2, #0131)
+- Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`the flag and unread toggles act on their own row`), `clients/desktop/src/app/reducer.test.ts` (`marks read in place and moves the unread count`), `clients/desktop/src-tauri/src/commands.rs` (`flag_and_read_set_the_state_they_name`)
+- Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: the daemon takes the new state rather than a toggle, and the TUI sends `settle: false`, so the row change and the owed `SetRead` commit together and the next sync tick drains them (#0039).
 
 ### MSG-04 Toggle the `\Flagged` star
@@ -517,9 +520,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `*` (`clients/tui/src/app/keymap.rs:616`)
 - Daemon surface: `message.set_flag` `{account, row_id, flagged, settle}`
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `src/tui_tests/actions.rs`, TUI golden frames
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `*` in the list or the reader, the row's "Flagged" toggle, the reader toolbar and the palette (M2, #0131)
+- Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`* flags the cursor row and unflags a flagged one`, `over marks, * flags them all when any is unflagged, and the marks clear`), `clients/desktop/src/app/reducer.test.ts` (`flags in place, and a refusal puts the old flag back`)
+- Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: on a batch, flagging wins whenever any selected message is unflagged; the decision stays client-side, because it is a property of the selection the user can see.
 - Note: flagging leaves the read bit alone, which is what a shared "set flags" method would get wrong.
 
@@ -528,38 +531,42 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `M`, `Action::MoveToMailbox` (`clients/tui/src/app/types.rs:1571`)
 - Daemon surface: `message.move` `{account, row_id, destination, settle}`, plus the mailbox list from `state.bootstrap`
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `src/tui_tests/actions.rs`, TUI golden frames
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `M`, the reader toolbar's Move and the palette open a picker of the account's mailboxes less Drafts and the rows' own mailbox, filtered as the name is typed; from Drafts it says "Quick-move is not available in this mailbox", the TUI's words (M2, #0131)
+- Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`M opens the mailbox picker, typing filters it and Enter moves`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`filters as the name is typed, and Escape cancels`, `says why a Drafts row cannot move`), `clients/desktop/src-tauri/src/commands.rs` (`a_move_lands_in_the_destination_by_slug_or_label`)
+- Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: `destination` is a role, slug or sidebar label, resolved by the daemon; the client no longer checks the sidebar's `server_name`, because `find_server_name_for_role` is the same mapping read on the side that owns it.
+  In the desktop a moved row leaves its list at once but shows in a destination list only after the drain's `state.invalidate` re-reads it.
 
 ### MSG-06 Multi-select and batch actions
 
 - Classification: GUI parity
 - Source anchor: TUI `v` (`clients/tui/src/app/keymap.rs:653`), `Ctrl+a` (`clients/tui/src/app/keymap.rs:654`), the batch actions in `clients/tui/src/app/types.rs`
 - Daemon surface: one call per selected message, in the selection's order, over `message.set_read`, `message.set_flag`, `message.archive`, `message.delete`, `draft.discard`, `draft.approve` and `draft.demote`; selection stays client-side
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `src/tui_tests/actions.rs`, TUI golden frames
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `v` marks the cursor row and steps, `Ctrl+a` marks every shown row, Shift+click marks a range and Cmd+click or the row's mark box one row, Escape clears the marks, and a hidden "N marked" status counts them; keys and the palette act on the marks in list order (M2, #0131)
+- Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`marks rows by the box, Shift+click and Cmd+click, counts them and clears them`), `clients/desktop/src/keymap/keymap.test.tsx` (`Ctrl+a marks every row, and Escape clears the marks before the selection`), `clients/desktop/src/app/reducer.test.ts` (the multi-select cases), `clients/desktop/src-tauri/src/commands.rs` (`an_unknown_row_fails_alone_and_the_rest_go_ahead`, `a_batch_stops_at_an_error_about_the_whole_batch`)
+- Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: the plain form rather than the plural address this row sketched: a reference to a row that is gone is skipped with a log line while the rest of the selection proceeds, which one call per row gives for free and a plural address would have to re-invent as a partial-failure shape. A plural address is worth taking the day a selection's round trips show up in a measurement.
+  The desktop keeps that shape: one Tauri command per account carries the row ids, the Rust layer sends one daemon call per row in order with `settle: false`, a `-32602` refusal fails its row alone, and an error about the whole batch stops it.
+  List windowing is off, so marking every row of a large mailbox mounts every row.
 
 ### MSG-07 Confirmation dialogs guarding destructive actions
 
 - Classification: GUI parity
 - Source anchor: the confirm variants in `clients/tui/src/app/types.rs`, covering approve, demote, archive, delete, send, send-approved, and signature deletion
 - Daemon surface: client-side, over the same methods
-- GUI location: clients/desktop (M2, #0131)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: archive and delete ask first in a dialog ("Archive this email?" with the sender and subject, "Delete 3 emails?" over marks), `y` or Enter confirms and `n` or Escape cancels (M2, #0131); the other confirmations arrive with the actions they guard (M3 and M4, #0131)
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`, `n cancels the confirmation and nothing is called`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`Archive asks first and archives on confirm`, `Delete asks first, and Cancel deletes nothing`)
+- Status: GUI shipped (M2, #0131) for archive and delete; the rest not started
+- Note: archive asks for confirmation in the desktop as the TUI does, since the daemon has no undo for it.
 
 ### MSG-08 Mark a message read on an explicit open
 
 - Classification: GUI parity
-- Source anchor: `mark_open_read` (`clients/tui/src/actions.rs:3339`), reached from the received-row branch of `Action::EditCurrent` and from `Action::MarkAsRead`, which `queue_mark_open_read` (defined at `clients/tui/src/app/mod.rs:1179`, pushed from `clients/tui/src/app/keys.rs:305`) queues on a focus move into the body pane
+- Source anchor: `mark_open_read` (`clients/tui/src/commands.rs:1445`), reached from the received-row branch of `Action::EditCurrent` and from `Action::MarkAsRead`, which `queue_mark_open_read` (defined at `clients/tui/src/app/mod.rs:1230`, pushed from `clients/tui/src/app/keys.rs:322` and `:336`) queues on a focus move into the body pane
 - Daemon surface: `message.set_read` carrying the opened `MessageRef` as `row_id`
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `clients/tui/src/commands.rs` unit tests, `src/tui_tests/actions.rs`
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: Enter on a row, a double-click on a row or a search hit, and Tab or Shift+Tab landing in the reader each mark an unread message read once; a cursor move or a single click marks nothing (M2, #0131)
+- Validation: `clients/tui/src/commands.rs` unit tests, `src/tui_tests/actions.rs`; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`moving the cursor marks nothing; Enter on an unread row marks it read once`, `Tab into the reader and a double-click open an unread row and mark it read`)
+- Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: #0110 retired the #0087 trigger that fired on every cursor move, so walking the list marks nothing and the GUI marks on the open rather than on selection; the action carries the `MessageRef` the open resolved, so a coalesced key batch marks the row that was opened.
 
 ### MSG-09 Optimistic local mutation state reconciled against the server
@@ -567,9 +574,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/pending_ops.rs`, `src/ops.rs`
 - Daemon surface: `state.event` carrying pending and reconciled states
-- GUI location: clients/desktop (M2, #0131)
-- Validation: unit tests in `src/pending_ops.rs`, `src/ops.rs`
-- Status: not started
+- GUI location: clients/desktop: every change applies at once and keeps one saved state per axis of the row (`clients/desktop/src/app/pending.ts`), a row in flight is `aria-busy` with a pending mark, and a refusal, a thrown command or a `mutations.rolled_back` puts the saved state back with a notice in the activity area (M2, #0131)
+- Validation: unit tests in `src/pending_ops.rs`, `src/ops.rs`; `clients/desktop/src/app/reducer.test.ts` (the "mutations and pending state" block), `clients/desktop/src/app/mutations.test.ts`, `clients/desktop/src/app/events.test.tsx` (`drops a list read that started before the archive and landed after it`, `brings rows back on a rollback and says so`)
+- Status: GUI shipped (M2, #0131) as a client-side model; the daemon publishes no per-row pending state
+- Note: a mutation publishes no event of its own, and `mutations.rolled_back` names a count per account and no row, so the desktop puts back every row of that account still pending and re-reads its lists.
+  A list generation per list, the TUI's `mailbox_load_generation`, drops a list read that started before a change, and every list answer is laid under the pending changes.
+  The daemon has no undo for archive, delete or move, so the rollback notice is the only undo surface.
+  Search hits streamed from the server are not laid under the pending changes.
 
 ## Drafts, composition, reply, and forward
 
@@ -790,13 +801,14 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `email.send_hold_secs` with a 20 second default, resolved daemon-side in `src/daemon/hold.rs`
 - Daemon surface: `send.hold_status`, `send.cancel_hold`, `hold: true` on `send.draft` / `send.approved`, and the countdown on `state.event` as `send.hold_started` / `send.hold_tick` / `send.hold_fired` / `send.hold_cancelled`
-- GUI location: clients/desktop (M2, #0131)
-- Validation: `src/tui_tests/hold.rs`, `tests/daemon_send_hold.rs`, `tests/phase5_undo_send_hold.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U1)
-- Status: routed (P6-U2); GUI not started
+- GUI location: clients/desktop: each hold is a card in the activity area, "Sending in N s" with the subject, the account, a progress bar and Cancel; `u` cancels the newest held send, as the TUI's does, and the palette has "Cancel the held send" (M2, #0131)
+- Validation: `src/tui_tests/hold.rs`, `tests/daemon_send_hold.rs`, `tests/phase5_undo_send_hold.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U1); `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (the "held sends" block), `clients/desktop/src/app/events.test.tsx` (`counts a hold down from its events and cancels it`), `clients/desktop/src/keymap/keymap.test.tsx` (`u cancels a held send while one counts down, and toggles read otherwise`), `clients/desktop/src-tauri/src/fixture.rs` (`a_simulated_hold_counts_down_and_fires`, `a_cancelled_hold_stops_and_cannot_be_cancelled_twice`)
+- Status: routed (P6-U2); GUI shipped (M2, #0131)
 - Note: the hold is the daemon's, and the TUI keeps only what it renders: the status line, the `u` key and the `App::hold` the events fill.
   `mp send` and `mp send-approved` bypass it by construction (`ANO-7`), because they pass no `hold` and the parameter defaults to off.
   The daemon owns the window: `hold` is a boolean and `email.send_hold_secs` is resolved daemon-side, so a caller that passes nothing bypasses the hold and `send_hold_secs = 0` fires at once with no countdown published.
   When the last client exits mid-hold the daemon cancels the hold and leaves the draft approved, which is what killing the TUI did before the move; a client that merely closed *its* window while another is connected cancels nothing, because a send is durable.
+  The desktop renders the holds any client armed, from the bootstrap's `holds` and the four `send.hold_*` events, with the seconds of the last tick; it arms none until M3 sends a draft.
 
 ### SND-05 Send a calendar invitation
 
@@ -912,9 +924,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/pending_ops.rs`, `src/ops.rs`
 - Daemon surface: `state.event` for queue depth and outcomes; the drains of a `sync.*` pass as `operation.progress`
-- GUI location: clients/desktop (M2, #0131)
-- Validation: unit tests in `src/pending_ops.rs`
-- Status: routed (P4-U10) for the sync tick's drains; GUI not started
+- GUI location: clients/desktop: the activity area reports each batch the daemon took or refused, a `mutations.rolled_back` as an alert in the TUI's words, and a failed or dropped sync; `ss` and `sS` start a quick or a full sync of the selected account (M2, #0131)
+- Validation: unit tests in `src/pending_ops.rs`; `clients/desktop/src/app/events.test.tsx` (`brings rows back on a rollback and says so`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (the "activity notices" block), `clients/desktop/src/keymap/keymap.test.tsx` (`ss and sS start a quick and a full sync of the selected account`), `clients/desktop/src-tauri/src/fixture.rs` (`a_burst_of_mutations_is_one_drain`, `a_rollback_restores_the_rows_and_says_how_many`)
+- Status: routed (P4-U10) for the sync tick's drains; GUI shipped (M2, #0131) for the outcomes, with no queue depth shown
 
 ### SYN-07 Store ingest, reconciliation, and drop-and-rebuild on an unreadable SQLite file
 
@@ -1441,7 +1453,7 @@ Four moved or were imprecise in the plan's inventory and are corrected here.
 - `MBX-04`: `clients/tui/src/app/keymap.rs:592` is a section comment; the `ga` binding is at line 591.
 - `ACC-11`: the `{{SIGNATURE}}` marker is not in `src/signatures.rs`; the splice and strip logic lives at `src/send.rs:185-268`, with the preview substitution at `clients/tui/src/ui/preview.rs:71`.
   `src/signatures.rs` holds the file and default lookup only.
-- `MSG-08`: `queue_mark_open_read` is defined at `clients/tui/src/app/mod.rs:1179`; `clients/tui/src/app/keys.rs` calls it (lines 305 and 319), which is what the inventory's wording describes.
+- `MSG-08`: `queue_mark_open_read` is defined at `clients/tui/src/app/mod.rs:1230`; `clients/tui/src/app/keys.rs` calls it (lines 322 and 336), which is what the inventory's wording describes.
 - `OBS-07`: there is no `[theme]` config section; `theme` is a top-level key (`src/config.rs:25`).
   `clients/tui/src/theme.rs` resolves.
 
@@ -1456,7 +1468,7 @@ Cross-reading `docs/baselines/pre-daemon/cli-help.txt` (every subcommand of ever
 Three key surfaces are only implicitly covered.
 
 - `Esc` in the MESSAGE context, which clears the selection and returns to the list, falls under `MSG-06` without being named there.
-  The GUI needs an equivalent escape.
+  The desktop's Escape clears the marks before the selection (M2).
 - Half-page `d/u` in the SERVER SEARCH and ACTIVITY LOG overlays sits outside `LST-02`, which names half-page scrolling for the list and body panes only.
 - `Tab` inside the SERVER SEARCH overlay switches focus between the result list and the query field, which is overlay-internal focus rather than the global pane cycling of `MBX-06`.
 

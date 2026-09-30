@@ -1,8 +1,15 @@
 # mailypoppins desktop client
 
 The macOS GUI of mailypoppins, a third client of the daemon beside the CLI and the TUI.
-It is built with Tauri 2, React 19, Vite, Tailwind 4 and shadcn on Base UI, and M1 is read-only: accounts, mailboxes, the message list, the reader, and local and server search.
-The plan is [docs/plans/native-gui.md](../../docs/plans/native-gui.md) and the ticket is [#0129](../../docs/tickets/0129-gui-shell-and-design-system.md).
+It is built with Tauri 2, React 19, Vite, Tailwind 4 and shadcn on Base UI.
+The plan is [docs/plans/native-gui.md](../../docs/plans/native-gui.md), and the tickets are [#0129](../../docs/tickets/0129-gui-shell-and-design-system.md) for M1 and [#0131](../../docs/tickets/0131-gui-full-parity.md) for M2 to M4.
+
+## What works
+
+- M1: accounts, mailboxes with counts and sync health, the message list, the sandboxed reader, and local and server search.
+- M2: archive, delete, move, flag and read, on one row or on marked rows, applied at once and put back on a refusal or a rollback, with the TUI's keys, palette entries, row toggles and a reader toolbar.
+- M2: the archive and delete confirmation, the move picker, mark read on an explicit open, quick and full sync, and the activity area with the send-hold countdown and Cancel.
+- Composing, the outbox view, calendar, contacts and settings come with M3 and M4.
 
 The Rust crate `mp-desktop` in `src-tauri/` has its own workspace and `Cargo.lock`, since the root workspace excludes `clients/desktop`.
 It links `mp-client`, `mp-protocol` and `mp-core` by path, never the root `mailypoppins` crate, and talks to the daemon only through `mp-client`, as `ClientKind::Gui`.
@@ -23,7 +30,7 @@ pnpm tauri dev                          # against the daemon, started with `mp d
 MP_DESKTOP_FIXTURE=1 pnpm tauri dev     # on the bundled fixtures, no daemon
 ```
 
-Fixture mode serves `fixtures/*.json`: 2 accounts, 6 mailboxes, 21 messages, 2 drafts and 3 HTML bodies, row 1006 being a hostile message.
+Fixture mode serves `fixtures/*.json`: 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies and 1 armed send hold, row 1006 being a hostile message.
 It is the way to iterate on the screens without a mail server.
 
 ## Test and build
@@ -58,6 +65,6 @@ The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, 
 ## Documentation
 
 - [docs/rust-layer.md](docs/rust-layer.md): the Tauri commands, the generated TypeScript types, the event stream, the reader scheme, links, the app CSP and fixture mode.
-- [docs/shell.md](docs/shell.md): the frontend modules, the model, the layouts, focus order and keys.
+- [docs/shell.md](docs/shell.md): the frontend modules, the model, mutations and pending state, the dialogs and the activity area, the layouts, focus order and keys.
 - [docs/reader.md](docs/reader.md): the reader frame, refused links, and the navigation guard's verification with its manual steps.
 - [docs/design-tokens.md](docs/design-tokens.md): the semantic tokens and their contrast table.

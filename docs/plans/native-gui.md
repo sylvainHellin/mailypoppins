@@ -9,6 +9,7 @@ The GUI itself is open, as tickets #0129 to #0132.
 M0, the risk spike (#0128), closed on 2026-09-30 with its numbers in [gui-spike-m0.md](../baselines/gui-spike-m0.md).
 M1, the read-only shell (#0129), landed on the `gui-m1` branch on 2026-09-30 as `clients/desktop/`.
 #0129 stays open for the live launchd check carried from #0128.
+M2, mutations with the undo hold (#0131), landed on the `gui-m2` branch on 2026-09-30; #0131 stays open for M3 and M4.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -286,7 +287,7 @@ What landed:
 
 What is open:
 
-- The live launchd check carried from #0128 is not taken.
+- The live launchd check carried from #0128 is half taken: the log-out and log-in half is pinned for the owner in the #0129 ticket.
 - The three guard cases that need a real click inside the frame were verified by hand on 2026-09-30 (`clients/desktop/docs/reader.md`) and are repeated after any change to the reader's guards.
 - `mp dump-keys --json` carries no action ids, so the palette matches keymap rows by their description; an `id` per row in the dump would replace that match.
 - App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
@@ -298,6 +299,28 @@ What is open:
 
 - Archive, delete, move, read, unread and flag, single and batch, with pending-operation feedback and the rollback event.
 - The undo-send countdown and its cancellation, for holds any client armed.
+
+M2 landed on the `gui-m2` branch on 2026-09-30, in the commits after `a127ce3a`, each tagged `(#0131)`.
+It closes `MSG-01` to `MSG-09`, `SND-04`, `SYN-06` and the archive half of `LST-09`.
+What landed:
+
+- Tauri commands for archive, delete, move, flag, read, draft discard, the hold status, the hold cancel and a quick or full sync; each message and draft command takes a batch, sends one daemon call per row with `settle: false`, fails a row alone on a `-32602` refusal and stops on an error about the whole batch.
+- Fixture handlers with a mutation journal, the drain after 1.5 s of quiet, the `rollback`, `rollback:<n>` and `hold` simulations, and a seeded 60 s hold.
+- A frontend model of unconfirmed changes, one saved state per axis of a row, with a list generation guard, the pending overlay on every list answer, marks, holds, syncs and activity notices capped at 20.
+- The TUI's keys `a`, `d`, `u`, `*`, `M`, `v`, `Ctrl+a`, `ss` and `sS`, Escape for the marks, the desktop's `X` for a notice, and a palette entry for each action.
+- The archive and delete confirmation, which mirrors the TUI's, the move picker, row controls, the "N marked" count and the reader toolbar.
+- The activity area with live regions, and the send-hold countdown with Cancel; `u` cancels a live hold, as in the TUI.
+- Mark read on an explicit open: Enter, a double-click, or Tab into the reader.
+- 168 vitest tests and 78 Rust tests, plus two ignored: the live-daemon test and the ts-rs export `pnpm gen:types` runs.
+
+What is open:
+
+- There is no undo for archive, delete or move, since the daemon has none; the rollback notice is the only undo surface.
+- App keys still stop at the cross-origin reader frame, and list windowing is still off.
+- The outbox view and a mutation queue depth wait for M3.
+- Fetching a server-only search hit needs a `message.fetch` command, which waits for M3.
+- Search hits streamed from the server are not laid under the pending changes.
+- A row moved into a mailbox the window shows appears there only after the drain.
 
 ### M3: compose through the external editor (#0131)
 
