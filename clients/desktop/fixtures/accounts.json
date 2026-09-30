@@ -1,0 +1,6 @@
+{
+  "accounts": [
+    {"name": "work", "default": true, "backend": "imap", "state": "ready"},
+    {"name": "home", "default": false, "backend": "graph", "state": "ready"}
+  ]
+}

@@ -1,0 +1,521 @@
+{
+ "work": {
+  "inbox": [
+   {
+    "id": 1001,
+    "uid": 1,
+    "message_id": "<quarterly-ledger-review-1001@fixture.example>",
+    "from": "Ivana Petrova <ivana@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Quarterly ledger review",
+    "date_sort": "2026-09-29T09:12:00",
+    "date_display": "Tue, 29 Sep 2026 09:12:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": true,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": true,
+    "is_invite": false,
+    "selector": "mp://work/inbox/quarterly-ledger-review-1001@fixture.example",
+    "body": "Hi,\n\nthe quarterly ledger is attached. Can we go through it on Thursday?\n\nIvana\n",
+    "attachments": [
+     {
+      "name": "ledger-q3.pdf",
+      "size": 184223
+     }
+    ]
+   },
+   {
+    "id": 1002,
+    "uid": 2,
+    "message_id": "<angebot-dachsanierung-1002@fixture.example>",
+    "from": "Robin Keller <robin@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Angebot Dachsanierung",
+    "date_sort": "2026-09-29T07:40:00",
+    "date_display": "Tue, 29 Sep 2026 07:40:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/inbox/angebot-dachsanierung-1002@fixture.example",
+    "body": "Guten Morgen,\n\nanbei unser Angebot fuer die Dachsanierung.\n\nGruesse\nRobin\n",
+    "attachments": []
+   },
+   {
+    "id": 1003,
+    "uid": 3,
+    "message_id": "<this-week-in-type-variab-1003@fixture.example>",
+    "from": "Design Weekly <news@designweekly.example>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "This week in type: variable fonts",
+    "date_sort": "2026-09-28T16:05:00",
+    "date_display": "Mon, 28 Sep 2026 16:05:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/inbox/this-week-in-type-variab-1003@fixture.example",
+    "body": "This week in type. Read online.\n",
+    "attachments": []
+   },
+   {
+    "id": 1004,
+    "uid": 4,
+    "message_id": "<planned-power-outage-fri-1004@fixture.example>",
+    "from": "Facilities <facilities@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Planned power outage Friday",
+    "date_sort": "2026-09-28T11:30:00",
+    "date_display": "Mon, 28 Sep 2026 11:30:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": true
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/inbox/planned-power-outage-fri-1004@fixture.example",
+    "body": "Power will be off on Friday 08:00-10:00 in building B.\n",
+    "attachments": []
+   },
+   {
+    "id": 1005,
+    "uid": 5,
+    "message_id": "<re-bim-model-handover-1005@fixture.example>",
+    "from": "Chen Wei <chen@example.org>",
+    "to": "me@example.com",
+    "cc": "team@example.com",
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Re: BIM model handover",
+    "date_sort": "2026-09-27T18:22:00",
+    "date_display": "Sun, 27 Sep 2026 18:22:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": true,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": true,
+    "is_invite": false,
+    "selector": "mp://work/inbox/re-bim-model-handover-1005@fixture.example",
+    "body": "Thanks, the IFC export opens fine now.\n",
+    "attachments": [
+     {
+      "name": "handover.ifc",
+      "size": 5234112
+     }
+    ]
+   },
+   {
+    "id": 1006,
+    "uid": 6,
+    "message_id": "<action-required-verify-y-1006@fixture.example>",
+    "from": "Security Team <security@example.net>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Action required: verify your account",
+    "date_sort": "2026-09-27T08:01:00",
+    "date_display": "Sun, 27 Sep 2026 08:01:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/inbox/action-required-verify-y-1006@fixture.example",
+    "body": "Please verify your account by clicking the link.\n",
+    "attachments": []
+   },
+   {
+    "id": 1007,
+    "uid": 7,
+    "message_id": "<team-offsite-in-october-1007@fixture.example>",
+    "from": "Marta Silva <marta@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Team offsite in October",
+    "date_sort": "2026-09-26T13:15:00",
+    "date_display": "Sat, 26 Sep 2026 13:15:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/inbox/team-offsite-in-october-1007@fixture.example",
+    "body": "Proposed dates for the offsite are 14-15 October.\n",
+    "attachments": []
+   },
+   {
+    "id": 1008,
+    "uid": 8,
+    "message_id": "<invitation-steering-comm-1008@fixture.example>",
+    "from": "Calendar <calendar@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Invitation: Steering committee",
+    "date_sort": "2026-09-25T10:00:00",
+    "date_display": "Fri, 25 Sep 2026 10:00:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": true,
+    "is_invite": true,
+    "selector": "mp://work/inbox/invitation-steering-comm-1008@fixture.example",
+    "body": "You have been invited to the steering committee.\n",
+    "attachments": [
+     {
+      "name": "invite.ics",
+      "size": 1822
+     }
+    ]
+   }
+  ],
+  "sent": [
+   {
+    "id": 1009,
+    "uid": 1,
+    "message_id": "<re-quarterly-ledger-revi-1009@fixture.example>",
+    "from": "Me <me@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Re: Quarterly ledger review",
+    "date_sort": "2026-09-29T09:40:00",
+    "date_display": "Tue, 29 Sep 2026 09:40:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/sent/re-quarterly-ledger-revi-1009@fixture.example",
+    "body": "Thursday 10:00 works for me.\n",
+    "attachments": []
+   },
+   {
+    "id": 1011,
+    "uid": 3,
+    "message_id": "<re-bim-model-handover-1011@fixture.example>",
+    "from": "Me <me@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Re: BIM model handover",
+    "date_sort": "2026-09-27T17:10:00",
+    "date_display": "Sun, 27 Sep 2026 17:10:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/sent/re-bim-model-handover-1011@fixture.example",
+    "body": "Here is the corrected export.\n",
+    "attachments": []
+   },
+   {
+    "id": 1010,
+    "uid": 2,
+    "message_id": "<draft-agenda-for-the-off-1010@fixture.example>",
+    "from": "Me <me@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Draft agenda for the offsite",
+    "date_sort": "2026-09-26T15:02:00",
+    "date_display": "Sat, 26 Sep 2026 15:02:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": true,
+    "is_invite": false,
+    "selector": "mp://work/sent/draft-agenda-for-the-off-1010@fixture.example",
+    "body": "Agenda draft attached.\n",
+    "attachments": [
+     {
+      "name": "agenda.docx",
+      "size": 23011
+     }
+    ]
+   }
+  ],
+  "archive": [
+   {
+    "id": 1012,
+    "uid": 1,
+    "message_id": "<ledger-template-1012@fixture.example>",
+    "from": "Ivana Petrova <ivana@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Ledger template",
+    "date_sort": "2026-08-12T09:00:00",
+    "date_display": "Wed, 12 Aug 2026 09:00:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/archive/ledger-template-1012@fixture.example",
+    "body": "Template for next quarter.\n",
+    "attachments": []
+   },
+   {
+    "id": 1013,
+    "uid": 2,
+    "message_id": "<kick-off-notes-1013@fixture.example>",
+    "from": "Robin Keller <robin@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Kick-off notes",
+    "date_sort": "2026-07-30T14:45:00",
+    "date_display": "Thu, 30 Jul 2026 14:45:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": true,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/archive/kick-off-notes-1013@fixture.example",
+    "body": "Notes from the kick-off meeting.\n",
+    "attachments": []
+   },
+   {
+    "id": 1014,
+    "uid": 3,
+    "message_id": "<holiday-calendar-2027-1014@fixture.example>",
+    "from": "HR <hr@example.com>",
+    "to": "me@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Holiday calendar 2027",
+    "date_sort": "2026-07-01T08:00:00",
+    "date_display": "Wed, 1 Jul 2026 08:00:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/archive/holiday-calendar-2027-1014@fixture.example",
+    "body": "The 2027 holiday calendar is published.\n",
+    "attachments": []
+   }
+  ]
+ },
+ "home": {
+  "inbox": [
+   {
+    "id": 1015,
+    "uid": 1,
+    "message_id": "<dinner-on-saturday-1015@fixture.example>",
+    "from": "Anna <anna@example.net>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Dinner on Saturday?",
+    "date_sort": "2026-09-29T19:30:00",
+    "date_display": "Tue, 29 Sep 2026 19:30:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://home/inbox/dinner-on-saturday-1015@fixture.example",
+    "body": "Are you free for dinner on Saturday?\n",
+    "attachments": []
+   },
+   {
+    "id": 1016,
+    "uid": 2,
+    "message_id": "<your-september-statement-1016@fixture.example>",
+    "from": "Bank <no-reply@bank.example>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Your September statement",
+    "date_sort": "2026-09-28T06:00:00",
+    "date_display": "Mon, 28 Sep 2026 06:00:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": true,
+    "is_invite": false,
+    "selector": "mp://home/inbox/your-september-statement-1016@fixture.example",
+    "body": "Your statement is ready.\n",
+    "attachments": [
+     {
+      "name": "statement-2026-09.pdf",
+      "size": 90211
+     }
+    ]
+   },
+   {
+    "id": 1017,
+    "uid": 3,
+    "message_id": "<your-parcel-is-on-its-wa-1017@fixture.example>",
+    "from": "Parcel Service <track@parcel.example>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Your parcel is on its way",
+    "date_sort": "2026-09-27T12:12:00",
+    "date_display": "Sun, 27 Sep 2026 12:12:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://home/inbox/your-parcel-is-on-its-wa-1017@fixture.example",
+    "body": "Track your parcel online.\n",
+    "attachments": []
+   },
+   {
+    "id": 1018,
+    "uid": 4,
+    "message_id": "<heating-maintenance-1018@fixture.example>",
+    "from": "Landlord <landlord@example.org>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Heating maintenance",
+    "date_sort": "2026-09-24T09:05:00",
+    "date_display": "Thu, 24 Sep 2026 09:05:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": true
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://home/inbox/heating-maintenance-1018@fixture.example",
+    "body": "The heating will be serviced next week.\n",
+    "attachments": []
+   }
+  ],
+  "newsletters": [
+   {
+    "id": 1019,
+    "uid": 1,
+    "message_id": "<autumn-ride-schedule-1019@fixture.example>",
+    "from": "Cycling Club <club@cycling.example>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Autumn ride schedule",
+    "date_sort": "2026-09-26T07:00:00",
+    "date_display": "Sat, 26 Sep 2026 07:00:00 +0200",
+    "flags": {
+     "seen": false,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://home/newsletters/autumn-ride-schedule-1019@fixture.example",
+    "body": "The autumn ride schedule is out.\n",
+    "attachments": []
+   },
+   {
+    "id": 1020,
+    "uid": 2,
+    "message_id": "<new-arrivals-1020@fixture.example>",
+    "from": "Bookshop <hello@books.example>",
+    "to": "me@home.example",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "New arrivals",
+    "date_sort": "2026-09-20T10:00:00",
+    "date_display": "Sun, 20 Sep 2026 10:00:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://home/newsletters/new-arrivals-1020@fixture.example",
+    "body": "New arrivals this week.\n",
+    "attachments": []
+   }
+  ]
+ }
+}

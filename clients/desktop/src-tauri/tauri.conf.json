@@ -10,17 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "mailypoppins",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 480,
-        "minHeight": 400
-      }
-    ],
+    "windows": [],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-src mpmsg: http://mpmsg.localhost https: http:; connect-src ipc: http://ipc.localhost",
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {

@@ -1,0 +1,53 @@
+{
+  "instance_id": "fixture-instance-1",
+  "revision": 100,
+  "capabilities": [
+    "state.bootstrap",
+    "account.list",
+    "mailbox.list",
+    "message.list",
+    "message.get",
+    "message.html",
+    "message.search",
+    "message.search_server",
+    "message.materialise_html",
+    "message.release_handle",
+    "draft.list",
+    "operation.status",
+    "operation.cancel"
+  ],
+  "snapshot": {
+    "accounts": [
+      {"name": "work", "state": "ready", "sync_health": {"state": "ok"}},
+      {"name": "home", "state": "ready", "sync_health": {"state": "failed"}}
+    ],
+    "mailboxes": {
+      "work": [
+        {"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0},
+        {"role": "drafts", "slug": "drafts", "label": "Drafts", "total": 0, "unread": 0, "badge": 0},
+        {"role": "sent", "slug": "sent", "label": "Sent", "total": 0, "unread": 0, "badge": 0},
+        {"role": "archive", "slug": "archive", "label": "Archive", "total": 0, "unread": 0, "badge": 0}
+      ],
+      "home": [
+        {"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0},
+        {"role": "other", "slug": "newsletters", "label": "Newsletters", "total": 0, "unread": 0, "badge": 0}
+      ]
+    },
+    "drafts": {
+      "work": [
+        {"id": "angebot-antwort", "path": "/fixture/work/drafts/angebot-antwort.md", "to": "robin@example.com", "subject": "Re: Angebot Dachsanierung", "status": "draft", "valid": true, "ready": true},
+        {"id": "offsite-note", "path": "/fixture/work/drafts/offsite-note.md", "to": null, "subject": "", "status": "draft", "valid": true, "ready": false}
+      ],
+      "home": []
+    },
+    "outbox": {
+      "work": {"queued": 0, "failed": 0},
+      "home": {"queued": 1, "failed": 0}
+    },
+    "holds": [],
+    "operations": [],
+    "diagnostics": [
+      {"name": "account:home", "status": "warn", "detail": "The last sync of home failed: the server refused the login."}
+    ]
+  }
+}

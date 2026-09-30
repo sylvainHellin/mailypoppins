@@ -1,14 +1,159 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+//! The mailypoppins desktop client's Rust layer (#0129).
+//!
+//! A third daemon client beside the CLI and the TUI: it links the client
+//! crates only (`mp-client`, `mp-protocol`, `mp-core`), never the root
+//! `mailypoppins` crate, and never falls back to the store when the daemon is
+//! away. See `clients/desktop/docs/rust-layer.md` for the command surface.
+//!
+//! - [`paths`]: the data, runtime and log locations, as the binary derives them.
+//! - [`connector`]: reaching the daemon, starting it on demand, typed failure.
+//! - [`session`]: the one session, the ordered event pump, re-bootstrap.
+//! - [`commands`]: the narrow Tauri commands.
+//! - [`reader`]: the `mpmsg` scheme serving `message.html`.
+//! - [`navigation`]: the webview's navigation allowlist and intercept log.
+//! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
+
+pub mod commands;
+pub mod connector;
+pub mod error;
+pub mod fixture;
+pub mod logging;
+pub mod navigation;
+pub mod paths;
+pub mod reader;
+pub mod session;
+
+use tauri::webview::NewWindowResponse;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+use crate::navigation::{intercepted, navigation_allowed, InterceptLog};
+use crate::session::{GuiEvent, InterceptSource, SessionHandle};
+
+/// `MP_DESKTOP_FIXTURE=1` or `--fixture`: serve the fixtures, no daemon.
+pub const FIXTURE_ENV: &str = "MP_DESKTOP_FIXTURE";
+
+/// How long the scheme handler waits for a session still connecting.
+const READER_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn fixture_requested() -> bool {
+    let env = std::env::var(FIXTURE_ENV)
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no"))
+        .unwrap_or(false);
+    env || std::env::args().any(|a| a == "--fixture")
+}
+
+/// A refused URL: log it, and tell the frontend.
+fn refuse(app: &tauri::AppHandle, url: &tauri::Url, source: InterceptSource) {
+    let entry = intercepted(&app.state::<InterceptLog>(), url, source);
+    app.state::<SessionHandle>()
+        .emit(GuiEvent::LinkIntercepted { url: entry });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let paths = paths::Paths::resolve();
+    logging::init(&paths);
+    let fixture = fixture_requested();
+    tracing::info!(
+        "[app] mp-desktop {} starting{}; data dir {}",
+        env!("CARGO_PKG_VERSION"),
+        if fixture { " in fixture mode" } else { "" },
+        paths.data_dir.display()
+    );
+    let session = SessionHandle::new(fixture);
+    let setup_session = session.clone();
+
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .manage(session)
+        .manage(InterceptLog::default())
+        .register_asynchronous_uri_scheme_protocol("mpmsg", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let method = request.method().as_str().to_string();
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn_blocking(move || {
+                let door = app.state::<SessionHandle>().door(READER_CONNECT_WAIT);
+                responder.respond(reader::respond(&method, &path, door));
+            });
+        })
+        .setup(move |app| {
+            setup_session.start();
+            let dev_origin = if cfg!(debug_assertions) {
+                app.config().build.dev_url.clone()
+            } else {
+                None
+            };
+            let nav_app = app.handle().clone();
+            let win_app = app.handle().clone();
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("mailypoppins")
+                .inner_size(1400.0, 900.0)
+                .min_inner_size(480.0, 400.0)
+                .on_navigation(move |url| {
+                    let allowed = navigation_allowed(url, dev_origin.as_ref());
+                    if !allowed {
+                        refuse(&nav_app, url, InterceptSource::Navigation);
+                    }
+                    allowed
+                })
+                .on_new_window(move |url, _features| {
+                    refuse(&win_app, &url, InterceptSource::NewWindow);
+                    NewWindowResponse::Deny
+                })
+                .build()?;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::subscribe_events,
+            commands::connection_status,
+            commands::retry_connect,
+            commands::bootstrap,
+            commands::list_accounts,
+            commands::list_mailboxes,
+            commands::list_messages,
+            commands::message_text,
+            commands::message_html_meta,
+            commands::search_local,
+            commands::search_server_start,
+            commands::search_server_cancel,
+            commands::restart_daemon,
+            commands::intercepted_urls,
+            commands::open_external,
+            commands::version_info,
+            commands::fixture_simulate,
+        ])
+        .run(tauri::generate_context!());
+    if let Err(e) = result {
+        tracing::error!("[app] the application failed: {e}");
+        eprintln!("mp-desktop: {e}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV: Mutex<()> = Mutex::new(());
+    static SCRATCH: AtomicU32 = AtomicU32::new(0);
+
+    /// Serialises the tests that touch the process environment.
+    pub fn env_lock() -> MutexGuard<'static, ()> {
+        match ENV.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// A fresh directory under the temp dir, unique to this process and call.
+    pub fn scratch_dir(tag: &str) -> PathBuf {
+        let n = SCRATCH.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mp-desktop-test-{}-{tag}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
 }
