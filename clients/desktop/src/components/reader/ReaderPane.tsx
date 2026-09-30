@@ -2,6 +2,7 @@ import { FileText } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ReaderBody } from "@/components/reader/ReaderBody";
 import { ReaderHeader } from "@/components/reader/ReaderHeader";
+import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
 import { READER_SCROLL_ID } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
@@ -65,6 +66,7 @@ export function ReaderPane() {
           </p>
         ) : ready && s.reader.meta ? (
           <article aria-label={s.reader.meta.subject ?? "Message"} className="flex flex-1 flex-col">
+            <ReaderToolbar meta={s.reader.meta} />
             <ReaderHeader meta={s.reader.meta} />
             <ReaderBody htmlUrl={s.reader.meta.html_url} subject={s.reader.meta.subject} />
           </article>

@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import { windowFor, WINDOW_FROM } from "@/components/list/useWindow";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
@@ -67,5 +67,52 @@ describe("accessibility primitives", () => {
     renderApp();
     await shellReady();
     expect(screen.getByRole("button", { name: /^Inbox, 4 unread of 8/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("names the row controls, keeps them out of the tab order, and says which rows are marked", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    expect(screen.getByRole("listbox", { name: "Inbox messages" })).toHaveAttribute("aria-multiselectable", "true");
+    for (const o of screen.getAllByRole("option")) {
+      const mark = within(o).getByRole("checkbox", { name: "Mark" });
+      const unread = within(o).getByRole("button", { name: "Unread" });
+      const flag = within(o).getByRole("button", { name: "Flagged" });
+      expect(mark).toHaveAttribute("aria-checked", "false");
+      expect(unread).toHaveAttribute("aria-pressed");
+      expect(flag).toHaveAttribute("aria-pressed");
+      for (const c of [mark, unread, flag]) expect(c).toHaveAttribute("tabindex", "-1");
+    }
+    await user.keyboard("j");
+    const cursor = screen.getAllByRole("option")[0];
+    expect(cursor).toHaveAttribute("aria-selected", "true");
+    // With marks, aria-selected names the marks and the cursor is the focus.
+    await user.keyboard("jv");
+    const options = screen.getAllByRole("option");
+    expect(options.filter((o) => o.getAttribute("aria-selected") === "true")).toEqual([options[1]]);
+    expect(options[1]).toHaveAccessibleName(/marked/);
+    expect(options.filter((o) => o.getAttribute("tabindex") === "0")).toEqual([options[2]]);
+  });
+
+  it("gives the reader toolbar, the confirmation and the activity area their roles and names", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    const toolbar = await within(reader).findByRole("toolbar", { name: "Message actions" });
+    for (const name of ["Archive", "Delete", "Move", "Flag", "Mark unread"]) {
+      expect(within(toolbar).getByRole("button", { name })).toBeInTheDocument();
+    }
+
+    const activity = screen.getByRole("region", { name: "Activity" });
+    const hold = within(activity).getByRole("group", { name: /^Held send: / });
+    expect(within(hold).getByRole("progressbar", { name: "Time left before the send" })).toHaveAttribute(
+      "aria-valuetext",
+      "60 seconds left",
+    );
+    expect(within(hold).getByRole("button", { name: "Cancel send" })).toBeEnabled();
+
+    await user.keyboard("d");
+    const dialog = await screen.findByRole("dialog", { name: "Delete this email?" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete" })).toHaveFocus());
   });
 });
