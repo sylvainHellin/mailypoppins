@@ -228,6 +228,8 @@ struct State {
     signatures: Value,
     /// Every stubbed `editor_open`, oldest first.
     editor_opens: Vec<EditorOpen>,
+    /// Every file the system opener was asked to open, oldest first.
+    opened: Vec<String>,
     next_draft: u64,
     html: BTreeMap<i64, String>,
     instance: u32,
@@ -718,6 +720,134 @@ impl State {
         self.signatures["signatures"][name]
             .as_str()
             .map(str::to_string)
+    }
+
+    /// `message.materialise_attachment` or `message.materialise_html`: the
+    /// part (a small file naming it) or the rendition, written under
+    /// `<root>/handles/<handle>/`, as the daemon writes under its runtime
+    /// directory. A message with no HTML part is `-32602`.
+    fn materialise(&mut self, method: &str, params: &Value) -> Result<Value> {
+        let account = param_str(method, params, "account")?.to_string();
+        let row_id = param_row_id(method, params)?;
+        let (_, row) = self
+            .row(&account, row_id)
+            .ok_or_else(|| refused(method, -32602, &format!("no message has row_id {row_id}")))?;
+        let (name, bytes) = if method == "message.materialise_html" {
+            let body = self
+                .html
+                .get(&row_id)
+                .ok_or_else(|| refused(method, -32602, "the message has no HTML part"))?;
+            ("message.html".to_string(), rendition(body).into_bytes())
+        } else {
+            let part = params["part"]
+                .as_u64()
+                .ok_or_else(|| refused(method, -32602, "part is a zero-based attachment index"))?
+                as usize;
+            let parts = row["attachments"].as_array().cloned().unwrap_or_default();
+            let entry = parts.get(part).ok_or_else(|| {
+                refused(
+                    method,
+                    -32602,
+                    &format!(
+                        "row {row_id} has {} attachments, no part {part}",
+                        parts.len()
+                    ),
+                )
+            })?;
+            let name = entry["name"].as_str().unwrap_or("part").to_string();
+            let bytes = format!("fixture attachment {name}\n").into_bytes();
+            (name, bytes)
+        };
+        let handle = self.next_operation_id("fixture-handle");
+        let dir = self.root.join("handles").join(&handle);
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join(&name);
+        fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+        Ok(json!({
+            "handle": handle, "path": path.display().to_string(), "name": name,
+            "bytes": bytes.len(), "expires_at": rfc3339_in(Duration::from_secs(600)),
+        }))
+    }
+
+    /// `message.fetch`: a message the store holds answers `already_present`;
+    /// the fixture's one server-only message is ingested into the mailbox
+    /// the hit named (by label or slug), which owes that mailbox's counts an
+    /// invalidation; anything else is not on the server, and the operation
+    /// fails. The operation is registered as running; the caller settles it.
+    fn fetch(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(String, std::result::Result<Value, String>, Option<String>)> {
+        only(method, params, &["account", "mailbox", "message_id"])?;
+        let account = param_str(method, params, "account")?.to_string();
+        let mailbox = param_str(method, params, "mailbox")?.to_string();
+        let message_id = param_str(method, params, "message_id")?.to_string();
+        self.account_known(method, &account)?;
+        let slug = self
+            .mailbox_rows(&account)
+            .into_iter()
+            .find(|m| {
+                m["label"]
+                    .as_str()
+                    .is_some_and(|l| l.eq_ignore_ascii_case(&mailbox))
+                    || m["slug"]
+                        .as_str()
+                        .is_some_and(|l| l.eq_ignore_ascii_case(&mailbox))
+            })
+            .and_then(|m| m["slug"].as_str().map(str::to_string))
+            .filter(|slug| slug != "drafts")
+            .ok_or_else(|| refused(method, -32602, &format!("no mailbox `{mailbox}`")))?;
+        let id = self.next_operation_id("fixture-op");
+        self.operations.insert(
+            id.clone(),
+            json!({
+                "operation_id": id, "method": method, "state": "running",
+                "scope": "durable", "progress": null, "result": null, "error": null
+            }),
+        );
+        let held = self.messages.get(&account).and_then(|boxes| {
+            boxes.iter().find_map(|(slug, rows)| {
+                rows.iter()
+                    .find(|r| r["message_id"] == message_id.as_str())
+                    .map(|r| (slug.clone(), r.clone()))
+            })
+        });
+        if let Some((slug, row)) = held {
+            let result = json!({
+                "account": account, "mailbox": slug, "uid": row["uid"], "row_id": row["id"],
+                "selector": row["selector"], "already_present": true,
+            });
+            return Ok((id, Ok(result), None));
+        }
+        let hit = server_only_hit(&account, "");
+        if hit["message_id"] != message_id.as_str() {
+            let why = format!("no message {message_id} in {mailbox} on the server");
+            return Ok((id, Err(why), None));
+        }
+        let row_id = self.next_row;
+        self.next_row += 1;
+        let bare = message_id.trim_start_matches('<').trim_end_matches('>');
+        let selector = format!("mp://{account}/{slug}/{bare}");
+        let row = json!({
+            "id": row_id, "uid": row_id, "message_id": message_id,
+            "from": hit["from"], "to": hit["to"], "cc": null, "reply_to": null, "bcc": null,
+            "subject": "Server-only match",
+            "date_sort": hit["date_sort"], "date_display": hit["date_display"],
+            "flags": hit["flags"], "has_attachments": false, "is_invite": false,
+            "selector": selector, "body": hit["body_text"], "attachments": []
+        });
+        self.messages
+            .entry(account.clone())
+            .or_default()
+            .entry(slug.clone())
+            .or_default()
+            .insert(0, row);
+        let result = json!({
+            "account": account, "mailbox": slug, "uid": row_id, "row_id": row_id,
+            "selector": selector, "already_present": false,
+        });
+        Ok((id, Ok(result), Some(format!("mailbox:{account}/{slug}"))))
     }
 
     /// The received message `source` addresses, as a reply or a forward reads
@@ -1573,6 +1703,7 @@ impl Fixture {
             root,
             signatures,
             editor_opens: Vec::new(),
+            opened: Vec::new(),
             next_draft: 0,
             html,
             instance: 1,
@@ -1804,6 +1935,40 @@ impl Fixture {
                 };
                 let html = rendition(body);
                 Ok(json!({"account": account, "row_id": row_id, "bytes": html.len(), "html": html}))
+            }
+            "message.materialise_attachment" | "message.materialise_html" => {
+                s.materialise(method, &params)
+            }
+            "message.release_handle" => {
+                let handle = param_str(method, &params, "handle")?;
+                if handle.is_empty()
+                    || !handle
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "handle is opaque and drawn from [A-Za-z0-9_-]",
+                    ));
+                }
+                let _ = fs::remove_dir_all(s.root.join("handles").join(handle));
+                Ok(json!({}))
+            }
+            "message.fetch" => {
+                let (id, end, invalidate) = s.fetch(method, &params)?;
+                drop(s);
+                match end {
+                    Ok(result) => self.settle(&id, "succeeded", Some(result)),
+                    Err(message) => self.settle_failed(&id, &message),
+                }
+                if let Some(resource) = invalidate {
+                    self.emit(
+                        "state.invalidate",
+                        json!({"resource": resource, "scope": {"query": "counts"}}),
+                    );
+                }
+                Ok(json!({"operation_id": id}))
             }
             "message.search" => {
                 let account = param_str(method, &params, "account")?;
@@ -2426,6 +2591,21 @@ impl Fixture {
         self.emit("operation.finished", payload);
     }
 
+    /// End the running operation `id` as `failed`, with `message` as its error.
+    fn settle_failed(&self, id: &str, message: &str) {
+        let payload = {
+            let mut s = self.state();
+            let Some(op) = s.operations.get_mut(id) else {
+                return;
+            };
+            let error = json!({"code": -32603, "message": message});
+            op["state"] = json!("failed");
+            op["error"] = error.clone();
+            json!({"operation_id": id, "state": "failed", "error": error})
+        };
+        self.emit("operation.finished", payload);
+    }
+
     /// Drive one connection state; see [`SIMULATIONS`]. `rollback:<n>`
     /// reverts only the last `n` mutations.
     pub fn simulate(self: &Arc<Self>, what: &str) -> Result<()> {
@@ -2603,6 +2783,21 @@ impl Fixture {
     /// Every stubbed `editor_open`, oldest first.
     pub fn editor_opens(&self) -> Vec<EditorOpen> {
         self.state().editor_opens.clone()
+    }
+
+    /// Journal a file the system opener would have opened.
+    pub fn record_open(&self, path: &str) {
+        self.state().opened.push(path.to_string());
+    }
+
+    /// Every stubbed open of a file, oldest first.
+    pub fn opened(&self) -> Vec<String> {
+        self.state().opened.clone()
+    }
+
+    /// The per-run directory the fixture writes its files under.
+    pub fn root(&self) -> PathBuf {
+        self.state().root.clone()
     }
 
     /// A client wrote the draft file at `path` (a recipient rewrite): publish

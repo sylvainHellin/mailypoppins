@@ -10,11 +10,13 @@
 //! - [`session`]: the one session, the ordered event pump, re-bootstrap.
 //! - [`commands`]: the narrow Tauri commands.
 //! - [`editor`]: the external editor a draft is opened in.
+//! - [`attachments`]: attachments, a draft's list, the browser rendition.
 //! - [`reader`]: the `mpmsg` scheme serving `message.html`.
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
 //! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
 
+pub mod attachments;
 pub mod commands;
 pub mod connector;
 pub mod editor;
@@ -172,6 +174,15 @@ pub fn run() {
             commands::outbox_list,
             commands::outbox_retry,
             commands::outbox_discard,
+            commands::message_fetch,
+            attachments::attachment_open,
+            attachments::attachment_save,
+            attachments::html_open,
+            attachments::hit_html_open,
+            attachments::draft_attachments,
+            attachments::draft_attach,
+            attachments::draft_attachment_remove,
+            attachments::draft_attachment_open,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

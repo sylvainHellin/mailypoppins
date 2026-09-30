@@ -53,11 +53,15 @@ const HOLD_BUDGET: Duration = Duration::from_secs(5);
 const DRAFT_BUDGET: Duration = Duration::from_secs(20);
 /// A draft query, or one status line rewritten.
 const DRAFT_QUERY_BUDGET: Duration = Duration::from_secs(10);
+/// A fetch of one server-only message: a login, a SELECT and one FETCH.
+const FETCH_BUDGET: Duration = Duration::from_secs(90);
+/// How often a running fetch's `operation.status` is read.
+const FETCH_POLL: Duration = Duration::from_millis(100);
 
 /// `MP_DESKTOP_STUB_OPENER=1`: `open_external` records instead of opening.
 pub const STUB_OPENER_ENV: &str = "MP_DESKTOP_STUB_OPENER";
 
-fn call(
+pub(crate) fn call(
     door: &Door,
     method: &str,
     params: Value,
@@ -69,7 +73,7 @@ fn call(
 }
 
 /// Run a blocking body off the async runtime.
-async fn blocking<T, F>(f: F) -> Result<T, GuiError>
+pub(crate) async fn blocking<T, F>(f: F) -> Result<T, GuiError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, GuiError> + Send + 'static,
@@ -80,7 +84,7 @@ where
 }
 
 /// Fetch the door, then run `f` with it off the async runtime.
-async fn with_door<T, F>(session: &SessionHandle, f: F) -> Result<T, GuiError>
+pub(crate) async fn with_door<T, F>(session: &SessionHandle, f: F) -> Result<T, GuiError>
 where
     T: Send + 'static,
     F: FnOnce(&SessionHandle, &Door) -> Result<T, GuiError> + Send + 'static,
@@ -324,6 +328,21 @@ pub struct ServerSearchParams {
 #[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct OperationStarted {
     pub operation_id: String,
+}
+
+/// What `message.fetch` settled with: the row the message is in now, and
+/// whether the store already held it (then nothing was fetched).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct FetchOutcome {
+    pub account: String,
+    /// The store's mailbox key.
+    pub mailbox: String,
+    pub uid: i64,
+    pub row_id: i64,
+    pub selector: String,
+    pub already_present: bool,
 }
 
 /// What a cancel came to.
@@ -799,6 +818,63 @@ pub fn search_server_cancel_on(
     }
 }
 
+/// Fetch the server-only message `message_id` of `mailbox` (a sidebar label
+/// or a server name) into the store, the TUI search overlay's `f` (LST-09).
+///
+/// `message.fetch` is an operation; one message is quick, so this waits for
+/// its end by reading `operation.status` rather than making the frontend
+/// await an id. A message the store already holds answers at once with
+/// `already_present`. The row it lands in reaches the lists through the
+/// counts invalidation the daemon publishes.
+pub fn message_fetch_on(
+    door: &Door,
+    account: &str,
+    mailbox: &str,
+    message_id: &str,
+) -> Result<FetchOutcome, GuiError> {
+    let answer = call(
+        door,
+        "message.fetch",
+        json!({"account": account, "mailbox": mailbox, "message_id": message_id}),
+        START_BUDGET,
+        Addressing::Params,
+    )?;
+    let id = answer["operation_id"]
+        .as_str()
+        .ok_or_else(|| GuiError::protocol("message.fetch answered no operation_id"))?
+        .to_string();
+    let deadline = std::time::Instant::now() + FETCH_BUDGET;
+    loop {
+        let status = call(
+            door,
+            "operation.status",
+            json!({"operation_id": id}),
+            CANCEL_BUDGET,
+            Addressing::Resource,
+        )?;
+        match status["state"].as_str() {
+            Some("succeeded") => return decode("message.fetch", status["result"].clone()),
+            Some("failed") => {
+                let why = status["error"]["message"]
+                    .as_str()
+                    .unwrap_or("no reason given");
+                return Err(GuiError::protocol(format!("The fetch failed: {why}")));
+            }
+            Some("cancelled") => return Err(GuiError::protocol("The fetch was cancelled")),
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(GuiError::Timeout {
+                message: format!(
+                    "the fetch of {message_id} did not finish in {} s",
+                    FETCH_BUDGET.as_secs()
+                ),
+            });
+        }
+        std::thread::sleep(FETCH_POLL);
+    }
+}
+
 /// A refusal that is about one row of a batch (it is gone, or a parameter
 /// the row made wrong), after which the next row still goes. Anything else
 /// (no daemon, an unknown account, a timeout) is about the whole batch.
@@ -974,14 +1050,17 @@ pub fn draft_discard_on(
 }
 
 /// Decode a daemon answer into `T`.
-fn decode<T: serde::de::DeserializeOwned>(method: &str, answer: Value) -> Result<T, GuiError> {
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(
+    method: &str,
+    answer: Value,
+) -> Result<T, GuiError> {
     serde_json::from_value(answer)
         .map_err(|e| GuiError::protocol(format!("{method} did not decode: {e}")))
 }
 
 /// Tell a fixture door that a client wrote a draft file, which the daemon's
 /// watcher would notice on its own.
-fn written(door: &Door, path: &str) {
+pub(crate) fn written(door: &Door, path: &str) {
     if let Door::Fixture(fixture) = door {
         fixture.file_written(std::path::Path::new(path));
     }
@@ -1600,6 +1679,19 @@ pub async fn search_server_cancel(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn message_fetch(
+    session: State<'_, SessionHandle>,
+    account: String,
+    mailbox: String,
+    message_id: String,
+) -> Result<FetchOutcome, GuiError> {
+    with_door(&session, move |_, door| {
+        message_fetch_on(door, &account, &mailbox, &message_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn message_archive(
     session: State<'_, SessionHandle>,
     account: String,
@@ -2046,6 +2138,56 @@ mod tests {
         assert!(
             calls.iter().all(|p| p["settle"] == false),
             "{method} went out without settle: false: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_ingests_a_server_only_message_once_and_then_says_it_is_present() {
+        let (d, fixture) = fixture_door();
+        let id = "<server-only@fixture.example>";
+        assert!(!rows_of(&d, "work", "archive")
+            .iter()
+            .any(|r| r.message_id == id));
+        let fetched = message_fetch_on(&d, "work", "Archive", id).expect("fetch");
+        assert!(!fetched.already_present);
+        assert_eq!(fetched.mailbox, "archive");
+        assert_eq!(
+            fetched.selector,
+            "mp://work/archive/server-only@fixture.example"
+        );
+        let row = rows_of(&d, "work", "archive")
+            .into_iter()
+            .find(|r| r.id == fetched.row_id)
+            .expect("the fetched row is listed");
+        assert_eq!(row.message_id, id);
+        let again = message_fetch_on(&d, "work", "archive", id).expect("fetch again");
+        assert!(again.already_present);
+        assert_eq!(again.row_id, fetched.row_id);
+        let calls: Vec<Value> = fixture
+            .calls()
+            .into_iter()
+            .filter(|(m, _)| m == "message.fetch")
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(
+            calls[0],
+            json!({"account": "work", "mailbox": "Archive", "message_id": id})
+        );
+        let gone = message_fetch_on(&d, "work", "Archive", "<nowhere@example.com>").unwrap_err();
+        assert!(
+            gone.message().contains("The fetch failed: no message"),
+            "{gone:?}"
+        );
+        let bad = message_fetch_on(&d, "work", "Nowhere", id).unwrap_err();
+        assert!(
+            matches!(
+                bad,
+                GuiError::Protocol {
+                    code: Some(-32602),
+                    ..
+                }
+            ),
+            "{bad:?}"
         );
     }
 

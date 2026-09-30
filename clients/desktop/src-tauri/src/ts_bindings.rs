@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::{Config, TS};
 
-use crate::{commands, connector, editor, error, session};
+use crate::{attachments, commands, connector, editor, error, session};
 
 /// Exports each listed type, and its dependencies, into `$cfg`'s directory.
 macro_rules! export {
@@ -60,6 +60,7 @@ fn export_into(dir: &Path) -> usize {
         commands::LocalSearchHit,
         commands::ServerSearchParams,
         commands::OperationStarted,
+        commands::FetchOutcome,
         commands::CancelOutcome,
         commands::MovedTo,
         commands::MutationAck,
@@ -79,6 +80,12 @@ fn export_into(dir: &Path) -> usize {
         commands::OutboxDiscarded,
         commands::SyncMode,
         commands::VersionInfo,
+        attachments::OpenedFile,
+        attachments::SavedFile,
+        attachments::SaveFailure,
+        attachments::SavedAttachments,
+        attachments::DraftAttachment,
+        attachments::DraftAttachments,
         editor::EditorSource,
         editor::EditorLaunch,
         editor::EditorSetting,
