@@ -453,6 +453,8 @@ subject = "^\\[pi\\]"            # a regular expression on the decoded subject
 headers = { "X-Task" = "^yes$" }  # header name to a regular expression
 ```
 
+Nothing watches `config.toml` yet, so a hook added or edited by hand takes effect at the next `mp daemon restart` (or `config.reload`).
+
 **The sender check is the one to get right**, because a hook may run anything with the user's rights and `From:` alone proves nothing.
 `authenticated_from` passes only when `From:` carries exactly one address, that address is on the list, and the *topmost* `Authentication-Results` header carries `authserv_id` and records a DKIM pass whose signing domain is exactly the `From:` domain.
 An SPF pass whose envelope-sender domain is the `From:` domain counts too only with `accept_spf = true`, because an SPF record that includes a shared platform passes SPF for every customer of it: `spf.protection.outlook.com` covers every Microsoft 365 tenant.
