@@ -11,12 +11,14 @@
 //! - [`commands`]: the narrow Tauri commands.
 //! - [`editor`]: the external editor a draft is opened in.
 //! - [`attachments`]: attachments, a draft's list, the browser rendition.
+//! - [`calendar`]: the agenda and an entry's `invite.ics` in the editor.
 //! - [`reader`]: the `mpmsg` scheme serving `message.html`.
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
 //! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
 
 pub mod attachments;
+pub mod calendar;
 pub mod commands;
 pub mod connector;
 pub mod editor;
@@ -183,6 +185,8 @@ pub fn run() {
             attachments::draft_attach,
             attachments::draft_attachment_remove,
             attachments::draft_attachment_open,
+            calendar::calendar_events,
+            calendar::invite_source_open,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

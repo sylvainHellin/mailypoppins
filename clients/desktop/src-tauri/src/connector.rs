@@ -115,6 +115,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "send.outbox_discard",
     "sync.quick",
     "sync.full",
+    "calendar.events",
+    "message.ics",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -809,7 +811,8 @@ mod tests {
     }
 
     /// The compose, send and attachment methods are required too, so a
-    /// daemon older than M3 is refused at the handshake; each name once.
+    /// daemon older than M3 is refused at the handshake, and M4's agenda
+    /// reads; each name once.
     #[test]
     fn the_required_capabilities_cover_compose_send_and_attachments() {
         for method in [
@@ -829,6 +832,8 @@ mod tests {
             "send.outbox_discard",
             "message.fetch",
             "message.materialise_attachment",
+            "calendar.events",
+            "message.ics",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }

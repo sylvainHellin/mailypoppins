@@ -486,7 +486,7 @@ fn is_file(path: &Path) -> bool {
     path.is_file()
 }
 
-fn settings_file(app: &AppHandle) -> Result<PathBuf, GuiError> {
+pub(crate) fn settings_file(app: &AppHandle) -> Result<PathBuf, GuiError> {
     let dir = app
         .path()
         .app_config_dir()
@@ -495,7 +495,7 @@ fn settings_file(app: &AppHandle) -> Result<PathBuf, GuiError> {
 }
 
 /// The process's own lookup, over the settings file's current value.
-fn live_lookup(setting: Option<String>) -> Lookup<'static> {
+pub(crate) fn live_lookup(setting: Option<String>) -> Lookup<'static> {
     Lookup {
         env: &process_env,
         setting,

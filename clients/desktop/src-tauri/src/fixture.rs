@@ -13,6 +13,11 @@
 //! frontend's connection and resync screens are testable, plus a rolled-back
 //! drain (`rollback`) and a send hold another client armed (`hold`).
 //!
+//! `calendar.events` answers each account's agenda from
+//! `fixtures/calendar.json`, and `message.ics` a row's `invite.ics` from the
+//! same file; `invite_update` and `invite_cancel` change `work`'s steering
+//! committee the way a new version or a cancellation of it arriving would.
+//!
 //! `send.draft` and `send.approved` arm a hold of the fixture's own
 //! `email.send_hold_secs` when asked for one, count it down through the same
 //! machinery, then "send": the draft file goes, a filed copy lands in Sent,
@@ -60,6 +65,7 @@ use serde_json::{json, Value};
 use mp_client::events::Incoming;
 use mp_core::draft::{DraftRecipientEdit, SourceMessage};
 use mp_core::selector::{message_key, Selector};
+use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 use mp_protocol::draft::{
     DraftCreated, DraftEntry, DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview,
     DraftReport, DraftSkip, DraftSource, DraftValidation,
@@ -85,6 +91,11 @@ const DRAFTS: &str = include_str!("../../fixtures/drafts.json");
 const HTML: &str = include_str!("../../fixtures/html.json");
 const DRAFT_BODIES: &str = include_str!("../../fixtures/draft-bodies.json");
 const SIGNATURES: &str = include_str!("../../fixtures/signatures.json");
+const CALENDAR: &str = include_str!("../../fixtures/calendar.json");
+
+/// The agenda row `invite_update` and `invite_cancel` change: `work`'s
+/// steering committee, the inbox invitation of `messages.json`.
+pub const INVITE_ROW: i64 = 1008;
 
 /// The address every fixture account sends from.
 const FIXTURE_FROM: &str = "Me <me@example.com>";
@@ -147,7 +158,17 @@ pub const SIMULATIONS: &[&str] = &[
     "send_partial",
     "send_pending_append",
     "send_hold:<secs>",
+    "invite_update",
+    "invite_cancel",
 ];
+
+/// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
+/// source of a row, by row id.
+#[derive(serde::Deserialize)]
+struct CalendarSeed {
+    events: BTreeMap<String, Vec<AgendaEvent>>,
+    ics: BTreeMap<String, String>,
+}
 
 /// One `editor_open` the fixture stubbed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +290,10 @@ struct State {
     /// The sends waiting out their hold, by operation id.
     held_sends: BTreeMap<String, SendWork>,
     send_delay: Duration,
+    /// account -> the agenda `calendar.events` answers, before its sort.
+    calendar: BTreeMap<String, Vec<AgendaEvent>>,
+    /// row id -> the `invite.ics` `message.ics` answers for it.
+    ics: BTreeMap<i64, String>,
 }
 
 impl State {
@@ -424,6 +449,35 @@ impl State {
         let id = format!("{prefix}-{}", self.next_op);
         self.next_op += 1;
         id
+    }
+
+    /// `account` known and its store ready, the daemon's `ready_account`:
+    /// unknown is `-32005`, a `blocked` store `-32006`.
+    fn account_ready(&self, method: &str, account: &str) -> Result<()> {
+        self.account_known(method, account)?;
+        let state = self.accounts["accounts"]
+            .as_array()
+            .and_then(|all| all.iter().find(|a| a["name"] == account))
+            .and_then(|a| a["state"].as_str())
+            .unwrap_or("ready");
+        if state == "ready" {
+            return Ok(());
+        }
+        Err(refused(
+            method,
+            -32006,
+            &format!("{account} has no local store to read yet; run `mp sync -A {account}`"),
+        ))
+    }
+
+    /// `account`'s agenda in the daemon's order: by start, undated last.
+    fn agenda(&self, method: &str, account: &str) -> Result<Vec<AgendaEvent>> {
+        self.account_ready(method, account)?;
+        let mut events = self.calendar.get(account).cloned().unwrap_or_default();
+        events.sort_by(|a, b| {
+            (a.start_sort.is_empty(), &a.start_sort).cmp(&(b.start_sort.is_empty(), &b.start_sort))
+        });
+        Ok(events)
     }
 
     fn account_known(&self, method: &str, account: &str) -> Result<()> {
@@ -1682,6 +1736,15 @@ impl Fixture {
             serde_json::from_str(DRAFT_BODIES).context("fixtures/draft-bodies.json")?;
         let signatures: Value =
             serde_json::from_str(SIGNATURES).context("fixtures/signatures.json")?;
+        let calendar: CalendarSeed =
+            serde_json::from_str(CALENDAR).context("fixtures/calendar.json")?;
+        let mut ics = BTreeMap::new();
+        for (key, text) in &calendar.ics {
+            let id: i64 = key
+                .parse()
+                .context("fixtures/calendar.json's ics keys are row ids")?;
+            ics.insert(id, text.clone());
+        }
         let root = fixture_root();
         seed_drafts(&root, &seeds, &bodies).context("writing the fixture drafts")?;
         let html_by_key: BTreeMap<String, String> =
@@ -1732,6 +1795,8 @@ impl Fixture {
             send_hold_secs: SIMULATED_HOLD_SECS,
             held_sends: BTreeMap::new(),
             send_delay: SEND_DELAY,
+            calendar: calendar.events,
+            ics,
         };
         state.rescan();
         state.seed_outbox();
@@ -2206,6 +2271,33 @@ impl Fixture {
                 let (op, held) = s.start_send(method, what, &account, work.clone());
                 self.answer_send(s, op, held, work)
             }
+            "calendar.events" => {
+                only(method, &params, &["account"])?;
+                let account = param_str(method, &params, "account")?;
+                let events = s.agenda(method, account)?;
+                Ok(json!({"account": account, "events": events}))
+            }
+            "message.ics" => {
+                let account = param_str(method, &params, "account")?;
+                s.account_ready(method, account)?;
+                let row_id = params["row_id"].as_i64().unwrap_or(-1);
+                let listed = s
+                    .calendar
+                    .get(account)
+                    .is_some_and(|events| events.iter().any(|e| e.row_id == row_id));
+                if s.row(account, row_id).is_none() && !listed {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("no message has row_id {row_id}"),
+                    ));
+                }
+                let ics = s
+                    .ics
+                    .get(&row_id)
+                    .map_or(Value::Null, |text| json!(base64(text.as_bytes())));
+                Ok(json!({"account": account, "row_id": row_id, "ics": ics}))
+            }
             "send.outbox_list" => {
                 only(method, &params, &["account"])?;
                 let account = param_str(method, &params, "account")?;
@@ -2637,6 +2729,8 @@ impl Fixture {
                 return Ok(());
             }
             "editor_save" => return self.simulate_editor(false),
+            "invite_update" => return self.simulate_invite(false),
+            "invite_cancel" => return self.simulate_invite(true),
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
                 self.state().send_next = Some(match what {
@@ -2787,6 +2881,70 @@ impl Fixture {
         self.spawn_hold(id);
     }
 
+    /// A new version of `work`'s steering committee arrives
+    /// (`invite_update`: its sequence one up and its start a day later) or
+    /// its cancellation does (`invite_cancel`): the agenda row
+    /// [`INVITE_ROW`] changes in place, the email that carried the change
+    /// lands at the top of `work`'s inbox with its `invite.ics`, and
+    /// `state.invalidate` of `mailbox:work/inbox` says so, as a sync that
+    /// fetched it would.
+    fn simulate_invite(&self, cancel: bool) -> Result<()> {
+        let mut s = self.state();
+        let event = s
+            .calendar
+            .get_mut("work")
+            .and_then(|events| events.iter_mut().find(|e| e.row_id == INVITE_ROW))
+            .ok_or_else(|| anyhow!("work's agenda has no row {INVITE_ROW}"))?;
+        if cancel {
+            event.cancelled = true;
+            event.event.cancelled = true;
+        } else {
+            event.event.sequence += 1;
+            let day = (14 + event.event.sequence).min(28);
+            event.event.start = Some(format!("2099-10-{day:02}T10:00:00+02:00"));
+            event.event.end = Some(format!("2099-10-{day:02}T11:00:00+02:00"));
+            event.start_sort = format!("2099-10-{day:02}T08:00:00");
+            event.end_sort = format!("2099-10-{day:02}T09:00:00");
+            event.start_display = format!("2099-10-{day:02} 10:00");
+        }
+        let event = event.clone();
+        let method = if cancel { "CANCEL" } else { "REQUEST" };
+        let source = invite_ics(&event, method);
+        if !cancel {
+            s.ics.insert(INVITE_ROW, source.clone());
+        }
+        let id = s.next_row;
+        s.next_row += 1;
+        s.ics.insert(id, source.clone());
+        let summary = event.event.summary.clone().unwrap_or_default();
+        let (subject, tag) = if cancel {
+            (format!("Cancelled: {summary}"), "invite-cancel")
+        } else {
+            (format!("Updated invitation: {summary}"), "invite-update")
+        };
+        let row = json!({
+            "id": id, "uid": id, "message_id": format!("<{tag}-{id}@fixture.example>"),
+            "from": "Calendar <calendar@example.com>", "to": "me@example.com",
+            "cc": null, "reply_to": null, "bcc": null,
+            "subject": subject,
+            "date_sort": "2026-09-30T12:00:00", "date_display": "Wed, 30 Sep 2026 12:00:00 +0200",
+            "flags": {"seen": false, "answered": false, "forwarded": false, "flagged": false},
+            "has_attachments": true, "is_invite": true,
+            "selector": format!("mp://work/inbox/{tag}-{id}@fixture.example"),
+            "body": format!("{subject}.\n"),
+            "attachments": [{"name": "invite.ics", "size": source.len()}]
+        });
+        if let Some(inbox) = s.messages.get_mut("work").and_then(|m| m.get_mut("inbox")) {
+            inbox.insert(0, row);
+        }
+        self.emit_locked(
+            &mut s,
+            "state.invalidate",
+            json!({"resource": "mailbox:work/inbox", "scope": {"query": "counts"}}),
+        );
+        Ok(())
+    }
+
     /// Journal an `editor_open` instead of spawning anything.
     pub fn record_editor(&self, path: &str, command: Vec<String>) {
         self.state().editor_opens.push(EditorOpen {
@@ -2855,6 +3013,71 @@ impl Fixture {
         }
         Ok(())
     }
+}
+
+/// The `invite.ics` of an agenda row as the organizer would send it, with
+/// `method` (`REQUEST` or `CANCEL`), its times in UTC from the sort keys.
+fn invite_ics(row: &AgendaEvent, method: &str) -> String {
+    let e: &EventFrontmatter = &row.event;
+    let utc = |sort: &str| format!("{}Z", sort.replace(['-', ':'], ""));
+    let mut lines = vec![
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".to_string(),
+        "PRODID:-//mailypoppins//fixture//EN".to_string(),
+        format!("METHOD:{method}"),
+        "BEGIN:VEVENT".to_string(),
+        format!("UID:{}", e.uid.as_deref().unwrap_or_default()),
+        format!("SEQUENCE:{}", e.sequence),
+        "DTSTAMP:20260930T100000Z".to_string(),
+    ];
+    if !row.start_sort.is_empty() {
+        lines.push(format!("DTSTART:{}", utc(&row.start_sort)));
+    }
+    if !row.end_sort.is_empty() {
+        lines.push(format!("DTEND:{}", utc(&row.end_sort)));
+    }
+    if method == "CANCEL" {
+        lines.push("STATUS:CANCELLED".to_string());
+    }
+    lines.push(format!(
+        "SUMMARY:{}",
+        e.summary.as_deref().unwrap_or_default()
+    ));
+    if let Some(location) = e.location.as_deref() {
+        lines.push(format!("LOCATION:{location}"));
+    }
+    if let Some(organizer) = e.organizer.as_deref() {
+        lines.push(format!("ORGANIZER:mailto:{organizer}"));
+    }
+    for a in &e.attendees {
+        lines.push(format!(
+            "ATTENDEE;PARTSTAT={}:mailto:{}",
+            a.status.to_uppercase(),
+            a.address
+        ));
+    }
+    lines.push("END:VEVENT".to_string());
+    lines.push("END:VCALENDAR".to_string());
+    lines.join("\r\n") + "\r\n"
+}
+
+/// Standard base64 with padding, what the daemon's `message.ics` carries the
+/// bytes as (the desktop layer has no base64 crate of its own).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let byte = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let n = (byte(0) << 16) | (byte(1) << 8) | byte(2);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// `<temp>/mp-desktop-fixture-<pid>`, with a `-<n>` suffix for every fixture
@@ -3271,6 +3494,119 @@ mod tests {
             }
         }
         assert!(hits >= 2, "local matches plus one server-only hit");
+    }
+
+    #[test]
+    fn the_agenda_decodes_sorted_with_the_undated_row_last() {
+        let (f, _rx) = fixture();
+        let q = crate::session::Budgeted {
+            door: &crate::session::Door::Fixture(Arc::clone(&f)),
+            budget: Duration::from_secs(1),
+        };
+        let work = mp_client::queries::calendar_events(&q, "work").expect("work");
+        let ids: Vec<i64> = work.iter().map(|e| e.row_id).collect();
+        assert_eq!(ids, [9101, INVITE_ROW, 9103, 9102, 9104]);
+        assert!(work[0].start_sort.starts_with("2020-"), "a past event");
+        assert!(work[3].cancelled && work[3].event.cancelled);
+        assert!(work[2].is_organizer);
+        assert!(work[4].start_sort.is_empty() && work[4].start_display.is_empty());
+        let home = mp_client::queries::calendar_events(&q, "home").expect("home");
+        assert_eq!(home.len(), 1);
+        let e = f
+            .call("calendar.events", json!({"account": "nobody"}))
+            .expect_err("unknown");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32005));
+        f.state().accounts["accounts"][1]["state"] = json!("blocked");
+        let e = f
+            .call("calendar.events", json!({"account": "home"}))
+            .expect_err("blocked");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32006));
+    }
+
+    #[test]
+    fn message_ics_answers_the_source_in_base64_or_null() {
+        let (f, _rx) = fixture();
+        let door = crate::session::Door::Fixture(Arc::clone(&f));
+        let q = crate::session::Budgeted {
+            door: &door,
+            budget: Duration::from_secs(1),
+        };
+        let ics = mp_client::queries::message_ics(&q, "work", INVITE_ROW)
+            .expect("ics")
+            .expect("a source");
+        let text = String::from_utf8(ics).expect("utf-8");
+        assert!(text.starts_with("BEGIN:VCALENDAR\r\n"), "{text}");
+        assert!(text.contains("UID:steering-committee@fixture.example"));
+        assert_eq!(
+            mp_client::queries::message_ics(&q, "work", 9104).expect("undated"),
+            None
+        );
+        let e = f
+            .call("message.ics", json!({"account": "work", "row_id": 9201}))
+            .expect_err("home's row");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
+        for (bytes, encoded) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+        ] {
+            assert_eq!(base64(bytes), encoded);
+        }
+    }
+
+    #[test]
+    fn invite_cancel_flips_the_agenda_row_and_delivers_the_cancellation() {
+        let (f, rx) = fixture();
+        let before = inbox_ids(&f, "work", "inbox");
+        f.simulate("invite_cancel").expect("cancel");
+        let event = next_event(&rx);
+        assert_eq!(event.kind, "state.invalidate");
+        assert_eq!(event.payload["resource"], "mailbox:work/inbox");
+        let answer = f
+            .call("calendar.events", json!({"account": "work"}))
+            .expect("events");
+        let row = answer["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|e| e["row_id"] == INVITE_ROW)
+            .expect("the steering committee")
+            .clone();
+        assert_eq!(row["cancelled"], true);
+        assert_eq!(row["event"]["cancelled"], true);
+        let after = inbox_ids(&f, "work", "inbox");
+        assert_eq!(after.len(), before.len() + 1);
+        let (_, mail) = {
+            let s = f.state();
+            let (mailbox, row) = s.row("work", after[0]).expect("the new row");
+            (mailbox.to_string(), row.clone())
+        };
+        assert_eq!(mail["subject"], "Cancelled: Steering committee");
+        assert_eq!(mail["is_invite"], true);
+        let ics = f.state().ics[&after[0]].clone();
+        assert!(ics.contains("METHOD:CANCEL"), "{ics}");
+    }
+
+    #[test]
+    fn invite_update_moves_the_start_and_raises_the_sequence() {
+        let (f, rx) = fixture();
+        f.simulate("invite_update").expect("update");
+        assert_eq!(next_event(&rx).payload["resource"], "mailbox:work/inbox");
+        let events = f.state().agenda("calendar.events", "work").expect("work");
+        let row = events.iter().find(|e| e.row_id == INVITE_ROW).expect("row");
+        assert_eq!(row.event.sequence, 1);
+        assert_eq!(row.start_display, "2099-10-15 10:00");
+        assert_eq!(row.start_sort, "2099-10-15T08:00:00");
+        assert!(!row.cancelled);
+        let ics = f.state().ics[&INVITE_ROW].clone();
+        assert!(
+            ics.contains("SEQUENCE:1") && ics.contains("DTSTART:20991015T080000Z"),
+            "{ics}"
+        );
+        let newest = inbox_ids(&f, "work", "inbox")[0];
+        assert!(f.state().ics.contains_key(&newest));
     }
 
     /// The next event, within five seconds.

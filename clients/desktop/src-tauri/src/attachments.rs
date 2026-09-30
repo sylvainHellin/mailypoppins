@@ -41,7 +41,7 @@ const RELEASE_BUDGET: Duration = Duration::from_secs(5);
 pub const DEFAULT_SAVE_DIR: &str = "~/Downloads";
 
 /// The cache subdirectory a server-only hit's rendition is written under.
-const RENDITIONS: &str = "renditions";
+pub(crate) const RENDITIONS: &str = "renditions";
 
 /// A rendition older than this is swept at the next write.
 const RENDITION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -402,7 +402,7 @@ pub fn hit_html_open_on(door: &Door, cache_dir: &Path, html: &str) -> Result<Ope
 /// Write a rendition readable by its owner only, as the daemon's handles and
 /// the TUI's temp files are: `renditions/` and the `hit-*` directory 0700
 /// (tightened if they exist wider), the file 0600.
-fn write_private(cache_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), GuiError> {
+pub(crate) fn write_private(cache_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), GuiError> {
     let private_dir = |dir: &Path| {
         mp_core::config::create_private_dir_all(dir)
             .map_err(|e| GuiError::internal(format!("could not create {}: {e}", dir.display())))
@@ -727,7 +727,7 @@ pub async fn html_open(
 }
 
 /// The app's cache directory, or the fixture's own under its run directory.
-fn cache_dir(app: &AppHandle, door: &Door) -> Result<PathBuf, GuiError> {
+pub(crate) fn cache_dir(app: &AppHandle, door: &Door) -> Result<PathBuf, GuiError> {
     match door {
         Door::Fixture(fixture) => Ok(fixture.root().join("cache")),
         Door::Daemon(_) => app

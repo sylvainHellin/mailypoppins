@@ -13,6 +13,8 @@ export type * from "@/protocol/generated/gui";
  * `editor_save` and `editor_invalid` save the draft `editor_open` last named.
  * `send_fail`, `send_partial` and `send_pending_append` decide the next send;
  * `send_hold:<secs>` is the fixture's `email.send_hold_secs`.
+ * `invite_update` and `invite_cancel` change `work`'s steering committee
+ * (row 1008) the way a new version or a cancellation of it arriving would.
  */
 export type FixtureSimulation =
   | "disconnect"
@@ -29,7 +31,9 @@ export type FixtureSimulation =
   | "send_fail"
   | "send_partial"
   | "send_pending_append"
-  | `send_hold:${number}`;
+  | `send_hold:${number}`
+  | "invite_update"
+  | "invite_cancel";
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {

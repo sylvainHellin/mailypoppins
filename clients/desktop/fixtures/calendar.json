@@ -1,0 +1,164 @@
+{
+  "events": {
+    "work": [
+      {
+        "row_id": 9101,
+        "event": {
+          "uid": "kick-off-2020@fixture.example",
+          "method": "REQUEST",
+          "sequence": 0,
+          "summary": "Project kick-off",
+          "start": "2020-03-02T09:00:00+01:00",
+          "end": "2020-03-02T10:30:00+01:00",
+          "location": "Room 1.02",
+          "organizer": "lead@example.com",
+          "rsvp": "accepted",
+          "recurrence": "",
+          "attendees": [
+            {"address": "me@example.com", "status": "accepted"},
+            {"address": "lead@example.com", "status": "accepted"}
+          ]
+        },
+        "subject": "Invitation: Project kick-off",
+        "start_sort": "2020-03-02T08:00:00",
+        "end_sort": "2020-03-02T09:30:00",
+        "start_display": "2020-03-02 09:00",
+        "is_organizer": false,
+        "cancelled": false
+      },
+      {
+        "row_id": 1008,
+        "event": {
+          "uid": "steering-committee@fixture.example",
+          "method": "REQUEST",
+          "sequence": 0,
+          "summary": "Steering committee",
+          "start": "2099-10-14T10:00:00+02:00",
+          "end": "2099-10-14T11:00:00+02:00",
+          "location": "Room 2.14",
+          "organizer": "chair@example.com",
+          "rsvp": "needs-action",
+          "recurrence": "",
+          "attendees": [
+            {"address": "chair@example.com", "status": "accepted"},
+            {"address": "me@example.com", "status": "needs-action"},
+            {"address": "finance@example.com", "status": "declined"}
+          ]
+        },
+        "subject": "Invitation: Steering committee",
+        "start_sort": "2099-10-14T08:00:00",
+        "end_sort": "2099-10-14T09:00:00",
+        "start_display": "2099-10-14 10:00",
+        "is_organizer": false,
+        "cancelled": false
+      },
+      {
+        "row_id": 9103,
+        "event": {
+          "uid": "team-sync@fixture.example",
+          "method": "REQUEST",
+          "sequence": 2,
+          "summary": "Team sync",
+          "start": "2099-11-02T09:00:00+01:00",
+          "end": "2099-11-02T09:30:00+01:00",
+          "location": "Video call",
+          "organizer": "me@example.com",
+          "rsvp": "",
+          "recurrence": "Weekly on Monday",
+          "attendees": [
+            {"address": "robin@example.com", "status": "accepted"},
+            {"address": "kim@example.com", "status": "tentative"},
+            {"address": "alex@example.com", "status": "needs-action"}
+          ],
+          "cancelled_instances": ["2099-11-16T09:00:00+01:00"]
+        },
+        "subject": "Team sync",
+        "start_sort": "2099-11-02T08:00:00",
+        "end_sort": "2099-11-02T08:30:00",
+        "start_display": "2099-11-02 09:00",
+        "is_organizer": true,
+        "cancelled": false
+      },
+      {
+        "row_id": 9102,
+        "event": {
+          "uid": "budget-review@fixture.example",
+          "method": "REQUEST",
+          "sequence": 1,
+          "summary": "Budget review",
+          "start": "2099-11-20T14:00:00+01:00",
+          "end": "2099-11-20T15:00:00+01:00",
+          "location": "Room 3.01",
+          "organizer": "finance@example.com",
+          "rsvp": "accepted",
+          "recurrence": "",
+          "attendees": [
+            {"address": "finance@example.com", "status": "accepted"},
+            {"address": "me@example.com", "status": "accepted"}
+          ],
+          "cancelled": true
+        },
+        "subject": "Invitation: Budget review",
+        "start_sort": "2099-11-20T13:00:00",
+        "end_sort": "2099-11-20T14:00:00",
+        "start_display": "2099-11-20 14:00",
+        "is_organizer": false,
+        "cancelled": true
+      },
+      {
+        "row_id": 9104,
+        "event": {
+          "uid": "offsite-planning@fixture.example",
+          "method": "REQUEST",
+          "sequence": 0,
+          "summary": "Offsite planning",
+          "organizer": "lead@example.com",
+          "rsvp": "tentative",
+          "recurrence": "",
+          "attendees": [
+            {"address": "me@example.com", "status": "tentative"}
+          ]
+        },
+        "subject": "Invitation: Offsite planning (date to follow)",
+        "start_sort": "",
+        "end_sort": "",
+        "start_display": "",
+        "is_organizer": false,
+        "cancelled": false
+      }
+    ],
+    "home": [
+      {
+        "row_id": 9201,
+        "event": {
+          "uid": "dentist@fixture.example",
+          "method": "REQUEST",
+          "sequence": 0,
+          "summary": "Dentist",
+          "start": "2099-12-01T08:30:00+01:00",
+          "end": "2099-12-01T09:00:00+01:00",
+          "location": "Praxis am Markt",
+          "organizer": "praxis@example.com",
+          "rsvp": "accepted",
+          "recurrence": "",
+          "attendees": [
+            {"address": "me@example.com", "status": "accepted"}
+          ]
+        },
+        "subject": "Termin: Dentist",
+        "start_sort": "2099-12-01T07:30:00",
+        "end_sort": "2099-12-01T08:00:00",
+        "start_display": "2099-12-01 08:30",
+        "is_organizer": false,
+        "cancelled": false
+      }
+    ]
+  },
+  "ics": {
+    "9101": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//mailypoppins//fixture//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:kick-off-2020@fixture.example\r\nSEQUENCE:0\r\nDTSTAMP:20200220T080000Z\r\nDTSTART:20200302T080000Z\r\nDTEND:20200302T093000Z\r\nSUMMARY:Project kick-off\r\nLOCATION:Room 1.02\r\nORGANIZER:mailto:lead@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    "1008": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//mailypoppins//fixture//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:steering-committee@fixture.example\r\nSEQUENCE:0\r\nDTSTAMP:20260925T080000Z\r\nDTSTART:20991014T080000Z\r\nDTEND:20991014T090000Z\r\nSUMMARY:Steering committee\r\nLOCATION:Room 2.14\r\nORGANIZER:mailto:chair@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:chair@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.com\r\nATTENDEE;PARTSTAT=DECLINED:mailto:finance@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    "9102": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//mailypoppins//fixture//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:budget-review@fixture.example\r\nSEQUENCE:1\r\nDTSTAMP:20260901T080000Z\r\nDTSTART:20991120T130000Z\r\nDTEND:20991120T140000Z\r\nSUMMARY:Budget review\r\nLOCATION:Room 3.01\r\nORGANIZER:mailto:finance@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    "9103": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//mailypoppins//fixture//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:team-sync@fixture.example\r\nSEQUENCE:2\r\nDTSTAMP:20260915T080000Z\r\nDTSTART:20991102T080000Z\r\nDTEND:20991102T083000Z\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nSUMMARY:Team sync\r\nLOCATION:Video call\r\nORGANIZER:mailto:me@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:robin@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:kim@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:alex@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    "9201": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//mailypoppins//fixture//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:dentist@fixture.example\r\nSEQUENCE:0\r\nDTSTAMP:20260910T080000Z\r\nDTSTART:20991201T073000Z\r\nDTEND:20991201T080000Z\r\nSUMMARY:Dentist\r\nLOCATION:Praxis am Markt\r\nORGANIZER:mailto:praxis@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+  }
+}
