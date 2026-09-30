@@ -262,6 +262,9 @@ Every settle re-reads the Drafts list; a draft that went out also leaves it thro
 A row of the Drafts list shows its status as a pill (`draft`, `approved`) next to the ready mark, a pencil badge while the editor has it open, and a "sending" badge while a send of this window is sending it.
 A file the listing skipped because it does not parse is a row too, named by its file stem, with an `invalid` pill; its diagnostic is the row's `title` on hover and part of its accessible name.
 So a draft whose save broke its frontmatter stays in the list, selected, rather than disappearing.
+`d` on such a row asks nothing and calls nothing: the daemon's `draft.discard` resolves an id against the drafts that parse and answers `-32602` for the stem, and no method takes a path.
+The notice names the file instead, "This file does not parse as a draft; delete <path> by hand", and a marked batch that includes one is refused whole with every such path.
+The TUI removes the file from disk itself, which the desktop does not do.
 Enter on a draft opens its preview in the reader ([reader.md](reader.md), "Drafts and server-only hits").
 
 ## Outbox

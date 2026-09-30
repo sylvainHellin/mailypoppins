@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
 
+function lastRow(list: HTMLElement): HTMLElement {
+  const rows = within(list).getAllByRole("option");
+  return rows[rows.length - 1];
+}
+
 function selectedSubject(): string | null {
   const row = document.querySelector('[role="option"][aria-selected="true"]');
   return row?.getAttribute("aria-label") ?? null;
@@ -250,6 +255,39 @@ describe("mutation keys (the TUI's)", () => {
     await user.keyboard("y");
     await waitFor(() => expect(callsOf("draft_discard")).toEqual([{ account: "work", ids: ["angebot-antwort"] }]));
     expect(callsOf("message_delete")).toEqual([]);
+  });
+
+  it("d on a draft that does not parse names the file to delete by hand and calls nothing", async () => {
+    // draft.discard resolves an id against the drafts that parse, so the
+    // daemon answers -32602 for a skipped file's stem, and no method takes a path.
+    const { user } = renderApp();
+    await shellReady();
+    mock.drafts.work.skipped = [{ path: "/fixture/work/drafts/broken.md", error: "line 2: mapping values are not allowed here" }];
+    await user.keyboard("2");
+    const list = await screen.findByRole("listbox", { name: "Drafts messages" });
+    await waitFor(() => expect(lastRow(list)).toHaveAccessibleName(/broken/));
+    await user.keyboard("G");
+    await user.keyboard("d");
+    expect(
+      await screen.findByText("This file does not parse as a draft; delete /fixture/work/drafts/broken.md by hand"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(callsOf("draft_discard")).toEqual([]);
+    expect(lastRow(list)).toHaveAccessibleName(/broken/);
+
+    // Marked with drafts that parse, the batch is refused whole and names the files.
+    mock.drafts.work.skipped.push({ path: "/fixture/work/drafts/torn.md", error: "line 1: did not find expected key" });
+    act(() => emitEnvelope("draft.invalid", { account: "work", id: "torn", path: "/fixture/work/drafts/torn.md", diagnostics: [] }));
+    await waitFor(() => expect(lastRow(list)).toHaveAccessibleName(/torn/));
+    await user.keyboard("{Control>}a{/Control}");
+    await user.keyboard("d");
+    expect(
+      await screen.findByText(
+        "2 files do not parse as drafts; delete them by hand: /fixture/work/drafts/broken.md, /fixture/work/drafts/torn.md",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(callsOf("draft_discard")).toEqual([]);
   });
 
   it("ss and sS start a quick and a full sync of the selected account", async () => {

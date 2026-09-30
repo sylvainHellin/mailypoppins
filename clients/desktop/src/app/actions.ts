@@ -9,6 +9,7 @@ import * as send from "@/app/send";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
+  draftItems,
   draftsShown,
   liveHolds,
   LIST_WIDTH_MIN,
@@ -324,6 +325,23 @@ function describeTarget(s: AppState, t: Target): string {
   return `${meta?.from ?? "(no sender)"} - ${meta?.subject ?? "(no subject)"}`;
 }
 
+/**
+ * The file of each draft target that does not parse. The listing names such a
+ * file by its stem, but the daemon's `draft.discard` resolves an id against
+ * the drafts that parse and answers -32602 for the stem, and no method takes
+ * a path, so the desktop cannot discard it.
+ */
+function unparseableFiles(s: AppState, targets: Target[]): string[] {
+  const list = s.messages.data;
+  if (list?.kind !== "drafts") return [];
+  const listed = new Set(list.listing.drafts.map((d) => d.id));
+  const skipped = new Map(draftItems(list).filter((d) => !listed.has(d.id)).map((d) => [d.id, d.path]));
+  return targets.flatMap((t) => {
+    const path = "draft" in t && t.account === list.account ? skipped.get(t.draft) : undefined;
+    return path ? [path] : [];
+  });
+}
+
 function emails(n: number): string {
   return `${n} email${n === 1 ? "" : "s"}`;
 }
@@ -351,6 +369,15 @@ export function runMutation(
       const acting = id === "archive" ? msgs : targets;
       if (acting.length === 0) {
         dispatch({ type: "notice", text: "Archive needs a received message; a draft leaves by send or delete" });
+        return;
+      }
+      const broken = id === "delete" ? unparseableFiles(s, acting) : [];
+      if (broken.length > 0) {
+        const text =
+          broken.length === 1
+            ? `This file does not parse as a draft; delete ${broken[0]} by hand`
+            : `${broken.length} files do not parse as drafts; delete them by hand: ${broken.join(", ")}`;
+        dispatch({ type: "notice", text });
         return;
       }
       const busy = sendingRefusal(s, acting);

@@ -2721,6 +2721,38 @@ mod tests {
     }
 
     #[test]
+    fn discard_refuses_a_draft_that_does_not_parse_and_leaves_its_file() {
+        // The daemon resolves a discard's id against the drafts that parse,
+        // so the stem a skipped file is listed under names nothing (-32602),
+        // and the fixture answers the same.
+        let (d, f, _rx) = fixture_with_events();
+        let angebot = draft_path_on(&d, "work", "angebot-antwort").expect("path");
+        open_in_editor(&f, &angebot.path);
+        f.simulate("editor_invalid").expect("broken");
+        let batch = draft_discard_on(&d, "work", &["angebot-antwort".to_string()]).expect("batch");
+        assert!(batch.done.is_empty());
+        assert_eq!(batch.failed[0].id, "angebot-antwort");
+        assert!(
+            matches!(
+                batch.failed[0].error,
+                GuiError::NotFound {
+                    code: Some(-32602),
+                    ..
+                }
+            ),
+            "{:?}",
+            batch.failed[0].error
+        );
+        assert!(std::path::Path::new(&angebot.path).exists());
+        match list_messages_on(&d, "work", "drafts").expect("drafts") {
+            MessageList::Drafts { listing, .. } => {
+                assert!(listing.skipped.iter().any(|s| s.path == angebot.path))
+            }
+            other => panic!("expected drafts, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn set_recipients_rewrites_the_header_and_keeps_the_body() {
         let (d, _f, rx) = fixture_with_events();
         let angebot = draft_path_on(&d, "work", "angebot-antwort").expect("path");

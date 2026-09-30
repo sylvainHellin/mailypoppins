@@ -2336,3 +2336,9 @@ Reshaping one for the Rust side alone broke 74 vitest tests at once, so data onl
 Base UI's focus trap puts a guard on each side of a modal, and a guard that takes focus sends it back into the dialog with `requestAnimationFrame` (`enqueueFocus` in `@base-ui/react/floating-ui-react`).
 A test that Tabs round a dialog and reads `document.activeElement` right after each `user.tab()` races that frame: in a loaded suite the frame lands between two Tabs, the next Tab starts from the first control, and the loop never sees it take focus.
 The desktop's wizard test waits for focus to settle inside the dialog after every Tab, cycles until the first control comes round, and records every `focusin` outside the dialog (`clients/desktop/src/components/shell/a11y.test.tsx`).
+
+## `draft.discard` cannot name a draft that does not parse
+
+`draft.approve` and the send path fall back to the watcher's `resolve`, which knows an unparseable file by its stem, so they answer `-32010` with the diagnostics (`src/daemon/methods/draft.rs`, the approve path).
+`draft.discard` goes through `resolve`, which scans only the drafts that parse, so the same stem answers `-32602` "no draft matches", and no method takes a path.
+The TUI deletes a skipped file from disk itself (`delete_skip_file` in `clients/tui/src/commands.rs`); the desktop names the path and leaves the file alone.
