@@ -25,6 +25,8 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
+| `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
+| `src/app/interop.ts` | `sc` and `sf` (config.toml and the daemon log in the editor), and the reader's copies |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -42,6 +44,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, the RSVP choice and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 | `src/components/signatures` | The Signatures dialog |
+| `src/components/activity` | The activity log dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -63,11 +66,12 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
 | `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
-| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards |
+| `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards and a line in the activity log |
+| `event` `config.changed`, `config.invalid` | a line in the activity log |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or the new-draft wizard is open |
-| `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
+| `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds`, and a line in the activity log when it fires or is cancelled |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
 | `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
@@ -106,6 +110,7 @@ The model keeps what the daemon has not confirmed yet:
 - `holds`, by `operation_id`: each `HoldStatus` with its state (`started`, `tick`, `cancelled`, `fired`), whether this window's cancel is in flight, and, for a send this window started, the outcome once it settled.
 - `marked`: the multi-select's row keys and its range anchor.
 - `activity`: numbered notices (applied, failed with each row's reason, rolled back, hold cancelled, sync failed, compose failed, send failed, send partly delivered), dismissed by `dismiss_notice`.
+- `activityLog`: every notice's line, kept after the notice is dismissed (see Activity log).
 - `syncs`: the syncs this window started, by `operation_id`.
 - `sends`: the sends this window started, in start order, each with its drafts; see Compose, "Send".
 
@@ -172,6 +177,11 @@ Held sends come first, then the failures, then the applied notices of `state.act
 - A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that stay until dismissed.
 - Every notice has a Dismiss button.
 - A cancelled hold's own notice is not shown, since the hold says so itself.
+
+`!` hides the notices and shows them again, the TUI's toggle of its log pane, which the desktop does not have.
+It never hides a hold card, so a held send can always be cancelled, by its button or by `u`.
+The choice is `prefs.activityHidden`, stored with the other preferences, and the toggle says "Notices hidden; ! shows them, s l lists them" or "Notices shown" on the notice line, which it never hides.
+While the notices are hidden `X` dismisses nothing, and every notice still reaches the activity log.
 
 The area stays mounted when it is empty, and the applied notices render into one `role="status"` region inside it, mounted empty before the first of them: a live region that mounts with its text already inside may not be announced.
 The list's "N marked" count follows the same rule, in a `role="status"` element that is mounted, empty and visually hidden, while nothing is marked.
@@ -374,7 +384,7 @@ Contacts and Calendar are filled (see Contacts and Calendar); their regions keep
 ### Entry points
 
 - `Space c` and `Space a`, the TUI's GLOBAL keys, show Contacts and Calendar; `Space m` shows Mail and focuses its list.
-- The sidebar's entries at its foot: Contacts, Calendar and Settings are buttons, the shown one `aria-current="page"`, out of the pane's tab order like the outbox line; Activity stays disabled until its unit.
+- The sidebar's entries at its foot: Contacts, Calendar and Settings are buttons, the shown one `aria-current="page"`, out of the pane's tab order like the outbox line; Activity is a button too, and opens the activity log dialog instead of a view.
 - The palette's "Switch to Mail view", "Switch to Contacts view", "Switch to Calendar view" and "Open settings".
   Settings has no key: the TUI has no settings view, and `Space s` is left free.
 
@@ -395,8 +405,8 @@ The keymap reads a view's table (`VIEW_KEYS` in `src/keymap/viewKeys.ts`) after 
 
 - A key the table binds runs at once, so a view can take `c`, `t`, `a` or `r` without arming the mail families.
 - `s` and Space still arm; `g` arms in Contacts and Calendar only for their own `gg`; `c`, `t` and `f` never arm.
-- Under an armed prefix only the view's combos and the view-agnostic ones run: `ss`, `sS`, `Space m`, `Space c`, `Space a` (`VIEW_AGNOSTIC_COMBOS`, which Mail reads too).
-- Tab, `:`, `Ctrl+p`, `?`, `X`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it, before a view's own Enter.
+- Under an armed prefix only the view's combos and the view-agnostic ones run: `ss`, `sS`, `sl`, `sc`, `sf`, `Space m`, `Space c`, `Space a` (`VIEW_AGNOSTIC_COMBOS`, which Mail reads too).
+- Tab, `:`, `Ctrl+p`, `?`, `X`, `!`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it, before a view's own Enter.
 - Every other printable key does nothing, silently, as the TUI's views ignore the mail keys: the MESSAGE keys, `v`, `x`, `y`, `F`, `z`, `/` and the digits, unless the view binds them (Contacts takes `/`, `n`, `v`, `c` and `r`).
 
 Each unit that fills a view adds its keys to that view's table: the table's keys are `ActionId`s, so a palette row runs the same action.
@@ -589,6 +599,51 @@ Every `signature.changed`, every change the dialog makes (answered or refused) a
 Only the listing of the open dialog or the open wizard is read; a stale one is read when one of them opens again.
 The daemon publishes nothing for a delete, so another client's delete shows on the next open, and this dialog's own delete shows at once because it reads the listing again.
 
+## Activity log
+
+The activity log is the TUI's ACTIVITY LOG overlay and status log (OBS-01): every line this window reported, in one place, after its notice left.
+
+### What it keeps
+
+`state.activityLog` holds `{id, at, level, text}` lines, oldest first, the newest 100 (`ACTIVITY_LOG_CAP` in `src/app/activity.ts`, the TUI's `STATUS_LOG_CAPACITY`).
+`at` is when the line arrived, and `level` is `info`, `warning` or `error`.
+The lines come from:
+
+- every notice line (the `notice` action), at `info` unless the dispatch names a level, and never the clearing of the line;
+- every notice of the activity area (`pushNotice`), with the failed rows and their reasons after the text, at `error` for the failure kinds (`FAILURES`) and `info` for the rest;
+- `sync.completed`, at the daemon's `severity` (`error` for a tick with an error), in the TUI's words with the account named: "Synced <account>: N new, M existing" and its suffixes, or "Fetch failed (<account>): <error>";
+- `config.changed`, "Configuration reloaded: added ...; updated ...; removed ...", and `config.invalid`, "The configuration was refused (<path>, line N): <message>", at `error`;
+- a hold that fires, "Hold over, sending <subject> from <account>", and one that is cancelled, through its own "Send of <subject> cancelled" notice, each once whichever of the event and this window's cancel answer lands first.
+
+These events arrive whichever client caused them, so another client's sync or reload is in this window's log too.
+The log holds only what this window heard since it started; the daemon's own log is `sf`.
+
+### The dialog
+
+`sl`, the sidebar's Activity entry and the palette's "Activity log overlay" open the overlay `activity` (`ActivityLogDialog.tsx`, a dialog named "Activity log").
+It lists the lines oldest first, scrolled to the newest, each with its local time, its level in its colour token (`link` for information, `warning`, `destructive` for an error) and its text, in a `role="log"` element named "Activity log lines".
+A line that arrives while the end is in view keeps the view at the end.
+The Filter field keeps the lines whose text or level name holds what is typed, case-insensitively, the TUI's rule; "No line matches the filter" and "Nothing reported yet" say why the list is empty.
+
+| Key | Action |
+|---|---|
+| `j`, Down / `k`, Up | scroll one line |
+| `d` / `u` | scroll half the view |
+| `gg` / `G` | the first line, the newest |
+| `/` | the Filter field |
+| Escape | close |
+
+The dialog owns every key while it is open, and reads them in the capture phase, as the Signatures dialog does.
+In the Filter field Enter goes back to the lines with the filter kept, and Escape clears the filter, or closes the dialog when the filter is already empty, the TUI's order.
+
+### config.toml and the daemon log
+
+`sc` opens the daemon's `config.toml` in the external editor through `config_open`, and `sf` the daemon's log file through `log_open`; the palette's "Open config.toml in $EDITOR" and "Open log file in $EDITOR" run them too.
+Both work from every view, the TUI's view-agnostic GLOBAL keys, and take the path from the daemon ([rust-layer.md](rust-layer.md), "config.toml and the daemon log").
+The notice line says "Opened config.toml in <editor>" or "Opened the daemon log in <editor>".
+With no configuration it says "There is no config.toml yet; add an account first", and with no log file yet "No log file found at <path>", both logged as warnings; any other failure is "Open config failed: <why>" or "Open log failed: <why>", logged as an error.
+The handoff reloads nothing: a saved change reaches the daemon with its next `config.reload`, and the `config.changed` or `config.invalid` that publishes lands in the log.
+
 ## Layouts
 
 | Width | Layout | Shows |
@@ -598,7 +653,7 @@ The daemon publishes nothing for a delete, so another client's delete shows on t
 | below 760 px | narrow | one of sidebar, list, reader: the focused pane, with a back button to its parent |
 
 Tailwind's `md` and shadcn's `useIsMobile` both move to 760 px, so the rail never turns into an off-screen sheet between 760 and 767.
-The list width and the collapsed sidebar are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
+The list width, the collapsed sidebar and whether `!` hides the notices are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
 The list is drawn at the stored width only while the reader keeps `READER_MIN` (320 px) of the pane row, measured by a ResizeObserver; a 720 px width stored in a wide window draws narrower in the medium layout, and the stored value is kept for when the window grows.
 
 ## Focus order
@@ -613,8 +668,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, and the Signatures dialog with its delete confirmation) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, and the activity log) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -640,6 +695,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
 - `tv`: the RSVP choice for the cursor email, from the list or the reader (the TUI's MESSAGE key); in the Calendar view `V` does it for the cursor row (see Calendar, "RSVP").
 - `X`: dismiss the newest activity notice, a desktop key.
+- `!`: hide or show the activity notices, never a hold card; `sl`: the activity log; `sc`, `sf`: config.toml and the daemon log in the editor; all four from every view (see Activity log).
 - `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
@@ -656,8 +712,8 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
-A key whose action a later milestone brings (an M4 key such as `sc`) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
-No row is left for M3.
+A KEYMAP key the desktop does not bind (such as `tt`, the TUI's thread view) shows a notice saying so; the palette lists the same actions disabled, with the badge.
+No row is left for M3; the palette's "Add account" carries the M4 badge until the Settings view brings it.
 
 ## Tests
 

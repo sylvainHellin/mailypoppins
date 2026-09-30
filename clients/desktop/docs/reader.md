@@ -23,7 +23,18 @@ The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, 
 
 The open message's toolbar (`ReaderToolbar.tsx`, `role="toolbar"`, "Message actions") runs the same actions as the keys, on this message only, whatever the list has marked.
 Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward opens the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
-Open in browser (`tb`) is last.
+Open in browser (`tb`) comes next, and the Copy menu is last (INT-03).
+
+The Copy menu (`ui/dropdown-menu.tsx`) has three items, each copying through `copyText` from its click:
+
+- "Copy sender address": the part of `MessageMeta.from` between angle brackets, else the whole field, trimmed; "This message has no sender" without one.
+- "Copy link (mp://)": the message's selector, what `y` copies.
+- "Copy subject": the subject; "This message has no subject" without one.
+
+The notice line says "Copied <address>", "Copied <selector>" or "Copied the subject", or "The clipboard refused ..." when the webview refuses the write.
+The palette's READER rows "Copy sender address", "Copy link (mp://)" and "Copy subject" run the same copies on the message the reader shows, and say "Open a message first" without one; they hide with the other selection actions outside Mail and over the outbox view.
+The copies have no key of their own: `y` stays the selector's, since a `y` family would turn it into a prefix the TUI does not have.
+While the menu is open it owns the keys, as a dialog does.
 
 ## Invitations
 

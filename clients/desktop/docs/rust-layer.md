@@ -17,6 +17,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
 | `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
+| `daemon_files.rs` | The daemon's `config.toml` and its log file in the editor |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -102,6 +103,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_open` | `path` | `EditorLaunch` |
 | `editor_setting_get` | none | `EditorSetting` |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
+| `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
+| `log_open` | none | `EditorLaunch`; `not_found` when the daemon's log file does not exist yet |
 | `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
 | `send_draft` | `account`, `id`, `hold` | `SendStarted`; rejects with a `SendRefusal` |
@@ -387,6 +390,17 @@ A refusal is `mp_core`'s sentence as it stands ("signature name '../x' cannot st
 The daemon's watcher publishes `signature.changed {name, path}` when a signature file is written or created, including by this layer, and nothing when one is deleted, since no `signature.removed` exists.
 So the frontend reads the listing again after each change it makes, and on every `signature.changed` while the Signatures dialog or the new-draft wizard is open ([shell.md](shell.md), "Signatures").
 
+## config.toml and the daemon log
+
+`config_open` is the TUI's `sc` and `log_open` its `sf` (INT-01, INT-02), in `daemon_files.rs`.
+Neither computes a path: the daemon's answer names the file it uses.
+
+- `config_open` calls `config.get` and opens its `path`; a `state` of `absent` is refused before any editor starts, as `not_found` "There is no config.toml yet; add an account first", and an `invalid` file opens, since the editor is where it gets fixed.
+- `log_open` calls `diagnostic.log_path`, the daemon's dated log (`mailypoppins-<date>.log`), and refuses a file that does not exist yet with `not_found` "No log file found at <path>".
+
+Both hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
+Both methods are in `REQUIRED_CAPABILITIES`.
+
 ## Drafts and the editor
 
 A draft is a Markdown file with YAML frontmatter in the account's drafts directory, and every command that writes one answers its absolute `path`.
@@ -667,6 +681,10 @@ A query matches the address or the display name as a case-insensitive substring,
 It refuses an unknown parameter, an unknown account (`-32005`) and one whose store is not ready (`-32006`), as the daemon does.
 `contact.rebuild` publishes its one `operation.progress` (phase `contacts`, `done: 0`, the account as its message) and settles 0.6 s later with `saved: written`, `contacts` the account's index size and `kept: 0`; the index itself does not change.
 `rebuild_refused` makes the next rebuild settle `refused_shrunk` instead, with 3 contacts found and the whole index kept (25 for `work`).
+
+`config.get` answers `{revision: 0, path, state: "ok", config}`, where `path` is `<temp>/mp-desktop-fixture-<pid>/config.toml`, written at start from the `fixtures/config.toml` template, whose accounts are `accounts.json`'s, and `config` is `fixtures/config.json`, the effective configuration with the passwords `<redacted>`.
+`diagnostic.log_path` answers `<root>/logs/mailypoppins-2026-09-30.log`, written at start with ten lines in the daemon's log format.
+Both refuse an unknown parameter with `-32602`.
 
 ## Tests
 
