@@ -2325,3 +2325,8 @@ Base UI moves focus into a dialog a tick after the dialog is in the DOM, so a te
 The desktop's move picker puts `autoFocus` on its input, and the archive and delete confirmation reads `y`, `n` and Enter on the window, so neither depends on that tick (`clients/desktop/src/components/mutations`).
 A test that types into another dialog waits for the input to have focus first.
 cmdk's `Command.Input` also sets `aria-labelledby` to its own label, which overrides an `aria-label` passed to it, so a test finds that input by its `combobox` role alone.
+
+## The desktop fixture JSON has two readers
+
+`clients/desktop/src/test/tauri-mock.ts` imports `clients/desktop/fixtures/*.json` as the wire shapes they hold (`drafts.json` as a `DraftListing` per account), beside the Rust fixture that compiles them in.
+Reshaping one for the Rust side alone broke 74 vitest tests at once, so data only the Rust fixture needs goes into a file of its own (`draft-bodies.json`, `signatures.json`).

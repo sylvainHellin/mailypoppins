@@ -12,6 +12,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `connector.rs` | The handshake as `ClientKind::Gui`, the on-demand start through `mp daemon start`, `ConnectError`, `mp daemon restart` |
 | `session.rs` | The one `Session`, the `StateTracker` watermark, the event pump, re-bootstrap, the awaited-operations table |
 | `commands.rs` | The Tauri commands and their result types |
+| `editor.rs` | The external editor a draft opens in, and the editor setting |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -31,10 +32,12 @@ type GuiError =
   | { kind: "timeout"; message: string }
   | { kind: "protocol"; message: string; code: number | null }
   | { kind: "not_found"; message: string; code: number | null }
+  | { kind: "setup"; message: string }
   | { kind: "internal"; message: string };
 ```
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
+`setup` is the desktop's own configuration: an editor that did not start, or a settings file that does not read; its message names what to change.
 
 ## Types
 
@@ -75,6 +78,20 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_set_flag` | `account`, `row_ids`, `flagged` | `MutationBatch` |
 | `message_set_read` | `account`, `row_ids`, `read` | `MutationBatch` |
 | `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
+| `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders` | `DraftCreated` |
+| `draft_reply` | `account`, `row_id`, `all`, `headers?` | `DraftCreated` |
+| `draft_forward` | `account`, `row_id`, `headers?` | `DraftCreated` |
+| `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
+| `draft_path` | `account`, `id` | `DraftLocation` |
+| `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
+| `draft_demote` | `account`, `ids` | `DraftStatusBatch` |
+| `draft_validate` | `account`, `id` | `DraftValidation` |
+| `draft_preview` | `account`, `id` | `DraftPreview` |
+| `draft_set_recipients` | `account`, `id`, `to`, `cc`, `bcc`, `subject?` | `DraftLocation` |
+| `signature_list` | `account` | `SignatureListing` |
+| `editor_open` | `path` | `EditorLaunch` |
+| `editor_setting_get` | none | `EditorSetting` |
+| `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
 | `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
@@ -140,6 +157,20 @@ type MutationBatch = { done: MutationAck[]; failed: { row_id: number; error: Gui
 type DraftDiscarded = { account: string; id: string; selector: string; status: string };
 type DraftDiscardBatch = { done: DraftDiscarded[]; failed: { id: string; error: GuiError }[] };
 type HoldCancelled = { cancelled: boolean; operation_id: string; revision: number };
+
+type DraftHeaders = { to: string; cc: string; bcc: string; subject: string };
+type DraftStatusChanged = { account: string; id: string; status: string; path: string };
+type DraftStatusBatch = {
+  done: DraftStatusChanged[];
+  failed: { id: string; error: GuiError; invalid?: DraftInvalid }[];
+};
+type SignatureListing = { account: string; names: string[]; default: string | null };
+type EditorSource = "env" | "setting" | "visual" | "editor" | "probe" | "fallback";
+type EditorLaunch = { editor: string; pid?: number; source: EditorSource };
+type EditorSetting = {
+  editor: string | null; file: string; env_override: string | null;
+  effective: string; effective_source: EditorSource;
+};
 type SyncMode = "quick" | "full";
 
 type InterceptedUrl = { url: string; at: number; source: "navigation" | "new_window" | "open_external_stub" };
@@ -152,6 +183,7 @@ type VersionInfo = {
 A `MessageMeta` header is `null` when the message did not carry it, where a `MessageListRow` of the same message has `""`.
 `AccountInfo.runtime_state`, `sync_health` and `outbox` and `MailboxListing.runtime_state` and `sync_health` come from the latest bootstrap; later changes arrive as events.
 `HoldListing` is the protocol's `{ holds: HoldStatus[] }`.
+`DraftCreated`, `DraftLocation`, `DraftValidation`, `DraftPreview`, `DraftKind`, `DraftMessage` and `DraftInvalid` are the protocol's own types.
 
 ## Mutations
 
@@ -170,9 +202,42 @@ A mutation publishes no event of its own.
 Once the drain runs, each mailbox whose counts moved gets a `state.invalidate` with scope `{ query: "counts" }`; a flag change moves no count and so publishes nothing.
 `draft_discard` is followed by `state.remove` for `draft:<account>/<id>`.
 
+`draft_approve` and `draft_demote` follow the same batch rules, and a draft whose file does not parse (`-32010` `draft_invalid`) also fails alone.
+Its failure carries `invalid`, the `draft.invalid` payload: the session keeps a refusal's text but not its `data`, so the path comes from `draft.list`'s skipped file under that stem and the one diagnostic is the refusal's message.
+
 `send_cancel_hold` stops a hold whichever client armed it; a hold that already fired, or never existed, is `not_found`.
 The countdown itself comes from the bootstrap's `holds` and the `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` events, each carrying one `HoldStatus` with the daemon's `remaining_secs`.
 `sync_trigger` starts `sync.quick` or `sync.full` and awaits it like a server search (`kind: "sync"`); the pass publishes `sync.completed` to every client before its `operation.finished`.
+
+## Drafts and the editor
+
+A draft is a Markdown file with YAML frontmatter in the account's drafts directory, and every command that writes one answers its absolute `path`.
+`draft_create` takes the file name; a name already taken is refused with `protocol` code `-32602`, and the message names the existing path.
+`draft.create` itself takes no recipients, so `headers` are written into the new file client-side.
+`draft_reply` and `draft_forward` address the source by `row_id` and pass `headers` to the daemon, which then needs all four fields; an empty string clears one.
+`draft_from_message` builds a reply, reply-all or forward from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.
+
+`draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.
+An absent `subject` keeps the draft's own, and the signature is not re-spliced.
+The daemon serves no `signature.list`, so `signature_list` reads the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on.
+
+Every change to a draft file, from the daemon, an editor or a client-side rewrite, reaches the frontend as the watcher's `draft.changed` or `draft.invalid`, and the commands publish nothing of their own.
+
+`editor_open` opens a file in the user's editor and never waits for it to exit, since a `code`-style launcher exits at once while the edit goes on.
+The editor is a command template, resolved in this order:
+
+1. `MP_DESKTOP_EDITOR`;
+2. the `editor` key of `desktop.json` in the app config directory (`~/Library/Application Support/dev.mailypoppins.desktop/` on macOS), read and written by `editor_setting_get` and `editor_setting_set`;
+3. `$VISUAL`, then `$EDITOR`, each skipped when it names a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and a few more);
+4. the first of `code`, `zed`, `subl` and `cursor` found in `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin`;
+5. `open -t` on macOS, which opens the default text editor, or `xdg-open` elsewhere.
+
+The template is split with shell-words rules and run without a shell.
+`{path}` in any word is replaced by the path; a template without it gets the path as its last argument.
+An app started from Finder inherits a `PATH` without Homebrew, so a bare program name is looked up on `PATH` and then in the three directories above.
+The process gets null stdio and its own process group.
+A spawn failure or a nonzero exit within 2 s rejects with `setup`, whose message names the variable or the setting to fix; the command answers when the launcher exits or after 2 s, whichever comes first.
+A terminal editor needs a terminal to run in, so it goes through a terminal command, for example `MP_DESKTOP_EDITOR="wezterm start -- hx {path}"`.
 
 ## The event stream
 
@@ -258,6 +323,7 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 | `MP_DESKTOP_MP_BIN` | The `mp` binary to start the daemon with; else the sidecar next to the executable, then `PATH`, then `~/.cargo/bin/mp`, `/opt/homebrew/bin/mp`, `/usr/local/bin/mp` |
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one; default `1400x900` |
 | `MP_DESKTOP_STUB_OPENER=1` | `open_external` records instead of opening |
+| `MP_DESKTOP_EDITOR` | The editor command template `editor_open` runs; see Drafts and the editor |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`; to stderr and `<data>/logs/mp-desktop.log` |
 | `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR` | The same overrides the binary reads |
 | `MAILYPOPPINS_DAEMON_AUTOSTART=0` | No on-demand start |
@@ -269,12 +335,12 @@ The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies 
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save` and `editor_invalid` below.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
 A call without `settle: false` drains before it answers, as `mp archive` does.
-`draft.discard` removes the draft and publishes `state.remove`.
+`draft.discard` removes the draft file and publishes `state.remove`.
 `sync.quick` and `sync.full` run for 0.8 s, drain, publish `sync.completed` and settle; `home` fails its login, as its sync health says.
 
 `rollback` puts back every fixture mutation since the last rollback or restart, and `rollback:<n>` only the last `n`.
@@ -284,6 +350,17 @@ With nothing to roll back it is an error, since the daemon publishes nothing for
 The bootstrap's seeded hold is on `work`'s first draft with a 60 s window, counting from the app's start.
 `hold` arms another one, 10 s long, as the TUI would: `send.hold_started` at once, a `send.hold_tick` each second down to 1, then `send.hold_fired` (the fixture sends nothing).
 `send_cancel_hold` stops either with `send.hold_cancelled`, and `restart` forgets every hold and the rollback journal.
+
+The drafts are real files in a per-run directory, `<temp>/mp-desktop-fixture-<pid>/drafts/<account>/`, written at start from `drafts.json`'s rows and `draft-bodies.json`.
+Every call rescans that directory, as the daemon's draft queries do, so the listing, the counts and the bootstrap's drafts follow the files.
+`draft.create`, `draft.reply`, `draft.forward` and `draft.create_from_message` write through the same `mp_core::draft` builders as the daemon; a reply or forward is renamed `<id>.md`, a created draft keeps its name, and a forward carries the source's attachments as small files under `attachments/`.
+`signature.list` answers from `signatures.json`, whose `work` default is spliced into a new `work` draft.
+Each write publishes `draft.changed`, and a file that does not parse is listed under `skipped`, is an `invalid` row in the bootstrap, and is refused by `draft.approve` and `draft.preview` with `-32010`.
+
+`editor_open` spawns nothing in fixture mode: it journals the path and the resolved command.
+`editor_save` appends a line to the file the last `editor_open` named, which moves it to the top of the listing, and publishes `draft.changed`.
+`editor_invalid` breaks that file's frontmatter and publishes `draft.invalid`.
+Either is an error before any `editor_open`.
 
 ## Tests
 
