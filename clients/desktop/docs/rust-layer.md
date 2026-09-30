@@ -15,6 +15,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
+| `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -117,6 +118,9 @@ The type blocks in this document are for reading, and the generated files are th
 | `calendar_rsvp` | `account`, `row_id`, `response: "accept" \| "tentative" \| "decline"` | `{ operation_id }` |
 | `invite_refusal` | `account` | `InviteRefusal` |
 | `send_invite` | `account`, `subject`, `start`, `to?`, `cc?`, `end?`, `duration?`, `location?`, `description?` | `{ operation_id }` |
+| `contact_search` | `account`, `query` (empty for the whole index), `limit` | `ContactSearch` |
+| `contact_rebuild` | `account` | `{ operation_id }` |
+| `contact_vcard_draft` | `account`, `name` (the new draft's file name), `address`, `display_name` | `VcardDraft` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
@@ -202,6 +206,13 @@ type RsvpSettled = {
   organizer: string; message_id: string; delivered: boolean;
 };
 type InviteRefusal = { account: string; refusal: string | null };
+type ContactRow = {
+  address: string; display_name: string; sent_to: number; sent_cc: number; received: number;
+  score: number; recipient: string;
+};
+type ContactSearch = { account: string; query: string; contacts: ContactRow[] };
+type ContactRebuilt = { account: string; contacts: number; kept: number; saved: string; cache_path: string };
+type VcardDraft = { draft: DraftCreated; vcf: string };
 
 type InterceptedUrl = { url: string; at: number; source: "navigation" | "new_window" | "open_external_stub" };
 type VersionInfo = {
@@ -266,6 +277,7 @@ A cancelled hold cancels the operation too, which then ends `cancelled`.
 | `outbox_retry` | `outbox_retry` | `send.outbox_retry` | `OutboxRetryOutcome` |
 | `rsvp` | `calendar_rsvp` | `calendar.rsvp` | `RsvpSettled` |
 | `send_invite` | `send_invite` | `send.invite` | `SendOutcome` |
+| `contact_rebuild` | `contact_rebuild` | `contact.rebuild` | `ContactRebuilt` |
 
 Each ends one of three ways, as the event stream below says: `operation.finished` with `{operation_id, state, result?, error?}`, `operation_settled` with the whole `OperationStatus` after a re-query, or `operation_dropped` when the daemon restarted.
 A send's `state` is `succeeded` once the submission ran, with each recipient's verdict in `recipients`, `failed` with the transport's error, or `cancelled`; a `succeeded` send every recipient refused is a failure to show.
@@ -320,6 +332,30 @@ An `imap` account answers `refusal: null` without that call, and an unknown one 
 The layer sends only the fields that are not empty, and never `uid`, `signature` or a hold: the daemon mints the UID, and `send.invite` takes no hold.
 The daemon's refusals are the CLI's (`--invite requires --subject (used as the event summary)`), so the three a form can check are checked before the call, in the form's words and in the daemon's order: "An invitation needs a subject", "An invitation needs a start", "An invitation needs at least one recipient in To or Cc".
 Any other refusal, the Graph one first of all, comes back as a `protocol` error whose message is the daemon's sentence alone, with its code.
+
+## The contacts
+
+`contact_search` is `contact.search {account, query, limit}`: the account's contacts a query fuzzy-matches, best first, or for an empty query the whole index in rank order (sent To, then Cc, then received, then recency), at most `limit`.
+The Contacts view asks with a `limit` of 1000, where the TUI lists the whole index from its cache file.
+Each row is the daemon's inline `{address, display_name, sent_to, sent_cc, received, score}` plus `recipient`, which the layer formats with `mp_core::addresses::format_recipient`: `Name <address>`, the name quoted when it holds a character outside atext and spaces (`"Doe, Jane" <jane@example.com>`), or the bare address when no message named one.
+The webview puts `recipient` in To as it is and never quotes a name itself.
+`score` is the fuzzy match score of a query; every row of an empty query carries `4294967295` (`u32::MAX`), which the view does not show.
+With no cache on disk the daemon builds the index inside the query, which walks the whole store, so a first search can take seconds; a rebuild the cache guard refuses there is only logged by the daemon.
+An account whose store is not ready is refused with `protocol` code `-32006`, and an unknown one is `not_found` with `-32005`.
+
+`contact_rebuild` starts `contact.rebuild {account}` and awaits it as `kind: "contact_rebuild"`.
+The daemon reports one `operation.progress`, phase `contacts` with the account as its message, which reaches the webview because the operation is awaited.
+`ContactRebuilt` is the daemon's inline settle: `contacts` the rebuild found, and `saved`, which is `written`, or `refused_empty` or `refused_shrunk` when the cache guard (#0067) kept the `kept` contacts it had instead.
+No event says that an index changed, so the frontend reads the list again after a written rebuild and on every open of the view.
+
+`contact_vcard_draft` is the TUI's `v`, done client-side since no daemon method exports a vCard:
+
+1. `draft.create` of `name` with the headers `to: recipient` and `subject: "Contact: <name>"` (the display name, else the address's local part) and `no_signature`, the TUI's vCard draft carrying none;
+2. `mp_core::contacts::contact_to_vcard` of the contact into `_vcards/` beside the new draft, named by `vcard_file_stem` (`doe-jane.vcf`), then `-1`, `-2` and on while the name is taken, the TUI's rule;
+3. the `.vcf`'s absolute path appended to the draft's `attachments:` through `draft_attach`'s code, which reads the file back through `draft.path`.
+
+It answers the `DraftCreated` and the `.vcf`'s path, and opens nothing: the frontend hands the draft to the editor as a new draft's.
+An empty address is a `protocol` refusal before any call.
 
 ## Drafts and the editor
 
@@ -420,7 +456,7 @@ The channel first carries a `connection` event and, once connected, a `rebootstr
 
 ```ts
 type BootstrapCause = "initial" | "subscribed" | "requested" | "resync" | "reconnected" | "instance_changed";
-type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry";
+type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry" | "rsvp" | "send_invite" | "contact_rebuild";
 type GuiEvent =
   | { type: "event"; event: { instance_id: string; revision: number; kind: string; payload: unknown } }
   | { type: "resync"; instance_id: string; reason: string }
@@ -436,7 +472,7 @@ type GuiEvent =
 `event` carries the daemon's envelope verbatim and only when it applied above the watermark; duplicates are dropped in Rust.
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
 A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
-A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, and a retry started by `outbox_retry` end the same three ways.
+A sync started by `sync_trigger`, a send started by `send_draft` or `send_approved`, a retry started by `outbox_retry`, an RSVP, an invitation and a contact index rebuild end the same three ways.
 A hit, a progress report or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 `operation.progress` reaches the webview only for an operation this window awaits, so another client's contacts rebuild or sign-in code never shows here.
 A progress report leaves its operation awaited; only the finish, a settle or a drop ends the wait.
@@ -508,11 +544,11 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 
 ## Fixture mode
 
-The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies, 1 armed send hold and 6 agenda events.
+The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts.
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel` and `rsvp_fail` below; `send_fail` also fails the next invitation.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail` and `rebuild_refused` below; `send_fail` also fails the next invitation.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -588,6 +624,13 @@ Otherwise the operation runs 0.5 s: the agenda row's `rsvp` and the user's own a
 `send.invite` refuses in `plan_invite`'s order with the daemon's words: `home` with the Graph sentence, then a missing subject, a missing start, both or neither of `end` and `duration`, and no recipient in `to` or `cc`; it does not parse the times.
 Otherwise the operation runs for the send delay: the invitation joins the account's agenda as a row the user organizes (a wall-clock start read as its UTC sort key, every recipient `needs-action`), `state.invalidate` of `mailbox:<account>/sent` says its copy was filed, and it settles with a `SendOutcome` every recipient took.
 After `send_fail` it fails instead with the transport error, after a `failed` outbox row naming the recipients.
+
+`contact.search` answers from `contacts.json`: 25 ranked contacts for `work` and 3 for `home`, each with a fixed `score` that spreads from 1000 down.
+`work` holds two display names with a comma (`Doe, Jane`, `Legal, Supplier Ltd`), one with an apostrophe (`Tom O'Brien`), one with an accent (`Sofia García`) and two addresses with no name.
+A query matches the address or the display name as a case-insensitive substring, where the daemon's match is fuzzy; the answer is in score order, empty query included, and capped at `limit`, 20 when absent.
+It refuses an unknown parameter, an unknown account (`-32005`) and one whose store is not ready (`-32006`), as the daemon does.
+`contact.rebuild` publishes its one `operation.progress` (phase `contacts`, `done: 0`, the account as its message) and settles 0.6 s later with `saved: written`, `contacts` the account's index size and `kept: 0`; the index itself does not change.
+`rebuild_refused` makes the next rebuild settle `refused_shrunk` instead, with 3 contacts found and the whole index kept (25 for `work`).
 
 ## Tests
 

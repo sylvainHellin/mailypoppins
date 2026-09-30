@@ -23,6 +23,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/calendar.ts` | The agendas, the past/upcoming rule, the Calendar view's cursor and scope, and the source open |
 | `src/app/rsvp.ts` | The reader's invitation cards, the Graph refusals, the RSVP refusals in the TUI's words, the RSVP choice and the RSVPs this window awaits |
 | `src/app/invite.ts` | The New invitation form's checks, and the invitations this window awaits |
+| `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -36,6 +37,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host and the placeholder of a view no unit has filled |
+| `src/components/contacts` | The Contacts view, its list and rows |
 | `src/components/calendar` | The Calendar view, its agenda list and rows, the event card the reader's invitation card reuses, the RSVP choice and the New invitation form |
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 
@@ -67,10 +69,11 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
 | `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
 | `event` `operation.finished` of an invitation | the invitation settles: a notice says how, and the account's agenda, invitation cards and outbox counts are read again |
+| `event` `operation.finished` of a contact rebuild | the rebuild settles: a notice says how, and a written index is read again |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
-| `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; nothing draws it yet |
-| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`), an RSVP (`rsvp`) or an invitation (`send_invite`) settles or says it was interrupted |
+| `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; the Contacts view's header shows a rebuild's |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`), an RSVP (`rsvp`), an invitation (`send_invite`) or a contact rebuild (`contact_rebuild`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -361,8 +364,8 @@ The window shows Mail (the list and the reader, or the outbox view in the list p
 `state.view` is `"mail" | "contacts" | "calendar" | "settings"`, and `switch_view` moves it.
 A full-pane view takes the list's and the reader's place, the splitter too, and is the `list` pane for focus; Tab cycles the sidebar and the view, and a history step never lands in the hidden reader.
 In the narrow layout the view stands where the list would, under a bar titled with its name whose back button goes up to the sidebar.
-Until its unit fills it, a view is a placeholder: a region named after the view ("Contacts", "Settings"), its heading, one line, and a "Mail" button (`EmptyView.tsx`, mounted by `ViewHost.tsx`).
-Calendar is filled (see Calendar); its region keeps the view's name.
+Until its unit fills it, a view is a placeholder: a region named after the view ("Settings"), its heading, one line, and a "Mail" button (`EmptyView.tsx`, mounted by `ViewHost.tsx`).
+Contacts and Calendar are filled (see Contacts and Calendar); their regions keep the view's name.
 
 ### Entry points
 
@@ -380,7 +383,7 @@ Another account keeps the view, which follows the selection's account.
 
 Outside Mail the mailbox selection and its marks are out of sight, so the actions that read them do nothing: the outbox view's set (see Outbox, "What the view hides"), through `hiddenByView` in `src/app/views.ts`.
 Their palette rows and menu items answer "Go back to Mail first (Escape): this acts on the mailbox selection", which takes precedence over the outbox's own sentence.
-`move_selection` leaves the mail list alone in a view; in Calendar it moves the agenda's cursor, and a later view with a cursor moves its own there.
+`move_selection` leaves the mail list alone in a view; in Contacts and Calendar it moves the view's own cursor.
 
 ### Keys in a view
 
@@ -390,9 +393,65 @@ The keymap reads a view's table (`VIEW_KEYS` in `src/keymap/viewKeys.ts`) after 
 - `s` and Space still arm; `g` arms in Contacts and Calendar only for their own `gg`; `c`, `t` and `f` never arm.
 - Under an armed prefix only the view's combos and the view-agnostic ones run: `ss`, `sS`, `Space m`, `Space c`, `Space a` (`VIEW_AGNOSTIC_COMBOS`, which Mail reads too).
 - Tab, `:`, `Ctrl+p`, `?`, `X`, the moves (`j`/`k`, `G`, the arrows, `Home`/`End`, the pages) and `u` over a held send work as in Mail; Enter on a sidebar mailbox brings Mail back with it, before a view's own Enter.
-- Every other printable key does nothing, silently, as the TUI's views ignore the mail keys: the MESSAGE keys, `v`, `x`, `y`, `F`, `z`, `/` and the digits.
+- Every other printable key does nothing, silently, as the TUI's views ignore the mail keys: the MESSAGE keys, `v`, `x`, `y`, `F`, `z`, `/` and the digits, unless the view binds them (Contacts takes `/`, `n`, `v`, `c` and `r`).
 
 Each unit that fills a view adds its keys to that view's table: the table's keys are `ActionId`s, so a palette row runs the same action.
+
+## Contacts
+
+The Contacts view lists the ranked contacts of the selection's account, the TUI's Contacts view (CON-01, CON-03, CON-05, CON-06, CON-07, CON-08).
+It follows the selection's account, and the query stays.
+
+### The list
+
+`contact_search` answers the rows, best first; `state.contacts` keeps each account's answer as a `Loadable`, created on the first open for that account.
+Every search asks for 1000 rows, where the TUI lists its whole index.
+`state.contactsView` is `{account, query, cursor, searching}`: the query the list was asked for, the cursor as an address (the first row while it is `null`), and whether the search field has the focus.
+
+The list is a single-select `listbox` named "Contacts".
+A row (`ContactRow.tsx`, an `option` named "<name>, <address>, to N, cc N, received N") shows the display name with the address under it, or the address alone when no message named one, then how many sent messages had it in To and in Cc and how many received messages named it, and a query's match score; an empty query ranks without a score, so none is shown.
+The header says "<account>: N contacts", with "matching <query>" while a query is set.
+An empty index says "No contacts yet; press r to build the index", and a query with no match "No matching contacts.".
+An account whose store is not ready (`-32006`) says that it has no local store yet and that its contacts appear after its first sync.
+
+### Search
+
+The header's search field (`mp-contacts-search`, labelled "Search contacts") asks the daemon, whose match is fuzzy over the name and the address.
+`/` focuses it.
+It asks 150 ms after the typing pauses, so a burst of keys is one `contact_search`, and each new query takes a new generation, so the answer to a query typed over never settles the list.
+Enter asks at once and hands the keys back to the list; Escape leaves the field with its query kept, where the TUI's Escape clears it, and the focus goes to the cursor row.
+
+### Keys and actions
+
+The Contacts view's table binds the TUI's CONTACTS keys (`VIEW_KEYS.contacts`):
+
+- `j`/`k`, the arrows, `gg`/`G`, `Home`/`End` and the pages move the cursor through `move_selection`.
+- Enter and `n` open the new-draft wizard with the contact's `recipient` in To and the focus in Subject, the TUI's `ComposeToContact`; a double-click on a row does the same.
+- `v` sends the contact as a vCard: `contact_vcard_draft` writes a new draft to it, subject "Contact: <name>", with the `.vcf` attached, the notice says "vCard draft: <recipient>", and the draft opens in the editor as a new draft does (see Compose).
+  A refused write is a `compose_failed` notice, "vCard draft failed: <why>".
+- `c` copies the contact's address through `copyText`, "Copied <address>", and never arms the `c` family, so `cn` and `cs` are not reachable here, as in the TUI.
+- `r` rebuilds the index (see Rebuild).
+- With no contact under the cursor, Enter, `n`, `v` and `c` say "No contact selected".
+
+The palette's "Fuzzy search", "Compose to contact", "Send contact as vCard", "Copy email address" and "Refresh contact index" run the same actions, and outside the Contacts view they answer "Switch to the Contacts view first (Space c): this acts on the contact list".
+The header's "Compose", "Send vCard" and "Copy address" buttons, shown while a contact is under the cursor, and its "Rebuild index" button run them too.
+
+### Rebuild
+
+A rebuild is `contact_rebuild`, awaited as `contact_rebuild`: `state.rebuilds` keeps each one this window started (`{token, account, operation_id}`) and `rebuildEarly` an end that overtook the start's answer, as `sends` and `sendEarly` do.
+One runs per account: a second `r` meanwhile says "The contact index of <account> is already being rebuilt".
+While it runs, the header's status line says "Rebuilding the contact index of <account>…" and the "Rebuild index" button is `aria-busy`.
+The settle says the TUI's words:
+
+- "Contacts refreshed (N)" when the index was written, and the list is read again;
+- "Contacts rebuild found none, kept K cached" and "Contacts rebuild found only N, kept K cached" when the cache guard kept the old index, as a notice that stays until dismissed;
+- "Contacts refresh failed: <why>" for a failure, a refused start or a drop by a daemon restart.
+
+### Staleness
+
+No daemon event names a contact index.
+So the shown account's list is read on every switch to the view, after a written rebuild, on a new query, and on every bootstrap, which also drops the lists of accounts that are gone.
+Only the shown list is read: one that went stale behind another view is read when the Contacts view comes back.
 
 ## Calendar
 
@@ -494,7 +553,7 @@ The list is drawn at the stored width only while the reader keeps `READER_MIN` (
 The window has three panes, each one tab stop, in reading order:
 
 1. Sidebar (`<nav aria-label="Accounts and mailboxes">`): the mailbox under the sidebar cursor.
-2. List (`<section aria-label="Message list">` inside `<main>`): the selected row of the `listbox`, or its first row; while the outbox shows, `<section aria-label="Outbox of <account>">` and the row under its cursor, a `listitem` named "Row N, <chip>"; outside Mail, the view's `<section>` named after it, in Calendar the cursor row of the "Agenda" `listbox`.
+2. List (`<section aria-label="Message list">` inside `<main>`): the selected row of the `listbox`, or its first row; while the outbox shows, `<section aria-label="Outbox of <account>">` and the row under its cursor, a `listitem` named "Row N, <chip>"; outside Mail, the view's `<section>` named after it, in Contacts the cursor row of the "Contacts" `listbox` and in Calendar the cursor row of the "Agenda" `listbox`.
 3. Reader (`<aside aria-label="Reader">`, complementary): the scrollable message; outside Mail there is none, and Tab cycles the first two.
 
 Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, reader, sidebar), starting from the pane the model holds as focused, and only while focus sits in a pane or on the page; anywhere else (a dialog, a screen's buttons, the splitter) they are the browser's.
@@ -502,7 +561,7 @@ Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
 Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice and the New invitation form) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice on its listbox, and the New invitation form in To, or on Cancel for a Graph account.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice on its listbox, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -530,6 +589,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `X`: dismiss the newest activity notice, a desktop key.
 - `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.
+- In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
 - In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
