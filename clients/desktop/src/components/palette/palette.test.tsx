@@ -110,6 +110,19 @@ describe("the command palette", () => {
     expect(await screen.findByRole("dialog", { name: "Keys" })).toBeInTheDocument();
   });
 
+  it("the key help lists the desktop client's own keys after the TUI's", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("?");
+    const help = await screen.findByRole("dialog", { name: "Keys" });
+    const desktop = within(help).getByRole("region", { name: "DESKTOP" });
+    expect(desktop).toHaveTextContent("Cancel the held send");
+    expect(desktop).toHaveTextContent("Mark range");
+    // The M2 rows lost their badge.
+    const archive = within(help).getAllByText("Archive")[0].closest("tr");
+    expect(archive).not.toHaveTextContent("M2");
+  });
+
   it("merges keys that share an action within a section", () => {
     const palette = paletteEntries().find((e) => e.label.startsWith("Command palette"));
     expect(palette?.keys).toEqual([":", "Ctrl+p"]);

@@ -7,7 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { BadgeFor } from "@/components/palette/BadgeFor";
 import { Kbd } from "@/components/ui/kbd";
-import { bindingFor, SECTIONS } from "@/keymap/catalog";
+import { bindingFor, GUI_ENTRIES, SECTIONS } from "@/keymap/catalog";
 
 export type KeyHelpProps = { open: boolean; onOpenChange: (open: boolean) => void };
 
@@ -19,8 +19,8 @@ export function KeyHelp({ open, onOpenChange }: KeyHelpProps) {
         <DialogHeader>
           <DialogTitle>Keys</DialogTitle>
           <DialogDescription>
-            The TUI's bindings, from <code>mp dump-keys</code>. A badge names the milestone that brings an action to
-            the desktop client.
+            The TUI's bindings, from <code>mp dump-keys</code>, then the desktop client's own. A badge names the
+            milestone that brings an action to the desktop client.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-x-8 gap-y-5 md:grid-cols-2">
@@ -50,6 +50,23 @@ export function KeyHelp({ open, onOpenChange }: KeyHelpProps) {
               </table>
             </section>
           ))}
+          <section aria-labelledby="keys-DESKTOP">
+            <h3 id="keys-DESKTOP" className="mb-2 text-xs font-semibold tracking-wide text-muted-foreground">
+              DESKTOP
+            </h3>
+            <table className="w-full text-sm">
+              <tbody>
+                {GUI_ENTRIES.filter((e) => e.keys.length > 0).map((e) => (
+                  <tr key={`${e.section}:${e.label}`} className="align-top">
+                    <th scope="row" className="w-28 py-0.5 pr-3 text-left font-normal">
+                      <Kbd className="font-mono">{e.keys.join(" / ")}</Kbd>
+                    </th>
+                    <td className="py-0.5">{e.label}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
         </div>
       </DialogContent>
     </Dialog>
