@@ -37,6 +37,8 @@ export type { MutationFailure } from "./MutationFailure";
 export type { OperationStarted } from "./OperationStarted";
 export type { PendingKind } from "./PendingKind";
 export type { ProtocolRange } from "./ProtocolRange";
+export type { SendRefusal } from "./SendRefusal";
+export type { SendStarted } from "./SendStarted";
 export type { ServerSearchParams } from "./ServerSearchParams";
 export type { SignatureListing } from "./SignatureListing";
 export type { SyncMode } from "./SyncMode";

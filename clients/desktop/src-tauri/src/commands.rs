@@ -520,6 +520,48 @@ pub struct HoldCancelled {
     pub revision: u64,
 }
 
+/// A send `send_draft` or `send_approved` started. It ends with the
+/// operation's `operation.finished`, `operation_settled` or
+/// `operation_dropped` (kind `send` or `send_approved`), whose `result` is
+/// a `SendOutcome` or an `ApprovedOutcome`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct SendStarted {
+    pub operation_id: String,
+    /// Whether the daemon armed its undo hold; `false` when the call asked
+    /// for none or `email.send_hold_secs` is 0, and then no `send.hold_*`
+    /// event follows.
+    pub held: bool,
+    /// `send_draft` approved the draft first, which a cancelled or failed
+    /// send leaves approved.
+    pub approved: bool,
+}
+
+/// Why `send_draft` did not start a send: a `GuiError`, and for a draft
+/// whose file does not parse (`-32010` `draft_invalid`), the file and why,
+/// as `draft.invalid` carries them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct SendRefusal {
+    #[serde(flatten)]
+    #[cfg_attr(test, ts(flatten))]
+    pub error: GuiError,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub invalid: Option<Box<DraftInvalid>>,
+}
+
+impl From<GuiError> for SendRefusal {
+    fn from(error: GuiError) -> SendRefusal {
+        SendRefusal {
+            error,
+            invalid: None,
+        }
+    }
+}
+
 /// Which sync pass `sync_trigger` starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -1280,6 +1322,96 @@ pub fn sync_trigger_on(
     Ok(OperationStarted { operation_id })
 }
 
+/// Send the draft `id` of `account`, the TUI's `x` (SND-03): the draft is
+/// validated first, and a `draft` status is approved before `send.draft`,
+/// so a draft that fails validation keeps its status. A refused approve
+/// stops here, with the `draft.invalid` payload for a file that does not
+/// parse; a send the daemon refuses to start leaves the approval in place,
+/// as the TUI's does.
+pub fn send_draft_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    id: &str,
+    hold: bool,
+) -> Result<SendStarted, SendRefusal> {
+    let answer = call(
+        door,
+        "draft.list",
+        json!({"account": account}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    let listing: DraftListing = decode("draft.list", answer)?;
+    let entry = listing.drafts.into_iter().find(|d| d.id == id);
+    if let Some(entry) = &entry {
+        let validation = draft_validate_on(door, account, id)?;
+        if let Some(report) = validation.reports.iter().find(|r| r.id == id && !r.valid) {
+            return Err(GuiError::Protocol {
+                message: format!(
+                    "{} does not validate: {}",
+                    entry.selector,
+                    report.error.as_deref().unwrap_or("no reason given")
+                ),
+                code: None,
+            }
+            .into());
+        }
+    }
+    // A draft the listing does not show is approved too: the daemon's
+    // refusal says whether it does not parse (`-32010`) or does not exist.
+    let approve = entry.as_ref().is_none_or(|e| e.status != "approved");
+    if approve {
+        let approved = call(
+            door,
+            "draft.approve",
+            json!({"account": account, "id": id}),
+            DRAFT_QUERY_BUDGET,
+            Addressing::Resource,
+        );
+        if let Err(error) = approved {
+            return Err(SendRefusal {
+                invalid: invalid_payload(door, account, id, &error).map(Box::new),
+                error,
+            });
+        }
+    }
+    let (operation_id, answer) = session.start_operation_answer(
+        door,
+        "send.draft",
+        json!({"account": account, "id": id, "hold": hold}),
+        PendingKind::Send,
+        START_BUDGET,
+    )?;
+    Ok(SendStarted {
+        operation_id,
+        held: answer["held"] == true,
+        approved: approve,
+    })
+}
+
+/// Send every approved draft of `account`, the TUI's `cX`: one operation,
+/// whose hold names the first draft it would send.
+pub fn send_approved_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    hold: bool,
+) -> Result<SendStarted, GuiError> {
+    let (operation_id, answer) = session.start_operation_answer(
+        door,
+        "send.approved",
+        json!({"account": account, "hold": hold}),
+        PendingKind::SendApproved,
+        START_BUDGET,
+    )?;
+    Ok(SendStarted {
+        operation_id,
+        held: answer["held"] == true,
+        approved: false,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The commands
 // ---------------------------------------------------------------------------
@@ -1648,6 +1780,36 @@ pub async fn send_cancel_hold(
 ) -> Result<HoldCancelled, GuiError> {
     with_door(&session, move |_, door| {
         send_cancel_hold_on(door, &operation_id)
+    })
+    .await
+}
+
+/// `hold: true` is what the frontend sends, as the TUI does: the daemon's
+/// `email.send_hold_secs` decides the window, `0` meaning none.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_draft(
+    session: State<'_, SessionHandle>,
+    account: String,
+    id: String,
+    hold: bool,
+) -> Result<SendStarted, SendRefusal> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let door = session.door(CONNECT_WAIT)?;
+        send_draft_on(&session, &door, &account, &id, hold)
+    })
+    .await
+    .map_err(|e| GuiError::internal(format!("the command task failed: {e}")))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn send_approved(
+    session: State<'_, SessionHandle>,
+    account: String,
+    hold: bool,
+) -> Result<SendStarted, GuiError> {
+    with_door(&session, move |s, door| {
+        send_approved_on(s, door, &account, hold)
     })
     .await
 }
@@ -2554,5 +2716,144 @@ mod tests {
             search_server_cancel_on(&session, &d, &started.operation_id).expect("again"),
             CancelOutcome::AlreadySettled
         );
+    }
+
+    /// The send path's calls, in order, out of everything the fixture saw.
+    fn send_calls(f: &Fixture) -> Vec<(String, Value)> {
+        f.calls()
+            .into_iter()
+            .filter(|(m, _)| {
+                matches!(
+                    m.as_str(),
+                    "draft.list"
+                        | "draft.validate"
+                        | "draft.approve"
+                        | "send.draft"
+                        | "send.approved"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn send_draft_validates_approves_then_sends_with_the_hold() {
+        let (d, f, rx) = fixture_with_events();
+        let session = SessionHandle::new(true);
+        let started =
+            send_draft_on(&session, &d, "work", "angebot-antwort", true).expect("started");
+        assert!(started.held);
+        assert!(started.approved);
+        let calls = send_calls(&f);
+        let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(
+            methods,
+            [
+                "draft.list",
+                "draft.validate",
+                "draft.approve",
+                "send.draft"
+            ]
+        );
+        assert_eq!(
+            calls[3].1,
+            json!({"account": "work", "id": "angebot-antwort", "hold": true})
+        );
+        assert_eq!(session.pending(), vec![started.operation_id.clone()]);
+        let kinds: Vec<String> = drained(&rx).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(kinds, ["draft.changed", "send.hold_started"]);
+        let value = serde_json::to_value(&started).expect("json");
+        assert_eq!(
+            value,
+            json!({"operation_id": started.operation_id, "held": true, "approved": true})
+        );
+    }
+
+    #[test]
+    fn an_approved_draft_is_sent_without_a_second_approve() {
+        let (d, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        draft_approve_on(&d, "work", &["angebot-antwort".to_string()]).expect("approved");
+        let before = send_calls(&f).len();
+        let started =
+            send_draft_on(&session, &d, "work", "angebot-antwort", false).expect("started");
+        assert!(!started.held);
+        assert!(!started.approved);
+        let methods: Vec<String> = send_calls(&f)[before..]
+            .iter()
+            .map(|(m, _)| m.clone())
+            .collect();
+        assert_eq!(methods, ["draft.list", "draft.validate", "send.draft"]);
+    }
+
+    #[test]
+    fn a_draft_that_does_not_validate_keeps_its_status_and_is_not_sent() {
+        let (d, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let refused =
+            send_draft_on(&session, &d, "work", "offsite-note", true).expect_err("refused");
+        assert!(refused.invalid.is_none());
+        assert!(matches!(
+            refused.error,
+            GuiError::Protocol { code: None, .. }
+        ));
+        assert!(
+            refused.error.message().contains("does not validate"),
+            "{refused:?}"
+        );
+        let methods: Vec<String> = send_calls(&f).into_iter().map(|(m, _)| m).collect();
+        assert_eq!(methods, ["draft.list", "draft.validate"]);
+        assert!(session.pending().is_empty());
+    }
+
+    #[test]
+    fn a_refused_approve_stops_the_send_with_the_invalid_payload() {
+        let (d, f, _rx) = fixture_with_events();
+        let session = SessionHandle::new(true);
+        let angebot = draft_path_on(&d, "work", "angebot-antwort").expect("path");
+        open_in_editor(&f, &angebot.path);
+        f.simulate("editor_invalid").expect("broken");
+        let refused =
+            send_draft_on(&session, &d, "work", "angebot-antwort", true).expect_err("refused");
+        assert!(matches!(
+            refused.error,
+            GuiError::Protocol {
+                code: Some(-32010),
+                ..
+            }
+        ));
+        let invalid = refused.invalid.as_ref().expect("the draft.invalid payload");
+        assert_eq!(invalid.path, angebot.path);
+        let methods: Vec<String> = send_calls(&f).into_iter().map(|(m, _)| m).collect();
+        assert!(!methods.contains(&"send.draft".to_string()), "{methods:?}");
+        assert!(session.pending().is_empty());
+        // The refusal is a GuiError with `invalid` beside its fields.
+        let value = serde_json::to_value(&refused).expect("json");
+        assert_eq!(value["kind"], "protocol");
+        assert_eq!(value["code"], -32010);
+        assert_eq!(value["invalid"]["id"], "angebot-antwort");
+        let missing = send_draft_on(&session, &d, "work", "missing", true).expect_err("missing");
+        assert!(matches!(missing.error, GuiError::NotFound { .. }));
+        let plain = serde_json::to_value(&missing).expect("json");
+        assert!(plain.get("invalid").is_none(), "absent, not null");
+    }
+
+    #[test]
+    fn send_approved_is_awaited_as_send_approved() {
+        let (d, f) = fixture_door();
+        let session = SessionHandle::new(true);
+        let started = send_approved_on(&session, &d, "work", true).expect("started");
+        assert!(!started.approved);
+        assert_eq!(session.pending(), vec![started.operation_id.clone()]);
+        assert_eq!(
+            send_calls(&f).last().cloned().expect("call"),
+            (
+                "send.approved".to_string(),
+                json!({"account": "work", "hold": true})
+            )
+        );
+        assert!(matches!(
+            send_approved_on(&session, &d, "nobody", true),
+            Err(GuiError::NotFound { .. })
+        ));
     }
 }

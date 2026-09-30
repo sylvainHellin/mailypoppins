@@ -167,6 +167,8 @@ pub fn run() {
             editor::editor_setting_set,
             commands::send_hold_status,
             commands::send_cancel_hold,
+            commands::send_draft,
+            commands::send_approved,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

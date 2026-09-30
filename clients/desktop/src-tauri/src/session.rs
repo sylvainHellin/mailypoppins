@@ -12,8 +12,8 @@
 //!   forwarded and answered with a fresh `state.bootstrap`, sent as
 //!   [`GuiEvent::Rebootstrapped`] so the frontend restores presentation state
 //!   by stable identifiers;
-//! - after every re-bootstrap the awaited operations (only server searches in
-//!   M1) are re-queried with `operation.status`, as the TUI's
+//! - after every re-bootstrap the awaited operations (server searches, syncs
+//!   and sends) are re-queried with `operation.status`, as the TUI's
 //!   `requery_operations` does, and settled or dropped.
 //!
 //! The frontend receives all of it on one ordered tauri `Channel`, registered
@@ -122,6 +122,10 @@ pub enum PendingKind {
     ServerSearch,
     /// `sync.quick` or `sync.full`.
     Sync,
+    /// `send.draft`: its `result` is a `SendOutcome`.
+    Send,
+    /// `send.approved`: its `result` is an `ApprovedOutcome`.
+    SendApproved,
 }
 
 /// Where an intercepted URL came from.
@@ -646,6 +650,20 @@ impl SessionHandle {
         kind: PendingKind,
         budget: Duration,
     ) -> Result<String, GuiError> {
+        self.start_operation_answer(door, method, params, kind, budget)
+            .map(|(id, _)| id)
+    }
+
+    /// [`SessionHandle::start_operation`], with the starting method's whole
+    /// answer beside the id (`send.draft` says whether it armed a hold).
+    pub fn start_operation_answer(
+        &self,
+        door: &Door,
+        method: &str,
+        params: Value,
+        kind: PendingKind,
+        budget: Duration,
+    ) -> Result<(String, Value), GuiError> {
         let mut pump = lock(&self.shared.pump);
         let answer = door
             .call_within(method, params, budget)
@@ -656,7 +674,7 @@ impl SessionHandle {
             .ok_or_else(|| GuiError::protocol(format!("{method} answered no operation_id")))?
             .to_string();
         pump.pending.insert(id.clone(), kind);
-        Ok(id)
+        Ok((id, answer))
     }
 
     /// Stop awaiting an operation.
@@ -1096,6 +1114,51 @@ mod tests {
             "{t:?}"
         );
         assert!(session.pending().is_empty());
+    }
+
+    #[test]
+    fn a_send_settled_by_the_requery_carries_its_kind_and_outcome() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_send_delay(Duration::ZERO);
+        let started =
+            crate::commands::send_draft_on(&session, &door, "work", "angebot-antwort", false)
+                .expect("started");
+        let id = started.operation_id;
+        await_terminal(&door, &id);
+        while rx.try_recv().is_ok() {}
+        session.handle(
+            &door,
+            Incoming::Resync {
+                instance_id: fixture.instance_id(),
+                reason: "event_queue_overflow".into(),
+            },
+        );
+        let settled = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_settled")
+            .cloned()
+            .expect("settled by the requery");
+        assert_eq!(settled["kind"], "send");
+        assert_eq!(settled["operation_id"], id.as_str());
+        let outcome: mp_protocol::send::SendOutcome =
+            serde_json::from_value(settled["status"]["result"].clone()).expect("a SendOutcome");
+        assert!(outcome.recipients.iter().all(|r| r.delivered));
+    }
+
+    #[test]
+    fn a_restart_drops_a_held_send_as_send() {
+        let (session, door, fixture, rx, seen) = harness();
+        let started =
+            crate::commands::send_approved_on(&session, &door, "work", true).expect("started");
+        fixture.simulate("restart").expect("restart");
+        drain(&session, &door, &rx);
+        let dropped = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_dropped")
+            .cloned()
+            .expect("dropped");
+        assert_eq!(dropped["kind"], "send_approved");
+        assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 
     /// The real path against a real daemon in a scratch data directory:

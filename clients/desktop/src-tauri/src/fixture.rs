@@ -13,6 +13,13 @@
 //! frontend's connection and resync screens are testable, plus a rolled-back
 //! drain (`rollback`) and a send hold another client armed (`hold`).
 //!
+//! `send.draft` and `send.approved` arm a hold of the fixture's own
+//! `email.send_hold_secs` when asked for one, count it down through the same
+//! machinery, then "send": the draft file goes, a filed copy lands in Sent,
+//! an in-memory outbox gets its row, and the operation settles with a
+//! `SendOutcome` or an `ApprovedOutcome`. `send_fail`, `send_partial` and
+//! `send_pending_append` decide what the next send comes to.
+//!
 //! The five message mutations change the rows in memory and publish what the
 //! daemon publishes for them: nothing with the answer, then, once the
 //! account's mutations have been quiet for [`DRAIN_DELAY`], one
@@ -55,10 +62,13 @@ use mp_protocol::draft::{
 };
 use mp_protocol::events::{
     Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
-    KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
-    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+    KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS, KIND_SEND_HOLD_CANCELLED,
+    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
-use mp_protocol::send::{HoldListing, HoldStatus};
+use mp_protocol::send::{
+    ApprovedOutcome, HoldListing, HoldStatus, OutboxCounts, OutboxListing, OutboxRow,
+    RecipientOutcome, SendOutcome, SentCopy,
+};
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
@@ -88,8 +98,22 @@ pub const DRAIN_DELAY: Duration = Duration::from_millis(1500);
 /// How long a sync pass runs before it completes.
 const SYNC_DELAY: Duration = Duration::from_millis(800);
 
-/// The window a `hold` simulation arms, in seconds.
+/// The window a `hold` simulation arms, in seconds, and the fixture's
+/// `email.send_hold_secs` until `send_hold:<n>` changes it.
 pub const SIMULATED_HOLD_SECS: u64 = 10;
+
+/// How long a send takes once its hold is over, the SMTP round trip.
+const SEND_DELAY: Duration = Duration::from_millis(400);
+
+/// Why a `send_fail` send failed, as a transport would say it.
+pub const SEND_FAIL_REASON: &str = "421 4.7.0 fixture: the server closed the connection";
+
+/// Why a `send_partial` send's last recipient was refused.
+pub const SEND_REFUSED_REASON: &str = "550 5.1.1 fixture: no such mailbox";
+
+/// The recipient a `send_partial` send adds when its draft names only one,
+/// so one recipient can be refused while another gets it.
+pub const SEND_REFUSED_EXTRA: &str = "nobody@refused.example";
 
 /// The mailbox `message.archive` moves into, the daemon's `ARCHIVE_MAILBOX`.
 const ARCHIVE_MAILBOX: &str = "archive";
@@ -109,6 +133,10 @@ pub const SIMULATIONS: &[&str] = &[
     "hold",
     "editor_save",
     "editor_invalid",
+    "send_fail",
+    "send_partial",
+    "send_pending_append",
+    "send_hold:<secs>",
 ];
 
 /// One `editor_open` the fixture stubbed.
@@ -125,6 +153,57 @@ struct Journaled {
     mailbox: String,
     index: usize,
     row: Value,
+}
+
+/// What the next send comes to, once (`send_fail`, `send_partial`,
+/// `send_pending_append`); a send with none is delivered and filed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendSimulation {
+    /// The transport fails: the operation fails and the outbox row is `failed`.
+    Fail,
+    /// The last recipient is refused: `partial` (SND-08).
+    Partial,
+    /// Delivered, and the Sent copy is still owed: `sent_pending_append`.
+    PendingAppend,
+}
+
+/// What a send operation does once its hold is over.
+#[derive(Clone, Debug)]
+enum SendWork {
+    Draft { account: String, id: String },
+    Approved { account: String },
+}
+
+/// One account's outbox, in memory: every row a send left, and whether the
+/// account has ever sent.
+#[derive(Default)]
+struct FixtureOutbox {
+    ever_used: bool,
+    rows: Vec<OutboxRow>,
+}
+
+impl FixtureOutbox {
+    /// The rows `send.outbox_list` lists: everything not `done`, and a `done`
+    /// row that kept a partial-delivery note.
+    fn unfinished(&self) -> Vec<OutboxRow> {
+        self.rows
+            .iter()
+            .filter(|r| r.state != "done" || r.partial)
+            .cloned()
+            .collect()
+    }
+
+    fn counts(&self) -> OutboxCounts {
+        let rows = self.unfinished();
+        OutboxCounts {
+            open: rows
+                .iter()
+                .filter(|r| r.state == "pending_send" || r.state == "sent_pending_append")
+                .count(),
+            failed: rows.iter().filter(|r| r.state == "failed").count(),
+            partial: rows.iter().filter(|r| r.partial).count(),
+        }
+    }
 }
 
 /// One armed send hold.
@@ -167,6 +246,17 @@ struct State {
     holds: Vec<Hold>,
     /// How long one second of a hold lasts; a test shortens it.
     hold_second: Duration,
+    /// account -> its outbox.
+    outbox: BTreeMap<String, FixtureOutbox>,
+    /// The next outbox row id, across accounts, as one store sequence would.
+    next_outbox_row: i64,
+    /// What the next send comes to.
+    send_next: Option<SendSimulation>,
+    /// The fixture's `email.send_hold_secs`; 0 arms no hold.
+    send_hold_secs: u64,
+    /// The sends waiting out their hold, by operation id.
+    held_sends: BTreeMap<String, SendWork>,
+    send_delay: Duration,
 }
 
 impl State {
@@ -226,6 +316,11 @@ impl State {
             b["snapshot"]["mailboxes"][&account] = Value::Array(self.mailbox_rows(&account));
         }
         b["snapshot"]["holds"] = json!(self.hold_listing(None).holds);
+        for (account, outbox) in &self.outbox {
+            let counts = outbox.counts();
+            b["snapshot"]["outbox"][account] =
+                json!({"queued": counts.open, "failed": counts.failed});
+        }
         for (account, listing) in &self.drafts {
             let mut rows: Vec<Value> = listing.drafts.iter().map(snapshot_row).collect();
             rows.extend(listing.skipped.iter().map(|skip| {
@@ -936,6 +1031,309 @@ impl State {
     }
 }
 
+/// Events a send owes, in order.
+type Owed = Vec<(&'static str, Value)>;
+
+/// The bare address of one recipient as a draft writes it
+/// (`Robin <robin@example.com>` or `robin@example.com`).
+fn bare_address(recipient: &str) -> String {
+    let r = recipient.trim();
+    match (r.rfind('<'), r.rfind('>')) {
+        (Some(open), Some(close)) if open < close => r[open + 1..close].trim().to_string(),
+        _ => r.to_string(),
+    }
+}
+
+/// Every recipient of a field, in the order written, with its role.
+fn recipients_of(field: Option<&str>, role: &str) -> Vec<RecipientOutcome> {
+    field
+        .unwrap_or_default()
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| RecipientOutcome {
+            address: bare_address(r),
+            role: role.to_string(),
+            delivered: true,
+            error: None,
+        })
+        .collect()
+}
+
+/// The send path: `send.draft`, `send.approved` and the outbox.
+impl State {
+    /// The bootstrap's outbox counts become rows: `home` has one message
+    /// queued and never submitted, which the next sync would send.
+    fn seed_outbox(&mut self) {
+        let seeds: Vec<(String, u64)> = self.bootstrap["snapshot"]["outbox"]
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(a, c)| (a.clone(), c["queued"].as_u64().unwrap_or(0)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (account, queued) in seeds {
+            for n in 0..queued {
+                let id = self.next_outbox_row;
+                self.next_outbox_row += 1;
+                let outbox = self.outbox.entry(account.clone()).or_default();
+                outbox.ever_used = true;
+                outbox.rows.push(OutboxRow {
+                    id,
+                    state: "pending_send".into(),
+                    partial: false,
+                    never_submitted: true,
+                    message_id: format!("<queued-{n}@{account}.fixture.example>"),
+                    target_mailbox: None,
+                    updated: 1_790_000_000,
+                    last_error: None,
+                    rejected: Vec::new(),
+                    outstanding: vec!["friend@example.com".into()],
+                });
+            }
+        }
+    }
+
+    fn outbox_listing(&self, account: &str) -> OutboxListing {
+        let outbox = self.outbox.get(account);
+        OutboxListing {
+            account: account.to_string(),
+            ever_used: outbox.is_some_and(|o| o.ever_used),
+            rows: outbox.map(FixtureOutbox::unfinished).unwrap_or_default(),
+            counts: outbox.map(FixtureOutbox::counts).unwrap_or_default(),
+        }
+    }
+
+    /// A send's `hold` parameter, the daemon's `hold_plan`: absent or null
+    /// is no hold, anything but a boolean is refused.
+    fn hold_asked(method: &str, params: &Value) -> Result<bool> {
+        match params.get("hold") {
+            None | Some(Value::Null) => Ok(false),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(refused(
+                method,
+                -32602,
+                "hold is a boolean; the window is the daemon's",
+            )),
+        }
+    }
+
+    /// Register a send operation and, when a hold is asked for and the
+    /// window is not 0, arm it; the answer is the daemon's.
+    fn start_send(
+        &mut self,
+        method: &str,
+        hold: Option<(String, String)>,
+        account: &str,
+        work: SendWork,
+    ) -> (String, Option<HoldStatus>) {
+        let id = self.next_operation_id("fixture-send");
+        let held = hold
+            .filter(|_| self.send_hold_secs > 0)
+            .map(|(draft_id, subject)| {
+                let status = HoldStatus {
+                    operation_id: id.clone(),
+                    account: account.to_string(),
+                    draft_id,
+                    subject,
+                    hold_secs: self.send_hold_secs,
+                    remaining_secs: self.send_hold_secs,
+                    fires_at: String::new(),
+                    origin: "gui".into(),
+                };
+                let secs = self.send_hold_secs;
+                self.arm_hold(status, secs)
+            });
+        self.operations.insert(
+            id.clone(),
+            json!({
+                "operation_id": id, "method": method,
+                "state": if held.is_some() { "queued" } else { "running" },
+                "scope": "durable", "progress": null, "result": null, "error": null
+            }),
+        );
+        if held.is_some() {
+            self.held_sends.insert(id.clone(), work);
+        }
+        (id, held)
+    }
+
+    /// Send the approved draft `id` of `account` now: what the simulation
+    /// asks for, the outbox row, the draft file retired and the copy filed
+    /// when it went out, and the events a daemon publishes for each. `Err`
+    /// is the transport's failure, which the operation fails with.
+    fn deliver(&mut self, account: &str, id: &str) -> (Result<SendOutcome, String>, Owed) {
+        let mut owed: Owed = Vec::new();
+        self.rescan();
+        let entry = match self.draft("send.draft", account, id) {
+            Ok(entry) => entry.clone(),
+            Err(e) => return (Err(one_line(&e)), owed),
+        };
+        if entry.status != "approved" {
+            return (Err("Email not approved for sending".into()), owed);
+        }
+        let draft = match mp_core::draft::parse_email_draft(Path::new(&entry.path))
+            .and_then(|d| mp_core::draft::validate_draft(&d).map(|_| d))
+        {
+            Ok(draft) => draft,
+            Err(e) => return (Err(one_line(&e)), owed),
+        };
+        let fm = &draft.frontmatter;
+        let mut recipients = recipients_of(fm.to.as_deref(), "To");
+        recipients.extend(recipients_of(fm.cc.as_deref(), "Cc"));
+        recipients.extend(recipients_of(fm.bcc.as_deref(), "Bcc"));
+        let simulation = self.send_next.take();
+        let row_id = self.next_outbox_row;
+        self.next_outbox_row += 1;
+        let message_id = format!("<fixture-sent-{row_id}@fixture.example>");
+        let outbox_changed = (
+            "state.invalidate",
+            json!({"resource": format!("outbox:{account}"), "scope": {"query": "counts"}}),
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let mut row = OutboxRow {
+            id: row_id,
+            state: "done".into(),
+            partial: false,
+            never_submitted: false,
+            message_id: message_id.clone(),
+            target_mailbox: Some("Sent".into()),
+            updated: now,
+            last_error: None,
+            rejected: Vec::new(),
+            outstanding: Vec::new(),
+        };
+        let mut sent_copy = SentCopy::Filed;
+        match simulation {
+            Some(SendSimulation::Fail) => {
+                row.state = "failed".into();
+                row.last_error = Some(SEND_FAIL_REASON.into());
+                row.outstanding = recipients.iter().map(|r| r.address.clone()).collect();
+                let outbox = self.outbox.entry(account.to_string()).or_default();
+                outbox.ever_used = true;
+                outbox.rows.push(row);
+                owed.push(outbox_changed);
+                return (Err(SEND_FAIL_REASON.into()), owed);
+            }
+            Some(SendSimulation::Partial) => {
+                if recipients.len() < 2 {
+                    recipients.push(RecipientOutcome {
+                        address: SEND_REFUSED_EXTRA.into(),
+                        role: "Cc".into(),
+                        delivered: true,
+                        error: None,
+                    });
+                }
+                if let Some(last) = recipients.last_mut() {
+                    last.delivered = false;
+                    last.error = Some(SEND_REFUSED_REASON.into());
+                    row.rejected = vec![(last.address.clone(), SEND_REFUSED_REASON.into())];
+                    row.last_error = Some(format!(
+                        "partly delivered: {} refused ({SEND_REFUSED_REASON})",
+                        last.address
+                    ));
+                }
+                row.partial = true;
+            }
+            Some(SendSimulation::PendingAppend) => {
+                row.state = "sent_pending_append".into();
+                sent_copy = SentCopy::Pending;
+            }
+            None => {}
+        }
+        let outbox = self.outbox.entry(account.to_string()).or_default();
+        outbox.ever_used = true;
+        outbox.rows.push(row);
+
+        // It went out: the draft file is retired and the copy filed.
+        let status_line = if simulation == Some(SendSimulation::Partial) {
+            "partly delivered, see `mp outbox list`"
+        } else if sent_copy == SentCopy::Pending {
+            "sent + append pending"
+        } else {
+            "sent + saved"
+        };
+        let settle_error = mp_core::draft::remove_draft_files(Path::new(&entry.path))
+            .err()
+            .map(|e| format!("{e:#}"));
+        self.rescan();
+        owed.push((
+            "state.remove",
+            json!({"resource": format!("draft:{account}/{id}")}),
+        ));
+        owed.push(outbox_changed);
+        if sent_copy == SentCopy::Filed {
+            self.file_sent_copy(account, &message_id, &draft);
+            for payload in self.moved_counts(account) {
+                owed.push(("state.invalidate", payload));
+            }
+        }
+        let outcome = SendOutcome {
+            account: account.to_string(),
+            selector: Some(entry.selector.clone()),
+            message_id,
+            status_line: status_line.into(),
+            recipients,
+            sent_copy,
+            settle_error,
+        };
+        (Ok(outcome), owed)
+    }
+
+    /// The copy of a sent draft, at the top of the account's Sent mailbox.
+    fn file_sent_copy(
+        &mut self,
+        account: &str,
+        message_id: &str,
+        draft: &mp_core::types::EmailDraft,
+    ) {
+        let Some(sent) = self.messages.get(account).and_then(|m| m.get("sent")) else {
+            return;
+        };
+        let uid = sent.len() as i64 + 1;
+        let id = self.next_row;
+        self.next_row += 1;
+        let fm = &draft.frontmatter;
+        let bare = message_id.trim_matches(|c| c == '<' || c == '>');
+        let row = json!({
+            "id": id, "uid": uid, "message_id": message_id,
+            "from": FIXTURE_FROM, "to": fm.to.clone().unwrap_or_default(),
+            "cc": fm.cc, "reply_to": null, "bcc": fm.bcc,
+            "subject": fm.subject,
+            "date_sort": "2026-09-30T12:00:00", "date_display": "Wed, 30 Sep 2026 12:00:00 +0200",
+            "flags": {"seen": true, "answered": false, "forwarded": false, "flagged": false},
+            "has_attachments": false, "is_invite": false,
+            "selector": format!("mp://{account}/sent/{bare}"),
+            "body": draft.body_markdown, "attachments": []
+        });
+        if let Some(sent) = self
+            .messages
+            .get_mut(account)
+            .and_then(|m| m.get_mut("sent"))
+        {
+            sent.insert(0, row);
+        }
+    }
+
+    /// The approved drafts of `account`, in listing order.
+    fn approved_drafts(&mut self, account: &str) -> Vec<DraftEntry> {
+        self.rescan();
+        self.drafts
+            .get(account)
+            .map(|l| {
+                l.drafts
+                    .iter()
+                    .filter(|d| d.status == "approved")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// The daemon stand-in.
 pub struct Fixture {
     state: Mutex<State>,
@@ -1061,8 +1459,15 @@ impl Fixture {
             sync_delay: SYNC_DELAY,
             holds: Vec::new(),
             hold_second: Duration::from_secs(1),
+            outbox: BTreeMap::new(),
+            next_outbox_row: 1,
+            send_next: None,
+            send_hold_secs: SIMULATED_HOLD_SECS,
+            held_sends: BTreeMap::new(),
+            send_delay: SEND_DELAY,
         };
         state.rescan();
+        state.seed_outbox();
         let names: Vec<String> = state.messages.keys().cloned().collect();
         for name in names {
             let counts = state.counts(&name);
@@ -1114,6 +1519,12 @@ impl Fixture {
     #[cfg(test)]
     pub fn calls(&self) -> Vec<(String, Value)> {
         self.calls.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// How long a send takes once its hold is over; a test sets zero.
+    #[cfg(test)]
+    pub fn set_send_delay(&self, delay: Duration) {
+        self.state().send_delay = delay;
     }
 
     /// How long one second of a hold lasts; a test shortens it.
@@ -1427,7 +1838,69 @@ impl Fixture {
                     serde_json::to_value(status)?,
                 );
                 let revision = s.revision;
+                // The daemon cancels the held operation with its hold; a
+                // hold the fixture armed for another client has none.
+                s.held_sends.remove(&id);
+                let awaited = s.operations.contains_key(&id);
+                drop(s);
+                if awaited {
+                    self.settle(&id, "cancelled", None);
+                }
                 Ok(json!({"cancelled": true, "operation_id": id, "revision": revision}))
+            }
+            "send.draft" => {
+                only(method, &params, &["account", "hold", "id", "selector"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                let hold = State::hold_asked(method, &params)?;
+                let id = match (params["id"].as_str(), params["selector"].as_str()) {
+                    (Some(id), _) => id.to_string(),
+                    (None, Some(selector)) => {
+                        selector.rsplit('/').next().unwrap_or_default().to_string()
+                    }
+                    (None, None) => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            "send.draft sends one draft: name it with selector (or id)",
+                        ))
+                    }
+                };
+                let entry = s.draft(method, &account, &id)?.clone();
+                let what =
+                    hold.then(|| (entry.id.clone(), entry.subject.clone().unwrap_or_default()));
+                let work = SendWork::Draft {
+                    account: account.clone(),
+                    id,
+                };
+                let (op, held) = s.start_send(method, what, &account, work.clone());
+                self.answer_send(s, op, held, work)
+            }
+            "send.approved" => {
+                only(method, &params, &["account", "hold"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                let hold = State::hold_asked(method, &params)?;
+                // The batch's hold names the first draft it would send; a
+                // batch with nothing in it arms none.
+                let what = if hold {
+                    s.approved_drafts(&account)
+                        .first()
+                        .map(|d| (d.id.clone(), d.subject.clone().unwrap_or_default()))
+                } else {
+                    None
+                };
+                let work = SendWork::Approved {
+                    account: account.clone(),
+                };
+                let (op, held) = s.start_send(method, what, &account, work.clone());
+                self.answer_send(s, op, held, work)
+            }
+            "send.outbox_list" => {
+                only(method, &params, &["account"])?;
+                let account = param_str(method, &params, "account")?;
+                s.account_known(method, account)?;
+                Ok(serde_json::to_value(s.outbox_listing(account))?)
             }
             "sync.quick" | "sync.full" => {
                 let allowed: &[&str] = if method == "sync.quick" {
@@ -1460,6 +1933,116 @@ impl Fixture {
             }
             other => Err(refused(other, -32601, "method not found")),
         }
+    }
+
+    /// Answer a started send the daemon's way: with a hold, `held: true` and
+    /// its `send.hold_started` (the countdown runs off the hold table, and
+    /// the fire runs the send); without one, the send runs now.
+    fn answer_send(
+        self: &Arc<Self>,
+        mut s: MutexGuard<'_, State>,
+        op: String,
+        held: Option<HoldStatus>,
+        work: SendWork,
+    ) -> Result<Value> {
+        match held {
+            Some(status) => {
+                self.emit_locked(
+                    &mut s,
+                    KIND_SEND_HOLD_STARTED,
+                    serde_json::to_value(status)?,
+                );
+                drop(s);
+                self.spawn_hold(op.clone());
+                Ok(json!({"operation_id": op, "held": true}))
+            }
+            None => {
+                drop(s);
+                self.run_send(op.clone(), work);
+                Ok(json!({"operation_id": op}))
+            }
+        }
+    }
+
+    /// Run a send whose hold is over (or that had none), off the caller's
+    /// thread after the transport's delay, and settle its operation: one
+    /// draft with a `SendOutcome`, the batch with an `ApprovedOutcome` and a
+    /// progress report per draft. A restart meanwhile drops it.
+    fn run_send(self: &Arc<Self>, op: String, work: SendWork) {
+        let delay = {
+            let mut s = self.state();
+            if let Some(o) = s.operations.get_mut(&op) {
+                o["state"] = json!("running");
+            }
+            s.send_delay
+        };
+        let fixture = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            if !fixture.running(&op) {
+                return;
+            }
+            match work {
+                SendWork::Draft { account, id } => match fixture.deliver(&account, &id) {
+                    Ok(outcome) => {
+                        let result = serde_json::to_value(outcome).unwrap_or_default();
+                        fixture.settle(&op, "succeeded", Some(result));
+                    }
+                    Err(message) => fixture.fail(&op, &message),
+                },
+                SendWork::Approved { account } => {
+                    let drafts = fixture.state().approved_drafts(&account);
+                    let total = drafts.len() as u64;
+                    let mut outcome = ApprovedOutcome {
+                        account: account.clone(),
+                        results: Vec::new(),
+                        sent: 0,
+                        failed: 0,
+                    };
+                    for (done, draft) in drafts.into_iter().enumerate() {
+                        fixture.emit(
+                            KIND_OPERATION_PROGRESS,
+                            json!({
+                                "operation_id": op, "phase": "draft", "done": done,
+                                "total": total, "message": draft.selector
+                            }),
+                        );
+                        let result = match fixture.deliver(&account, &draft.id) {
+                            Ok(result) => result,
+                            // One draft that could not be sent is one line of
+                            // the batch, as the daemon's loop has it.
+                            Err(message) => SendOutcome {
+                                account: account.clone(),
+                                selector: Some(draft.selector.clone()),
+                                message_id: String::new(),
+                                status_line: message,
+                                recipients: Vec::new(),
+                                sent_copy: SentCopy::NotRequested,
+                                settle_error: None,
+                            },
+                        };
+                        if result.recipients.iter().any(|r| r.delivered) {
+                            outcome.sent += 1;
+                        } else {
+                            outcome.failed += 1;
+                        }
+                        outcome.results.push(result);
+                    }
+                    let result = serde_json::to_value(outcome).unwrap_or_default();
+                    fixture.settle(&op, "succeeded", Some(result));
+                }
+            }
+        });
+    }
+
+    /// [`State::deliver`], with the events it owes published in order.
+    fn deliver(&self, account: &str, id: &str) -> Result<SendOutcome, String> {
+        let mut s = self.state();
+        let (outcome, owed) = s.deliver(account, id);
+        for (kind, payload) in owed {
+            self.emit_locked(&mut s, kind, payload);
+        }
+        outcome
     }
 
     /// Ask for a drain of `account` once its mutations have been quiet for
@@ -1556,6 +2139,13 @@ impl Fixture {
                 if let Some(status) = s.take_hold(&id) {
                     let payload = serde_json::to_value(status).unwrap_or_default();
                     fixture.emit_locked(&mut s, KIND_SEND_HOLD_FIRED, payload);
+                }
+                // A send the fixture armed goes out now; a simulated hold
+                // another client armed sends nothing.
+                let work = s.held_sends.remove(&id);
+                drop(s);
+                if let Some(work) = work {
+                    fixture.run_send(id, work);
                 }
                 return;
             }
@@ -1672,7 +2262,22 @@ impl Fixture {
             }
             "editor_save" => return self.simulate_editor(false),
             "editor_invalid" => return self.simulate_editor(true),
+            "send_fail" | "send_partial" | "send_pending_append" => {
+                self.state().send_next = Some(match what {
+                    "send_fail" => SendSimulation::Fail,
+                    "send_partial" => SendSimulation::Partial,
+                    _ => SendSimulation::PendingAppend,
+                });
+                return Ok(());
+            }
             _ => {}
+        }
+        if let Some(secs) = what.strip_prefix("send_hold:") {
+            let secs: u64 = secs
+                .parse()
+                .map_err(|_| anyhow!("`send_hold:<secs>` takes whole seconds, not `{secs}`"))?;
+            self.state().send_hold_secs = secs;
+            return Ok(());
         }
         match what {
             "disconnect" => {
@@ -1701,6 +2306,7 @@ impl Fixture {
                     // A daemon's holds and queued ops live in its memory and
                     // its drain; neither survives it here.
                     s.holds.clear();
+                    s.held_sends.clear();
                     s.journal.clear();
                     s.drain_requests.clear();
                     s.down = false;
@@ -2701,5 +3307,388 @@ mod tests {
         let b = f.call("state.bootstrap", json!({})).expect("b");
         assert_eq!(b["snapshot"]["holds"], json!([]));
         assert!(f.simulate("rollback").is_err());
+    }
+
+    // -- Sends --------------------------------------------------------------
+
+    /// A fixture whose sends run at once and whose hold seconds are short.
+    fn sending() -> (Arc<Fixture>, std::sync::mpsc::Receiver<Incoming>) {
+        let (f, rx) = fixture();
+        f.set_send_delay(Duration::ZERO);
+        f.set_hold_second(Duration::from_millis(20));
+        (f, rx)
+    }
+
+    /// Approve `id` of `work`, and drop the watcher event it publishes.
+    fn approve(f: &Arc<Fixture>, rx: &std::sync::mpsc::Receiver<Incoming>, id: &str) {
+        f.call("draft.approve", json!({"account": "work", "id": id}))
+            .expect("approved");
+        assert_eq!(next_event(rx).kind, KIND_DRAFT_CHANGED);
+    }
+
+    /// Every event up to and including `op`'s `operation.finished`.
+    fn until_finished(rx: &std::sync::mpsc::Receiver<Incoming>, op: &Value) -> Vec<EventEnvelope> {
+        let mut out = Vec::new();
+        loop {
+            let e = next_event(rx);
+            let done = e.kind == KIND_OPERATION_FINISHED && e.payload["operation_id"] == *op;
+            out.push(e);
+            if done {
+                return out;
+            }
+        }
+    }
+
+    fn kinds(events: &[EventEnvelope]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e.kind.as_str() {
+                "state.invalidate" | "state.remove" => {
+                    format!(
+                        "{} {}",
+                        e.kind,
+                        e.payload["resource"].as_str().unwrap_or_default()
+                    )
+                }
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
+    fn angebot_path(f: &Arc<Fixture>) -> String {
+        let listing = f
+            .call("draft.list", json!({"account": "work"}))
+            .expect("list");
+        listing["drafts"]
+            .as_array()
+            .and_then(|d| d.iter().find(|x| x["id"] == "angebot-antwort"))
+            .and_then(|d| d["path"].as_str())
+            .expect("the angebot draft")
+            .to_string()
+    }
+
+    #[test]
+    fn a_held_send_counts_down_then_sends_files_and_settles() {
+        let (f, rx) = sending();
+        approve(&f, &rx, "angebot-antwort");
+        let path = angebot_path(&f);
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort", "hold": true}),
+            )
+            .expect("started");
+        assert_eq!(answer["held"], true);
+        let op = answer["operation_id"].clone();
+        let events = until_finished(&rx, &op);
+        let k = kinds(&events);
+        assert_eq!(k[0], KIND_SEND_HOLD_STARTED);
+        assert_eq!(events[0].payload["draft_id"], "angebot-antwort");
+        assert_eq!(events[0].payload["hold_secs"], SIMULATED_HOLD_SECS);
+        assert_eq!(events[0].payload["origin"], "gui");
+        let fired = k
+            .iter()
+            .position(|x| x == KIND_SEND_HOLD_FIRED)
+            .expect("fired");
+        assert!(
+            k[1..fired].iter().all(|x| x == KIND_SEND_HOLD_TICK),
+            "{k:?}"
+        );
+        assert_eq!(
+            k[fired + 1..],
+            [
+                "state.remove draft:work/angebot-antwort",
+                "state.invalidate outbox:work",
+                "state.invalidate mailbox:work/sent",
+                "operation.finished",
+            ],
+            "{k:?}"
+        );
+        let finished = events.last().expect("finished");
+        assert_eq!(finished.payload["state"], "succeeded");
+        let outcome: SendOutcome =
+            serde_json::from_value(finished.payload["result"].clone()).expect("a SendOutcome");
+        assert_eq!(
+            outcome.selector.as_deref(),
+            Some("mp://work/drafts/angebot-antwort")
+        );
+        assert_eq!(outcome.sent_copy, SentCopy::Filed);
+        assert_eq!(outcome.recipients.len(), 1);
+        assert!(outcome.recipients.iter().all(|r| r.delivered));
+        assert!(!Path::new(&path).exists(), "the draft file is retired");
+        let sent = f
+            .call(
+                "message.list",
+                json!({"account": "work", "mailbox": "sent"}),
+            )
+            .expect("sent");
+        assert_eq!(
+            sent["messages"][0]["message_id"],
+            outcome.message_id.as_str()
+        );
+        let listing = f
+            .call("send.outbox_list", json!({"account": "work"}))
+            .expect("outbox");
+        assert_eq!(listing["ever_used"], true);
+        assert_eq!(listing["rows"], json!([]), "a done row is not listed");
+        let status = f
+            .call("operation.status", json!({"operation_id": op}))
+            .expect("status");
+        assert_eq!(status["state"], "succeeded");
+    }
+
+    #[test]
+    fn a_cancelled_send_settles_cancelled_and_leaves_the_draft() {
+        let (f, rx) = fixture();
+        f.set_hold_second(Duration::from_millis(200));
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort", "hold": true}),
+            )
+            .expect("started");
+        let op = answer["operation_id"].clone();
+        assert_eq!(next_event(&rx).kind, KIND_SEND_HOLD_STARTED);
+        f.call("send.cancel_hold", json!({"operation_id": op}))
+            .expect("cancelled");
+        let k = kinds(&until_finished(&rx, &op));
+        let k: Vec<&String> = k.iter().filter(|x| *x != KIND_SEND_HOLD_TICK).collect();
+        assert_eq!(k, [KIND_SEND_HOLD_CANCELLED, KIND_OPERATION_FINISHED]);
+        let status = f
+            .call("operation.status", json!({"operation_id": op}))
+            .expect("status");
+        assert_eq!(status["state"], "cancelled");
+        assert!(Path::new(&angebot_path(&f)).exists());
+        // Nothing fires later.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(rx
+            .try_iter()
+            .all(|i| !matches!(i, Incoming::Event(e) if e.kind == "state.remove")));
+    }
+
+    #[test]
+    fn with_no_window_a_send_answers_unheld_and_arms_nothing() {
+        let (f, rx) = sending();
+        f.simulate("send_hold:0").expect("no window");
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort", "hold": true}),
+            )
+            .expect("started");
+        assert!(answer.get("held").is_none(), "{answer}");
+        let k = kinds(&until_finished(&rx, &answer["operation_id"]));
+        assert!(k.iter().all(|x| !x.starts_with("send.hold_")), "{k:?}");
+        assert_eq!(k.last().map(String::as_str), Some(KIND_OPERATION_FINISHED));
+        assert!(f.simulate("send_hold:soon").is_err());
+        assert!(f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "x", "hold": 20})
+            )
+            .is_err_and(|e| e.to_string().contains("-32602")));
+    }
+
+    #[test]
+    fn send_fail_fails_the_operation_and_parks_a_failed_row() {
+        let (f, rx) = sending();
+        f.simulate("send_fail").expect("armed");
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort"}),
+            )
+            .expect("started");
+        let events = until_finished(&rx, &answer["operation_id"]);
+        assert_eq!(
+            kinds(&events),
+            ["state.invalidate outbox:work", "operation.finished"]
+        );
+        let finished = events.last().expect("finished");
+        assert_eq!(finished.payload["state"], "failed");
+        assert_eq!(finished.payload["error"]["message"], SEND_FAIL_REASON);
+        assert!(Path::new(&angebot_path(&f)).exists(), "the draft stays");
+        let listing: OutboxListing = serde_json::from_value(
+            f.call("send.outbox_list", json!({"account": "work"}))
+                .expect("outbox"),
+        )
+        .expect("a listing");
+        assert_eq!(listing.rows.len(), 1);
+        assert_eq!(listing.rows[0].state, "failed");
+        assert_eq!(
+            listing.rows[0].last_error.as_deref(),
+            Some(SEND_FAIL_REASON)
+        );
+        assert_eq!(listing.counts.failed, 1);
+        let b = f.call("state.bootstrap", json!({})).expect("b");
+        assert_eq!(
+            b["snapshot"]["outbox"]["work"],
+            json!({"queued": 0, "failed": 1})
+        );
+    }
+
+    #[test]
+    fn send_partial_refuses_one_recipient_and_keeps_a_partial_row() {
+        let (f, rx) = sending();
+        f.simulate("send_partial").expect("armed");
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort"}),
+            )
+            .expect("started");
+        let events = until_finished(&rx, &answer["operation_id"]);
+        let outcome: SendOutcome =
+            serde_json::from_value(events.last().expect("f").payload["result"].clone())
+                .expect("outcome");
+        let refused: Vec<&RecipientOutcome> =
+            outcome.recipients.iter().filter(|r| !r.delivered).collect();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].address, SEND_REFUSED_EXTRA);
+        assert_eq!(refused[0].error.as_deref(), Some(SEND_REFUSED_REASON));
+        assert!(outcome.recipients.iter().any(|r| r.delivered));
+        assert!(outcome.status_line.starts_with("partly delivered"));
+        let listing: OutboxListing = serde_json::from_value(
+            f.call("send.outbox_list", json!({"account": "work"}))
+                .expect("outbox"),
+        )
+        .expect("a listing");
+        assert_eq!(listing.rows.len(), 1);
+        assert!(listing.rows[0].partial);
+        assert_eq!(listing.rows[0].state, "done");
+        assert_eq!(listing.counts.partial, 1);
+        // The next send has no simulation left.
+        assert!(f.state().send_next.is_none());
+    }
+
+    #[test]
+    fn send_pending_append_owes_the_sent_copy() {
+        let (f, rx) = sending();
+        f.simulate("send_pending_append").expect("armed");
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort"}),
+            )
+            .expect("started");
+        let events = until_finished(&rx, &answer["operation_id"]);
+        let k = kinds(&events);
+        assert!(
+            !k.contains(&"state.invalidate mailbox:work/sent".to_string()),
+            "{k:?}"
+        );
+        let outcome: SendOutcome =
+            serde_json::from_value(events.last().expect("f").payload["result"].clone())
+                .expect("outcome");
+        assert_eq!(outcome.sent_copy, SentCopy::Pending);
+        let listing: OutboxListing = serde_json::from_value(
+            f.call("send.outbox_list", json!({"account": "work"}))
+                .expect("outbox"),
+        )
+        .expect("a listing");
+        assert_eq!(listing.rows[0].state, "sent_pending_append");
+        assert_eq!(listing.counts.open, 1);
+    }
+
+    #[test]
+    fn an_unapproved_draft_fails_at_send_time_as_the_daemon_does() {
+        let (f, rx) = sending();
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort"}),
+            )
+            .expect("started");
+        let events = until_finished(&rx, &answer["operation_id"]);
+        let finished = events.last().expect("f");
+        assert_eq!(finished.payload["state"], "failed");
+        assert_eq!(
+            finished.payload["error"]["message"],
+            "Email not approved for sending"
+        );
+        assert!(f
+            .call("send.draft", json!({"account": "work", "id": "missing"}))
+            .is_err_and(|e| e.to_string().contains("-32602")));
+    }
+
+    #[test]
+    fn send_approved_sends_every_approved_draft_behind_one_hold() {
+        let (f, rx) = sending();
+        // Nothing approved: no window, and a batch of none.
+        let none = f
+            .call("send.approved", json!({"account": "work", "hold": true}))
+            .expect("started");
+        assert!(none.get("held").is_none());
+        let finished = until_finished(&rx, &none["operation_id"]);
+        let outcome: ApprovedOutcome =
+            serde_json::from_value(finished.last().expect("f").payload["result"].clone())
+                .expect("outcome");
+        assert_eq!((outcome.sent, outcome.failed), (0, 0));
+
+        // A rewrite moves a draft to the top of the listing: the newest
+        // approved is the first the batch sends.
+        approve(&f, &rx, "offsite-note");
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call("send.approved", json!({"account": "work", "hold": true}))
+            .expect("started");
+        assert_eq!(answer["held"], true);
+        let events = until_finished(&rx, &answer["operation_id"]);
+        assert_eq!(events[0].kind, KIND_SEND_HOLD_STARTED);
+        assert_eq!(events[0].payload["draft_id"], "angebot-antwort");
+        let progress = events
+            .iter()
+            .filter(|e| e.kind == KIND_OPERATION_PROGRESS)
+            .count();
+        assert_eq!(progress, 2);
+        let outcome: ApprovedOutcome =
+            serde_json::from_value(events.last().expect("f").payload["result"].clone())
+                .expect("outcome");
+        // `offsite-note` has no recipient, so it fails validation and stays.
+        assert_eq!((outcome.sent, outcome.failed), (1, 1));
+        assert_eq!(outcome.results.len(), 2);
+        assert!(outcome.results[1].recipients.is_empty());
+    }
+
+    #[test]
+    fn the_outbox_is_seeded_from_the_bootstrap_and_a_restart_drops_held_sends() {
+        let (f, rx) = fixture();
+        let home: OutboxListing = serde_json::from_value(
+            f.call("send.outbox_list", json!({"account": "home"}))
+                .expect("outbox"),
+        )
+        .expect("a listing");
+        assert_eq!(home.rows.len(), 1);
+        assert_eq!(home.rows[0].state, "pending_send");
+        assert!(home.rows[0].never_submitted);
+        assert_eq!(home.counts.open, 1);
+        let work = f
+            .call("send.outbox_list", json!({"account": "work"}))
+            .expect("outbox");
+        assert_eq!(work["ever_used"], false);
+        assert!(f
+            .call("send.outbox_list", json!({"account": "nobody"}))
+            .is_err());
+
+        approve(&f, &rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort", "hold": true}),
+            )
+            .expect("started");
+        f.simulate("restart").expect("restart");
+        assert!(f.state().held_sends.is_empty());
+        assert!(f
+            .call(
+                "operation.status",
+                json!({"operation_id": answer["operation_id"]})
+            )
+            .is_err());
     }
 }
