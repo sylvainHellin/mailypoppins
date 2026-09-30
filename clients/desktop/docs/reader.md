@@ -23,6 +23,30 @@ The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, 
 
 The open message's toolbar (`ReaderToolbar.tsx`, `role="toolbar"`, "Message actions") runs the same actions as the keys, on this message only, whatever the list has marked.
 Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward opens the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
+Open in browser (`tb`) is last.
+
+## Attachments
+
+The header block lists the message's attachments from `MessageMeta.attachments`, each with its name, its size, and two icon buttons named after the file: "Open <name>" (`to`) and "Save <name>" (`ts`).
+Open calls `attachment_open`, which hands the daemon's copy of the part to the system opener, and the status line says "Opened: <name>", the TUI's words ([rust-layer.md](rust-layer.md), "Attachments").
+Save opens the Save dialog for that one part.
+
+The keys act on the cursor message from the list or the reader, as the TUI's MESSAGE keys do:
+
+- `to` opens a message's only attachment at once, and over several opens the "Open attachment" dialog, one button per part, the first focused.
+- `ts` opens the Save dialog with every part checked.
+- A message with none says "No attachments", the TUI's line.
+
+The Save dialog ("Save attachment", or "Save attachments" over several parts) has a checkbox per part and a Directory field, which stands in for the TUI's directory picker and the native folder picker until the dialog plugin is installed.
+The field starts at `~/Downloads`, the TUI's default, and then at the last directory a save went to in this window.
+It takes an absolute path or one starting with `~`; a refusal, such as a relative path, shows in the dialog's alert, which keeps it open.
+A save that went through closes the dialog and says "Saved 2 files to ~/Downloads" in the activity area, with the directory as typed; parts that failed turn it into an alert naming why.
+
+## The browser rendition
+
+`tb`, the toolbar's Open in browser, or the palette's "Open HTML in browser" hands the message to the default browser through `html_open`: the daemon's rendition, with the charset, the CSP tag and the `cid:` images inlined.
+The status line says "Opened in browser", or "No HTML version available" for a message whose sender wrote no markup.
+On a server-only hit, `tb` writes the hit's own markup into the app cache through `hit_html_open`, and a hit without markup gets the same line; a draft has no rendition.
 
 ## Drafts and server-only hits
 
@@ -30,12 +54,24 @@ The reader pane shows no frame for these two.
 
 A selected draft shows `DraftPreview.tsx` (`src/components/compose/`): the `draft_preview` record, which is the headers (From, To, Cc, Bcc), the status pill, the body as the dry run cuts it at 500 characters, and the file path.
 Under the headers, `draft_validate`'s report says "Valid" or "Not sendable" with the error, and lists the warnings.
-The two are read again whenever the listing's row or the list itself changes, which is what a save in the editor does through `draft.changed`.
-Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), and Approve (`cA`) or Back to draft (`cD`).
+Under the report, the "Attachments" list shows each entry of the draft's `attachments:` as the file spells it, from `draft_attachments`, with "Open <entry>" and "Remove <entry>" buttons.
+An entry with no file behind it carries a "missing" badge and its Open is disabled, since the send would fail on it.
+Remove calls `draft_attachment_remove`, which takes the entry out of the file and leaves the file it named alone.
+The three are read again whenever the listing's row or the list itself changes, which is what a save in the editor or an attach does through `draft.changed`.
+Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), Attach file (`ta`), and Approve (`cA`) or Back to draft (`cD`).
+
+Attach file, `ta` in Drafts, opens the "Attach file" dialog, whose File field takes an absolute path or one starting with `~`, stored in the draft as typed.
+The native file picker arrives with the dialog plugin, and the dialog says so under the field.
+A path with no file behind it ("No such file: ~/nope.pdf", the TUI's words), a relative path, a directory, and a file the draft already lists are refused in the dialog's alert, which keeps it open for a correction, as the TUI's prompt stays armed.
+An attach that went through closes the dialog and says "Attached <path> to <draft>".
+On a draft, `to` opens one of its files, or picks among several in the same dialog as a message's parts, and `ts` says the files are already on disk.
 A file that does not parse gets no preview call: the pane says "This draft does not parse" with the listing's diagnostic, and only Edit in editor stays, since the editor is where it gets fixed.
 
 A server-only search hit has no row, so there is no body to load.
 The pane shows its sender, date and mailbox, says the message is on the server only, and offers Reply, Reply all and Forward, which `draft_from_message` builds from the hit's own headers, with no attachments.
+Its Fetch button, or `F`, is the TUI search overlay's `f`: `message_fetch` downloads the message into the store, the button says "Fetching…" meanwhile, and the hit then becomes the row it landed in, so the reader loads it like any stored message and the activity area says "Fetched into the local store".
+`F` on a hit the store already holds says "Already in the local store", and a refused fetch is an alert naming the daemon's reason.
+`to` and `ts` on a server-only hit say to fetch it first, since only a stored message has parts to materialise; Open in browser shows when the hit carries markup.
 
 ## Refused links
 

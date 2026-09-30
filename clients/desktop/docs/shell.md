@@ -18,6 +18,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/compose.ts` | New draft, reply, forward, edit, recipients, approve and demote, and the editor handoff |
 | `src/app/send.ts` | `x` and `cX`: the send confirmations and what their OK runs |
 | `src/app/outbox.ts` | The outbox listings, the outbox view, retry and discard, and the queue depth |
+| `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
 | `src/app/layout.ts`, `prefs.ts`, `store.tsx` | Breakpoints, localStorage preferences, the context store |
@@ -28,6 +29,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/mutations` | The archive, delete, approve, demote and send confirmation, the move picker, and the activity area (notices and send holds) |
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 | `src/components/outbox` | The outbox view |
+| `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -187,6 +189,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
 | `x` | Send the cursor draft, approving it first | any pane | `send_draft` (`hold: true`) |
 | `cX` | Send all approved drafts, Drafts only | list, reader | `send_approved` (`hold: true`) |
+| `ta` | Attach a file to the draft, Drafts only: the path dialog | list, reader | `draft_attach` |
 
 The keys are the TUI's (`clients/tui/src/app/keymap.rs`), and like its MESSAGE and List keys they do nothing from the sidebar.
 `ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words.
@@ -288,7 +291,7 @@ The reader keeps what it showed, and its toolbar and draft buttons still act on 
 ### What the view hides
 
 The mailbox selection and its marks stay in the model while the view shows, and nothing the view does not show acts on them.
-The actions that read them are open, copy selector, archive, delete, move, the read and flag toggles, the marks (`v`, `Ctrl+a`, the range, clear marks), reply, reply all, forward, open in editor, edit recipients, approve, demote, `x` and `cX` (`hiddenByOutbox` in `src/app/outbox.ts`).
+The actions that read them are open, copy selector, archive, delete, move, the read and flag toggles, the marks (`v`, `Ctrl+a`, the range, clear marks), reply, reply all, forward, open in editor, edit recipients, approve, demote, `x`, `cX`, the attachment keys `to`, `ts`, `tb` and `ta`, and `F` (`hiddenByOutbox` in `src/app/outbox.ts`).
 Their keys do nothing from any pane, the reader included, since from the reader they would act on the marks as well.
 Their palette rows stay listed, and running one says "Close the outbox first (Escape): this acts on the mailbox selection".
 Escape closes the view before it clears any marks, so the first Escape never drops marks the view hid.
@@ -362,8 +365,8 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard and the recipients dialog) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, and the attachment picker, Save and Attach file dialogs) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, the Save and Attach file dialogs in their path field, whose note is its description, and the attachment picker on its first file.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -392,11 +395,16 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `ss`, `sS`: quick and full sync of the selected account.
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
+- `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser, from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
+  The search overlay's `o`, `O` and `b` are these same keys on a hit, which is a list row here.
+- `F`: fetch the server-only hit under the cursor into the store, from the list or the reader, a desktop key: the TUI's overlay binds `f`, which is the find family's prefix in the desktop (`fm`, `ff`), and a bare `F` is free in every TUI mail context.
+  The palette's row for it shows `F`.
 - Shift+click marks the range from the last mark to the row, and Cmd+click or Ctrl+click marks one row; the palette's "Mark range" does the same from the cursor.
 - The palette's and the View menu's "Widen list" and "Narrow list" move the splitter by 40 px, since Tab cycles panes and never lands on it.
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
-A key whose action a later milestone brings (`ta`, or an M4 key) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
+A key whose action a later milestone brings (an M4 key such as `tv`) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
+No row is left for M3.
 
 ## Tests
 

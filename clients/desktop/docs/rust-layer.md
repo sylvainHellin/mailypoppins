@@ -13,6 +13,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `session.rs` | The one `Session`, the `StateTracker` watermark, the event pump, re-bootstrap, the awaited-operations table |
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
+| `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `reader.rs` | The `mpmsg` scheme serving `message.html` |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
@@ -99,6 +100,15 @@ The type blocks in this document are for reading, and the generated files are th
 | `outbox_list` | `account` | `OutboxListing` |
 | `outbox_retry` | `account`, `row_id` | `{ operation_id }` |
 | `outbox_discard` | `account`, `row_id` | `OutboxDiscarded` |
+| `message_fetch` | `account`, `mailbox` (label or server name), `message_id` | `FetchOutcome`, once the fetch has ended |
+| `attachment_open` | `account`, `row_id`, `part` | `OpenedFile` |
+| `attachment_save` | `account`, `row_id`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
+| `html_open` | `account`, `row_id` | `OpenedFile`, or `null` for a message with no HTML part |
+| `hit_html_open` | `html` | `OpenedFile` |
+| `draft_attachments` | `account`, `id` | `DraftAttachments` |
+| `draft_attach` | `account`, `id`, `path` (absolute or `~`) | `DraftAttachments` |
+| `draft_attachment_remove` | `account`, `id`, `index` | `DraftAttachments` |
+| `draft_attachment_open` | `account`, `id`, `index` | `OpenedFile` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
@@ -295,6 +305,66 @@ The process gets null stdio and its own process group.
 A spawn failure or a nonzero exit within 2 s rejects with `setup`, whose message names the variable or the setting to fix; the command answers when the launcher exits or after 2 s, whichever comes first.
 A terminal editor needs a terminal to run in, so it goes through a terminal command, for example `MP_DESKTOP_EDITOR="wezterm start -- hx {path}"`.
 
+## Attachments
+
+A received message's part and its browser rendition are files the daemon writes, one call each: `message.materialise_attachment {account, row_id, part}` and `message.materialise_html {account, row_id}` answer `{handle, path, name, bytes, expires_at}`, with the file at `<data_dir>/runtime/handles/<handle>/<name>` for ten minutes.
+`part` is the zero-based index into `MessageMeta.attachments`, which is `message.get`'s list; the daemon serves no list method of its own.
+The layer checks that `name` is one file in one directory (not empty, `.` or `..`, and without `/`, `\` or NUL) and that `path` is absolute and ends in `name`, before it opens or copies anything.
+
+`attachment_open` and `html_open` hand the daemon's file to the system opener and leave the handle unreleased, since the viewer just launched holds the file (`ATT-01`, `ATT-05`).
+The opener is `mp_core::parse::open_file_with_system`, the TUI's: `open <path>` on macOS and `xdg-open <path>` elsewhere, spawned with null stdio and reaped on a thread.
+A fixture door journals the path instead, and `MP_DESKTOP_STUB_OPENER=1` logs `[open] stubbed: <path>` and opens nothing.
+The rendition carries the charset, the `Content-Security-Policy` tag and the `cid:` images as `data:` URIs, all three written by the daemon.
+A message whose sender wrote no markup is the daemon's `-32602`, which `html_open` answers as `null` and the frontend shows as "No HTML version available", the TUI's line; an unknown row reads the same, as it does in the TUI.
+
+`attachment_save` copies each of `parts`, in the order given, into `dest_dir`, then releases the part's handle (`ATT-02`).
+`dest_dir` is typed by the user: `~` and `~/…` expand against `$HOME`, a relative path is refused with `protocol`, since the app has no working directory a user could mean, and a missing directory is created.
+The copy is `mp_core::parse::save_attachment`, so a name the directory already has becomes `name_1.ext`, then `name_2.ext`.
+A part that fails lands in `failed` with its `GuiError`, and the others still go.
+
+```ts
+type OpenedFile = { name: string; path: string };
+type SavedAttachments = {
+  dir: string;
+  saved: { part: number; name: string; path: string }[];
+  failed: { part: number; error: GuiError }[];
+};
+```
+
+A server-only search hit has no row, so there is nothing to materialise; its markup is the hit's `html_body`.
+`hit_html_open` writes it with `mp_core::parse::ensure_utf8_charset` and `inject_csp_meta`, as the TUI's `html_temp_file` does, to `<app cache>/renditions/hit-<hash>/message.html`, one directory per markup, and opens it.
+The app cache is Tauri's `app_cache_dir`, `~/Library/Caches/dev.mailypoppins.desktop/` on macOS; the fixture uses `cache/` under its run directory.
+Each write first removes the renditions older than a day.
+
+A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon serves neither `draft.attach` nor a removal, so all four draft commands work on the file, which `draft.path` resolves fresh:
+
+- `draft_attachments` parses the file and answers each entry as typed, where the send path finds it, and whether a file is there: `~` expands against `$HOME`, and a relative entry resolves against the draft's own directory (`ATT-03`).
+- `draft_attach` appends with `mp_core::draft::append_draft_attachment`, the TUI's `ta`, which keeps the body and every other line byte for byte and stores the path as typed, `~` included.
+  It refuses a blank or relative path and a directory with `protocol`, a path with no file behind it with `not_found` ("No such file: <path>", the TUI's words), and a file the list already names with `protocol` ("<entry> is already attached").
+- `draft_attachment_remove` drops item `index` of the block list and leaves the file it named alone.
+  The rewrite is this layer's own, line by line, and it first checks that the list has one line per parsed entry, so a flow-style list or an entry that spans lines is refused rather than rewritten; an emptied list keeps its bare `attachments:` key, the skeleton's shape.
+- `draft_attachment_open` opens entry `index` with the opener (`ATT-04`), and a missing file is `not_found`.
+
+```ts
+type DraftAttachments = {
+  account: string; id: string; path: string;
+  attachments: { index: number; entry: string; path: string; exists: boolean }[];
+};
+```
+
+A write reaches the frontend as the watcher's `draft.changed`, like every other client-side rewrite.
+An editor open on the same file can overwrite the change with its own buffer, as it can in the TUI.
+
+`message_fetch` is the TUI search overlay's `f` (`LST-09`): `message.fetch {account, mailbox, message_id}` ingests a server-only message.
+It is an operation, and one message is quick, so the command reads `operation.status` every 100 ms until it ends and answers with its result; the frontend awaits one promise, and no `PendingKind` is registered.
+A fetch still running after 90 s is `timeout`, a `failed` operation is `protocol` with the daemon's reason, and a bad mailbox is `-32602` at the call.
+A message the store already holds answers at once with `already_present: true`.
+The new row reaches the lists through the counts `state.invalidate` the daemon publishes for its mailbox.
+
+```ts
+type FetchOutcome = { account: string; mailbox: string; uid: number; row_id: number; selector: string; already_present: boolean };
+```
+
 ## The event stream
 
 `subscribe_events` registers one `Channel`; a second call replaces the first.
@@ -379,7 +449,7 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 | `MP_DESKTOP_FIXTURE=1` (or `--fixture`) | Serve `clients/desktop/fixtures/*.json`, no daemon |
 | `MP_DESKTOP_MP_BIN` | The `mp` binary to start the daemon with; else the sidecar next to the executable, then `PATH`, then `~/.cargo/bin/mp`, `/opt/homebrew/bin/mp`, `/usr/local/bin/mp` |
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one; default `1400x900` |
-| `MP_DESKTOP_STUB_OPENER=1` | `open_external` records instead of opening |
+| `MP_DESKTOP_STUB_OPENER=1` | `open_external` records instead of opening, and a file open only logs |
 | `MP_DESKTOP_EDITOR` | The editor command template `editor_open` runs; see Drafts and the editor |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`; to stderr and `<data>/logs/mp-desktop.log` |
 | `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR` | The same overrides the binary reads |
@@ -433,6 +503,11 @@ It re-arms a `failed` row to `pending_send`, publishes the invalidation, and 0.4
 
 The fixture files no Sent copy for a retried row, and it refuses a second retry of a re-armed row while the first runs, where the daemon admits it and settles on what it finds.
 `send.outbox_discard` removes the row, publishes the invalidation, and answers `{discarded, row_id, message_id, revision}`; a row it does not have is `-32602`.
+
+`message.materialise_attachment` writes a small file naming the part, and `message.materialise_html` the fixture's rendition of the row's HTML body, under `handles/<handle>/` in the run directory; a part the row does not have and a row with no HTML body are `-32602`.
+`message.release_handle` removes the handle's directory.
+`message.fetch` settles at once: a `Message-ID` a row of the account carries answers `already_present`, the fixture's server-only hit (`<server-only@fixture.example>`) lands at the top of the mailbox the hit names, by label or slug, with a counts `state.invalidate`, and any other message fails the operation as not on the server.
+The system opener is never run in fixture mode: each file open is journalled, and the tests read the journal.
 
 The drafts are real files in a per-run directory, `<temp>/mp-desktop-fixture-<pid>/drafts/<account>/`, written at start from `drafts.json`'s rows and `draft-bodies.json`.
 Every call rescans that directory, as the daemon's draft queries do, so the listing, the counts and the bootstrap's drafts follow the files.
