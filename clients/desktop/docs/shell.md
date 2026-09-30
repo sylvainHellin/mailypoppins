@@ -28,6 +28,8 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
 | `src/app/interop.ts` | `sc` and `sf` (config.toml and the daemon log in the editor), and the reader's copies |
 | `src/app/settings.ts` | The Settings view's configuration, the config.toml banner's problem, `config.changed`, the reload, and the password dialog's store |
+| `src/app/wizard.ts` | The account wizard's presets, per-step checks and the `AccountDraft` its review writes |
+| `src/app/signin.ts` | The device-code sign-in this window awaits: its start, the code read from its progress, its cancel, how it ends and the lines that say so |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
@@ -46,7 +48,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/components/attachments` | The open picker, the Save dialog and the Attach file dialog |
 | `src/components/signatures` | The Signatures dialog |
 | `src/components/activity` | The activity log dialog |
-| `src/components/settings` | The Settings view, the password dialog and the config.toml banner |
+| `src/components/settings` | The Settings view, the password dialog, the config.toml banner, the account wizard and the device-code dialog |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -97,7 +99,7 @@ Shift+Enter, the header's server button, `ff` (the TUI's "Search all mail") and 
 `state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`) and the list selection and focus to restore.
 Hits stream in from `message.server_hit`; a hit or a finish that overtakes the `search_server_start` answer is held in `search.early` and replayed once the id is known.
 Cancel calls `search_server_cancel`; leaving a running search (Escape, a new query, another mailbox) cancels it too.
-A server-only hit (`row_id: null`) is listed with a "server only" badge and has no body to open: fetching it into the store needs a `message.fetch` command the Tauri layer does not have yet.
+A server-only hit (`row_id: null`) is listed with a "server only" badge and has no body to open until `F` fetches it into the store ([reader.md](reader.md), "Drafts and server-only hits").
 The cursor still lands on it (`selection.hit`, by the hit's key), so it can be replied to or forwarded from its own headers; it cannot be marked, and no mutation names it.
 Escape, from the list or the field, returns to the mailbox list with the selection it had before the search; choosing a mailbox or an account ends the search as well.
 A `rebootstrapped` keeps the search and its hits: the selection to restore goes through the same rules as a live one, a local search runs again after a daemon restart (row ids are per instance), and a server search waits for the `operation_settled` or `operation_dropped` the Rust layer's re-query sends.
@@ -858,7 +860,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
 A KEYMAP key the desktop does not bind (such as `tt`, the TUI's thread view) shows a notice saying so; the palette lists the same actions disabled, with the badge.
-No row is left for M3; the palette's "Add account" carries the M4 badge until the account wizard brings it.
+No row carries an M3 or M4 badge any more.
 
 ## Tests
 

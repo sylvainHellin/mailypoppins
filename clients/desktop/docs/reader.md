@@ -113,7 +113,8 @@ Its Fetch button, or `F`, is the TUI search overlay's `f`: `message_fetch` downl
 
 Every navigation the webview refuses arrives as a `link_intercepted` GuiEvent and lands in `state.intercepted` (the last 100).
 One from a navigation or a new window also becomes `state.interceptNotice`, shown in the reader footer (`InterceptedLinkNotice.tsx`): the URL truncated, in full on hover (`title`), with "Open in browser", "Copy" and "Dismiss".
-"Open in browser" is the only caller of `open_external`, and only for http, https and mailto; the button is disabled for any other scheme.
+"Open in browser" is the reader's only caller of `open_external`, and only for http, https and mailto; the button is disabled for any other scheme.
+The other caller is the device-code dialog's "Open verification page" ([shell.md](shell.md), "The device-code dialog").
 The stub's own log line (`source: "open_external_stub"`) raises no notice.
 The palette action "Show intercepted links" opens `InterceptedLinksDialog.tsx`, which calls `intercepted_urls()`; that command drains the Rust log, so its answer is merged into `state.intercepted` and the dialog lists the model's copy, newest first.
 

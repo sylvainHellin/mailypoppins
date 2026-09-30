@@ -14,7 +14,12 @@ The plan is [docs/plans/native-gui.md](../../docs/plans/native-gui.md), and the 
 - M3: send and send all approved behind the TUI's confirmations and the daemon's hold, with the Sent, Send cancelled, Failed and Partly delivered outcomes.
 - M3: the outbox view with retry and discard, the sidebar's outbox line as its link, and the queue depth in the status region.
 - M3: opening and saving a message's attachments, the browser rendition, attaching a file to a draft, and fetching a server-only search hit; paths are typed until the dialog plugin brings the native picker.
-- Calendar, contacts, signature management and settings come with M4.
+- M4: the Contacts, Calendar and Settings views beside Mail, switched with `Space c`, `Space a` and `Space m`, the sidebar or the palette.
+- M4: the agenda with its past toggle and the source `invite.ics` in the editor, the reader's invitation card, RSVP from the card, `tv` and `V`, and a New invitation form, disabled on a Graph account.
+- M4: ranked contacts with a fuzzy search, compose to a contact, a contact sent as a vCard draft, the address copied, and the index rebuild.
+- M4: the Signatures dialog on `cs`, the activity log on `sl`, config.toml and the daemon log in the editor on `sc` and `sf`, and the reader's Copy menu.
+- M4: Settings with the config.toml banner, Reload, passwords and the device-code sign-in, the account wizard with the CLI's four presets, and a setup screen when the daemon has no config.toml.
+- Nothing of M2 to M4 has run in a real window yet; the tests run against the fixtures.
 
 The Rust crate `mp-desktop` in `src-tauri/` has its own workspace and `Cargo.lock`, since the root workspace excludes `clients/desktop`.
 It links `mp-client`, `mp-protocol` and `mp-core` by path, never the root `mailypoppins` crate, and talks to the daemon only through `mp-client`, as `ClientKind::Gui`.
@@ -35,7 +40,7 @@ pnpm tauri dev                          # against the daemon, started with `mp d
 MP_DESKTOP_FIXTURE=1 pnpm tauri dev     # on the bundled fixtures, no daemon
 ```
 
-Fixture mode serves `fixtures/*.json`: 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies and 1 armed send hold, row 1006 being a hostile message.
+Fixture mode serves `fixtures/*.json`: 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts, row 1006 being a hostile message.
 It is the way to iterate on the screens without a mail server.
 The drafts are real files in a per-run directory, and the fixture never starts an editor or the system opener: it records the path instead.
 The `fixture_simulate` command, answered only in fixture mode, takes these:
@@ -43,6 +48,10 @@ The `fixture_simulate` command, answered only in fixture mode, takes these:
 - `editor_save` and `editor_invalid`: a save, or a broken frontmatter, in the file the last `editor_open` named.
 - `send_fail`, `send_partial` and `send_pending_append`: the next send or outbox retry fails, refuses a recipient, or delivers and owes its Sent copy.
 - `send_hold:<secs>`: the hold window of later sends, `0` for none, 10 s by default.
+- `invite_update` and `invite_cancel`: a new version or a cancellation of the steering committee lands in `work`'s inbox; `rsvp_fail`: the next RSVP fails.
+- `rebuild_refused`: the next contact rebuild is refused by the cache guard; `signature_changed`: the `work` signature is edited behind the app's back.
+- `config_invalid`: the next reload finds a broken config.toml; `config_absent`: a daemon restarted on an empty configuration directory.
+- `oauth_approve` and `oauth_deny`: the waiting device-code sign-in is approved or declined.
 - `hold`, `rollback`, `rollback:<n>`, `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown`, as before.
 
 [docs/rust-layer.md](docs/rust-layer.md), "Fixture mode", has the details.
@@ -72,7 +81,7 @@ pnpm tauri build                        # an unsigned app bundle; signing and no
 | `MP_DESKTOP_MP_BIN` | The `mp` binary that starts the daemon; else the one next to the executable, then `PATH`, then `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` |
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one |
 | `MP_DESKTOP_STUB_OPENER=1` | "Open in browser" records the URL in the intercepted-URL log instead of opening it, and a file open only logs; automated runs set it |
-| `MP_DESKTOP_EDITOR` | The editor command for drafts, `{path}` standing for the file; else the `editor` key of `desktop.json`, `$VISUAL` or `$EDITOR` unless a terminal editor, a probed `code`, `zed`, `subl` or `cursor`, then `open -t` |
+| `MP_DESKTOP_EDITOR` | The editor command for drafts and every other file the app opens in an editor, `{path}` standing for the file; else the `editor` key of `desktop.json`, `$VISUAL` or `$EDITOR` unless a terminal editor, a probed `code`, `zed`, `subl` or `cursor`, then `open -t` |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`, to stderr and `<data>/logs/mp-desktop.log` |
 
 The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, `MAILYPOPPINS_DAEMON_AUTOSTART`) apply as they do to `mp`.
@@ -80,6 +89,6 @@ The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, 
 ## Documentation
 
 - [docs/rust-layer.md](docs/rust-layer.md): the Tauri commands, the generated TypeScript types, the event stream, the reader scheme, links, the app CSP and fixture mode.
-- [docs/shell.md](docs/shell.md): the frontend modules, the model, mutations and pending state, the dialogs and the activity area, compose and send, the outbox, the layouts, focus order and keys.
-- [docs/reader.md](docs/reader.md): the reader frame, the attachments, the browser rendition, the draft preview and server-only hits, refused links, and the navigation guard's verification with its manual steps.
+- [docs/shell.md](docs/shell.md): the frontend modules, the model, mutations and pending state, the dialogs and the activity area, compose and send, the outbox, the views, contacts, the calendar, signatures, the activity log, settings, the account wizard, first run, the layouts, focus order and keys.
+- [docs/reader.md](docs/reader.md): the reader frame, the toolbar and its Copy menu, invitations, the attachments, the browser rendition, the draft preview and server-only hits, refused links, and the navigation guard's verification with its manual steps.
 - [docs/design-tokens.md](docs/design-tokens.md): the semantic tokens and their contrast table.
