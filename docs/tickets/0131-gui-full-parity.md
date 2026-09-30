@@ -84,6 +84,78 @@ Open for M3:
 - A hold card's "Sent" and "Send cancelled" line is a `role="status"` that mounts with its text, which a screen reader may not announce.
 - The fixture's `home` account fails its sync login by design, as its sync health says, so `ss` there always ends in a failure notice.
 
+## M3 landed
+
+M3, compose through the external editor, landed on the `gui-m3` branch on 2026-09-30, in the 21 commits from `b765c620` to `efe865b5`, each tagged `(#0131)`.
+It closes `DFT-01`, `DFT-03` to `DFT-09`, `DFT-12`, `SND-01` to `SND-03`, `SND-06` to `SND-09`, `ATT-01`, `ATT-04` and `ATT-05`, and the M3 halves of `SND-04`, `MSG-07`, `SYN-06`, `MBX-07` and `LST-09`.
+`DFT-02`, `DFT-10`, `DFT-11`, `ATT-02`, `ATT-03`, `ACC-09` and `ACC-11` ship in part, and [docs/parity-matrix.md](../parity-matrix.md) names what each lacks.
+
+What shipped, per unit:
+
+- U1, drafts and the editor (`b765c620`, `5eeb9826`, `a95ff466`): the Tauri commands `draft_create`, `draft_reply`, `draft_forward`, `draft_from_message`, `draft_path`, `draft_approve`, `draft_demote`, `draft_validate`, `draft_preview`, `draft_set_recipients`, `signature_list`, `editor_open`, `editor_setting_get` and `editor_setting_set`, and fixture drafts that are real files in a per-run directory, rescanned on every call.
+- U2, compose (`cf3daa4e`, `35b4e025`, `71765368`): the `cn` wizard with To, Cc, Bcc, Subject and a signature select, reply and forward into the editor, a server-only hit replied to or forwarded through `draft_from_message`, `e` and `ce` on a draft, approve and demote as a pending `status` axis, the editing banner, draft rows with status, editing, sending and `invalid` badges, and the draft preview in the reader.
+- U4, send (`898cc5d8`, `37b413a4`, `683a8cc4`): `send_draft`, which validates, approves a `draft` status and starts `send.draft` with `hold: true`, `send_approved`, the operation kinds `send` and `send_approved`, the TUI's confirmation texts, and the hold card's ends "Sent", "Send cancelled", "Failed" and "Partly delivered".
+- U5, outbox (`9f4e3ff2`, `7523e2b7`, `0d21511a`, `2c450be4`): `outbox_list`, `outbox_retry` awaited as the operation kind `outbox_retry`, `outbox_discard`, the outbox view in the list pane with its state chips, Retry and Discard behind a confirmation that warns about a second delivery, the sidebar's outbox line as a button with a partly delivered count, and the queue depth in the status region.
+- U3, attachments and fetch (`81785dfc`, `7a11e44d`, `efe865b5`): `attachment_open`, `attachment_save`, `html_open`, `hit_html_open`, `draft_attachments`, `draft_attach`, `draft_attachment_remove`, `draft_attachment_open` and `message_fetch`, the reader's attachment list with Open and Save, the Save and Attach file dialogs with a typed path, the draft preview's attachment list with Open and Remove, and the Fetch button on a server-only hit.
+- The TUI's keys `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`, `x`, `cX`, `to`, `ts`, `tb` and `ta`, each with a palette entry; the palette has no M3 badge left.
+- The desktop's keys `go` for the outbox, `R` and `d` on its cursor row, and `F` for the fetch, since `f` is the find family's prefix in the desktop.
+- The fixture simulations `editor_save` and `editor_invalid` (a save or a broken frontmatter in the file the last `editor_open` named), `send_fail`, `send_partial` and `send_pending_append` (the next send or retry fails, refuses a recipient, or leaves its Sent copy owed), and `send_hold:<secs>` (the fixture's `email.send_hold_secs`, `0` for no hold).
+- 286 vitest tests (168 at M2) and 135 Rust tests (78 at M2), plus the same two ignored.
+
+The unit docs are `clients/desktop/docs/rust-layer.md` ("Drafts and the editor", "Sends", "The outbox", "Attachments", "Fixture mode"), `clients/desktop/docs/shell.md` ("Compose", "Outbox") and `clients/desktop/docs/reader.md` ("Attachments", "The browser rendition", "Drafts and server-only hits").
+
+Decisions taken in M3, each the breakdown's default:
+
+- The editor is resolved from `MP_DESKTOP_EDITOR`, then the `editor` key of `desktop.json`, then `$VISUAL` and `$EDITOR` less terminal editors, then `code`, `zed`, `subl` and `cursor` in the Homebrew and system directories, then `open -t` (D1, D2).
+- A terminal editor runs only through a terminal command template such as `wezterm start -- hx {path}`, and the app never waits for the editor to exit.
+- Compose stays in the external editor until M5, and the wizard has no inline body, since `draft.create` takes none (D5).
+- A draft's attachments are a client-side frontmatter rewrite, since the daemon serves neither `draft.attach` nor a removal (D3).
+- The outbox view offers Retry and Discard behind a confirmation, although `SND-07` does not require them (D4).
+- The outbox opens with `go`, the palette or the sidebar's outbox line (D6).
+- `x` always asks first, and every send passes `hold: true`, so the daemon's `email.send_hold_secs` decides the window (D7).
+- The dialog plugin is not installed, and typed path fields stand in for the native picker (D8).
+- The fetch of a server-only hit ships in M3, on `F` (D9).
+- `ts` on a draft says its files are already on disk and saves nothing.
+- `d` on a draft file that does not parse names the file to delete by hand, since `draft.discard` takes no path, where the TUI deletes the file itself.
+
+Review findings fixed before the close-out:
+
+- The editor probe test fails if the probe goes directory by directory (`f0f2585e`).
+- The wizard's focus-trap test waits for focus to settle inside the dialog after each Tab (`515cf825`).
+- `d` on a draft that does not parse calls nothing, and a marked batch with one is refused whole (`d72ef02d`).
+- While the outbox view shows, no key or palette row acts on the hidden mailbox selection, and Escape closes the view before it clears any marks (`864cb9e6`).
+- The queue depth counts a retry of a row the listing already counts as open once, and `Ctrl+a` over the view marks nothing (`a1c3ef5e`).
+- M2's open item on the hold card: its end line is a `role="status"` mounted empty with the card (`37b413a4`).
+
+Known limits carried:
+
+- Search hits streamed from the server are still not laid under the pending changes.
+- App keys stop inside the cross-origin reader frame, and list windowing is off.
+- An editor open on a draft can overwrite an attach, a removal or a `ce` rewrite with its own buffer, as in the TUI.
+- `cX` sends one account's approved drafts; the CLI's `--all-accounts` loop has no GUI path.
+- `send.approved` and `send.outbox_retry` still render their outcome at the end.
+
+Open for M4 and for Sylvain:
+
+- Install `tauri-plugin-dialog` to replace the path text fields in the Save and Attach file dialogs: the crate `tauri-plugin-dialog = "2"`, `.plugin(tauri_plugin_dialog::init())` in the builder, the npm package `@tauri-apps/plugin-dialog`, and the capability `dialog:allow-open` in `src-tauri/capabilities/default.json`.
+- Check by eye with `MP_DESKTOP_FIXTURE=1 pnpm tauri dev`: the wizard, the editing banner, the draft preview, the hold card's outcomes, the outbox view and the attachment dialogs; nothing of M3 was run in a real window.
+- Confirm the editor resolution order above: `MP_DESKTOP_EDITOR`, `desktop.json`, `$VISUAL` and `$EDITOR` with terminal editors skipped, the `code`, `zed`, `subl` and `cursor` probes, `open -t`.
+- Confirm that the outbox's Retry and Discard sit behind a confirmation.
+- Confirm the desktop keys `go`, `R` and `F`.
+- Confirm that `ts` on a draft is declined.
+- Confirm that `d` on a draft file that does not parse shows a notice instead of deleting the file, as the TUI does.
+- `REQUIRED_CAPABILITIES` in `clients/desktop/src-tauri/src/connector.rs` lacks the M3 methods, so a daemon without them connects and fails at the first call.
+- `draft.reply` and `draft.forward` take no signature arguments, so a reply or a forward gets no signature choice.
+- `draft.create` takes no body, so the wizard cannot write one.
+- `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`.
+- `DraftCreated` has no `subject`.
+- `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file.
+- The daemon's `SendOutcome.message_id` is empty.
+- The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself.
+- The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself.
+- `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
+- The draft preview's Approve and Back to draft buttons act on the marks the outbox view hides while it is open (the fix1 review), and `clients/desktop/docs/shell.md`, "What the view hides", says nothing hidden acts on them.
+
 ## Exit gate
 
 - Every GUI-parity row is implemented and validated, or carries a settled deferral recorded in `BACKLOG.md`.
