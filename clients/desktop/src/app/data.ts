@@ -106,7 +106,8 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     );
   }, [hasBootstrap, account, mailbox, messages, dispatch]);
 
-  // The reader: headers and the plain-text body of a verified selection.
+  // The reader: the headers of a verified selection. The body is the
+  // `mpmsg` document the reader's iframe loads by itself.
   const message = state.selection.message;
   const reader = state.reader;
   useEffect(() => {
@@ -116,9 +117,72 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     const gen = reader.load.gen;
     const rowId = message.row_id;
     run(`reader:${key}@${gen}`, () =>
-      Promise.all([cmd.messageHtmlMeta(account, rowId), cmd.messageText(account, rowId)])
-        .then(([meta, text]) => dispatch({ type: "reader_loaded", key, gen, meta, text }))
+      cmd
+        .messageHtmlMeta(account, rowId)
+        .then((meta) => dispatch({ type: "reader_loaded", key, gen, meta }))
         .catch((e: unknown) => dispatch({ type: "reader_failed", key, gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, account, message, reader, dispatch]);
+
+  useSearchSync(state, dispatch);
+}
+
+/**
+ * Runs what the search state asks for: the local query, the server start,
+ * and the cancel of a server search the user walked away from (a new query,
+ * Escape, another mailbox) while it still ran.
+ */
+function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
+  const search = state.search;
+  const current = useRef(search);
+  current.current = search;
+
+  const want =
+    search && search.status === "searching"
+      ? { mode: search.mode, seq: search.seq, account: search.account, query: search.query }
+      : null;
+  const wantKey = want ? `${want.mode}:${want.seq}` : null;
+  const exclude = search && search.mode === "server" && search.status === "searching" ? search.hits.map((h) => h.message_id) : [];
+  const excludeRef = useRef(exclude);
+  excludeRef.current = exclude;
+
+  const started = useRef<string | null>(null);
+  useEffect(() => {
+    if (!want || started.current === wantKey) return;
+    started.current = wantKey;
+    const { mode, seq, account, query } = want;
+    if (mode === "local") {
+      cmd
+        .searchLocal({ account, query })
+        .then((hits) => dispatch({ type: "search_local_loaded", seq, hits }))
+        .catch((e: unknown) => dispatch({ type: "search_local_failed", seq, error: asGuiError(e) }));
+      return;
+    }
+    const ids = excludeRef.current;
+    cmd
+      .searchServerStart({ account, query, ...(ids.length ? { exclude_message_ids: ids } : {}) })
+      .then(({ operation_id }) => {
+        const now = current.current;
+        if (!now || now.seq !== seq || now.mode !== "server") {
+          // Superseded before it answered: nobody will read its hits.
+          void cmd.searchServerCancel(operation_id).catch(() => {});
+          return;
+        }
+        dispatch({ type: "search_server_started", seq, operation_id });
+      })
+      .catch((e: unknown) => dispatch({ type: "search_server_failed", seq, error: asGuiError(e) }));
+    // `want` is keyed by wantKey: its fields do not change under one key.
+  }, [wantKey, dispatch]);
+
+  // A running operation the search no longer shows is cancelled.
+  const running = search && search.status === "running" ? search.operationId : null;
+  const shownOp = search?.operationId ?? null;
+  const prev = useRef<string | null>(null);
+  useEffect(() => {
+    const was = prev.current;
+    prev.current = running;
+    if (was && was !== running && was !== shownOp) {
+      void cmd.searchServerCancel(was).catch(() => {});
+    }
+  }, [running, shownOp]);
 }

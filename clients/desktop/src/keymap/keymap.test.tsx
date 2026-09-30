@@ -20,7 +20,10 @@ describe("keyboard routing", () => {
     expect(selectedSubject()).toMatch(/Quarterly ledger review/);
     const reader = screen.getByRole("complementary", { name: "Reader" });
     expect(await within(reader).findByRole("heading", { name: "Quarterly ledger review" })).toBeInTheDocument();
-    expect(within(reader).getByText(/the quarterly ledger is attached/)).toBeInTheDocument();
+    expect(within(reader).getByTitle("Message body: Quarterly ledger review")).toHaveAttribute(
+      "src",
+      "mpmsg://localhost/work/1001",
+    );
   });
 
   it("Tab and Shift+Tab cycle focus through sidebar, list and reader", async () => {

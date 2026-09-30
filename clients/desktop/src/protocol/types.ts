@@ -149,5 +149,41 @@ export type SyncCompletedPayload = {
   new_inbox_mail: { from: string; subject: string }[];
 };
 export type DraftChangedPayload = DraftRow & { account: string };
+
+/**
+ * `mp_protocol::listing::ServerSearchHit`: `mailbox` is the sidebar label the
+ * hit was found under, and `row_id` and `selector` are null for a message the
+ * store has never ingested.
+ */
+export type ServerSearchHit = {
+  account: string;
+  mailbox: string;
+  message_id: string;
+  row_id: number | null;
+  selector: string | null;
+  from: string;
+  to: string;
+  cc: string | null;
+  reply_to: string | null;
+  bcc: string | null;
+  subject: string;
+  date_display: string;
+  date_sort: string;
+  flags: MessageFlags;
+  has_attachments: boolean;
+  is_invite: boolean;
+  body_text: string | null;
+  html_body: string | null;
+};
+
+export type ServerHitPayload = { operation_id: string; hit: ServerSearchHit };
+
+/** `operation.finished`: `result` on success, `error` on failure or cancellation. */
+export type OperationFinishedPayload = {
+  operation_id: string;
+  state: OperationState;
+  result?: unknown;
+  error?: RpcError | null;
+};
 export type MutationsRolledBackPayload = { account: string; failed: number };
 export type ShuttingDownPayload = { grace_secs: number; pending: unknown[] };

@@ -2,6 +2,7 @@ import { FileText } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ReaderBody } from "@/components/reader/ReaderBody";
 import { ReaderHeader } from "@/components/reader/ReaderHeader";
+import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
 import { READER_SCROLL_ID } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
 import { isStale, readerKey } from "@/app/state";
@@ -48,12 +49,12 @@ export function ReaderPane() {
         data-roving="active"
         aria-label="Message"
         aria-busy={loading}
-        className="min-h-0 flex-1 overflow-y-auto outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
       >
         {draft ? (
           <DraftSummary id={draft} />
         ) : !message ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
             <FileText aria-hidden="true" className="size-6" />
             <p>No message selected.</p>
             <p className="text-xs">j / k to move, Enter to read.</p>
@@ -62,15 +63,10 @@ export function ReaderPane() {
           <p role="alert" className="p-5 text-sm text-destructive">
             This message did not load: {s.reader.load.error.message}
           </p>
-        ) : ready && s.reader.meta && s.reader.text ? (
-          <article aria-label={s.reader.meta.subject ?? "Message"}>
+        ) : ready && s.reader.meta ? (
+          <article aria-label={s.reader.meta.subject ?? "Message"} className="flex flex-1 flex-col">
             <ReaderHeader meta={s.reader.meta} />
-            <ReaderBody
-              account={s.reader.meta.account}
-              rowId={s.reader.meta.row_id}
-              htmlUrl={s.reader.meta.html_url}
-              text={s.reader.text.body}
-            />
+            <ReaderBody htmlUrl={s.reader.meta.html_url} subject={s.reader.meta.subject} />
           </article>
         ) : (
           <div className="flex flex-col gap-3 p-5" aria-label="Loading message">
@@ -81,6 +77,7 @@ export function ReaderPane() {
           </div>
         )}
       </div>
+      {s.interceptNotice ? <InterceptedLinkNotice entry={s.interceptNotice} /> : null}
     </aside>
   );
 }

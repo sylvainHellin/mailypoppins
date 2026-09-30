@@ -12,6 +12,8 @@ import type {
   AccountInfo,
   ConnectionStatus,
   GuiEvent,
+  InterceptedUrl,
+  LocalSearchHit,
   MailboxListing,
   MessageList,
   MessageMeta,
@@ -41,6 +43,12 @@ export const mock = {
   failing: new Map<string, unknown>(),
   /** Added to every row_id, as a daemon restart that rebuilt the store would. */
   rowShift: 0,
+  /** What `intercepted_urls` drains. */
+  interceptLog: [] as InterceptedUrl[],
+  /** The next server search's operation id counter. */
+  nextOp: 1,
+  /** What `search_server_cancel` answers. */
+  cancelOutcome: "cancelled" as "cancelled" | "already_settled",
 };
 
 export function resetMock(): void {
@@ -50,6 +58,9 @@ export function resetMock(): void {
   mock.calls = [];
   mock.failing.clear();
   mock.rowShift = 0;
+  mock.interceptLog = [];
+  mock.nextOp = 1;
+  mock.cancelOutcome = "cancelled";
 }
 
 export function emit(event: GuiEvent): void {
@@ -188,8 +199,31 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         attachments: r.attachments ?? [],
       } satisfies MessageMeta;
     }
-    case "intercepted_urls":
-      return [];
+    case "intercepted_urls": {
+      const drained = mock.interceptLog;
+      mock.interceptLog = [];
+      return drained;
+    }
+    case "open_external":
+      return undefined;
+    case "search_local": {
+      // fixture.rs's `matches`: subject, sender or body, case-insensitive.
+      const params = args.params as { account: string; query: string; mailbox?: string };
+      const q = params.query.trim().toLowerCase();
+      const hits: LocalSearchHit[] = [];
+      for (const [mailbox, rows] of Object.entries(fixtures.messages[params.account] ?? {})) {
+        if (params.mailbox && params.mailbox !== mailbox) continue;
+        for (const r of rows) {
+          const text = `${r.subject ?? ""}\n${r.from ?? ""}\n${r.body ?? ""}`.toLowerCase();
+          if (text.includes(q)) hits.push({ ...strip(r), id: r.id + mock.rowShift, mailbox });
+        }
+      }
+      return hits;
+    }
+    case "search_server_start":
+      return { operation_id: `op-${mock.nextOp++}` };
+    case "search_server_cancel":
+      return mock.cancelOutcome;
     default:
       throw { kind: "internal", message: `the mock does not answer ${cmd}` };
   }

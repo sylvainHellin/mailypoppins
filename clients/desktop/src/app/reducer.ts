@@ -12,15 +12,27 @@ import type {
   ConnectionStatus,
   GuiError,
   GuiEvent,
+  InterceptedUrl,
+  LocalSearchHit,
   MailboxListing,
   MessageList,
   MessageMeta,
-  MessageText,
   VersionInfo,
 } from "@/lib/gui-types";
 import {
+  finishedSignal,
+  localHit,
+  openableHits,
+  serverHitSignal,
+  serverStarted,
+  settledSignal,
+  signal,
+  startSearch,
+} from "@/app/search";
+import {
   accountNames,
   emptyLoadable,
+  emptyReader,
   filteredDrafts,
   filteredRows,
   isStale,
@@ -50,7 +62,7 @@ export type Action =
   | { type: "mailboxes_failed"; account: string; gen: number; error: GuiError }
   | { type: "messages_loaded"; key: string; gen: number; list: MessageList }
   | { type: "messages_failed"; key: string; gen: number; error: GuiError }
-  | { type: "reader_loaded"; key: string; gen: number; meta: MessageMeta; text: MessageText }
+  | { type: "reader_loaded"; key: string; gen: number; meta: MessageMeta }
   | { type: "reader_failed"; key: string; gen: number; error: GuiError }
   | { type: "select_account"; account: string }
   | { type: "select_mailbox"; account: string; slug: string; focus?: Pane }
@@ -75,9 +87,20 @@ export type Action =
   | { type: "overlay"; overlay: Overlay }
   | { type: "filter"; text: string }
   | { type: "notice"; text: string | null }
-  | { type: "error"; error: GuiError | null };
+  | { type: "error"; error: GuiError | null }
+  | { type: "search_local"; query: string }
+  | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[] }
+  | { type: "search_local_failed"; seq: number; error: GuiError }
+  | { type: "search_server"; query: string }
+  | { type: "search_server_started"; seq: number; operation_id: string }
+  | { type: "search_server_failed"; seq: number; error: GuiError }
+  | { type: "search_server_cancelled"; operation_id: string; outcome: "cancelled" | "already_settled" }
+  | { type: "exit_search" }
+  | { type: "intercepted_fetched"; urls: InterceptedUrl[] }
+  | { type: "dismiss_intercept" };
 
 const HISTORY_CAP = 32;
+const INTERCEPT_CAP = 100;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,7 +135,34 @@ function retarget(s: AppState, sel: Selection): AppState {
   return { ...s, selection: sel, messages, sidebarCursor: cursor, filter: key === s.messages.key ? s.filter : "" };
 }
 
+/**
+ * The selection the mailbox list owns: the live one, or while a search shows
+ * its hits, the one the search will restore.
+ */
+function listSelection(s: AppState): Selection {
+  return s.search ? s.search.restore.selection : s.selection;
+}
+
+function setListSelection(s: AppState, sel: Selection): AppState {
+  if (!s.search) return { ...s, selection: sel };
+  return { ...s, search: { ...s.search, restore: { ...s.search.restore, selection: sel } } };
+}
+
+/** Leave the search: the mailbox list and its selection come back. */
+function endSearch(s: AppState): AppState {
+  const search = s.search;
+  if (!search) return s;
+  let next: AppState = { ...s, search: null, filter: "", selection: search.restore.selection };
+  const list = next.messages.data;
+  if (next.selection.message && !next.selection.message.verified && list && !isStale(next.messages)) {
+    next = reverify(next, list);
+  }
+  if (!next.selection.message) next = { ...next, reader: emptyReader() };
+  return next;
+}
+
 function selectMailbox(s: AppState, account: string, slug: string): AppState {
+  s = endSearch(s);
   if (s.selection.account === account && s.selection.mailbox === slug) {
     return { ...s, sidebarCursor: { account, slug } };
   }
@@ -121,8 +171,9 @@ function selectMailbox(s: AppState, account: string, slug: string): AppState {
 
 type ListItem = { kind: "message"; ref: Omit<MessageRef, "verified"> } | { kind: "draft"; id: string };
 
-/** The rows the list pane shows, after the local filter. */
+/** The rows the list pane shows, after the local filter, or the search's hits. */
 export function visibleItems(s: AppState): ListItem[] {
+  if (s.search) return openableHits(s.search).map((ref) => ({ kind: "message", ref }));
   const list = s.messages.data;
   if (list?.kind === "drafts") {
     return filteredDrafts(list, s.filter).map((d) => ({ kind: "draft", id: d.id }));
@@ -170,15 +221,13 @@ function staleMailboxes(s: AppState, account: string): AppState {
 }
 
 function staleListIf(s: AppState, match: (account: string, mailbox: string) => boolean): AppState {
-  const { account, mailbox } = s.selection;
+  const sel = listSelection(s);
+  const { account, mailbox } = sel;
   if (!account || !mailbox || !match(account, mailbox)) return s;
-  // A listing reload re-verifies the selected message by message_id.
-  const message = s.selection.message ? { ...s.selection.message, verified: false } : null;
-  return {
-    ...s,
-    messages: { ...markStale(s.messages), key: s.messages.key },
-    selection: { ...s.selection, message },
-  };
+  // A listing reload re-verifies the list's selected message by message_id;
+  // an open search hit is the search's, not the list's, and stays open.
+  const message = sel.message ? { ...sel.message, verified: false } : null;
+  return setListSelection({ ...s, messages: { ...markStale(s.messages), key: s.messages.key } }, { ...sel, message });
 }
 
 function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): AppState {
@@ -193,6 +242,7 @@ function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): A
 }
 
 function removeAccount(s: AppState, name: string): AppState {
+  if (s.search?.account === name) s = endSearch(s);
   const mailboxes = { ...s.mailboxes };
   delete mailboxes[name];
   let next: AppState = {
@@ -228,7 +278,7 @@ function removeAccount(s: AppState, name: string): AppState {
  * identifier (account name, mailbox slug, message_id), and a reference to a
  * resource the snapshot no longer has is cleared.
  */
-export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
+function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
   const names = bootstrap.snapshot.accounts.map((a) => a.name);
   const mailboxes: AppState["mailboxes"] = {};
   for (const name of names) {
@@ -260,12 +310,42 @@ export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
   if (same) next = { ...next, messages: { ...markStale(next.messages), key: next.messages.key } };
   // The reader refetches once the list re-verifies the row.
   next = { ...next, reader: { ...next.reader, load: markStale(next.reader.load) } };
-  if (!message) next = { ...next, reader: { key: null, meta: null, text: null, load: emptyLoadable() } };
+  if (!message) next = { ...next, reader: emptyReader() };
   const cursor = next.sidebarCursor;
   if (cursor && !(names.includes(cursor.account) && (bootstrap.snapshot.mailboxes[cursor.account] ?? []).some((m) => m.slug === cursor.slug))) {
     next = { ...next, sidebarCursor: account && mailbox ? { account, slug: mailbox } : null };
   }
   return next;
+}
+
+/**
+ * A fresh bootstrap replaces the model: selection survives by stable
+ * identifier (account name, mailbox slug, message_id), and a reference to a
+ * resource the snapshot no longer has is cleared. A search survives with its
+ * hits: the list selection it restores goes through the same rules, a local
+ * search runs again (row ids are per daemon instance), and a server search
+ * waits for the `operation_settled` or `operation_dropped` the Rust layer's
+ * re-query sends.
+ */
+export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
+  const search = s.search;
+  if (!search) return bootstrapModel(s, bootstrap);
+  const names = bootstrap.snapshot.accounts.map((a) => a.name);
+  const base = bootstrapModel({ ...s, search: null, selection: search.restore.selection }, bootstrap);
+  if (!names.includes(search.account)) return base;
+  const sameInstance = s.bootstrap?.instance_id === bootstrap.instance_id;
+  const hit = sameInstance ? s.selection.message : null;
+  const rerun = search.mode === "local" && !sameInstance;
+  return {
+    ...base,
+    search: {
+      ...search,
+      restore: { ...search.restore, selection: base.selection },
+      ...(rerun ? { status: "searching" as const, seq: search.seq + 1, error: null } : {}),
+    },
+    selection: { ...base.selection, message: hit, draft: null },
+    reader: hit ? { ...s.reader, load: markStale(s.reader.load) } : emptyReader(),
+  };
 }
 
 function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
@@ -295,11 +375,12 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (family === "account") return removeAccount(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
-        let next = staleMailboxes(s, account);
+        const sel = listSelection(s);
+        let next = staleMailboxes(sel.account === account && sel.mailbox === slug ? endSearch(s) : s, account);
         if (next.selection.account === account && next.selection.mailbox === slug) {
           const mailbox = next.mailboxes[account]?.data?.mailboxes.find((m) => m.slug !== slug && m.role === "inbox")?.slug ?? null;
           next = retarget(next, { account, mailbox, message: null, draft: null });
-          next = { ...next, reader: { key: null, meta: null, text: null, load: emptyLoadable() } };
+          next = { ...next, reader: emptyReader() };
         }
         return next;
       }
@@ -339,6 +420,10 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     }
     case "daemon.shutting_down":
       return { ...s, shuttingDown: true };
+    case "message.server_hit":
+      return signal(s, serverHitSignal(payload));
+    case "operation.finished":
+      return signal(s, finishedSignal(payload));
     default:
       return s;
   }
@@ -362,11 +447,15 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (s.bootstrap && e.event.instance_id !== s.bootstrap.instance_id) return s;
       return applyEnvelope(s, e.event.kind, e.event.payload);
     case "link_intercepted":
-      return { ...s, intercepted: [...s.intercepted, e.url].slice(-20) };
+      return {
+        ...s,
+        intercepted: [...s.intercepted, e.url].slice(-INTERCEPT_CAP),
+        interceptNotice: e.url.source === "open_external_stub" ? s.interceptNotice : e.url,
+      };
     case "operation_settled":
+      return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
-      // Server search lands in U4.
-      return s;
+      return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
 
@@ -382,12 +471,12 @@ function failed<T>(l: Loadable<T>, gen: number, error: GuiError): Loadable<T> {
   return { ...l, loadedGen: gen, error };
 }
 
-/** After a listing reload, confirm the selected message by message_id or drop it. */
+/** After a listing reload, confirm the list's selected message by message_id or drop it. */
 function reverify(s: AppState, list: MessageList): AppState {
-  const sel = s.selection;
+  const sel = listSelection(s);
   if (list.kind === "drafts") {
     if (sel.draft && !list.listing.drafts.some((d) => d.id === sel.draft)) {
-      return { ...s, selection: { ...sel, draft: null } };
+      return setListSelection(s, { ...sel, draft: null });
     }
     return s;
   }
@@ -397,13 +486,10 @@ function reverify(s: AppState, list: MessageList): AppState {
     list.rows.find((r) => r.message_id === want.message_id && r.selector === want.selector) ??
     list.rows.find((r) => r.selector === want.selector);
   if (!row) {
-    return {
-      ...s,
-      selection: { ...sel, message: null },
-      reader: { key: null, meta: null, text: null, load: emptyLoadable() },
-    };
+    const next = setListSelection(s, { ...sel, message: null });
+    return s.search ? next : { ...next, reader: emptyReader() };
   }
-  return { ...s, selection: { ...sel, message: { ...want, row_id: row.id, verified: true } } };
+  return setListSelection(s, { ...sel, message: { ...want, row_id: row.id, verified: true } });
 }
 
 // ---------------------------------------------------------------------------
@@ -453,10 +539,7 @@ export function reducer(s: AppState, a: Action): AppState {
     case "reader_loaded": {
       const m = s.selection.message;
       if (!m || !s.selection.account || readerKey(s.selection.account, m.row_id) !== a.key) return s;
-      return {
-        ...s,
-        reader: { key: a.key, meta: a.meta, text: a.text, load: loaded(s.reader.load, a.gen, true) },
-      };
+      return { ...s, reader: { key: a.key, meta: a.meta, load: loaded(s.reader.load, a.gen, true) } };
     }
     case "reader_failed": {
       const m = s.selection.message;
@@ -465,6 +548,8 @@ export function reducer(s: AppState, a: Action): AppState {
     }
 
     case "select_account": {
+      if (a.account === s.selection.account && !s.search) return s;
+      s = endSearch(s);
       if (a.account === s.selection.account) return s;
       return retarget(s, { account: a.account, mailbox: defaultMailbox(s, a.account), message: null, draft: null });
     }
@@ -548,10 +633,11 @@ export function reducer(s: AppState, a: Action): AppState {
     }
     case "clear_selection":
       if (s.focus === "reader") return withFocus(s, "list");
+      if (s.search) return withFocus(endSearch(s), "list");
       return {
         ...s,
         selection: { ...s.selection, message: null, draft: null },
-        reader: { key: null, meta: null, text: null, load: emptyLoadable() },
+        reader: emptyReader(),
       };
     case "toggle_zoom":
       if (s.focus === "sidebar") return s;
@@ -574,6 +660,44 @@ export function reducer(s: AppState, a: Action): AppState {
       return { ...s, notice: a.text };
     case "error":
       return { ...s, lastError: a.error };
+
+    case "search_local":
+      return withFocus(startSearch(s, "local", a.query), "list");
+    case "search_local_loaded": {
+      const search = s.search;
+      if (!search || search.seq !== a.seq || search.mode !== "local") return s;
+      return { ...s, search: { ...search, status: "done", hits: a.hits.map((h) => localHit(search.account, h)) } };
+    }
+    case "search_local_failed": {
+      const search = s.search;
+      if (!search || search.seq !== a.seq || search.mode !== "local") return s;
+      return { ...s, search: { ...search, status: "failed", error: a.error.message } };
+    }
+    case "search_server":
+      return withFocus(startSearch(s, "server", a.query), "list");
+    case "search_server_started":
+      return serverStarted(s, a.seq, a.operation_id);
+    case "search_server_failed": {
+      const search = s.search;
+      if (!search || search.seq !== a.seq || search.mode !== "server" || search.status !== "searching") return s;
+      return { ...s, search: { ...search, status: "failed", error: a.error.message, early: [] } };
+    }
+    case "search_server_cancelled": {
+      const search = s.search;
+      if (!search || search.operationId !== a.operation_id || search.status !== "running") return s;
+      // The Rust layer stops awaiting a cancelled id, so no finish follows.
+      return { ...s, search: { ...search, status: a.outcome === "cancelled" ? "cancelled" : "done" } };
+    }
+    case "exit_search":
+      return s.search ? withFocus(endSearch(s), "list") : s;
+    case "intercepted_fetched": {
+      const seen = new Set(s.intercepted.map((u) => `${u.at}|${u.source}|${u.url}`));
+      const fresh = a.urls.filter((u) => !seen.has(`${u.at}|${u.source}|${u.url}`));
+      if (fresh.length === 0) return s;
+      return { ...s, intercepted: [...s.intercepted, ...fresh].slice(-INTERCEPT_CAP) };
+    }
+    case "dismiss_intercept":
+      return { ...s, interceptNotice: null };
   }
 }
 

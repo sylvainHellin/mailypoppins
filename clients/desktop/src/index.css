@@ -60,6 +60,7 @@
     --color-framing: var(--framing);
     --color-warning: var(--warning);
     --color-disabled-foreground: var(--disabled-foreground);
+    --color-reader-canvas: var(--reader-canvas);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -103,6 +104,11 @@
     --primary: #FF6700;
     --primary-foreground: #0C1B33;
     --warning: #FF6700;
+
+    /* The reader frame's canvas: mail is authored for a white page, and a
+       message that sets no background would otherwise draw its default black
+       text straight onto Prussian. */
+    --reader-canvas: #FFFFFF;
 
     --destructive: #FF7A85;
     --border: #25406A;

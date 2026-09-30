@@ -1,7 +1,7 @@
 // The desktop shell's model: connection, bootstrap, the fetched lists, the
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
-import type { Bootstrap, DraftEntry, MessageListRow } from "@/protocol/types";
+import type { Bootstrap, DraftEntry, MessageFlags, MessageListRow } from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
@@ -10,7 +10,6 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
-  MessageText,
   VersionInfo,
 } from "@/lib/gui-types";
 
@@ -74,13 +73,76 @@ export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420 };
 export const LIST_WIDTH_MIN = 260;
 export const LIST_WIDTH_MAX = 720;
 
-export type Overlay = "palette" | "help" | "restart" | null;
+export type Overlay = "palette" | "help" | "restart" | "intercepted" | null;
 
+/**
+ * The reader's headers. The body is the `mpmsg` document the iframe loads
+ * itself, so the model holds no body.
+ */
 export type ReaderState = {
   key: string | null;
   meta: MessageMeta | null;
-  text: MessageText | null;
   load: Loadable<true>;
+};
+
+export function emptyReader(): ReaderState {
+  return { key: null, meta: null, load: emptyLoadable() };
+}
+
+/** One search result, local or from the server, in the list's shape. */
+export type SearchHit = {
+  /** Unique within one search: the mailbox and the message_id. */
+  key: string;
+  account: string;
+  /** The mailbox slug (local) or sidebar label (server) it was found under. */
+  mailbox: string;
+  message_id: string;
+  /** Null for a server-only hit the store has never ingested. */
+  row_id: number | null;
+  selector: string | null;
+  from: string;
+  subject: string;
+  date_display: string;
+  date_sort: string;
+  flags: MessageFlags;
+  has_attachments: boolean;
+  is_invite: boolean;
+  origin: "local" | "server";
+};
+
+/** What the event stream says about a server search, by operation id. */
+export type SearchSignal =
+  | { kind: "hit"; operation_id: string; hit: SearchHit }
+  | { kind: "finish"; operation_id: string; state: string; result: unknown; error: string | null }
+  | { kind: "dropped"; operation_id: string; reason: string };
+
+/**
+ * `searching`: the local query or the server start is in flight;
+ * `running`: the server operation streams hits; the rest are terminal.
+ */
+export type SearchStatus = "searching" | "running" | "done" | "cancelled" | "failed" | "dropped";
+
+export type SearchState = {
+  query: string;
+  account: string;
+  mode: "local" | "server";
+  hits: SearchHit[];
+  /** The server operation, once `search_server_start` answered. */
+  operationId: string | null;
+  status: SearchStatus;
+  /** Moves with every run, so a late answer to an older run is dropped. */
+  seq: number;
+  error: string | null;
+  /** The settled summary: hits the server counted, mailboxes it could not reach. */
+  summary: { hits: number; unreachable: number } | null;
+  /**
+   * Server signals that arrived before `search_server_start` answered with
+   * their id; the Rust layer registers the id before it answers, so its
+   * first hits can overtake the answer on the way to the webview.
+   */
+  early: SearchSignal[];
+  /** The mailbox list's selection and focus, restored when the search ends. */
+  restore: { selection: Selection; focus: Pane };
 };
 
 export type AppState = {
@@ -97,6 +159,8 @@ export type AppState = {
   messages: Loadable<MessageList> & { key: string | null };
   reader: ReaderState;
   selection: Selection;
+  /** Search results replace the mailbox list while this is set. */
+  search: SearchState | null;
   sidebarCursor: { account: string; slug: string } | null;
   focus: Pane;
   /** Moves whenever the DOM focus should follow `focus` (keyboard-driven). */
@@ -109,7 +173,10 @@ export type AppState = {
   filter: string;
   notice: string | null;
   lastError: GuiError | null;
+  /** Every refused URL this window heard of, oldest first. */
   intercepted: InterceptedUrl[];
+  /** The last refused link, shown in the reader footer until dismissed. */
+  interceptNotice: InterceptedUrl | null;
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -123,8 +190,9 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     accounts: emptyLoadable(),
     mailboxes: {},
     messages: { ...emptyLoadable<MessageList>(), key: null },
-    reader: { key: null, meta: null, text: null, load: emptyLoadable() },
+    reader: emptyReader(),
     selection: { account: null, mailbox: null, message: null, draft: null },
+    search: null,
     sidebarCursor: null,
     focus: "list",
     focusSeq: 0,
@@ -137,6 +205,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     notice: null,
     lastError: null,
     intercepted: [],
+    interceptNotice: null,
   };
 }
 

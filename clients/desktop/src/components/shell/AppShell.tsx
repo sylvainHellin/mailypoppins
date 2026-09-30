@@ -6,6 +6,7 @@ import { VersionMismatchScreen } from "@/components/screens/VersionMismatchScree
 import { RestartDaemonDialog } from "@/components/screens/RestartDaemonDialog";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { KeyHelp } from "@/components/palette/KeyHelp";
+import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDialog";
 import { MENU_ACTIONS, useRunAction } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
@@ -69,6 +70,7 @@ export function AppShell() {
       <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} />
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
+      <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />
     </>
   );
 }

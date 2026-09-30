@@ -36,7 +36,8 @@ describe("live events end to end", () => {
       expect(document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-row-id")).toBe("1502"),
     );
     expect(await within(reader).findByRole("heading", { name: "Angebot Dachsanierung" })).toBeInTheDocument();
-    expect(mock.calls.some((c) => c.cmd === "message_text" && c.args?.row_id === 1502)).toBe(true);
+    expect(mock.calls.some((c) => c.cmd === "message_html_meta" && c.args?.row_id === 1502)).toBe(true);
+    expect(within(reader).getByTitle(/^Message body/)).toHaveAttribute("src", "mpmsg://localhost/work/1502");
     expect(screen.queryByText(/Resynchronising|Reconnecting/)).toBeNull();
   });
 });

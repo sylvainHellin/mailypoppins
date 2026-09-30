@@ -72,7 +72,10 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         if (e.key === "Escape") {
           e.preventDefault();
           (e.target as HTMLElement).blur();
-          if ((e.target as HTMLElement).id === FILTER_INPUT_ID) dispatch({ type: "focus", pane: "list" });
+          if ((e.target as HTMLElement).id === FILTER_INPUT_ID) {
+            // Out of the field, and out of a search: the mailbox list returns.
+            dispatch(s.search ? { type: "exit_search" } : { type: "focus", pane: "list" });
+          }
         }
         return;
       }
@@ -114,6 +117,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("prev_message");
           case "fm":
             return run("focus_filter");
+          case "ff":
+            return run("search_server");
           case "Space m":
             return run("focus_list");
           default:
@@ -163,6 +168,7 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return handled(), run("copy_selector");
         case "Escape":
           handled();
+          if (s.search && s.focus !== "reader") return dispatch({ type: "exit_search" });
           if (s.layout === "narrow") return dispatch({ type: "up" });
           return run("clear_selection");
         case "Enter":

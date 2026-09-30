@@ -33,7 +33,10 @@ export type ActionId =
   | "page_down"
   | "toggle_sidebar"
   | "restart_daemon"
-  | "back";
+  | "back"
+  | "search_server"
+  | "cancel_search"
+  | "show_intercepted";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -55,7 +58,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Zoom / unzoom the focused pane": { id: "toggle_zoom" },
   "Toggle activity log": { badge: "M4" },
   "Send current draft (approve + send)": { badge: "M3" },
-  "Search all mail (sender, subject, body)": { badge: "soon" },
+  "Search all mail (sender, subject, body)": { id: "search_server" },
   "New draft": { badge: "M3" },
   "Manage signatures": { badge: "M4" },
   "Go to mailboxes (sidebar)": { id: "focus_sidebar" },
@@ -107,7 +110,6 @@ const BY_ACTION: Record<string, Binding> = {
 
 /** A section none of whose rows run in M1 yet. */
 const BY_SECTION: Record<string, Badge> = {
-  "SERVER SEARCH": "soon",
   CONTACTS: "M4",
   CALENDAR: "M4",
   "ACTIVITY LOG": "M4",
@@ -116,6 +118,17 @@ const BY_SECTION: Record<string, Badge> = {
 /** A section's own reading of a shared description. */
 const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   BODY: { "Half-page down / up": { badge: "key" } },
+  // The results list is the message list pane while a search shows, so its
+  // moves are the list's; what acts on a hit arrives with its milestone.
+  "SERVER SEARCH": {
+    "Navigate results": { badge: "key" },
+    "Jump to top / bottom": { id: "list_top" },
+    "Half-page down / up": { badge: "key" },
+    "Open in the mail list": { badge: "later" },
+    "Open read-only in $EDITOR": { badge: "later" },
+    "Copy the Markdown rendition path": { badge: "later" },
+    "Fetch a server-only hit into the store": { badge: "M2" },
+  },
 };
 
 export function bindingFor(section: string, action: string): Binding {
@@ -168,6 +181,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Toggle sidebar", keys: ["Cmd+b"], id: "toggle_sidebar", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
+  { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
+  { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
+  { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
 ];
 
 /** The KEYMAP row a single printable key names in the mail sections, if any. */

@@ -5,6 +5,8 @@ import { useCallback, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import type { AppState } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
+import * as cmd from "@/lib/commands";
+import { asGuiError } from "@/lib/gui-types";
 
 export const FILTER_INPUT_ID = "mp-list-filter";
 export const READER_SCROLL_ID = "mp-reader-scroll";
@@ -78,6 +80,30 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>)
       return dispatch({ type: "overlay", overlay: "restart" });
     case "back":
       return dispatch({ type: "back" });
+    case "search_server": {
+      // The typed query, else the one the search shows.
+      const query = s.filter.trim() || s.search?.query || "";
+      if (!query) {
+        dispatch({ type: "notice", text: "Type what to search for, then Shift+Enter searches the server" });
+        return runAction("focus_filter", s, dispatch);
+      }
+      return dispatch({ type: "search_server", query });
+    }
+    case "cancel_search": {
+      const search = s.search;
+      if (!search || search.mode !== "server" || search.status !== "running" || !search.operationId) {
+        dispatch({ type: "notice", text: "No server search is running" });
+        return;
+      }
+      const id = search.operationId;
+      void cmd
+        .searchServerCancel(id)
+        .then((outcome) => dispatch({ type: "search_server_cancelled", operation_id: id, outcome }))
+        .catch((e: unknown) => dispatch({ type: "notice", text: `The cancel failed: ${asGuiError(e).message}` }));
+      return;
+    }
+    case "show_intercepted":
+      return dispatch({ type: "overlay", overlay: "intercepted" });
   }
 }
 

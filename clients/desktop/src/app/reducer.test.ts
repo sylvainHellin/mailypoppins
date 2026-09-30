@@ -175,3 +175,64 @@ describe("the reducer", () => {
     expect(s.prefs.listWidth).toBe(720);
   });
 });
+
+describe("the search reducer", () => {
+  const hitPayload = (operation_id: string, message_id: string) => ({
+    operation_id,
+    hit: {
+      account: "work", mailbox: "Inbox", message_id, row_id: null, selector: null, from: "a@example.com", to: "",
+      cc: null, reply_to: null, bcc: null, subject: message_id, date_display: "", date_sort: "",
+      flags: { seen: true, answered: false, forwarded: false, flagged: false }, has_attachments: false,
+      is_invite: false, body_text: null, html_body: null,
+    },
+  });
+  const envelope = (kind: string, payload: unknown, revision: number): Action => ({
+    type: "gui_event",
+    event: { type: "event", event: { instance_id: "fixture-instance-1", revision, kind, payload } },
+  });
+
+  it("holds hits that overtake the start answer and replays those of its operation", () => {
+    let s = run(booted(), { type: "search_server", query: "x" });
+    const seq = s.search!.seq;
+    s = run(s, envelope("message.server_hit", hitPayload("op-7", "<a>"), 900), envelope("message.server_hit", hitPayload("op-7", "<b>"), 901));
+    expect(s.search?.hits).toHaveLength(0);
+    expect(s.search?.early).toHaveLength(2);
+    s = run(s, { type: "search_server_started", seq, operation_id: "op-7" });
+    expect(s.search).toMatchObject({ status: "running", operationId: "op-7", early: [] });
+    expect(s.search?.hits.map((h) => h.message_id)).toEqual(["<a>", "<b>"]);
+  });
+
+  it("drops a start answer for a superseded run", () => {
+    let s = run(booted(), { type: "search_server", query: "x" });
+    const stale = s.search!.seq;
+    s = run(s, { type: "search_local", query: "y" });
+    s = run(s, { type: "search_server_started", seq: stale, operation_id: "op-1" });
+    expect(s.search).toMatchObject({ mode: "local", operationId: null, status: "searching" });
+  });
+
+  it("runs a local search again after a daemon restart, and restores the list selection by message_id", () => {
+    let s = booted();
+    const row = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows[1];
+    s = run(s, { type: "select_message", message: { row_id: row.id, message_id: row.message_id, selector: row.selector } });
+    s = run(s, { type: "search_local", query: "ledger" });
+    const seq = s.search!.seq;
+    s = run(s, { type: "search_local_loaded", seq, hits: [] });
+    s = run(s, {
+      type: "gui_event",
+      event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } },
+    });
+    expect(s.search).toMatchObject({ status: "searching", seq: seq + 1 });
+    s = run(s, { type: "messages_loaded", key: listKey("work", "inbox"), gen: s.messages.gen, list: inbox("work", "inbox", 500) });
+    expect(s.search?.restore.selection.message).toMatchObject({ row_id: row.id + 500, verified: true });
+    s = run(s, { type: "exit_search" });
+    expect(s.search).toBeNull();
+    expect(s.selection.message).toMatchObject({ message_id: row.message_id, row_id: row.id + 500 });
+  });
+
+  it("leaves the search when another mailbox is chosen", () => {
+    let s = run(booted(), { type: "search_local", query: "ledger" });
+    s = run(s, { type: "jump_mailbox", index: 2 });
+    expect(s.search).toBeNull();
+    expect(s.selection.mailbox).toBe("sent");
+  });
+});
