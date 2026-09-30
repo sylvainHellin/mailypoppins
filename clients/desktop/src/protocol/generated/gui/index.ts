@@ -35,6 +35,7 @@ export type { MutationAck } from "./MutationAck";
 export type { MutationBatch } from "./MutationBatch";
 export type { MutationFailure } from "./MutationFailure";
 export type { OperationStarted } from "./OperationStarted";
+export type { OutboxDiscarded } from "./OutboxDiscarded";
 export type { PendingKind } from "./PendingKind";
 export type { ProtocolRange } from "./ProtocolRange";
 export type { SendRefusal } from "./SendRefusal";

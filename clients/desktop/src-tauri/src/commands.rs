@@ -27,7 +27,7 @@ use mp_protocol::draft::{
 };
 use mp_protocol::events::{Diagnostic, DraftInvalid};
 use mp_protocol::listing::MessageListRow;
-use mp_protocol::send::HoldListing;
+use mp_protocol::send::{HoldListing, OutboxListing};
 use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
@@ -536,6 +536,20 @@ pub struct SendStarted {
     /// `send_draft` approved the draft first, which a cancelled or failed
     /// send leaves approved.
     pub approved: bool,
+}
+
+/// The daemon's answer to `send.outbox_discard`, which it builds inline:
+/// the row and the message it carried, so the client can name what it
+/// dropped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct OutboxDiscarded {
+    pub discarded: bool,
+    pub row_id: i64,
+    pub message_id: String,
+    /// The revision the discard moved the daemon to.
+    pub revision: u64,
 }
 
 /// Why `send_draft` did not start a send: a `GuiError`, and for a draft
@@ -1390,6 +1404,56 @@ pub fn send_draft_on(
     })
 }
 
+/// The unfinished rows of `account`'s outbox, `mp outbox list`. An account
+/// with no store answers `ever_used: false`, which is not an error.
+pub fn outbox_list_on(door: &Door, account: &str) -> Result<OutboxListing, GuiError> {
+    let answer = call(
+        door,
+        "send.outbox_list",
+        json!({"account": account}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("send.outbox_list", answer)
+}
+
+/// Retry the outbox row `row_id`, `mp outbox retry`: an operation the GUI
+/// awaits as `outbox_retry`, whose `result` is an `OutboxRetryOutcome`. The
+/// daemon admits a `failed` row and a `sent_pending_append` row whose APPEND
+/// was attempted, and refuses anything else with `-32602`.
+pub fn outbox_retry_on(
+    session: &SessionHandle,
+    door: &Door,
+    account: &str,
+    row_id: i64,
+) -> Result<OperationStarted, GuiError> {
+    let operation_id = session.start_operation(
+        door,
+        "send.outbox_retry",
+        json!({"account": account, "row_id": row_id}),
+        PendingKind::OutboxRetry,
+        START_BUDGET,
+    )?;
+    Ok(OperationStarted { operation_id })
+}
+
+/// Drop the outbox row `row_id` and release its bytes, `mp outbox discard`:
+/// one committed command. A row that is gone is `not_found`.
+pub fn outbox_discard_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+) -> Result<OutboxDiscarded, GuiError> {
+    let answer = call(
+        door,
+        "send.outbox_discard",
+        json!({"account": account, "row_id": row_id}),
+        MUTATION_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("send.outbox_discard", answer)
+}
+
 /// Send every approved draft of `account`, the TUI's `cX`: one operation,
 /// whose hold names the first draft it would send.
 pub fn send_approved_on(
@@ -1810,6 +1874,38 @@ pub async fn send_approved(
 ) -> Result<SendStarted, GuiError> {
     with_door(&session, move |s, door| {
         send_approved_on(s, door, &account, hold)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn outbox_list(
+    session: State<'_, SessionHandle>,
+    account: String,
+) -> Result<OutboxListing, GuiError> {
+    with_door(&session, move |_, door| outbox_list_on(door, &account)).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn outbox_retry(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+) -> Result<OperationStarted, GuiError> {
+    with_door(&session, move |s, door| {
+        outbox_retry_on(s, door, &account, row_id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn outbox_discard(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+) -> Result<OutboxDiscarded, GuiError> {
+    with_door(&session, move |_, door| {
+        outbox_discard_on(door, &account, row_id)
     })
     .await
 }
@@ -2854,6 +2950,82 @@ mod tests {
         assert!(matches!(
             send_approved_on(&session, &d, "nobody", true),
             Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn outbox_list_reads_the_listing_and_ever_used() {
+        let (d, _f) = fixture_door();
+        let home = outbox_list_on(&d, "home").expect("home");
+        assert!(home.ever_used);
+        assert_eq!(home.rows.len(), 1);
+        assert_eq!(home.rows[0].state, "pending_send");
+        assert!(home.rows[0].never_submitted);
+        assert_eq!(home.counts.open, 1);
+        let work = outbox_list_on(&d, "work").expect("work");
+        assert!(!work.ever_used, "never queued is a fact, not an error");
+        assert!(matches!(
+            outbox_list_on(&d, "nobody"),
+            Err(GuiError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn outbox_retry_is_awaited_as_outbox_retry_and_a_refusal_awaits_nothing() {
+        let (d, f, rx) = fixture_with_events();
+        f.set_send_delay(Duration::ZERO);
+        f.simulate("send_fail").expect("armed");
+        let session = SessionHandle::new(true);
+        let sent = send_draft_on(&session, &d, "work", "angebot-antwort", false).expect("sent");
+        session.forget_operation(&sent.operation_id);
+        let failed = loop {
+            let listing = outbox_list_on(&d, "work").expect("listing");
+            if let Some(row) = listing.rows.into_iter().find(|r| r.state == "failed") {
+                break row;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        drained(&rx);
+        let started = outbox_retry_on(&session, &d, "work", failed.id).expect("started");
+        assert_eq!(
+            session.pending_kind(&started.operation_id),
+            Some(PendingKind::OutboxRetry)
+        );
+        assert_eq!(
+            f.calls().last().cloned().expect("call"),
+            (
+                "send.outbox_retry".to_string(),
+                json!({"account": "work", "row_id": failed.id})
+            )
+        );
+        let queued = outbox_list_on(&d, "home").expect("home").rows[0].id;
+        let refused = outbox_retry_on(&session, &d, "home", queued).expect_err("refused");
+        assert!(
+            refused.message().contains("only a failed row"),
+            "{refused:?}"
+        );
+        assert_eq!(session.pending(), vec![started.operation_id]);
+        assert_eq!(
+            serde_json::to_value(PendingKind::OutboxRetry).expect("json"),
+            json!("outbox_retry")
+        );
+    }
+
+    #[test]
+    fn outbox_discard_answers_the_row_and_a_second_discard_is_not_found() {
+        let (d, _f) = fixture_door();
+        let row = outbox_list_on(&d, "home").expect("home").rows[0].clone();
+        let discarded = outbox_discard_on(&d, "home", row.id).expect("discarded");
+        assert!(discarded.discarded);
+        assert_eq!(discarded.row_id, row.id);
+        assert_eq!(discarded.message_id, row.message_id);
+        assert!(outbox_list_on(&d, "home").expect("home").rows.is_empty());
+        assert!(matches!(
+            outbox_discard_on(&d, "home", row.id),
+            Err(GuiError::NotFound {
+                code: Some(-32602),
+                ..
+            })
         ));
     }
 }

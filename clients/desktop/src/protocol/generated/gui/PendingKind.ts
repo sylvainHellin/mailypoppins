@@ -3,4 +3,4 @@
 /**
  * What kind of operation the GUI awaits.
  */
-export type PendingKind = "server_search" | "sync" | "send" | "send_approved";
+export type PendingKind = "server_search" | "sync" | "send" | "send_approved" | "outbox_retry";

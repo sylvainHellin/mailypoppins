@@ -76,6 +76,7 @@ fn export_into(dir: &Path) -> usize {
         commands::HoldCancelled,
         commands::SendStarted,
         commands::SendRefusal,
+        commands::OutboxDiscarded,
         commands::SyncMode,
         commands::VersionInfo,
         editor::EditorSource,

@@ -19,6 +19,10 @@
 //! an in-memory outbox gets its row, and the operation settles with a
 //! `SendOutcome` or an `ApprovedOutcome`. `send_fail`, `send_partial` and
 //! `send_pending_append` decide what the next send comes to.
+//! `send.outbox_retry` re-arms a `failed` or `sent_pending_append` row and
+//! runs it through the same simulations (a retry with none delivers it and
+//! the row goes); `send.outbox_discard` drops a row. Every outbox change
+//! publishes `state.invalidate` of `outbox:<account>`.
 //!
 //! The five message mutations change the rows in memory and publish what the
 //! daemon publishes for them: nothing with the answer, then, once the
@@ -66,8 +70,8 @@ use mp_protocol::events::{
     KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::{
-    ApprovedOutcome, HoldListing, HoldStatus, OutboxCounts, OutboxListing, OutboxRow,
-    RecipientOutcome, SendOutcome, SentCopy,
+    ApprovedOutcome, HoldListing, HoldStatus, OutboxCounts, OutboxListing, OutboxRetryOutcome,
+    OutboxRow, RecipientOutcome, SendOutcome, SentCopy,
 };
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
@@ -1095,6 +1099,118 @@ impl State {
         }
     }
 
+    /// The row `row_id` of `account`'s outbox, listed or not, as the
+    /// daemon's `existing_row` finds it.
+    fn outbox_row_mut(&mut self, account: &str, row_id: i64) -> Option<&mut OutboxRow> {
+        self.outbox
+            .get_mut(account)?
+            .rows
+            .iter_mut()
+            .find(|r| r.id == row_id)
+    }
+
+    /// Admit a retry of `row_id` the daemon's way and re-arm a `failed` row
+    /// to `pending_send`; the `state.invalidate` it owes is the caller's.
+    fn rearm(&mut self, method: &str, account: &str, row_id: i64) -> Result<()> {
+        let Some(row) = self.outbox_row_mut(account, row_id) else {
+            return Err(refused(method, -32602, &format!("no outbox row {row_id}")));
+        };
+        match row.state.as_str() {
+            "failed" => {
+                row.state = "pending_send".into();
+                row.updated = unix_now();
+                Ok(())
+            }
+            // The APPEND is re-driven; the row keeps its state until it lands.
+            "sent_pending_append" => Ok(()),
+            state => Err(refused(
+                method,
+                -32602,
+                &format!("outbox row {row_id} is {state}, and only a failed row can be retried"),
+            )),
+        }
+    }
+
+    /// Run a re-armed row through what the next send comes to, and answer
+    /// the retry's `OutboxRetryOutcome`: with no simulation it is delivered,
+    /// its copy filed, and the row goes.
+    fn finish_retry(&mut self, account: &str, row_id: i64) -> OutboxRetryOutcome {
+        let simulation = self.send_next.take();
+        let now = unix_now();
+        let Some(row) = self.outbox_row_mut(account, row_id) else {
+            // Discarded meanwhile: nothing left to send.
+            return OutboxRetryOutcome {
+                row_id,
+                state: None,
+                completed: 0,
+            };
+        };
+        row.updated = now;
+        let owes_copy = row.target_mailbox.is_some();
+        match simulation {
+            Some(SendSimulation::Fail) => {
+                if row.state == "pending_send" {
+                    row.state = "failed".into();
+                }
+                row.last_error = Some(SEND_FAIL_REASON.into());
+                return OutboxRetryOutcome {
+                    row_id,
+                    state: Some(row.state.clone()),
+                    completed: 0,
+                };
+            }
+            Some(SendSimulation::Partial) => {
+                let refused = row
+                    .outstanding
+                    .pop()
+                    .unwrap_or_else(|| SEND_REFUSED_EXTRA.to_string());
+                row.state = "done".into();
+                row.partial = true;
+                row.outstanding.clear();
+                row.rejected = vec![(refused.clone(), SEND_REFUSED_REASON.into())];
+                row.last_error = Some(format!(
+                    "partly delivered: {refused} refused ({SEND_REFUSED_REASON})"
+                ));
+                return OutboxRetryOutcome {
+                    row_id,
+                    state: Some("done".into()),
+                    completed: usize::from(owes_copy),
+                };
+            }
+            Some(SendSimulation::PendingAppend) => {
+                row.state = "sent_pending_append".into();
+                row.outstanding.clear();
+                row.last_error = None;
+                return OutboxRetryOutcome {
+                    row_id,
+                    state: Some(row.state.clone()),
+                    completed: 0,
+                };
+            }
+            None => {}
+        }
+        if let Some(outbox) = self.outbox.get_mut(account) {
+            outbox.rows.retain(|r| r.id != row_id);
+        }
+        OutboxRetryOutcome {
+            row_id,
+            state: None,
+            completed: usize::from(owes_copy),
+        }
+    }
+
+    /// Drop `row_id` from `account`'s outbox, answering its `Message-ID`.
+    fn discard_outbox_row(&mut self, method: &str, account: &str, row_id: i64) -> Result<String> {
+        let outbox = self.outbox.get_mut(account);
+        let at = outbox
+            .as_ref()
+            .and_then(|o| o.rows.iter().position(|r| r.id == row_id));
+        match (outbox, at) {
+            (Some(outbox), Some(at)) => Ok(outbox.rows.remove(at).message_id),
+            _ => Err(refused(method, -32602, &format!("no outbox row {row_id}"))),
+        }
+    }
+
     fn outbox_listing(&self, account: &str) -> OutboxListing {
         let outbox = self.outbox.get(account);
         OutboxListing {
@@ -1187,13 +1303,8 @@ impl State {
         let row_id = self.next_outbox_row;
         self.next_outbox_row += 1;
         let message_id = format!("<fixture-sent-{row_id}@fixture.example>");
-        let outbox_changed = (
-            "state.invalidate",
-            json!({"resource": format!("outbox:{account}"), "scope": {"query": "counts"}}),
-        );
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+        let outbox_changed = ("state.invalidate", outbox_invalidate(account));
+        let now = unix_now();
         let mut row = OutboxRow {
             id: row_id,
             state: "done".into(),
@@ -1354,6 +1465,13 @@ fn param_str<'a>(method: &str, params: &'a Value, key: &str) -> Result<&'a str> 
 }
 
 /// Refuse a parameter outside `allowed`, as the daemon's `only` does.
+/// The outbox methods' `row_id`, an integer.
+fn param_row_id(method: &str, params: &Value) -> Result<i64> {
+    params["row_id"]
+        .as_i64()
+        .ok_or_else(|| refused(method, -32602, "missing integer param `row_id`"))
+}
+
 fn only(method: &str, params: &Value, allowed: &[&str]) -> Result<()> {
     if let Some(extra) = params
         .as_object()
@@ -1366,6 +1484,18 @@ fn only(method: &str, params: &Value, allowed: &[&str]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Now, as the unix timestamp an outbox row's `updated` carries.
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The `state.invalidate` every change to `account`'s outbox publishes.
+fn outbox_invalidate(account: &str) -> Value {
+    json!({"resource": format!("outbox:{account}"), "scope": {"query": "counts"}})
 }
 
 /// Whole hold seconds left before `deadline`, rounded up like the daemon's.
@@ -1901,6 +2031,57 @@ impl Fixture {
                 let account = param_str(method, &params, "account")?;
                 s.account_known(method, account)?;
                 Ok(serde_json::to_value(s.outbox_listing(account))?)
+            }
+            "send.outbox_retry" => {
+                only(method, &params, &["account", "row_id"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                let row_id = param_row_id(method, &params)?;
+                s.rearm(method, &account, row_id)?;
+                self.emit_locked(&mut s, "state.invalidate", outbox_invalidate(&account));
+                let id = s.next_operation_id("fixture-op");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                let delay = s.send_delay;
+                drop(s);
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    if !fixture.running(&op) {
+                        return;
+                    }
+                    let outcome = {
+                        let mut s = fixture.state();
+                        let outcome = s.finish_retry(&account, row_id);
+                        fixture.emit_locked(
+                            &mut s,
+                            "state.invalidate",
+                            outbox_invalidate(&account),
+                        );
+                        outcome
+                    };
+                    let result = serde_json::to_value(outcome).unwrap_or_default();
+                    fixture.settle(&op, "succeeded", Some(result));
+                });
+                Ok(json!({"operation_id": id}))
+            }
+            "send.outbox_discard" => {
+                only(method, &params, &["account", "row_id"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                let row_id = param_row_id(method, &params)?;
+                let message_id = s.discard_outbox_row(method, &account, row_id)?;
+                self.emit_locked(&mut s, "state.invalidate", outbox_invalidate(&account));
+                Ok(json!({
+                    "discarded": true, "row_id": row_id, "message_id": message_id,
+                    "revision": s.revision
+                }))
             }
             "sync.quick" | "sync.full" => {
                 let allowed: &[&str] = if method == "sync.quick" {
@@ -3653,6 +3834,191 @@ mod tests {
         assert_eq!((outcome.sent, outcome.failed), (1, 1));
         assert_eq!(outcome.results.len(), 2);
         assert!(outcome.results[1].recipients.is_empty());
+    }
+
+    // -- The outbox ---------------------------------------------------------
+
+    /// Send `angebot-antwort` of `work` under `simulation`, and answer the
+    /// outbox row it left.
+    fn parked_row(
+        f: &Arc<Fixture>,
+        rx: &std::sync::mpsc::Receiver<Incoming>,
+        simulation: &str,
+    ) -> OutboxRow {
+        f.simulate(simulation).expect("armed");
+        approve(f, rx, "angebot-antwort");
+        let answer = f
+            .call(
+                "send.draft",
+                json!({"account": "work", "id": "angebot-antwort"}),
+            )
+            .expect("started");
+        until_finished(rx, &answer["operation_id"]);
+        outbox_of(f, "work").rows.pop().expect("a parked row")
+    }
+
+    fn outbox_of(f: &Arc<Fixture>, account: &str) -> OutboxListing {
+        serde_json::from_value(
+            f.call("send.outbox_list", json!({"account": account}))
+                .expect("outbox"),
+        )
+        .expect("a listing")
+    }
+
+    fn retry(
+        f: &Arc<Fixture>,
+        rx: &std::sync::mpsc::Receiver<Incoming>,
+        row_id: i64,
+    ) -> (Vec<String>, OutboxRetryOutcome) {
+        let answer = f
+            .call(
+                "send.outbox_retry",
+                json!({"account": "work", "row_id": row_id}),
+            )
+            .expect("started");
+        let events = until_finished(rx, &answer["operation_id"]);
+        let finished = events.last().expect("finished");
+        assert_eq!(finished.payload["state"], "succeeded");
+        let outcome = serde_json::from_value(finished.payload["result"].clone())
+            .expect("an OutboxRetryOutcome");
+        (kinds(&events), outcome)
+    }
+
+    #[test]
+    fn a_retried_failed_row_is_rearmed_delivered_and_gone() {
+        let (f, rx) = sending();
+        let row = parked_row(&f, &rx, "send_fail");
+        assert_eq!(row.state, "failed");
+        let (k, outcome) = retry(&f, &rx, row.id);
+        assert_eq!(
+            k,
+            [
+                "state.invalidate outbox:work",
+                "state.invalidate outbox:work",
+                "operation.finished"
+            ]
+        );
+        assert_eq!(
+            outcome,
+            OutboxRetryOutcome {
+                row_id: row.id,
+                state: None,
+                completed: 1
+            }
+        );
+        let listing = outbox_of(&f, "work");
+        assert!(listing.rows.is_empty());
+        assert_eq!(listing.counts, OutboxCounts::default());
+        let b = f.call("state.bootstrap", json!({})).expect("b");
+        assert_eq!(
+            b["snapshot"]["outbox"]["work"],
+            json!({"queued": 0, "failed": 0})
+        );
+    }
+
+    #[test]
+    fn a_retry_under_send_fail_leaves_the_row_failed() {
+        let (f, rx) = sending();
+        let row = parked_row(&f, &rx, "send_fail");
+        f.simulate("send_fail").expect("armed again");
+        let (_, outcome) = retry(&f, &rx, row.id);
+        assert_eq!(outcome.state.as_deref(), Some("failed"));
+        assert_eq!(outcome.completed, 0);
+        let listing = outbox_of(&f, "work");
+        assert_eq!(listing.rows.len(), 1);
+        assert_eq!(listing.rows[0].state, "failed");
+        assert_eq!(
+            listing.rows[0].last_error.as_deref(),
+            Some(SEND_FAIL_REASON)
+        );
+        assert_eq!(listing.counts.failed, 1);
+    }
+
+    #[test]
+    fn a_retried_pending_append_row_files_its_copy() {
+        let (f, rx) = sending();
+        let row = parked_row(&f, &rx, "send_pending_append");
+        assert_eq!(row.state, "sent_pending_append");
+        let (_, outcome) = retry(&f, &rx, row.id);
+        assert_eq!((outcome.state, outcome.completed), (None, 1));
+        assert!(outbox_of(&f, "work").rows.is_empty());
+    }
+
+    #[test]
+    fn a_retry_refuses_what_the_daemon_refuses() {
+        let (f, rx) = sending();
+        // `home`'s seeded row is queued: nothing for a retry to do.
+        let queued = outbox_of(&f, "home").rows[0].id;
+        let refused = f
+            .call(
+                "send.outbox_retry",
+                json!({"account": "home", "row_id": queued}),
+            )
+            .expect_err("refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("is pending_send, and only a failed row"),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("-32602"));
+        let partial = parked_row(&f, &rx, "send_partial");
+        assert!(partial.partial);
+        assert!(f
+            .call(
+                "send.outbox_retry",
+                json!({"account": "work", "row_id": partial.id}),
+            )
+            .is_err_and(|e| e.to_string().contains("is done")));
+        assert!(f
+            .call(
+                "send.outbox_retry",
+                json!({"account": "work", "row_id": 999}),
+            )
+            .is_err_and(|e| e.to_string().contains("no outbox row 999")));
+        assert!(f
+            .call("send.outbox_retry", json!({"account": "work"}))
+            .is_err_and(|e| e.to_string().contains("-32602")));
+        // Nothing moved: no invalidate was published for a refusal.
+        assert!(rx.try_iter().all(|i| !matches!(i, Incoming::Event(_))));
+    }
+
+    #[test]
+    fn a_discard_drops_the_row_and_publishes_the_outbox() {
+        let (f, rx) = fixture();
+        let row = outbox_of(&f, "home").rows[0].clone();
+        let answer = f
+            .call(
+                "send.outbox_discard",
+                json!({"account": "home", "row_id": row.id}),
+            )
+            .expect("discarded");
+        let event = next_event(&rx);
+        assert_eq!(
+            kinds(std::slice::from_ref(&event)),
+            ["state.invalidate outbox:home"]
+        );
+        assert_eq!(
+            answer,
+            json!({
+                "discarded": true, "row_id": row.id, "message_id": row.message_id,
+                "revision": event.revision
+            })
+        );
+        let listing = outbox_of(&f, "home");
+        assert!(listing.ever_used, "a discard does not forget the outbox");
+        assert!(listing.rows.is_empty());
+        let b = f.call("state.bootstrap", json!({})).expect("b");
+        assert_eq!(
+            b["snapshot"]["outbox"]["home"],
+            json!({"queued": 0, "failed": 0})
+        );
+        assert!(f
+            .call(
+                "send.outbox_discard",
+                json!({"account": "home", "row_id": row.id}),
+            )
+            .is_err_and(|e| e.to_string().contains("-32602")));
     }
 
     #[test]

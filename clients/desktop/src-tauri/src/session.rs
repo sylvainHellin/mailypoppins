@@ -126,6 +126,8 @@ pub enum PendingKind {
     Send,
     /// `send.approved`: its `result` is an `ApprovedOutcome`.
     SendApproved,
+    /// `send.outbox_retry`: its `result` is an `OutboxRetryOutcome`.
+    OutboxRetry,
 }
 
 /// Where an intercepted URL came from.
@@ -685,6 +687,12 @@ impl SessionHandle {
     /// The operations awaited, for tests and diagnostics.
     pub fn pending(&self) -> Vec<String> {
         lock(&self.shared.pump).pending.keys().cloned().collect()
+    }
+
+    /// The kind `id` is awaited as, for tests.
+    #[cfg(test)]
+    pub fn pending_kind(&self, id: &str) -> Option<PendingKind> {
+        lock(&self.shared.pump).pending.get(id).copied()
     }
 
     // -----------------------------------------------------------------------
