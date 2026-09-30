@@ -4,8 +4,9 @@
 // Off in M1 (WINDOW_FROM is Infinity): the fixtures hold at most 8 rows, and
 // the hook loses DOM focus when `G` or `gg` jumps the selection past the
 // overscan, since the focused row unmounts before the new one mounts.
-// TODO(#0129): keep the roving row mounted across a jump (or move focus
-// after revealRow lands), then set a real threshold again.
+// TODO(ticket 0129): keep the roving row mounted across a jump (or move
+// focus after revealRow lands), then set a real threshold again.
+// (The ticket is written without its `#`, which the colour guard reads as hex.)
 
 import { useEffect, useState, type RefObject } from "react";
 
