@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { SearchHitRow } from "@/components/search/SearchHitRow";
 import { useAppState, useDispatch } from "@/app/store";
-import type { SearchHit, SearchState } from "@/app/state";
+import { targetKey, type SearchHit, type SearchState } from "@/app/state";
 
 /** The search's hits in place of the mailbox list. */
 export function SearchResults({ search }: { search: SearchState }) {
@@ -21,7 +21,7 @@ export function SearchResults({ search }: { search: SearchState }) {
 
   useEffect(() => {
     if (selectedIndex < 0) return;
-    ref.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+    ref.current?.querySelector<HTMLElement>('[data-cursor="true"]')?.scrollIntoView?.({ block: "nearest" });
   }, [selectedIndex, s.focusSeq]);
 
   const pick = useCallback(
@@ -37,6 +37,16 @@ export function SearchResults({ search }: { search: SearchState }) {
   );
   const onSelect = useCallback((hit: SearchHit) => pick(hit), [pick]);
   const onOpen = useCallback((hit: SearchHit) => pick(hit, "reader"), [pick]);
+  const onMark = useCallback(
+    (hit: SearchHit, range: boolean) => {
+      if (hit.row_id === null) return;
+      const key = targetKey({ account: hit.account, row_id: hit.row_id });
+      dispatch(range ? { type: "mark_range", key } : { type: "mark_toggle", key });
+    },
+    [dispatch],
+  );
+  const anyMarked = s.marked.keys.size > 0;
+  const keyOf = (h: SearchHit) => (h.row_id === null ? null : targetKey({ account: h.account, row_id: h.row_id }));
 
   if (search.hits.length === 0) {
     const busy = search.status === "searching" || search.status === "running";
@@ -47,18 +57,22 @@ export function SearchResults({ search }: { search: SearchState }) {
     );
   }
   return (
-    <div ref={ref} role="listbox" aria-label={`Search results for ${search.query}`}>
+    <div ref={ref} role="listbox" aria-multiselectable="true" aria-label={`Search results for ${search.query}`}>
       {search.hits.map((h, i) => (
         <SearchHitRow
           key={h.key}
           hit={h}
           mailboxLabel={h.origin === "local" ? labelOf(h.mailbox) : h.mailbox}
-          selected={i === selectedIndex}
+          cursor={i === selectedIndex}
+          marked={keyOf(h) !== null && s.marked.keys.has(keyOf(h)!)}
+          anyMarked={anyMarked}
+          pending={keyOf(h) !== null && keyOf(h)! in s.pending}
           tabStop={i === tabIndexRow}
           position={i + 1}
           setSize={search.hits.length}
           onSelect={onSelect}
           onOpen={onOpen}
+          onMark={onMark}
         />
       ))}
     </div>

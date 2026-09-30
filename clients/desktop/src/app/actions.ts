@@ -3,8 +3,19 @@
 
 import { useCallback, useRef, type Dispatch, type RefObject } from "react";
 import { listWidthFor } from "@/app/layout";
-import type { Action } from "@/app/reducer";
-import { LIST_WIDTH_MIN, LIST_WIDTH_STEP, type AppState } from "@/app/state";
+import { createMutations } from "@/app/mutations";
+import { actionTargets, type Action } from "@/app/reducer";
+import {
+  liveHolds,
+  LIST_WIDTH_MIN,
+  LIST_WIDTH_STEP,
+  readerKey,
+  targetKey,
+  type AppState,
+  type MessageTarget,
+  type MutationDialog,
+  type Target,
+} from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
@@ -71,6 +82,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return;
     }
     case "clear_selection":
+      // Marks go first, as the TUI's Esc clears a live selection first.
+      if (s.marked.keys.size > 0) return dispatch({ type: "mark_clear" });
       return dispatch({ type: "clear_selection" });
     case "focus_filter":
       dispatch({ type: "focus", pane: "list" });
@@ -123,7 +136,202 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     }
     case "show_intercepted":
       return dispatch({ type: "overlay", overlay: "intercepted" });
+    case "archive":
+    case "delete":
+    case "move":
+    case "toggle_flag":
+    case "toggle_read":
+      return runMutation(id, actionTargets(s), s, dispatch);
+    case "mark_toggle": {
+      const t = actionCursor(s);
+      if (!t) return;
+      dispatch({ type: "mark_toggle", key: targetKey(t) });
+      // The TUI's `v` steps to the next row, so a run of `v` marks a run.
+      return dispatch({ type: "move_selection", to: 1, relative: true });
+    }
+    case "mark_range": {
+      const t = actionCursor(s);
+      if (t) dispatch({ type: "mark_range", key: targetKey(t) });
+      return;
+    }
+    case "mark_all":
+      return dispatch({ type: "mark_all" });
+    case "mark_clear":
+      return dispatch({ type: "mark_clear" });
+    case "cancel_hold": {
+      // The newest hold still counting, as the TUI's `u` cancels its one hold.
+      const hold = liveHolds(s).filter((h) => !h.cancelling).pop();
+      if (!hold) {
+        dispatch({ type: "notice", text: "No send is being held" });
+        return;
+      }
+      void createMutations(dispatch).cancelHold(hold.operation_id);
+      return;
+    }
+    case "quick_sync":
+    case "full_sync": {
+      const account = s.search?.account ?? s.selection.account;
+      if (!account) return;
+      const mode = id === "quick_sync" ? "quick" : "full";
+      dispatch({ type: "notice", text: `${mode === "quick" ? "Quick sync" : "Full sync"} of ${account}…` });
+      void createMutations(dispatch).sync(account, mode);
+      return;
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Mutations: keys, palette, row toggles and the reader toolbar all come here
+// ---------------------------------------------------------------------------
+
+export type MutationActionId = "archive" | "delete" | "move" | "toggle_flag" | "toggle_read";
+
+/** The row under the cursor as a target, without the marks. */
+function actionCursor(s: AppState): Target | null {
+  const account = s.search?.account ?? s.selection.account;
+  if (!account) return null;
+  if (s.selection.draft && !s.search) return { account, draft: s.selection.draft };
+  if (s.selection.message) return { account, row_id: s.selection.message.row_id };
+  return null;
+}
+
+/** The open message, what the reader toolbar acts on. */
+export function openMessageTarget(s: AppState): MessageTarget | null {
+  const account = s.selection.account;
+  const m = s.selection.message;
+  return account && m ? { account, row_id: m.row_id } : null;
+}
+
+function messageTargets(targets: Target[]): MessageTarget[] {
+  return targets.filter((t): t is MessageTarget => "row_id" in t);
+}
+
+/** A message's read and flag state, wherever the model shows it. */
+export function flagsOf(s: AppState, t: MessageTarget): { seen: boolean; flagged: boolean } | null {
+  const list = s.messages.data;
+  if (list?.kind === "messages" && list.account === t.account) {
+    const row = list.rows.find((r) => r.id === t.row_id);
+    if (row) return { seen: row.flags.seen, flagged: row.flags.flagged };
+  }
+  const hit = s.search?.hits.find((h) => h.account === t.account && h.row_id === t.row_id);
+  if (hit) return { seen: hit.flags.seen, flagged: hit.flags.flagged };
+  if (s.reader.meta && s.reader.key === readerKey(t.account, t.row_id)) {
+    return { seen: s.reader.meta.flags.includes("read"), flagged: s.reader.meta.flags.includes("flagged") };
+  }
+  return null;
+}
+
+/** `from - subject` of one row, as the TUI's confirmation names it. */
+function describeTarget(s: AppState, t: Target): string {
+  const list = s.messages.data;
+  if ("draft" in t) {
+    const d = list?.kind === "drafts" ? list.listing.drafts.find((x) => x.id === t.draft) : undefined;
+    return `${d?.to || "(no recipient)"} - ${d?.subject || "(no subject)"}`;
+  }
+  const row =
+    (list?.kind === "messages" && list.account === t.account ? list.rows.find((r) => r.id === t.row_id) : undefined) ??
+    s.search?.hits.find((h) => h.account === t.account && h.row_id === t.row_id);
+  if (row) return `${row.from || "(no sender)"} - ${row.subject || "(no subject)"}`;
+  const meta = s.reader.key === readerKey(t.account, t.row_id) ? s.reader.meta : null;
+  return `${meta?.from ?? "(no sender)"} - ${meta?.subject ?? "(no subject)"}`;
+}
+
+function emails(n: number): string {
+  return `${n} email${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Run a mutation over `targets`: archive and delete ask first (the TUI's
+ * confirmations), move opens the mailbox picker, flag and read toggle at
+ * once. Over a batch, flagging wins when any row is unflagged, and marking
+ * read when any is unread (the TUI's rule). `fromMarks` says the targets are
+ * the marked rows, which are unmarked once the batch is dispatched, as the
+ * TUI clears its selection; a row toggle or the reader toolbar passes false.
+ */
+export function runMutation(
+  id: MutationActionId,
+  targets: Target[],
+  s: AppState,
+  dispatch: Dispatch<Action>,
+  fromMarks = s.marked.keys.size > 0,
+): void {
+  if (targets.length === 0) return;
+  const msgs = messageTargets(targets);
+  switch (id) {
+    case "archive":
+    case "delete": {
+      const acting = id === "archive" ? msgs : targets;
+      if (acting.length === 0) {
+        dispatch({ type: "notice", text: "Archive needs a received message; a draft leaves by send or delete" });
+        return;
+      }
+      const verb = id === "archive" ? "Archive" : "Delete";
+      const single = acting.length === 1 && !fromMarks;
+      const dialog: MutationDialog = {
+        kind: id,
+        targets: acting,
+        title: single ? `${verb} this email?` : `${verb} ${emails(acting.length)}?`,
+        detail: single ? describeTarget(s, acting[0]) : `${acting.length} selected emails`,
+      };
+      return dispatch({ type: "open_dialog", dialog });
+    }
+    case "move": {
+      const list = s.messages.data;
+      if (!s.search && list?.kind === "drafts") {
+        dispatch({ type: "notice", text: "Quick-move is not available in this mailbox" });
+        return;
+      }
+      if (msgs.length === 0) return;
+      const account = msgs[0].account;
+      const source = s.search ? null : s.selection.mailbox;
+      if (moveDestinations(s, account, source).length === 0) {
+        dispatch({ type: "notice", text: "No other mailboxes to move to" });
+        return;
+      }
+      return dispatch({ type: "open_dialog", dialog: { kind: "move", targets: msgs, account, source } });
+    }
+    case "toggle_flag":
+    case "toggle_read": {
+      if (msgs.length === 0) {
+        dispatch({ type: "notice", text: "A draft has no read or flag state" });
+        return;
+      }
+      const m = createMutations(dispatch);
+      const flags = msgs.map((t) => flagsOf(s, t));
+      if (id === "toggle_flag") void m.setFlag(msgs, flags.some((f) => !f?.flagged));
+      else void m.setRead(msgs, flags.some((f) => !f?.seen));
+      if (fromMarks) dispatch({ type: "mark_set", keys: targets.map(targetKey), on: false });
+      return;
+    }
+  }
+}
+
+/** What the confirmation's OK or the picker's choice runs. */
+export function runDialog(dialog: MutationDialog, dispatch: Dispatch<Action>, destination?: string): void {
+  const m = createMutations(dispatch);
+  dispatch({ type: "overlay", overlay: null });
+  if (dialog.kind === "move") {
+    if (destination) void m.move(dialog.targets, destination);
+  } else if (dialog.kind === "archive") {
+    void m.archive(messageTargets(dialog.targets));
+  } else {
+    const msgs = messageTargets(dialog.targets);
+    const drafts = dialog.targets.filter((t): t is { account: string; draft: string } => "draft" in t);
+    if (msgs.length > 0) void m.remove(msgs);
+    const byAccount = new Map<string, string[]>();
+    for (const d of drafts) byAccount.set(d.account, [...(byAccount.get(d.account) ?? []), d.draft]);
+    for (const [account, ids] of byAccount) void m.discardDrafts(account, ids);
+  }
+  dispatch({ type: "mark_set", keys: dialog.targets.map(targetKey), on: false });
+}
+
+/** The mailboxes a move can go to: the account's, less Drafts and the one the rows are in. */
+export function moveDestinations(s: AppState, account: string, source: string | null): { slug: string; label: string }[] {
+  const rows =
+    s.mailboxes[account]?.data?.mailboxes.map((m) => ({ slug: m.slug, label: m.label, role: m.role })) ??
+    s.bootstrap?.snapshot.mailboxes[account]?.map((m) => ({ slug: m.slug, label: m.label, role: m.role })) ??
+    [];
+  return rows.filter((m) => m.role !== "drafts" && m.slug !== source).map(({ slug, label }) => ({ slug, label }));
 }
 
 /** A stable runner bound to the latest state. */

@@ -75,6 +75,7 @@ import {
   type Layout,
   type Loadable,
   type MessageRef,
+  type MutationDialog,
   type MutationKind,
   type Overlay,
   type Pane,
@@ -120,6 +121,7 @@ export type Action =
   | { type: "set_list_width"; px: number }
   | { type: "set_layout"; layout: Layout }
   | { type: "overlay"; overlay: Overlay }
+  | { type: "open_dialog"; dialog: MutationDialog }
   | { type: "filter"; text: string }
   | { type: "notice"; text: string | null }
   | { type: "error"; error: GuiError | null }
@@ -627,11 +629,15 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
       const next = applyBootstrap(s, e.bootstrap);
+      // A confirmation or a picker names rows by id: another instance closes it.
+      const closeDialog = !sameInstance && next.dialog !== null;
       return {
         ...next,
         pending: {},
         holds: seedHolds(e.bootstrap.snapshot.holds),
         marked: sameInstance ? next.marked : NO_MARKS,
+        dialog: closeDialog ? null : next.dialog,
+        overlay: closeDialog && next.overlay === "mutation" ? null : next.overlay,
       };
     }
     case "event":
@@ -867,7 +873,9 @@ export function reducer(s: AppState, a: Action): AppState {
     case "set_layout":
       return a.layout === s.layout ? s : { ...s, layout: a.layout };
     case "overlay":
-      return { ...s, overlay: a.overlay };
+      return { ...s, overlay: a.overlay, dialog: a.overlay === "mutation" ? s.dialog : null };
+    case "open_dialog":
+      return { ...s, overlay: "mutation", dialog: a.dialog };
     case "filter":
       return { ...s, filter: a.text };
     case "notice":

@@ -7,7 +7,9 @@ import { RestartDaemonDialog } from "@/components/screens/RestartDaemonDialog";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { KeyHelp } from "@/components/palette/KeyHelp";
 import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDialog";
-import { MENU_ACTIONS, useRunAction, type ListGeometry } from "@/app/actions";
+import { ConfirmMutationDialog } from "@/components/mutations/ConfirmMutationDialog";
+import { MovePicker } from "@/components/mutations/MovePicker";
+import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
 import { screenFor } from "@/app/state";
@@ -73,6 +75,17 @@ export function AppShell() {
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
       <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />
+      <ConfirmMutationDialog
+        dialog={s.overlay === "mutation" && s.dialog && s.dialog.kind !== "move" ? s.dialog : null}
+        onOpenChange={close}
+        onConfirm={() => s.dialog && runDialog(s.dialog, dispatch)}
+      />
+      <MovePicker
+        state={s}
+        dialog={s.overlay === "mutation" && s.dialog?.kind === "move" ? s.dialog : null}
+        onOpenChange={close}
+        onPick={(slug) => s.dialog && runDialog(s.dialog, dispatch, slug)}
+      />
     </>
   );
 }

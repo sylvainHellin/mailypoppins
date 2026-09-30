@@ -10,7 +10,7 @@ export type KeymapSection = { title: string; bindings: KeymapBinding[] };
 
 export const SECTIONS: KeymapSection[] = keymap;
 
-/** What the M1 shell can run. */
+/** What the shell can run. */
 export type ActionId =
   | "focus_next"
   | "focus_prev"
@@ -38,14 +38,26 @@ export type ActionId =
   | "back"
   | "search_server"
   | "cancel_search"
-  | "show_intercepted";
+  | "show_intercepted"
+  | "archive"
+  | "delete"
+  | "move"
+  | "toggle_flag"
+  | "toggle_read"
+  | "mark_toggle"
+  | "mark_range"
+  | "mark_all"
+  | "mark_clear"
+  | "cancel_hold"
+  | "quick_sync"
+  | "full_sync";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
  * a later milestone of the plan, the next M1 unit ("soon"), a row that only
  * makes sense as a key ("key", e.g. j/k or 1-9), or one the app menu owns.
  */
-export type Badge = "M2" | "M3" | "M4" | "soon" | "key" | "menu" | "later";
+export type Badge = "M3" | "M4" | "soon" | "key" | "menu" | "later";
 
 type Binding = { id: ActionId } | { badge: Badge };
 
@@ -65,8 +77,8 @@ const BY_ACTION: Record<string, Binding> = {
   "Manage signatures": { badge: "M4" },
   "Go to mailboxes (sidebar)": { id: "focus_sidebar" },
   "Switch account": { id: "next_account" },
-  "Quick sync": { badge: "M2" },
-  "Full sync": { badge: "M2" },
+  "Quick sync": { id: "quick_sync" },
+  "Full sync": { id: "full_sync" },
   "Activity log overlay": { badge: "M4" },
   "Open config.toml in $EDITOR": { badge: "M4" },
   "Open log file in $EDITOR": { badge: "M4" },
@@ -78,11 +90,11 @@ const BY_ACTION: Record<string, Binding> = {
   Reply: { badge: "M3" },
   "Reply all": { badge: "M3" },
   Forward: { badge: "M3" },
-  Archive: { badge: "M2" },
-  Delete: { badge: "M2" },
-  "Toggle read/unread": { badge: "M2" },
-  "Toggle flag/star": { badge: "M2" },
-  "Move to mailbox (fuzzy picker)": { badge: "M2" },
+  Archive: { id: "archive" },
+  Delete: { id: "delete" },
+  "Toggle read/unread": { id: "toggle_read" },
+  "Toggle flag/star": { id: "toggle_flag" },
+  "Move to mailbox (fuzzy picker)": { id: "move" },
   "Copy selector (mp://)": { id: "copy_selector" },
   "Clear selection / return to list": { id: "clear_selection" },
   "Filter the current list": { id: "focus_filter" },
@@ -98,8 +110,8 @@ const BY_ACTION: Record<string, Binding> = {
   "Half-page down / up": { id: "half_page_down" },
   "Page down / up": { id: "page_down" },
   "Jump to date (e.g. last week)": { badge: "soon" },
-  "Toggle selection": { badge: "M2" },
-  "Select all visible": { badge: "M2" },
+  "Toggle selection": { id: "mark_toggle" },
+  "Select all visible": { id: "mark_all" },
   "Edit recipients (Drafts only)": { badge: "M3" },
   "Attach file to draft (Drafts only)": { badge: "M3" },
   "Approve draft (Drafts only)": { badge: "M3" },
@@ -129,7 +141,8 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Open in the mail list": { badge: "later" },
     "Open read-only in $EDITOR": { badge: "later" },
     "Copy the Markdown rendition path": { badge: "later" },
-    "Fetch a server-only hit into the store": { badge: "M2" },
+    // The Tauri layer has no `message.fetch` command yet.
+    "Fetch a server-only hit into the store": { badge: "later" },
   },
 };
 
@@ -188,6 +201,10 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
+  { section: "EMAIL LIST", label: "Mark range (from the last mark to the cursor)", keys: ["Shift+click"], id: "mark_range", badge: null },
+  { section: "EMAIL LIST", label: "Clear marks", keys: ["Esc"], id: "mark_clear", badge: null },
+  { section: "EMAIL LIST", label: "Discard draft (Drafts only)", keys: ["d"], id: "delete", badge: null },
+  { section: "SEND", label: "Cancel the held send", keys: ["u"], id: "cancel_hold", badge: null },
 ];
 
 /** The KEYMAP row a single printable key names in the mail sections, if any. */

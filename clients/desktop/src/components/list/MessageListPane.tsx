@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { Server, Search } from "lucide-react";
+import { Server, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,15 +8,18 @@ import { MessageRow } from "@/components/list/MessageRow";
 import { revealRow, useWindow, WINDOW_FROM } from "@/components/list/useWindow";
 import { SearchResults } from "@/components/search/SearchResults";
 import { SearchStatusBar } from "@/components/search/SearchStatusBar";
-import { FILTER_INPUT_ID, runAction } from "@/app/actions";
+import { FILTER_INPUT_ID, runAction, runMutation } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
-import { filteredDrafts, filteredRows } from "@/app/state";
+import { filteredDrafts, filteredRows, targetKey } from "@/app/state";
 import type { MessageListRow } from "@/protocol/types";
 
 export function MessageListPane() {
   const s = useAppState();
   const dispatch = useDispatch();
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The row toggles read the flags as they are at the click.
+  const stateRef = useRef(s);
+  stateRef.current = s;
 
   const list = s.messages.data;
   const f = s.filter.trim();
@@ -45,7 +48,7 @@ export function MessageListPane() {
     const el = scrollRef.current;
     if (!el || selectedIndex < 0) return;
     if (count >= WINDOW_FROM) revealRow(el, selectedIndex);
-    else el.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+    else el.querySelector<HTMLElement>('[data-cursor="true"]')?.scrollIntoView?.({ block: "nearest" });
   }, [selectedIndex, count, s.focusSeq]);
 
   const onSelect = useCallback(
@@ -66,6 +69,32 @@ export function MessageListPane() {
     [dispatch],
   );
   const onSelectDraft = useCallback((id: string) => dispatch({ type: "select_draft", id }), [dispatch]);
+  const mark = useCallback(
+    (key: string, range: boolean) => dispatch(range ? { type: "mark_range", key } : { type: "mark_toggle", key }),
+    [dispatch],
+  );
+  const onMark = useCallback(
+    (row: MessageListRow, range: boolean) => account && mark(targetKey({ account, row_id: row.id }), range),
+    [account, mark],
+  );
+  const onMarkDraft = useCallback(
+    (id: string, range: boolean) => account && mark(targetKey({ account, draft: id }), range),
+    [account, mark],
+  );
+  const onToggleFlag = useCallback(
+    (row: MessageListRow) =>
+      account && runMutation("toggle_flag", [{ account, row_id: row.id }], stateRef.current, dispatch, false),
+    [account, dispatch],
+  );
+  const onToggleRead = useCallback(
+    (row: MessageListRow) =>
+      account && runMutation("toggle_read", [{ account, row_id: row.id }], stateRef.current, dispatch, false),
+    [account, dispatch],
+  );
+  const markedCount = s.marked.keys.size;
+  const anyMarked = markedCount > 0;
+  const rowKey = (id: number) => targetKey({ account: account ?? "", row_id: id });
+  const draftKey = (id: string) => targetKey({ account: account ?? "", draft: id });
 
   const total = list?.kind === "messages" ? list.total : list?.kind === "drafts" ? list.listing.drafts.length : null;
   const search = s.search;
@@ -119,6 +148,17 @@ export function MessageListPane() {
             <Server aria-hidden="true" />
           </Button>
         </div>
+        {anyMarked ? (
+          <div data-slot="marked-bar" className="flex items-center gap-2 text-xs">
+            <span role="status" className="flex-1 text-muted-foreground tabular-nums">
+              {`${markedCount} marked`}
+            </span>
+            <Button size="xs" variant="ghost" onClick={() => dispatch({ type: "mark_clear" })} title="Clear marks (Esc)">
+              <X aria-hidden="true" />
+              Clear marks
+            </Button>
+          </div>
+        ) : null}
         {search ? (
           <SearchStatusBar
             search={search}
@@ -147,6 +187,7 @@ export function MessageListPane() {
         ) : (
           <div
             role="listbox"
+            aria-multiselectable="true"
             aria-label={`${label} messages`}
             style={{ paddingTop: win.padTop, paddingBottom: win.padBottom }}
           >
@@ -155,23 +196,33 @@ export function MessageListPane() {
                   <DraftRow
                     key={d.id}
                     draft={d}
-                    selected={d.id === s.selection.draft}
+                    cursor={d.id === s.selection.draft}
+                    marked={s.marked.keys.has(draftKey(d.id))}
+                    anyMarked={anyMarked}
+                    pending={draftKey(d.id) in s.pending}
                     tabStop={win.start + i === tabIndexRow}
                     position={win.start + i + 1}
                     setSize={count}
                     onSelect={onSelectDraft}
+                    onMark={onMarkDraft}
                   />
                 ))
               : rows.slice(win.start, win.end).map((r, i) => (
                   <MessageRow
                     key={r.id}
                     row={r}
-                    selected={win.start + i === selectedIndex}
+                    cursor={win.start + i === selectedIndex}
+                    marked={s.marked.keys.has(rowKey(r.id))}
+                    anyMarked={anyMarked}
+                    pending={rowKey(r.id) in s.pending}
                     tabStop={win.start + i === tabIndexRow}
                     position={win.start + i + 1}
                     setSize={count}
                     onSelect={onSelect}
                     onOpen={onOpen}
+                    onMark={onMark}
+                    onToggleFlag={onToggleFlag}
+                    onToggleRead={onToggleRead}
                   />
                 ))}
           </div>

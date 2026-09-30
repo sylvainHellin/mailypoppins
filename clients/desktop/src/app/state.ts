@@ -78,7 +78,8 @@ export const READER_MIN = 320;
 /** What "Widen list" and "Narrow list" move the splitter by. */
 export const LIST_WIDTH_STEP = 40;
 
-export type Overlay = "palette" | "help" | "restart" | "intercepted" | null;
+/** `mutation` is the confirmation or the move picker `dialog` describes. */
+export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | null;
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
@@ -232,6 +233,15 @@ export type Marked = { keys: ReadonlySet<string>; anchor: string | null };
 
 export const NO_MARKS: Marked = { keys: new Set<string>(), anchor: null };
 
+/**
+ * A mutation that waits for the user: the confirmation archive and delete
+ * ask for (the TUI's), or the mailbox picker a move opens. The targets are
+ * taken when it opens, so what runs is what the dialog named.
+ */
+export type MutationDialog =
+  | { kind: "archive" | "delete"; targets: Target[]; title: string; detail: string }
+  | { kind: "move"; targets: MessageTarget[]; account: string; source: string | null };
+
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
 
@@ -269,6 +279,8 @@ export type AppState = {
   layout: Layout;
   prefs: Prefs;
   overlay: Overlay;
+  /** What the `mutation` overlay shows; null whenever another overlay or none is open. */
+  dialog: MutationDialog | null;
   filter: string;
   notice: string | null;
   lastError: GuiError | null;
@@ -320,6 +332,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     layout: "wide",
     prefs,
     overlay: null,
+    dialog: null,
     filter: "",
     notice: null,
     lastError: null,

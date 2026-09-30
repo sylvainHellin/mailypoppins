@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
-import { screenFor, type AppState } from "@/app/state";
+import { liveHolds, screenFor, type AppState } from "@/app/state";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
 
@@ -12,8 +12,15 @@ const PREFIX_TIMEOUT_MS = 1200;
 const PREFIXES = new Set(["g", "f", "c", "t", "s"]);
 const LINE_PX = 48;
 
+const MESSAGE_KEYS: Record<string, ActionId> = {
+  a: "archive",
+  d: "delete",
+  u: "toggle_read",
+  "*": "toggle_flag",
+  M: "move",
+};
+
 const BADGE_TEXT: Record<Badge, string> = {
-  M2: "arrives with mutations (M2)",
   M3: "arrives with compose (M3)",
   M4: "arrives in M4",
   soon: "arrives in the next M1 unit",
@@ -94,7 +101,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         if (k === "p") return handled(), run("open_palette");
         if (k === "d") return handled(), pageBy(HALF_PAGE);
         if (k === "u") return handled(), pageBy(-HALF_PAGE);
-        if (k === "a") return handled(), notice("Ctrl+a");
+        // The TUI's Ctrl+a is a List key.
+        if (k === "a") return handled(), s.focus === "list" && run("mark_all");
         return;
       }
 
@@ -121,6 +129,10 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("search_server");
           case "Space m":
             return run("focus_list");
+          case "ss":
+            return run("quick_sync");
+          case "sS":
+            return run("full_sync");
           default:
             return notice(combo);
         }
@@ -168,6 +180,7 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return handled(), run("copy_selector");
         case "Escape":
           handled();
+          if (s.marked.keys.size > 0) return run("mark_clear");
           if (s.search && s.focus !== "reader") return dispatch({ type: "exit_search" });
           if (s.layout === "narrow") return dispatch({ type: "up" });
           return run("clear_selection");
@@ -195,6 +208,21 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return run("list_bottom");
         default:
           break;
+      }
+      // While a send is held, `u` cancels it before it is toggle read (the TUI's rule).
+      if (e.key === "u" && liveHolds(s).length > 0) return handled(), run("cancel_hold");
+      // The MESSAGE keys act from the list and the reader, as the TUI's do
+      // from its list, headers and body; `v` is a List key.
+      const message = MESSAGE_KEYS[e.key];
+      if (message) {
+        handled();
+        if (s.focus !== "sidebar") run(message);
+        return;
+      }
+      if (e.key === "v") {
+        handled();
+        if (s.focus === "list") run("mark_toggle");
+        return;
       }
       if (/^[1-9]$/.test(e.key)) {
         handled();

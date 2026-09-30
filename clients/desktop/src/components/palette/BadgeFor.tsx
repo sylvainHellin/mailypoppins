@@ -2,7 +2,6 @@ import { Badge } from "@/components/ui/badge";
 import type { Badge as BadgeKind } from "@/keymap/catalog";
 
 const TITLE: Record<BadgeKind, string> = {
-  M2: "Arrives with mutations (M2)",
   M3: "Arrives with compose (M3)",
   M4: "Arrives in M4",
   soon: "Arrives in the next M1 unit",
