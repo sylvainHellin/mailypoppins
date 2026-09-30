@@ -98,6 +98,46 @@ describe("the adaptive layout", () => {
     }
   });
 
+  it("medium: Widen and Narrow step from the drawn width, within what the reader leaves", async () => {
+    const Real = globalThis.ResizeObserver;
+    class Measured {
+      constructor(private cb: ResizeObserverCallback) {}
+      observe(el: Element) {
+        if (!el.hasAttribute("data-panes")) return;
+        this.cb([{ target: el, contentRect: { width: 850 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = Measured as unknown as typeof ResizeObserver;
+    const stored = () => JSON.parse(localStorage.getItem("mailypoppins.desktop.prefs.v1") ?? "{}").listWidth;
+    try {
+      const { user } = renderApp(900, () =>
+        localStorage.setItem("mailypoppins.desktop.prefs.v1", JSON.stringify({ sidebarCollapsed: false, listWidth: 720 })),
+      );
+      await shellReady();
+      const sep = screen.getByRole("separator", { name: /Resize/ });
+      await waitFor(() => expect(sep).toHaveAttribute("aria-valuenow", "530"));
+
+      act(() => emitMenu("narrow_list"));
+      await waitFor(() => expect(sep).toHaveAttribute("aria-valuenow", "490"));
+      expect(stored()).toBe(490);
+
+      act(() => emitMenu("widen_list"));
+      await waitFor(() => expect(sep).toHaveAttribute("aria-valuenow", "530"));
+      expect(stored()).toBe(530);
+
+      // At the measured max, neither the menu nor the splitter's keys store more.
+      act(() => emitMenu("widen_list"));
+      sep.focus();
+      await user.keyboard("{ArrowRight}");
+      expect(sep).toHaveAttribute("aria-valuenow", "530");
+      expect(stored()).toBe(530);
+    } finally {
+      globalThis.ResizeObserver = Real;
+    }
+  });
+
   it("resizes the list from the palette and the View menu, not only the pointer", async () => {
     const { user } = renderApp(1400);
     await shellReady();

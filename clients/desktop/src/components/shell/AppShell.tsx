@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Shell } from "@/components/shell/Shell";
 import { ConnectingScreen } from "@/components/screens/ConnectingScreen";
 import { DaemonUnavailableScreen } from "@/components/screens/DaemonUnavailableScreen";
@@ -7,7 +7,7 @@ import { RestartDaemonDialog } from "@/components/screens/RestartDaemonDialog";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { KeyHelp } from "@/components/palette/KeyHelp";
 import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDialog";
-import { MENU_ACTIONS, useRunAction } from "@/app/actions";
+import { MENU_ACTIONS, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
 import { screenFor } from "@/app/state";
@@ -20,7 +20,9 @@ import { asGuiError } from "@/lib/gui-types";
 export function AppShell() {
   const s = useAppState();
   const dispatch = useDispatch();
-  const run = useRunAction(s, dispatch);
+  // What the Shell draws, so Widen and Narrow list step from it.
+  const listGeometry = useRef<ListGeometry | null>(null);
+  const run = useRunAction(s, dispatch, listGeometry);
 
   const onMenu = useCallback(
     (id: string) => {
@@ -58,7 +60,7 @@ export function AppShell() {
   } else if (screen === "connecting") {
     body = <ConnectingScreen reason={s.connection.state === "reconnecting" ? s.connection.reason : null} />;
   } else {
-    body = <Shell />;
+    body = <Shell listGeometry={listGeometry} />;
   }
 
   const close = (open: boolean) => {

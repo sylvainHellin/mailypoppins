@@ -1,9 +1,10 @@
 // Runs a GUI action, whichever path asked: a key, the palette, a native menu
 // item, or a button. One table, so no path can do something another cannot.
 
-import { useCallback, useRef, type Dispatch } from "react";
+import { useCallback, useRef, type Dispatch, type RefObject } from "react";
+import { listWidthFor } from "@/app/layout";
 import type { Action } from "@/app/reducer";
-import { LIST_WIDTH_STEP, type AppState } from "@/app/state";
+import { LIST_WIDTH_MIN, LIST_WIDTH_STEP, type AppState } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
@@ -26,7 +27,14 @@ export const MENU_ACTIONS: Record<string, ActionId> = {
 const HALF_PAGE = 10;
 const PAGE = 20;
 
-export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>): void {
+/** The list width the Shell draws and the most the measured pane row allows. */
+export type ListGeometry = { width: number; max: number };
+
+/**
+ * `list` is what the Shell last drew; without it (no Shell mounted) the
+ * stored width is taken as drawn, unclamped by any measurement.
+ */
+export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>, list?: ListGeometry): void {
   switch (id) {
     case "focus_next":
       return dispatch({ type: "cycle_focus", dir: 1 });
@@ -78,11 +86,15 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>)
       return dispatch({ type: "move_selection", to: PAGE, relative: true });
     case "toggle_sidebar":
       return dispatch({ type: "toggle_sidebar" });
-    // The splitter's keyboard road: the reducer clamps to the width range.
+    // The splitter's keyboard road: a step from the drawn width, within what
+    // the pane row leaves the reader; a stored width wider than drawn would
+    // otherwise take presses that change nothing on screen.
     case "widen_list":
-      return dispatch({ type: "set_list_width", px: s.prefs.listWidth + LIST_WIDTH_STEP });
-    case "narrow_list":
-      return dispatch({ type: "set_list_width", px: s.prefs.listWidth - LIST_WIDTH_STEP });
+    case "narrow_list": {
+      const { width, max } = list ?? listWidthFor(s.prefs.listWidth, 0);
+      const px = width + (id === "widen_list" ? LIST_WIDTH_STEP : -LIST_WIDTH_STEP);
+      return dispatch({ type: "set_list_width", px: Math.max(LIST_WIDTH_MIN, Math.min(px, max)) });
+    }
     case "restart_daemon":
       return dispatch({ type: "overlay", overlay: "restart" });
     case "back":
@@ -115,10 +127,17 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>)
 }
 
 /** A stable runner bound to the latest state. */
-export function useRunAction(state: AppState, dispatch: Dispatch<Action>): (id: ActionId) => void {
+export function useRunAction(
+  state: AppState,
+  dispatch: Dispatch<Action>,
+  list?: RefObject<ListGeometry | null>,
+): (id: ActionId) => void {
   const ref = useRef(state);
   ref.current = state;
-  return useCallback((id: ActionId) => runAction(id, ref.current, dispatch), [dispatch]);
+  return useCallback(
+    (id: ActionId) => runAction(id, ref.current, dispatch, list?.current ?? undefined),
+    [dispatch, list],
+  );
 }
 
 export { HALF_PAGE, PAGE };

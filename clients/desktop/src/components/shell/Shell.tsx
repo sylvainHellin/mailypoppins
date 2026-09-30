@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, type RefObject } from "react";
+import type { ListGeometry } from "@/app/actions";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/sidebar/AppSidebar";
 import { MessageListPane } from "@/components/list/MessageListPane";
@@ -28,12 +29,15 @@ function useFocusFollow(focus: Pane, seq: number): void {
  * The inset shell. Wide: sidebar, list, reader. Medium: the sidebar is an
  * icon rail. Narrow: one of the three at a time, the focused one.
  */
-export function Shell() {
+export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry | null> }) {
   const s = useAppState();
   const dispatch = useDispatch();
   useFocusFollow(s.focus, s.focusSeq);
   const [panesRef, paneWidth] = useWidth();
   const list = listWidthFor(s.prefs.listWidth, paneWidth);
+  useLayoutEffect(() => {
+    if (listGeometry) listGeometry.current = { width: list.width, max: list.max };
+  }, [listGeometry, list.width, list.max]);
 
   const layout = s.layout;
   const narrow = layout === "narrow";
@@ -75,7 +79,7 @@ export function Shell() {
                 value={list.width}
                 min={LIST_WIDTH_MIN}
                 max={list.max}
-                onChange={(px) => dispatch({ type: "set_list_width", px })}
+                onChange={(px) => dispatch({ type: "set_list_width", px: Math.min(px, list.max) })}
                 label="Resize the message list"
               />
             ) : null}
