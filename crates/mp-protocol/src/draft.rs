@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// The received message a reply or a forward answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftSource {
     /// `"<mailbox>/<uid>"`, the way the read slice addresses a message.
     pub id: String,
@@ -31,6 +32,7 @@ pub struct DraftSource {
 /// A draft that was just written: `draft.create`, `draft.reply`,
 /// `draft.forward`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftCreated {
     /// The account whose drafts directory holds it.
     pub account: String,
@@ -51,6 +53,7 @@ pub struct DraftCreated {
 /// missing subject to `""`, and `mp list` prints the dimmed subject line only
 /// when the file has one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftEntry {
     /// The draft id, the `id:` field of the file.
     pub id: String,
@@ -85,6 +88,7 @@ pub struct DraftEntry {
 /// A file the refresh could not parse, named by path because a file with no
 /// frontmatter has no id to be named by (#0080).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftSkip {
     /// The file that would not parse.
     pub path: String,
@@ -94,6 +98,7 @@ pub struct DraftSkip {
 
 /// Two files claiming one id, which makes one of them unaddressable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftCollision {
     /// The id both files carry.
     pub id: String,
@@ -105,6 +110,7 @@ pub struct DraftCollision {
 
 /// The `result` of `draft.list`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftListing {
     /// The account that was listed.
     pub account: String,
@@ -119,6 +125,7 @@ pub struct DraftListing {
 
 /// One draft's diagnostics, as `mp validate` prints them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftReport {
     /// The draft id.
     pub id: String,
@@ -137,6 +144,7 @@ pub struct DraftReport {
 /// An invalid draft is an answer rather than a refusal, and the exit code stays
 /// the client's decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftValidation {
     /// The account that was validated.
     pub account: String,
@@ -152,6 +160,7 @@ pub struct DraftValidation {
 /// decide between `✓ approved …` and `ℹ … is already approved`, and the
 /// approval's own four keys are frozen.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftLocation {
     /// The account the draft belongs to.
     pub account: String,
@@ -168,6 +177,7 @@ pub struct DraftLocation {
 /// The `result` of `draft.preview`: the record the bare-selector dry run
 /// renders, field for field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftPreview {
     /// The account the draft belongs to.
     pub account: String,
@@ -219,6 +229,7 @@ pub struct DraftPreview {
 /// parameter combination with no meaning and a client that sent it would have
 /// to be told so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DraftKind {
     /// A reply to the sender.
@@ -246,6 +257,7 @@ pub enum DraftKind {
 /// forward built this way quotes the message and attaches nothing. That is
 /// what the client does with such a hit today.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftMessage {
     /// The `From:` header, which the reply addresses.
     #[serde(default)]

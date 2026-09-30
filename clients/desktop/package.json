@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "gen:keymap": "node scripts/gen-keymap.ts",
+    "gen:types": "cd ../.. && cargo test -p mp-protocol --features ts --test ts_bindings -- --ignored export_bindings",
     "contrast": "node scripts/contrast.ts"
   },
   "dependencies": {

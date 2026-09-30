@@ -20,6 +20,7 @@ use crate::RpcError;
 
 /// The five states of an operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum OperationState {
     /// Accepted, not started.
@@ -46,6 +47,7 @@ impl OperationState {
 
 /// What a disconnect of the starting connection does to an operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CancelScope {
     /// The work outlives the connection that asked for it.
@@ -60,6 +62,7 @@ pub enum CancelScope {
 /// `total` and `message` travel as `null` rather than as absent keys, because a
 /// client reads `total` to draw a bar and has to tell "unknown" from "missing".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Progress {
     /// What the operation is doing now.
     pub phase: String,
@@ -76,6 +79,7 @@ pub struct Progress {
 /// Every member is always present: `progress`, `result` and `error` are `null`
 /// when there is nothing to say, never absent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OperationStatus {
     /// The opaque id the starting method answered with.
     pub operation_id: String,
@@ -89,6 +93,7 @@ pub struct OperationStatus {
     /// still read it.
     pub progress: Option<Progress>,
     /// What a succeeded operation produced.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub result: Option<Value>,
     /// Why a failed or cancelled operation stopped, the JSON-RPC error object
     /// the method would have answered with.

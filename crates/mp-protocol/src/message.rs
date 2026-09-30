@@ -9,6 +9,7 @@ use serde_json::Value;
 
 /// A JSON-RPC request id, either a number or a string, echoed back unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(untagged)]
 pub enum RequestId {
     /// A numeric id, which is what every mailypoppins client sends.
@@ -21,6 +22,7 @@ pub enum RequestId {
 ///
 /// `id` is absent for a notification-style request, which expects no response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Request {
     /// Always `"2.0"`.
     pub jsonrpc: String,
@@ -31,17 +33,20 @@ pub struct Request {
     pub method: String,
     /// Named parameters, always an object in this protocol, never positional.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub params: Value,
 }
 
 /// A successful answer to a [`Request`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Response {
     /// Always `"2.0"`.
     pub jsonrpc: String,
     /// The id of the request being answered.
     pub id: RequestId,
     /// The method's result, shaped by the method.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub result: Value,
 }
 
@@ -50,6 +55,7 @@ pub struct Response {
 /// `id` is absent when the failure happened before an id could be read, which
 /// is the JSON-RPC parse-error case.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ErrorResponse {
     /// Always `"2.0"`.
     pub jsonrpc: String,
@@ -62,6 +68,7 @@ pub struct ErrorResponse {
 
 /// The `error` member of an [`ErrorResponse`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RpcError {
     /// A JSON-RPC standard code or a [`crate::ErrorCode`] value.
     pub code: i32,
@@ -69,11 +76,13 @@ pub struct RpcError {
     pub message: String,
     /// The structured payload the error table fixes for this code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub data: Option<Value>,
 }
 
 /// A message that expects no answer, in either direction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Notification {
     /// Always `"2.0"`.
     pub jsonrpc: String,
@@ -81,6 +90,7 @@ pub struct Notification {
     pub method: String,
     /// Named parameters, always an object.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub params: Value,
 }
 
@@ -89,6 +99,7 @@ pub struct Notification {
 ///
 /// This is not a JSON-RPC message on its own, so it declares no `jsonrpc`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventEnvelope {
     /// The daemon instance that produced the event.
     pub instance_id: String,
@@ -98,5 +109,6 @@ pub struct EventEnvelope {
     /// Selects the client's handler, for example `message.flags_changed`.
     pub kind: String,
     /// The kind's payload, always an object so it can gain fields.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub payload: Value,
 }

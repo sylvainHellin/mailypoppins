@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// the client does not understand, and decoding it as one of the three would be
 /// a guess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     /// Nothing to do.
@@ -29,6 +30,7 @@ pub enum CheckStatus {
 
 /// One health check.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HealthCheck {
     /// `config_loaded`, `store_open`, `socket_owner`, `log_writable` or
     /// `account:<name>`.

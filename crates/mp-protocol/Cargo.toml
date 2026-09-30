@@ -16,3 +16,10 @@ serde_json = "1"
 # boundary (docs/plans/daemon-dependencies.md). Already in the lock file via
 # `async-imap` / `dialoguer` / `html2text`, so this downloads nothing.
 thiserror = "2"
+# TypeScript bindings for the desktop client (tests/ts_bindings.rs). Behind the
+# `ts` feature, so the daemon and the CLI never compile it.
+ts-rs = { version = "12", features = ["serde-compat"], optional = true }
+
+[features]
+# Derives `ts_rs::TS` on every wire type; `cargo test -p mp-protocol --features ts`.
+ts = ["dep:ts-rs"]

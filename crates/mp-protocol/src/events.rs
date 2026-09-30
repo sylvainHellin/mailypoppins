@@ -25,6 +25,7 @@ pub const KIND_SYNC_COMPLETED: &str = "sync.completed";
 /// payload that carried a row id or a uid would invite a client to treat an
 /// arrival as an address into a list it has not refetched yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Arrival {
     /// The `From:` header as the message carried it.
     pub from: String,
@@ -40,6 +41,7 @@ pub struct Arrival {
 /// non-converging detector (#0115) and the rolled-back-mutation report (#0039)
 /// exist to prevent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// The tick did what it could and nothing needs attention.
@@ -58,6 +60,7 @@ pub enum Severity {
 /// so two payloads describing one tick compare equal and a formatter is a
 /// straight walk over it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SyncCompleted {
     /// The account this tick belongs to.
     pub account: String,
@@ -116,6 +119,7 @@ pub const KIND_MUTATIONS_ROLLED_BACK: &str = "mutations.rolled_back";
 /// `failed` is above zero, because a drain whose ops all landed changed nothing
 /// a client holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MutationsRolledBack {
     /// The account whose queue was drained.
     pub account: String,
@@ -139,6 +143,7 @@ pub const KIND_CONFIG_INVALID: &str = "config.invalid";
 /// successful swap: it is not the state revision, which moves on every event
 /// from every source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ConfigChanged {
     /// Accounts the swap started a runtime for.
     pub added: Vec<String>,
@@ -203,6 +208,7 @@ pub const KIND_DIAGNOSTIC_CHECK_CHANGED: &str = "diagnostic.check_changed";
 /// parser read, and `null` for a refusal by value rather than by syntax:
 /// inventing a position would point the user at an innocent line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Diagnostic {
     /// The offending line, `null` when the refusal has no position.
     pub line: Option<u32>,
@@ -216,6 +222,7 @@ pub struct Diagnostic {
 /// `ready` is `draft::validate_draft`, the second axis, because a draft with no
 /// subject parses perfectly and is not sendable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftChanged {
     /// The account whose drafts directory holds the file.
     pub account: String,
@@ -243,6 +250,7 @@ pub struct DraftChanged {
 /// `draft.changed` does: fixing the file replaces the row rather than adding a
 /// second one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftInvalid {
     /// The account whose drafts directory holds the file.
     pub account: String,
@@ -260,6 +268,7 @@ pub struct DraftInvalid {
 /// snapshot section carries them and this is a "re-read the list" for a client
 /// that caches signature bodies.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SignatureChanged {
     /// The file stem, which is the key `signatures::read` takes.
     pub name: String,
@@ -276,6 +285,7 @@ pub struct SignatureChanged {
 /// semantic refusal has no span to point at, and inventing one would send a
 /// user to an innocent line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ConfigInvalid {
     /// The file the daemon read, or would have read.
     pub path: String,

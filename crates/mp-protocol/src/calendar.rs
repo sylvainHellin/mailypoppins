@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// A single attendee within an `event:` frontmatter block.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventAttendee {
     pub address: String,
     /// needs-action | accepted | tentative | declined
@@ -28,6 +29,7 @@ pub struct EventAttendee {
 /// Every field is optional or defaulted so that emails without an `event:`
 /// block (the vast majority) round-trip unchanged.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventFrontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
@@ -87,6 +89,7 @@ pub struct EventFrontmatter {
 /// No field is skipped when empty: an agenda row is one object per event and a
 /// client decodes it whole, so a stable key set is worth more than the bytes.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgendaEvent {
     /// The `messages.id` of the winning copy, the address an RSVP from the
     /// agenda uses (#0050).

@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 /// branches on each axis independently and a missing axis is `false` rather
 /// than unknown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageFlags {
     /// The server has flagged it `\Seen`.
     #[serde(default)]
@@ -56,6 +57,7 @@ pub struct MessageFlags {
 /// `crates/mp-protocol/fixtures/message.list.response.json` pins, plus
 /// `selector` (P5-U10c).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageListRow {
     /// `messages.id`, the synthetic row key a client holds a listed row by and
     /// addresses `message.get` with as `row_id`.
@@ -121,6 +123,7 @@ pub struct MessageListRow {
 
 /// The whole `message.list` answer in its default `projection: "list"` form.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageListing {
     /// The account that was listed.
     pub account: String,
@@ -146,6 +149,7 @@ pub struct MessageListing {
 /// client that re-sorted it would be inventing an order the overlay does not
 /// have.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ThreadMessage {
     /// `messages.id`, the same synthetic row key [`MessageListRow`] carries
     /// under the same name, which is what the overlay opens the message with.
@@ -185,6 +189,7 @@ pub struct ThreadMessage {
 
 /// The whole `message.thread` answer: one conversation, oldest first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ThreadListing {
     /// The account the conversation was read from.
     pub account: String,
@@ -217,6 +222,7 @@ pub struct ThreadListing {
 /// would name it for the CLI. What the overlay renders today is exactly this
 /// set, plus the two body renditions it previews and hands to a browser.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServerSearchHit {
     /// The account the search ran against.
     pub account: String,

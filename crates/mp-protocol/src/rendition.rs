@@ -35,6 +35,7 @@ pub const MAX_INLINE_HTML_BYTES: usize = 8 << 20;
 /// `message.get` does: exactly one of `row_id`, `id` and `selector`, with
 /// `mailbox` narrowing a selector.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageHtmlParams {
     /// The account the message is in.
     pub account: String,
@@ -54,6 +55,7 @@ pub struct MessageHtmlParams {
 
 /// The `result` of `message.html`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageHtml {
     /// The account, echoed.
     pub account: String,
@@ -75,6 +77,7 @@ pub struct MessageHtml {
 /// is what distinguishes this one from a frame the transport refused, and names
 /// the method that serves the same rendition as a file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct InlineHtmlRefusal {
     /// The inline limit, [`MAX_INLINE_HTML_BYTES`].
     pub limit: u64,

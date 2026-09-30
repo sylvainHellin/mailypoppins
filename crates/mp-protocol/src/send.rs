@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 /// some recipients holding the message and others not (`SND-08`); this is that
 /// split, per address, in the order the message was built with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RecipientOutcome {
     /// The address as the submission attempted it.
     pub address: String,
@@ -41,6 +42,7 @@ pub struct RecipientOutcome {
 /// Not a path and not a UID: the copy is a message in a server mailbox, and the
 /// only thing a client renders about it is whether it is there yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SentCopy {
     /// The account files no local copy: the server does it (Gmail, Graph,
@@ -55,6 +57,7 @@ pub enum SentCopy {
 /// What one send did, end to end: `send.draft`, `send.invite`, and one element
 /// of a `send.approved` batch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SendOutcome {
     /// The account the message went out from.
     pub account: String,
@@ -78,6 +81,7 @@ pub struct SendOutcome {
 
 /// What one `send.approved` batch did, in the order it walked the drafts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ApprovedOutcome {
     /// The account whose approved drafts were sent.
     pub account: String,
@@ -95,6 +99,7 @@ pub struct ApprovedOutcome {
 
 /// One row of `send.outbox_list`, with every field the listing renders.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OutboxRow {
     /// The row id, which is what `mp outbox retry|discard` names.
     pub id: i64,
@@ -123,6 +128,8 @@ pub struct OutboxRow {
 
 /// The three counts under the listing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(rename = "OutboxListingCounts"))]
 pub struct OutboxCounts {
     /// Rows still working: queued, or waiting for their Sent copy.
     pub open: usize,
@@ -134,6 +141,7 @@ pub struct OutboxCounts {
 
 /// The `result` of `send.outbox_list`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OutboxListing {
     /// The account that was listed.
     pub account: String,
@@ -163,6 +171,7 @@ pub struct OutboxListing {
 /// computed from a local clock drifts against the daemon that owns the timer
 /// and two windows would then disagree about one hold.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HoldStatus {
     /// The operation id `send.draft` or `send.approved` answered with, which
     /// is what `send.cancel_hold` names.
@@ -185,6 +194,7 @@ pub struct HoldStatus {
 
 /// The `result` of `send.hold_status`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HoldListing {
     /// Every hold the daemon is carrying, in arm order.
     pub holds: Vec<HoldStatus>,
@@ -192,6 +202,7 @@ pub struct HoldListing {
 
 /// The `result` of a settled `send.outbox_retry`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OutboxRetryOutcome {
     /// The row that was retried.
     pub row_id: i64,

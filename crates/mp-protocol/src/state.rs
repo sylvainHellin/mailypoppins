@@ -47,6 +47,7 @@ use crate::send::HoldStatus;
 /// this account's store on disk", this answers "has this account's runtime
 /// come up", and the two are deliberately different questions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AccountState {
     /// No runtime has reported yet. Counts are 0 and the draft list is empty,
@@ -69,6 +70,7 @@ impl AccountState {
 
 /// How the last sync of an account went.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SyncHealthState {
     /// Nothing has synced yet, which is what a fresh bootstrap reports.
@@ -85,6 +87,7 @@ pub enum SyncHealthState {
 /// An object around one enum rather than a bare string, because the reason and
 /// the timestamp join it without a version bump.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SyncHealth {
     /// `unknown`, `ok` or `failed`.
     #[serde(default)]
@@ -93,6 +96,7 @@ pub struct SyncHealth {
 
 /// One account of the snapshot, in `config.toml`'s order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AccountSnapshot {
     /// The configured account name, which keys every other section.
     pub name: String,
@@ -113,6 +117,7 @@ pub struct AccountSnapshot {
 /// client that derived one from another would be right until an account maps
 /// its Inbox to a server folder called something else.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MailboxRow {
     /// `inbox`, `drafts`, `sent`, `archive` or `other`.
     pub role: String,
@@ -138,6 +143,7 @@ pub struct MailboxRow {
 /// `ready`, and a snapshot section a client does not read yet must not be able
 /// to stop it from starting.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DraftRow {
     /// The `id:` frontmatter field, or the file stem when the file has none.
     pub id: String,
@@ -165,6 +171,7 @@ pub struct DraftRow {
 
 /// One account's outbox counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OutboxCounts {
     /// Messages waiting to go out.
     #[serde(default)]
@@ -176,6 +183,7 @@ pub struct OutboxCounts {
 
 /// The whole state a client mirrors, captured at one revision.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Snapshot {
     /// The accounts, in `config.toml`'s order, which is the order a sidebar
     /// lists them in.
@@ -234,6 +242,7 @@ impl Snapshot {
 /// `capabilities` is what *this connection* agreed on at its handshake rather
 /// than the daemon's whole list: a client acts on what it may use.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Bootstrap {
     /// The daemon instance that answered. A client that sees an unfamiliar one
     /// has been reconnected to a new daemon and must bootstrap again.
