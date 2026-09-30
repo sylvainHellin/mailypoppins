@@ -2243,6 +2243,8 @@ The config's `app.windows` must then be `[]`: a config window labelled `main` is
 `Connector.open` returns a `Connection`, never an error, because the binary's version ends the process with exit 4.
 A GUI has to show a screen instead, so `clients/desktop/src-tauri/src/session.rs` first runs the whole connect-or-start sequence on a throwaway runtime and only hands `Session::connect` a connector (which retries plain handshakes) once a daemon has answered.
 The cost is one extra handshake per launch; the alternative, an `open` that loops for ever, leaves a failed start as a spinner.
+The connector's own `open` still retries, but only for 25 s (`connector::OPEN_DEADLINE`), under `Session::connect`'s 30 s ceiling: an `open` that outlives the ceiling keeps its thread retrying every 2 s for ever, because the thread only notices the dropped call channel after a handshake succeeds, and every retry adds one more.
+Past the deadline it hands back a connection whose peer already hung up, and `run_daemon` drops the `Session`, which ends the thread.
 
 ## A session call's refusal code survives only as text
 

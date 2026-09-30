@@ -338,6 +338,15 @@ impl SessionHandle {
             Ok(session) => session,
             Err(e) => return self.fail(unavailable(format!("{e:#}"))),
         };
+        if connector::take_open_gave_up() {
+            // Dropping the session ends its thread, which is serving a
+            // connection that is already closed.
+            drop(session);
+            return self.fail(unavailable(format!(
+                "a daemon answered, then refused the session's handshake for {} s",
+                connector::OPEN_DEADLINE.as_secs()
+            )));
+        }
         let Some(events) = session.events() else {
             return self.fail(unavailable("the session handed out no event stream"));
         };

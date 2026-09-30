@@ -33,6 +33,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -353,26 +354,105 @@ pub async fn connect_or_start(
     }
 }
 
+/// How long the session's first connect retries. Under `mp_client`'s
+/// `CONNECT_CEILING` (30 s), so `Session::connect` always hears back from
+/// [`open_session`] rather than giving up on a thread that goes on retrying.
+pub const OPEN_DEADLINE: Duration = Duration::from_secs(25);
+
+/// Set when the latest [`open_session`] ran out of time and handed back a
+/// closed connection; read once by [`take_open_gave_up`].
+static OPEN_GAVE_UP: AtomicBool = AtomicBool::new(false);
+
+/// Whether the session's first connect gave up, clearing the mark. The
+/// session thread then serves a dead connection, and the caller drops the
+/// `Session`, which ends that thread.
+pub fn take_open_gave_up() -> bool {
+    OPEN_GAVE_UP.swap(false, Ordering::SeqCst)
+}
+
 /// The session's first connect. Only reached after [`connect_or_start`]
 /// succeeded on the same machine a moment earlier, so it retries plain
-/// handshakes and never gives up: `Session::connect` puts its own 30 s ceiling
-/// over it, and a session thread that connects after that ceiling finds its
-/// call channel dropped and ends.
-async fn open_forever() -> Connection {
+/// handshakes, for [`OPEN_DEADLINE`].
+///
+/// `Connector::open` cannot fail, so past the deadline it answers a
+/// connection whose peer is already gone and marks [`take_open_gave_up`].
+/// The session thread then sees the connection close and ends once the
+/// `Session` is dropped, instead of retrying every 2 s for ever behind a
+/// `Session::connect` that stopped waiting.
+async fn open_session() -> Connection {
+    open_within(OPEN_DEADLINE, handshake).await
+}
+
+async fn open_within<F, Fut>(budget: Duration, mut attempt: F) -> Connection
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(Connection, InitializeResult), ClientError>>,
+{
+    OPEN_GAVE_UP.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + budget;
     let mut gap = RETRY_MIN;
     loop {
-        match handshake().await {
+        // Each attempt under what is left, so a handshake that hangs for its
+        // own 10 s cannot carry the whole open past the ceiling.
+        let left = deadline.saturating_duration_since(Instant::now());
+        let tried = match tokio::time::timeout(left, attempt()).await {
+            Ok(result) => result,
+            Err(_) => Err(ClientError::Timeout {
+                method: "initialize".to_string(),
+                after: left,
+            }),
+        };
+        match tried {
             Ok((connection, hello)) => {
                 record_hello(&hello);
                 return connection;
             }
             Err(e) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    tracing::warn!(
+                        "[connect] the session handshake failed for {} s, giving up: {e}",
+                        budget.as_secs()
+                    );
+                    OPEN_GAVE_UP.store(true, Ordering::SeqCst);
+                    return match closed_connection().await {
+                        Some(connection) => connection,
+                        None => {
+                            // Nothing to hand back: park rather than retry.
+                            tracing::error!(
+                                "[connect] no closed connection to end the session thread with"
+                            );
+                            std::future::pending().await
+                        }
+                    };
+                }
                 tracing::warn!("[connect] session handshake failed, retrying: {e}");
-                tokio::time::sleep(gap).await;
+                tokio::time::sleep(gap.min(left)).await;
                 gap = (gap * 2).min(Duration::from_secs(2));
             }
         }
     }
+}
+
+/// A connection whose peer has already hung up: a listener bound on a
+/// throwaway socket for the length of one connect.
+async fn closed_connection() -> Option<Connection> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "mp-desktop-closed-{}-{}.sock",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_file(&path);
+    let listener = std::os::unix::net::UnixListener::bind(&path).ok()?;
+    let _ = listener.set_nonblocking(true);
+    let connection = Connection::connect(&path).await.ok();
+    // Accepting and dropping closes the peer; dropping a listener with the
+    // connect still in its backlog resets it. Either way the read ends.
+    drop(listener.accept());
+    drop(listener);
+    let _ = std::fs::remove_file(&path);
+    connection
 }
 
 /// A reconnect: the same sequence, starting a daemon at most once every
@@ -405,7 +485,7 @@ async fn reopen() -> Option<(Connection, String)> {
 /// The connector the session thread uses.
 pub fn connector() -> Connector {
     Connector {
-        open: || Box::pin(open_forever()),
+        open: || Box::pin(open_session()),
         reopen: || Box::pin(reopen()),
     }
 }
@@ -693,5 +773,52 @@ mod tests {
             GuiError::VersionMismatch { .. }
         ));
         assert!(classify(&ClientError::NotRunning).is_none());
+    }
+
+    #[test]
+    fn the_session_open_gives_up_at_its_deadline_with_a_closed_connection() {
+        let socket = scratch_dir("open").join("nobody.sock");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let budget = Duration::from_millis(200);
+        let mut attempts = 0;
+        let started = Instant::now();
+        let mut connection = runtime.block_on(open_within(budget, || {
+            attempts += 1;
+            let socket = socket.clone();
+            async move {
+                Connection::connect(&socket)
+                    .await
+                    .and_then(|_| Err(ClientError::NotRunning))
+            }
+        }));
+        let took = started.elapsed();
+        assert!(took >= budget, "gave up after {took:?}");
+        assert!(took < Duration::from_secs(5), "gave up after {took:?}");
+        assert!(attempts > 1, "{attempts} attempts");
+        assert!(take_open_gave_up());
+        assert!(!take_open_gave_up(), "the mark is read once");
+        // The session thread's `serve` sees it close at once and ends.
+        assert!(runtime.block_on(connection.next_notification()).is_none());
+    }
+
+    #[test]
+    fn a_session_on_the_closed_connection_ends_its_thread_when_dropped() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let session = mp_client::session::Session::connect(Connector {
+                open: || Box::pin(async { closed_connection().await.expect("closed") }),
+                reopen: || Box::pin(async { None }),
+            })
+            .expect("the open answers at once");
+            // `Drop` joins the session thread.
+            drop(session);
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the session thread ended");
     }
 }
