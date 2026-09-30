@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ACTIVITY_LOG_CAP, entryTime, filterLog } from "@/app/activity";
@@ -46,8 +46,13 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
     }
   }, [open]);
 
-  // Scrolled to the newest line when it opens, when the filter changes, and
-  // when a line arrives while the end is in view.
+  // Scrolled to the newest line when it opens (the popup mounts after the
+  // dialog's first render, so on the element's mount), when the filter
+  // changes, and when a line arrives while the end is in view.
+  const setLog = useCallback((el: HTMLDivElement | null) => {
+    logRef.current = el;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
   const newest = shown[shown.length - 1]?.id ?? 0;
   useLayoutEffect(() => {
     const el = logRef.current;
@@ -161,7 +166,7 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
         </div>
         <div
           id={`${id}-log`}
-          ref={logRef}
+          ref={setLog}
           role="log"
           aria-label="Activity log lines"
           tabIndex={0}
