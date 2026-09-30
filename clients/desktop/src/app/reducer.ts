@@ -84,6 +84,7 @@ import {
   NO_MARKS,
   readerKey,
   targetKey,
+  type AccountWizard,
   type AppState,
   type ActivityKind,
   type ActivityLevel,
@@ -177,7 +178,18 @@ import {
 } from "@/app/contacts";
 import type { ConfigSnapshot, ContactSearch, SecretKind, SignatureListing } from "@/lib/gui-types";
 import type { ConfigChanged, ConfigInvalid } from "@/protocol/types";
-import { configChanged, configFailed, configInvalid, configLoaded, openPasswordDialog, openSettings } from "@/app/settings";
+import { configChanged, configFailed, configInvalid, configLoaded, openAccountWizard, openPasswordDialog, openSettings } from "@/app/settings";
+import {
+  isSignInOperation,
+  signInCancelling,
+  signInClosed,
+  signInRebootstrapped,
+  signInRequested,
+  signInSignal,
+  signInStarted,
+  signInStartFailed,
+  signInStarting,
+} from "@/app/signin";
 import {
   dropSignatures,
   openSignaturesDialog,
@@ -346,6 +358,12 @@ export type Action =
   /** A reload answered: the notice line says so, and the daemon's own event already logged it. */
   | { type: "config_reloaded"; text: string }
   | { type: "open_password"; account: string; kind: SecretKind }
+  | { type: "open_account_wizard"; preset?: AccountWizard["preset"] }
+  | { type: "sign_in_requested"; token: number; account: string }
+  | { type: "sign_in_started"; token: number; operation_id: string }
+  | { type: "sign_in_failed"; token: number; error: GuiError }
+  | { type: "sign_in_cancelling" }
+  | { type: "sign_in_closed" }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -880,6 +898,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (isRsvpOperation(s, sig.operation_id)) return rsvpSignal(s, end);
       if (isInviteOperation(s, sig.operation_id)) return inviteSignal(s, end);
       if (isRebuildOperation(s, sig.operation_id)) return rebuildSignal(s, end);
+      if (isSignInOperation(s, sig.operation_id)) return signInSignal(s, end);
       // An unknown id may be a sync, a send, a retry or an RSVP whose start
       // has not answered yet, or the search's: each holds it until its id is known.
       let next = s.syncStarting > 0 ? syncSignal(s, end) : s;
@@ -888,6 +907,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (rsvpStarting(next)) next = rsvpSignal(next, end);
       if (inviteSending(next)) next = inviteSignal(next, end);
       if (rebuildStarting(next)) next = rebuildSignal(next, end);
+      if (signInStarting(next)) next = signInSignal(next, end);
       return signal(next, sig);
     }
     default:
@@ -922,7 +942,8 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // The same daemon keeps the cards of holds that ended, so a settle
       // still finds the card it reports on; the snapshot's are the live ones.
       const ended = sameInstance ? Object.fromEntries(Object.entries(s.holds).filter(([, h]) => h.state === "fired" || h.state === "cancelled")) : {};
-      return {
+      return signInRebootstrapped(
+        {
         ...next,
         pending: {},
         holds: { ...ended, ...seedHolds(e.bootstrap.snapshot.holds) },
@@ -934,7 +955,10 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
         overlay: closeOverlay ? null : next.overlay,
-      };
+        },
+        e.bootstrap,
+        sameInstance,
+      );
     }
     case "event":
       if (s.bootstrap && e.event.instance_id !== s.bootstrap.instance_id) return s;
@@ -953,6 +977,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "rsvp") return rsvpSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send_invite") return inviteSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "contact_rebuild") return rebuildSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "oauth2_login") return signInSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       s = endProgress(s, e.operation_id);
@@ -962,6 +987,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "rsvp") return rsvpSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "send_invite") return inviteSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "contact_rebuild") return rebuildSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "oauth2_login") return signInSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -1079,6 +1105,11 @@ function reduce(s: AppState, a: Action): AppState {
           const mailbox = defaultMailbox(next, def);
           next = retarget(next, { account: def, mailbox, message: null, draft: null, hit: null });
         }
+      } else if (next.selection.account === null && a.accounts.length > 0) {
+        // A window that started with no account (the first run) selects the
+        // first one the wizard added, as a bootstrap would have.
+        const def = a.accounts.find((x) => x.default)?.name ?? a.accounts[0].name;
+        next = { ...retarget(next, { account: def, mailbox: defaultMailbox(next, def), message: null, draft: null, hit: null }), selectionAuto: true };
       }
       return next;
     }
@@ -1086,7 +1117,13 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, accounts: failed(s.accounts, a.gen, a.error) };
     case "mailboxes_loaded": {
       const prev = s.mailboxes[a.account] ?? emptyLoadable<MailboxListing>();
-      return { ...s, mailboxes: { ...s.mailboxes, [a.account]: loaded(prev, a.gen, a.listing) } };
+      const next: AppState = { ...s, mailboxes: { ...s.mailboxes, [a.account]: loaded(prev, a.gen, a.listing) } };
+      // An account selected before its mailboxes were known (the first run's) opens its inbox now.
+      if (!next.search && next.selection.account === a.account && next.selection.mailbox === null) {
+        const mailbox = defaultMailbox(next, a.account);
+        if (mailbox) return retarget(next, { ...next.selection, mailbox });
+      }
+      return next;
     }
     case "mailboxes_failed": {
       const prev = s.mailboxes[a.account] ?? emptyLoadable<MailboxListing>();
@@ -1255,6 +1292,7 @@ function reduce(s: AppState, a: Action): AppState {
         inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
+        accountWizard: a.overlay === "account_wizard" ? s.accountWizard : null,
       };
     case "open_dialog":
       return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
@@ -1475,6 +1513,18 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, notice: a.text };
     case "open_password":
       return openPasswordDialog(s, { account: a.account, kind: a.kind });
+    case "open_account_wizard":
+      return openAccountWizard(s, a.preset ?? "imap");
+    case "sign_in_requested":
+      return signInRequested(s, a.token, a.account);
+    case "sign_in_started":
+      return signInStarted(s, a.token, a.operation_id);
+    case "sign_in_failed":
+      return signInStartFailed(s, a.token, a.error.message);
+    case "sign_in_cancelling":
+      return signInCancelling(s);
+    case "sign_in_closed":
+      return signInClosed(s);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

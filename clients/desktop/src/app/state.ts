@@ -118,7 +118,9 @@ export const LIST_WIDTH_STEP = 40;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
  * invitation form `inviteDialog` describes; `signatures` is the Signatures
  * dialog `signaturesDialog` describes; `activity` is the activity log;
- * `password` is the password dialog `passwordDialog` describes.
+ * `password` is the password dialog `passwordDialog` describes;
+ * `account_wizard` is the account wizard `accountWizard` describes;
+ * `device_code` is the sign-in `signIn` describes.
  */
 export type Overlay =
   | "palette"
@@ -133,6 +135,8 @@ export type Overlay =
   | "signatures"
   | "activity"
   | "password"
+  | "account_wizard"
+  | "device_code"
   | null;
 
 /**
@@ -492,6 +496,28 @@ export type SignaturesDialog = { account: string };
  */
 export type PasswordDialog = { account: string; kind: SecretKind };
 
+/**
+ * The account wizard and the provider it starts on; its form lives in the
+ * dialog's own state. The review writes the first config.toml when the
+ * daemon has none, else appends.
+ */
+export type AccountWizard = { preset: "imap" | "proton" | "microsoft365" | "graph" };
+
+/**
+ * The device-code sign-in the `device_code` overlay shows, one at a time:
+ * `operation_id` is null until `config_oauth2_login` answers, `cancelling`
+ * is set once Cancel was asked, and `outcome` once it ended (stored, failed
+ * with the daemon's or the provider's sentence, cancelled). The code itself
+ * is the operation's progress, in `progress`.
+ */
+export type SignIn = {
+  token: number;
+  account: string;
+  operation_id: string | null;
+  cancelling: boolean;
+  outcome: { kind: "stored" | "failed" | "cancelled"; text: string } | null;
+};
+
 /** A contact index rebuild this window started, until it settles or is dropped; `operation_id` is null until `contact_rebuild` answers. */
 export type RebuildRun = { token: number; account: string; operation_id: string | null };
 
@@ -672,6 +698,12 @@ export type AppState = {
   configProblem: ConfigInvalid | null;
   /** What the `password` overlay shows; null whenever another overlay or none is open. */
   passwordDialog: PasswordDialog | null;
+  /** What the `account_wizard` overlay shows; null whenever another overlay or none is open. */
+  accountWizard: AccountWizard | null;
+  /** The sign-in the `device_code` overlay shows, kept while it runs whatever overlay is open. */
+  signIn: SignIn | null;
+  /** Operation ends that arrived while `config_oauth2_login` was unanswered, for its id. */
+  signInEarly: OperationEnd[];
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -746,6 +778,9 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     config: emptyLoadable(),
     configProblem: null,
     passwordDialog: null,
+    accountWizard: null,
+    signIn: null,
+    signInEarly: [],
   };
 }
 
@@ -803,13 +838,23 @@ export function mailboxSlugs(s: AppState, account: string): string[] {
   return s.bootstrap?.snapshot.mailboxes[account]?.map((m) => m.slug) ?? [];
 }
 
-export type Screen = "connecting" | "unavailable" | "version_mismatch" | "shell";
+export type Screen = "connecting" | "unavailable" | "version_mismatch" | "setup" | "shell";
 
 export function screenFor(s: AppState): Screen {
   if (s.connection.state === "failed") {
     return s.connection.error.kind === "version_mismatch" ? "version_mismatch" : "unavailable";
   }
-  return s.bootstrap ? "shell" : "connecting";
+  if (!s.bootstrap) return "connecting";
+  return needsSetup(s) ? "setup" : "shell";
+}
+
+/**
+ * First run: the daemon serves no account and has no config.toml, so the
+ * setup screen with the wizard shows instead of an empty shell. With
+ * accounts, or with a config.toml that names none, the shell shows.
+ */
+export function needsSetup(s: AppState): boolean {
+  return s.bootstrap !== null && accountNames(s).length === 0 && s.config.data?.state === "absent";
 }
 
 export type Banner =

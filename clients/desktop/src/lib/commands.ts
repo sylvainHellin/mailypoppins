@@ -17,7 +17,10 @@ import type {
   OutboxListing,
 } from "@/protocol/types";
 import type {
+  AccountDraft,
   AccountInfo,
+  CancelOutcome,
+  ConfigInitialised,
   ConfigSnapshot,
   ConfigSwap,
   ConnectionStatus,
@@ -233,6 +236,29 @@ export const configReload = (): Promise<ConfigSwap> => invoke<ConfigSwap>("confi
 /** Store the SMTP or IMAP password of `account` through the daemon's secrets backend. */
 export const configSetPassword = (account: string, kind: SecretKind, value: string): Promise<SecretStored> =>
   invoke<SecretStored>("config_set_password", { account, kind, value });
+
+/**
+ * Append the wizard's account to config.toml (`config.add_account`). The
+ * draft carries no secret; the daemon refuses a taken name, a missing
+ * file (then `configInit`) and a block that does not load, each with its
+ * own sentence.
+ */
+export const configAddAccount = (account: AccountDraft): Promise<ConfigSwap> => invoke<ConfigSwap>("config_add_account", { account });
+
+/** Write the first config.toml, holding the wizard's account (`config.init`); refused where a file exists. */
+export const configInit = (account: AccountDraft): Promise<ConfigInitialised> => invoke<ConfigInitialised>("config_init", { account });
+
+/**
+ * Start the device-code sign-in of an `oauth2` or `graph` account, awaited
+ * as `oauth2_login`: its one `operation.progress` (phase `device_code`)
+ * carries "<url> <code>", and it settles with an `OAuth2Stored`.
+ */
+export const configOauth2Login = (account: string): Promise<OperationStarted> =>
+  invoke<OperationStarted>("config_oauth2_login", { account });
+
+/** Cancel a sign-in; it stays awaited until its `cancelled` finish, and the provider may still complete it. */
+export const configOauth2Cancel = (operation_id: string): Promise<CancelOutcome> =>
+  invoke<CancelOutcome>("config_oauth2_cancel", { operation_id });
 
 export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetting>("editor_setting_get");
 

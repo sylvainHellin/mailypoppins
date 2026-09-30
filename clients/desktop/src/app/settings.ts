@@ -9,15 +9,13 @@ import type { Dispatch } from "react";
 import type { ConfigChanged, ConfigInvalid } from "@/protocol/types";
 import type { Action } from "@/app/reducer";
 import { configChangedLine } from "@/app/activity";
-import { accountNames, markStale, type AppState, type PasswordDialog } from "@/app/state";
+import { accountNames, markStale, type AccountWizard, type AppState, type PasswordDialog } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type ConfigAccount, type ConfigSnapshot, type ConfigSwap, type GuiError, type SecretKind } from "@/lib/gui-types";
 
 /** The daemon's `ConfigInvalid` code: the file did not load, and the daemon kept what it served. */
 export const CONFIG_INVALID_CODE = -32007;
 
-/** What the view says of the controls the account wizard brings (U7b). */
-export const LATER_IN_M4 = "Arrives with the account wizard, later in M4";
 
 /** The word a secret kind shows as. */
 export function kindLabel(kind: SecretKind): string {
@@ -92,6 +90,23 @@ export function openPasswordDialog(s: AppState, dialog: PasswordDialog): AppStat
     rsvpDialog: null,
     inviteDialog: null,
     signaturesDialog: null,
+    accountWizard: null,
+  };
+}
+
+/** Open the account wizard on `preset`. */
+export function openAccountWizard(s: AppState, preset: AccountWizard["preset"]): AppState {
+  return {
+    ...s,
+    overlay: "account_wizard",
+    accountWizard: { preset },
+    dialog: null,
+    composeDialog: null,
+    attachDialog: null,
+    rsvpDialog: null,
+    inviteDialog: null,
+    signaturesDialog: null,
+    passwordDialog: null,
   };
 }
 

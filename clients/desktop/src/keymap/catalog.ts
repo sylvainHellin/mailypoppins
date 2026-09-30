@@ -76,6 +76,7 @@ export type ActionId =
   | "view_contacts"
   | "view_calendar"
   | "open_settings"
+  | "add_account"
   | "calendar_open_source"
   | "calendar_toggle_past"
   | "calendar_refresh"
@@ -282,8 +283,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
   // The TUI has no settings view, and no key for one (D11): palette and sidebar only.
   { section: "APP", label: "Open settings", keys: [], id: "open_settings", badge: null },
-  // Account setup arrives with the Settings view's own unit (U7).
-  { section: "APP", label: "Add account", keys: [], id: null, badge: "M4" },
+  // The account wizard (ACC-01): the TUI has none, the CLI's `mp config
+  // add-account` is its model; no key of its own (D11), as Settings.
+  { section: "APP", label: "Add account", keys: [], id: "add_account", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },

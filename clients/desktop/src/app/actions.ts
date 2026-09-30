@@ -294,6 +294,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "switch_view", view: "calendar" });
     case "open_settings":
       return dispatch({ type: "switch_view", view: "settings" });
+    case "add_account":
+      return dispatch({ type: "open_account_wizard" });
     case "calendar_open_source":
       return void openEventSource(s, dispatch);
     case "calendar_toggle_past":

@@ -29,6 +29,7 @@ import type {
   OutboxRow,
 } from "@/protocol/types";
 import type {
+  AccountDraft,
   AccountInfo,
   ConfigSnapshot,
   ConnectionStatus,
@@ -206,7 +207,90 @@ export const mock = {
   configInvalid: false,
   /** Every `config_set_password`, as fixture.rs journals it: the value redacted. */
   passwords: [] as { account: string; kind: string; value: string }[],
+  /** What `subscribe_events` and `bootstrap` answer; `config_add_account` and `config_init` add to it. */
+  bootstrap: clone(fixtures.bootstrap),
+  /** What `account_list` lists. */
+  accounts: clone(fixtures.accounts),
+  /** The effective configuration `config_get` answers. */
+  config: clone(fixtures.config),
+  /** The sign-ins `config_oauth2_login` started and no test ended yet, oldest first. */
+  signIns: [] as { operation_id: string; account: string; kind: "oauth2" | "graph" }[],
+  /** The next sign-in's operation id counter. */
+  nextSignIn: 1,
 };
+
+/** fixture.rs's `DEVICE_CODE_MESSAGE`, the device-code progress's message. */
+export const DEVICE_CODE_MESSAGE = "https://microsoft.com/devicelogin FXTR-CODE";
+
+/** fixture.rs's `OAUTH_DENIED`, why an `oauth_deny` sign-in failed. */
+export const OAUTH_DENIED = "Authorization was declined by the user.";
+
+/**
+ * fixture.rs's `config_absent`, before the app starts: the daemon has no
+ * config.toml and serves no account.
+ */
+export function simulateConfigAbsent(): void {
+  mock.configState = "absent";
+  mock.accounts = [];
+  mock.config = { ...clone(fixtures.config), accounts: [] };
+  mock.bootstrap = {
+    ...clone(fixtures.bootstrap),
+    snapshot: { ...clone(fixtures.bootstrap.snapshot), accounts: [], mailboxes: {}, drafts: {}, outbox: {}, holds: [], diagnostics: [] },
+  };
+  mock.holds = [];
+  mock.outbox = {};
+}
+
+/** The oldest waiting sign-in reports its device code, as fixture.rs does after `DEVICE_CODE_DELAY`. */
+export function reportDeviceCode(): string {
+  const run = mock.signIns[0];
+  if (!run) throw new Error("no sign-in is waiting for its code");
+  emitEnvelope("operation.progress", { operation_id: run.operation_id, phase: "device_code", done: 0, total: null, message: DEVICE_CODE_MESSAGE });
+  return run.operation_id;
+}
+
+/** fixture.rs's `oauth_approve` (stored) or `oauth_deny` (failed): the oldest waiting sign-in ends. */
+export function settleSignIn(opts: { deny?: boolean } = {}): string {
+  const run = mock.signIns.shift();
+  if (!run) throw new Error("no sign-in is waiting to settle");
+  if (opts.deny) {
+    emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: OAUTH_DENIED } });
+  } else {
+    emitEnvelope("operation.finished", {
+      operation_id: run.operation_id,
+      state: "succeeded",
+      result: { stored: true, account: run.account, kind: run.kind, key: `oauth2-token-${run.account}` },
+    });
+  }
+  return run.operation_id;
+}
+
+/** fixture.rs's `configure_account`: the account is served at once, ready, with Inbox, Archive and Sent. */
+function configureAccount(account: AccountDraft): string {
+  const name = account.name;
+  const auth = account.auth_method ?? "password";
+  mock.accounts.push({ name, default: mock.accounts.length === 0, backend: auth === "graph" ? "graph" : "imap", state: "ready" });
+  mock.bootstrap.snapshot.accounts.push({ name, state: "ready", sync_health: { state: "ok" } } as Bootstrap["snapshot"]["accounts"][number]);
+  mock.bootstrap.snapshot.mailboxes[name] = [
+    { role: "inbox", slug: "inbox", label: "Inbox", total: 0, unread: 0, badge: 0 },
+    { role: "archive", slug: "archive", label: "Archive", total: 0, unread: 0, badge: 0 },
+    { role: "sent", slug: "sent", label: "Sent", total: 0, unread: 0, badge: 0 },
+  ] as Bootstrap["snapshot"]["mailboxes"][string];
+  mock.rows[name] = { inbox: [], archive: [], sent: [] };
+  const server = (s: AccountDraft["smtp"], port: number) => ({ host: s?.host ?? "", port: s?.port ?? port, username: s?.username ?? "" });
+  mock.config.accounts.push({
+    name,
+    default_from: account.default_from ?? "",
+    auth_method: auth,
+    smtp: server(account.smtp, 465),
+    imap: server(account.imap, 993),
+    oauth2: account.oauth2 ?? null,
+  } as ConfigSnapshot["config"]["accounts"][number]);
+  mock.configState = "ok";
+  mock.configRevision += 1;
+  emitEnvelope("config.changed", { added: [name], updated: [], removed: [], config_revision: mock.configRevision });
+  return name;
+}
 
 /** fixture.rs's `CONFIG_INVALID_MESSAGE`, why `config_reload` refuses after `config_invalid`. */
 export const CONFIG_INVALID_MESSAGE = "key with no value, expected `=`";
@@ -286,6 +370,11 @@ export function resetMock(): void {
   mock.configRevision = 0;
   mock.configInvalid = false;
   mock.passwords = [];
+  mock.bootstrap = clone(fixtures.bootstrap);
+  mock.accounts = clone(fixtures.accounts);
+  mock.config = clone(fixtures.config);
+  mock.signIns = [];
+  mock.nextSignIn = 1;
 }
 
 /** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
@@ -586,7 +675,7 @@ function findRow(account: string, rowId: number): [string, FixtureRow] | null {
 }
 
 export function mailboxListing(account: string): MailboxListing {
-  const snap = fixtures.bootstrap.snapshot;
+  const snap = mock.bootstrap.snapshot;
   const rows = snap.mailboxes[account] ?? [];
   const mailboxes = rows.map((m) => {
     const msgs = mock.rows[account]?.[m.slug] ?? [];
@@ -612,7 +701,7 @@ function refusedRow(method: string, why: string): GuiError {
 
 /** An unknown account fails the whole command, as `account_unknown` does. */
 function knownAccount(cmd: string, account: string): void {
-  if (!fixtures.bootstrap.snapshot.accounts.some((a) => a.name === account)) {
+  if (!mock.bootstrap.snapshot.accounts.some((a) => a.name === account)) {
     throw { kind: "not_found", message: `${cmd}: the daemon refused the call: account_unknown: ${account} (-32005)`, code: -32005 };
   }
 }
@@ -865,7 +954,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       queueMicrotask(() => {
         emit({ type: "connection", status });
         if (status.state === "connected") {
-          emit({ type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap });
+          emit({ type: "rebootstrapped", cause: "subscribed", bootstrap: clone(mock.bootstrap) });
         }
       });
       return undefined;
@@ -876,7 +965,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "restart_daemon":
       return undefined;
     case "bootstrap":
-      return fixtures.bootstrap;
+      return clone(mock.bootstrap);
     case "version_info":
       return {
         app_version: "0.1.0",
@@ -886,8 +975,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         daemon: mock.connection.state === "connected" ? { daemon_version: "0.0.0-fixture", protocol: 1, instance_id: "fixture-instance-1" } : null,
       } satisfies VersionInfo;
     case "list_accounts":
-      return fixtures.accounts.map((a): AccountInfo => {
-        const snap = fixtures.bootstrap.snapshot.accounts.find((x) => x.name === a.name);
+      return mock.accounts.map((a): AccountInfo => {
+        const snap = mock.bootstrap.snapshot.accounts.find((x) => x.name === a.name);
         return {
           name: a.name,
           default: a.default,
@@ -895,7 +984,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
           store_state: a.state,
           runtime_state: snap?.state ?? "opening",
           sync_health: snap?.sync_health.state ?? "unknown",
-          outbox: fixtures.bootstrap.snapshot.outbox[a.name] ?? { queued: 0, failed: 0 },
+          outbox: mock.bootstrap.snapshot.outbox[a.name] ?? { queued: 0, failed: 0 },
         };
       });
     case "list_mailboxes":
@@ -1236,8 +1325,53 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         revision: mock.configRevision,
         path: MOCK_CONFIG_PATH,
         state: mock.configState,
-        config: clone(fixtures.config),
+        config: clone(mock.config),
       } satisfies ConfigSnapshot;
+    // fixture.rs's `config.add_account` and `config.init`, their refusals in the daemon's words.
+    case "config_add_account": {
+      const draft = args.account as AccountDraft;
+      if (mock.configState === "absent") {
+        throw { kind: "protocol", code: -32602, message: `there is no configuration at ${MOCK_CONFIG_PATH}; write one with config.init first` };
+      }
+      if (mock.config.accounts.some((a) => a.name === draft.name)) {
+        throw { kind: "protocol", code: -32602, message: `an account named ${draft.name} is already configured` };
+      }
+      return { added: [configureAccount(draft)], updated: [], removed: [] };
+    }
+    case "config_init": {
+      const draft = args.account as AccountDraft;
+      if (mock.configState !== "absent") {
+        throw { kind: "protocol", code: -32602, message: `a configuration already exists at ${MOCK_CONFIG_PATH}; edit it and call config.reload` };
+      }
+      return { path: MOCK_CONFIG_PATH, added: [configureAccount(draft)], updated: [], removed: [] };
+    }
+    // fixture.rs's `config.oauth2_login`: its refusals, then a sign-in a test reports and settles.
+    case "config_oauth2_login": {
+      const a = mock.config.accounts.find((x) => x.name === account);
+      if (!a) throw { kind: "not_found", code: -32005, message: `Account '${account}' not found in config` };
+      if (a.auth_method !== "oauth2" && a.auth_method !== "graph") {
+        throw {
+          kind: "protocol",
+          code: -32602,
+          message: `Account '${account}' uses auth_method = "password", not "oauth2" or "graph". Set auth_method = "oauth2" or "graph" in config.toml to use OAuth2.`,
+        };
+      }
+      const operation_id = `fixture-oauth-${mock.nextSignIn++}`;
+      mock.signIns.push({ operation_id, account, kind: a.auth_method });
+      return { operation_id };
+    }
+    case "config_oauth2_cancel": {
+      const id = String(args.operation_id);
+      const at = mock.signIns.findIndex((r) => r.operation_id === id);
+      if (at < 0) return "already_settled";
+      mock.signIns.splice(at, 1);
+      emitEnvelope("operation.finished", {
+        operation_id: id,
+        state: "cancelled",
+        error: { code: -32008, message: "operation_cancelled", data: { operation_id: id } },
+      });
+      return "cancelled";
+    }
     case "config_reload": {
       if (mock.configInvalid) {
         emitEnvelope("config.invalid", { path: MOCK_CONFIG_PATH, line: CONFIG_INVALID_AT, message: CONFIG_INVALID_MESSAGE });
@@ -1249,7 +1383,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "config_set_password": {
       const kind = String(args.kind);
-      if (!fixtures.config.accounts.some((a) => a.name === account)) {
+      if (!mock.config.accounts.some((a) => a.name === account)) {
         throw { kind: "not_found", message: `no account named ${account} is configured`, code: -32005 };
       }
       mock.passwords.push({ account, kind, value: "<redacted>" });

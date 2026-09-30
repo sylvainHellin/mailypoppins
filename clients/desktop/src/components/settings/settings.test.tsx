@@ -5,7 +5,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/shell/AppShell";
 import { StoreProvider, useAppState } from "@/app/store";
 import type { AppState } from "@/app/state";
-import { LATER_IN_M4 } from "@/app/settings";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
 import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, resetMock } from "@/test/tauri-mock";
@@ -61,20 +60,31 @@ describe("the Settings view", () => {
     await waitFor(() => expect(within(view).getByLabelText("Editor command")).toHaveAttribute("placeholder", "code --wait {path}"));
   });
 
-  it("shows what the account wizard brings as disabled controls that say so", async () => {
-    const { view } = await openSettings();
-    const add = within(view).getByRole("button", { name: "Add account" });
-    expect(add).toBeDisabled();
-    expect(add).toHaveAccessibleDescription(LATER_IN_M4);
+  it("offers Sign in on the OAuth2 and Graph cards and Add account below them, both live", async () => {
+    const { user, view } = await openSettings();
     const home = card(view, "home");
     const signIn = within(home).getByRole("button", { name: "Sign in" });
-    expect(signIn).toBeDisabled();
-    expect(signIn).toHaveAccessibleDescription(LATER_IN_M4);
+    expect(signIn).toBeEnabled();
     expect(within(home).queryByRole("button", { name: /password/ })).toBeNull();
     const work = card(view, "work");
     expect(within(work).queryByRole("button", { name: "Sign in" })).toBeNull();
     expect(within(work).getByRole("button", { name: "Set SMTP password" })).toBeEnabled();
     expect(within(work).getByRole("button", { name: "Set IMAP password" })).toBeEnabled();
+
+    // Sign in opens the device-code dialog directly, on a started sign-in.
+    await user.click(signIn);
+    const dialog = await screen.findByRole("dialog", { name: "Sign in home" });
+    await waitFor(() => expect(callsOf("config_oauth2_login")).toEqual([{ account: "home" }]));
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Asking the provider for a device code");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel sign-in" }));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Close" })).toBeInTheDocument());
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Sign in home" })).toBeNull());
+
+    const add = within(view).getByRole("button", { name: "Add account" });
+    expect(add).toBeEnabled();
+    await user.click(add);
+    expect(await screen.findByRole("dialog", { name: "Add account" })).toBeInTheDocument();
   });
 
   it("Open config.toml hands the daemon's file to the editor", async () => {

@@ -23,10 +23,21 @@ describe("the command palette", () => {
     await shellReady();
     await user.keyboard(":");
     const dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    // Account setup, until the Settings view's unit brings it (U7).
-    const setup = within(dialog).getAllByText("Add account")[0].closest("[data-testid='palette-item']");
-    expect(setup).toHaveAttribute("data-disabled", "true");
-    expect(setup).toHaveTextContent("M4");
+    // Date jumps, which the next list unit brings.
+    const later = within(dialog).getAllByText("Jump to date (e.g. last week)")[0].closest("[data-testid='palette-item']");
+    expect(later).toHaveAttribute("data-disabled", "true");
+    expect(later).toHaveTextContent("soon");
+  });
+
+  it("Add account runs: it opens the account wizard", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(":");
+    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    const row = within(dialog).getAllByText("Add account")[0].closest("[data-testid='palette-item']");
+    expect(row).not.toHaveAttribute("data-disabled", "true");
+    await user.click(row as HTMLElement);
+    expect(await screen.findByRole("dialog", { name: "Add account" })).toBeInTheDocument();
   });
 
   it("runs every mutation action and no row is left for M2", () => {

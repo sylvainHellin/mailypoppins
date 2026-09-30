@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { openConfig } from "@/app/interop";
-import { kindLabel, LATER_IN_M4, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
+import { kindLabel, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
+import { signInOrShow } from "@/app/signin";
 import { useAppState, useDispatch } from "@/app/store";
 import * as cmd from "@/lib/commands";
 import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
@@ -36,23 +37,15 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** A control the account wizard brings (U7b): shown, disabled, with why. */
-function Later({ icon, label, hint }: { icon: ReactNode; label: string; hint: string }) {
-  const id = useId();
-  return (
-    <span className="flex flex-wrap items-center gap-2">
-      <Button size="xs" variant="outline" disabled aria-describedby={id}>
-        {icon}
-        {label}
-      </Button>
-      <span id={id} className="text-xs text-muted-foreground">
-        {hint}
-      </span>
-    </span>
-  );
-}
-
-function AccountCard({ account, onPassword }: { account: ConfigAccount; onPassword: (kind: SecretKind) => void }) {
+function AccountCard({
+  account,
+  onPassword,
+  onSignIn,
+}: {
+  account: ConfigAccount;
+  onPassword: (kind: SecretKind) => void;
+  onSignIn: () => void;
+}) {
   const password = usesPassword(account);
   const headingId = useId();
   return (
@@ -82,7 +75,10 @@ function AccountCard({ account, onPassword }: { account: ConfigAccount; onPasswo
             </Button>
           ))
         ) : (
-          <Later icon={<LogIn aria-hidden="true" />} label="Sign in" hint={LATER_IN_M4} />
+          <Button size="xs" variant="outline" onClick={onSignIn} title="Sign in with a device code">
+            <LogIn aria-hidden="true" />
+            Sign in
+          </Button>
         )}
       </div>
     </article>
@@ -236,11 +232,15 @@ export function SettingsView() {
                     key={account.name}
                     account={account}
                     onPassword={(kind) => dispatch({ type: "open_password", account: account.name, kind })}
+                    onSignIn={() => signInOrShow(s, dispatch, account.name)}
                   />
                 ))}
               </div>
               <div className="mt-3">
-                <Later icon={<Plus aria-hidden="true" />} label="Add account" hint={LATER_IN_M4} />
+                <Button size="xs" variant="outline" onClick={() => dispatch({ type: "open_account_wizard" })}>
+                  <Plus aria-hidden="true" />
+                  Add account
+                </Button>
               </div>
             </section>
           </>

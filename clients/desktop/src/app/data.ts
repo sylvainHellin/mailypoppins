@@ -147,11 +147,15 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
   }, [hasBootstrap, contactsAccount, contactsQuery, contacts, dispatch]);
 
   // The daemon's configuration, while the Settings view shows: read on
-  // every open and again after each `config.changed`.
-  const settingsShown = state.view === "settings";
+  // every open and again after each `config.changed`. With no account at
+  // all it is read too, since its `absent` state is what shows the
+  // first-run screen (`needsSetup`); the account wizard reads it to pick
+  // `config_init` over `config_add_account`.
+  const configWanted =
+    state.view === "settings" || state.overlay === "account_wizard" || (hasBootstrap && accountNames(state).length === 0);
   const config = state.config;
   useEffect(() => {
-    if (!hasBootstrap || !settingsShown || !isStale(config)) return;
+    if (!hasBootstrap || !configWanted || !isStale(config)) return;
     const gen = config.gen;
     run(`config@${gen}`, () =>
       cmd
@@ -159,7 +163,7 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .then((snapshot) => dispatch({ type: "config_loaded", gen, snapshot }))
         .catch((e: unknown) => dispatch({ type: "config_failed", gen, error: asGuiError(e) })),
     );
-  }, [hasBootstrap, settingsShown, config, dispatch]);
+  }, [hasBootstrap, configWanted, config, dispatch]);
 
   // The signature listing the Signatures dialog or the new-draft wizard
   // shows, and only while one of them is open: a listing that went stale

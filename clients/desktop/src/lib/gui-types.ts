@@ -18,7 +18,9 @@ export type * from "@/protocol/generated/gui";
  * `rsvp_fail` fails the next RSVP with an SMTP error; `rebuild_refused`
  * makes the next contact index rebuild settle `refused_shrunk`;
  * `signature_changed` edits the signature `work` as another window would;
- * `config_invalid` appends a line to config.toml the next reload refuses.
+ * `config_invalid` appends a line to config.toml the next reload refuses;
+ * `config_absent` restarts the daemon with no config.toml and no account;
+ * `oauth_approve` and `oauth_deny` end every waiting device-code sign-in.
  */
 export type FixtureSimulation =
   | "disconnect"
@@ -41,7 +43,10 @@ export type FixtureSimulation =
   | "rsvp_fail"
   | "rebuild_refused"
   | "signature_changed"
-  | "config_invalid";
+  | "config_invalid"
+  | "config_absent"
+  | "oauth_approve"
+  | "oauth_deny";
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {

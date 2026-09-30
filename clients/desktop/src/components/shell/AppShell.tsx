@@ -16,6 +16,9 @@ import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
 import { ActivityLogDialog } from "@/components/activity/ActivityLogDialog";
 import { PasswordDialog } from "@/components/settings/PasswordDialog";
+import { AccountWizard } from "@/components/settings/AccountWizard";
+import { DeviceCodeDialog } from "@/components/settings/DeviceCodeDialog";
+import { SetupScreen } from "@/components/screens/SetupScreen";
 import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
@@ -68,6 +71,8 @@ export function AppShell() {
     body = <VersionMismatchScreen error={s.connection.error} version={s.version} onRestart={askRestart} />;
   } else if (screen === "connecting") {
     body = <ConnectingScreen reason={s.connection.state === "reconnecting" ? s.connection.reason : null} />;
+  } else if (screen === "setup") {
+    body = <SetupScreen path={s.config.data?.path ?? ""} />;
   } else {
     body = <Shell listGeometry={listGeometry} />;
   }
@@ -100,6 +105,8 @@ export function AppShell() {
       <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
       <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />
       <PasswordDialog dialog={s.overlay === "password" ? s.passwordDialog : null} onOpenChange={close} />
+      <AccountWizard dialog={s.overlay === "account_wizard" ? s.accountWizard : null} onOpenChange={close} />
+      <DeviceCodeDialog open={s.overlay === "device_code"} />
     </>
   );
 }
