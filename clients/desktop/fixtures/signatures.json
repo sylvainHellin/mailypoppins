@@ -1,0 +1,9 @@
+{
+  "signatures": {
+    "work": "Kind regards,\nMe\nFixture GmbH",
+    "short": "Me"
+  },
+  "defaults": {
+    "work": "work"
+  }
+}

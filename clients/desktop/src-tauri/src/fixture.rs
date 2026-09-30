@@ -23,8 +23,22 @@
 //! The HTML bodies get the daemon's CSP meta tag prepended like a rendition
 //! does, but their `<meta http-equiv="refresh">` is deliberately **not**
 //! stripped: the hostile fixture exercises the reader's own defences.
+//!
+//! Drafts are real Markdown-with-frontmatter files in a per-run directory,
+//! `<temp>/mp-desktop-fixture-<pid>/drafts/<account>/`, written through the
+//! same `mp_core::draft` builders the daemon uses; `drafts.json` (whose rows
+//! the frontend's mock reads as they are) and `draft-bodies.json` seed them.
+//! Every call rescans that directory, as the daemon's `draft.*` queries do,
+//! so a file changed behind the fixture's back (a client-side recipient
+//! rewrite, a simulated editor save) is what the next answer reads. The
+//! fixture names every file it builds `<id>.md` (a created draft keeps its
+//! given name), so a draft whose frontmatter breaks is still addressed by
+//! its id, the file stem the daemon's watcher falls back to.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -33,10 +47,16 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use mp_client::events::Incoming;
+use mp_core::draft::{DraftRecipientEdit, SourceMessage};
 use mp_core::selector::{message_key, Selector};
+use mp_protocol::draft::{
+    DraftCreated, DraftEntry, DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview,
+    DraftReport, DraftSkip, DraftSource, DraftValidation,
+};
 use mp_protocol::events::{
-    KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+    Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
+    KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED,
+    KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::{HoldListing, HoldStatus};
 use mp_protocol::state::Bootstrap;
@@ -49,6 +69,14 @@ const ACCOUNTS: &str = include_str!("../../fixtures/accounts.json");
 const MESSAGES: &str = include_str!("../../fixtures/messages.json");
 const DRAFTS: &str = include_str!("../../fixtures/drafts.json");
 const HTML: &str = include_str!("../../fixtures/html.json");
+const DRAFT_BODIES: &str = include_str!("../../fixtures/draft-bodies.json");
+const SIGNATURES: &str = include_str!("../../fixtures/signatures.json");
+
+/// The address every fixture account sends from.
+const FIXTURE_FROM: &str = "Me <me@example.com>";
+
+/// The line `editor_save` appends.
+pub const EDITOR_SAVE_LINE: &str = "A line the fixture's editor added.";
 
 /// The default gap between two server-search hits.
 const HIT_DELAY: Duration = Duration::from_millis(150);
@@ -79,7 +107,17 @@ pub const SIMULATIONS: &[&str] = &[
     "shutdown",
     "rollback",
     "hold",
+    "editor_save",
+    "editor_invalid",
 ];
+
+/// One `editor_open` the fixture stubbed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorOpen {
+    pub path: String,
+    /// The argument vector the editor would have run with.
+    pub command: Vec<String>,
+}
 
 /// One row as it was before a mutation changed it.
 struct Journaled {
@@ -100,7 +138,14 @@ struct State {
     accounts: Value,
     /// account -> mailbox slug -> rows, newest first.
     messages: BTreeMap<String, BTreeMap<String, Vec<Value>>>,
-    drafts: BTreeMap<String, Value>,
+    /// account -> the listing of the last rescan of its drafts directory.
+    drafts: BTreeMap<String, DraftListing>,
+    /// The per-run directory the draft files live under.
+    root: PathBuf,
+    signatures: Value,
+    /// Every stubbed `editor_open`, oldest first.
+    editor_opens: Vec<EditorOpen>,
+    next_draft: u64,
     html: BTreeMap<i64, String>,
     instance: u32,
     revision: u64,
@@ -148,7 +193,7 @@ impl State {
         let drafts = self
             .drafts
             .get(account)
-            .map_or(0, |d| d["drafts"].as_array().map_or(0, Vec::len) as u64);
+            .map_or(0, |d| d.drafts.len() as u64);
         seeds
             .into_iter()
             .map(|mut seed| {
@@ -181,6 +226,16 @@ impl State {
             b["snapshot"]["mailboxes"][&account] = Value::Array(self.mailbox_rows(&account));
         }
         b["snapshot"]["holds"] = json!(self.hold_listing(None).holds);
+        for (account, listing) in &self.drafts {
+            let mut rows: Vec<Value> = listing.drafts.iter().map(snapshot_row).collect();
+            rows.extend(listing.skipped.iter().map(|skip| {
+                json!({
+                    "id": stem_of(&skip.path), "path": skip.path, "to": null, "subject": "",
+                    "status": "invalid", "valid": false, "ready": false
+                })
+            }));
+            b["snapshot"]["drafts"][account] = Value::Array(rows);
+        }
         b
     }
 
@@ -459,6 +514,428 @@ impl State {
     }
 }
 
+/// What a draft method answers and the watcher events it owes.
+type Answered = (Value, Vec<(&'static str, Value)>);
+
+/// The draft files: the `draft.*` family and `signature.list`.
+impl State {
+    fn drafts_dir(&self, account: &str) -> PathBuf {
+        self.root.join("drafts").join(account)
+    }
+
+    /// Re-read every account's drafts directory into [`State::drafts`].
+    fn rescan(&mut self) {
+        let accounts: Vec<String> = self.messages.keys().cloned().collect();
+        for account in accounts {
+            let (drafts, skipped) = scan_drafts(&account, &self.drafts_dir(&account));
+            let listing = DraftListing {
+                account: account.clone(),
+                drafts,
+                skipped,
+                collisions: Vec::new(),
+            };
+            self.drafts.insert(account, listing);
+        }
+    }
+
+    /// The listed draft `id` names, or the daemon's `-32602`.
+    fn draft(&self, method: &str, account: &str, id: &str) -> Result<&DraftEntry> {
+        self.drafts
+            .get(account)
+            .and_then(|l| l.drafts.iter().find(|d| d.id == id))
+            .ok_or_else(|| {
+                refused(
+                    method,
+                    -32602,
+                    &format!("no draft matches {}", Selector::for_draft(account, id)),
+                )
+            })
+    }
+
+    /// The draft `id` names, or, for a file that will not parse, the
+    /// `-32010` refusal the daemon answers when the id is the file's stem.
+    fn parseable(&self, method: &str, account: &str, id: &str) -> Result<DraftEntry> {
+        if let Some(skip) = self
+            .drafts
+            .get(account)
+            .and_then(|l| l.skipped.iter().find(|s| stem_of(&s.path) == id))
+        {
+            return Err(refused(method, -32010, &skip.error));
+        }
+        self.draft(method, account, id).cloned()
+    }
+
+    /// The watcher's event for the file at `path`, after a rescan.
+    fn watch_events(&self, path: &Path) -> Vec<(&'static str, Value)> {
+        let shown = path.display().to_string();
+        let account = path
+            .parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some(listing) = self.drafts.get(&account) else {
+            return Vec::new();
+        };
+        if let Some(entry) = listing.drafts.iter().find(|d| d.path == shown) {
+            let mut payload = snapshot_row(entry);
+            payload["account"] = json!(account);
+            return vec![(KIND_DRAFT_CHANGED, payload)];
+        }
+        if let Some(skip) = listing.skipped.iter().find(|s| s.path == shown) {
+            let payload = DraftInvalid {
+                account,
+                id: stem_of(&skip.path),
+                path: skip.path.clone(),
+                diagnostics: vec![Diagnostic {
+                    line: None,
+                    message: skip.error.clone(),
+                }],
+            };
+            return vec![(
+                KIND_DRAFT_INVALID,
+                serde_json::to_value(payload).unwrap_or_default(),
+            )];
+        }
+        Vec::new()
+    }
+
+    fn mint_id(&mut self) -> String {
+        self.next_draft += 1;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        format!("{:016x}", nanos ^ (self.next_draft << 56))
+    }
+
+    /// The signature a written draft carries: the one named, none, or the
+    /// account's default.
+    fn signature_for(&self, account: &str, params: &Value) -> Option<String> {
+        if params["no_signature"] == true {
+            return None;
+        }
+        let name = params["signature"]
+            .as_str()
+            .or_else(|| self.signatures["defaults"][account].as_str())?;
+        self.signatures["signatures"][name]
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// The received message `source` addresses, as a reply or a forward reads
+    /// it. A forward carries the attachments, written as small files.
+    fn source_of(
+        &self,
+        method: &str,
+        account: &str,
+        source: &Value,
+        forward: bool,
+    ) -> Result<(SourceMessage, DraftSource)> {
+        let row_id = source["row_id"].as_i64().ok_or_else(|| {
+            refused(
+                method,
+                -32602,
+                "the fixture addresses a source by row_id only",
+            )
+        })?;
+        let (mailbox, row) = self.row(account, row_id).ok_or_else(|| {
+            refused(
+                method,
+                -32602,
+                &format!("{account} holds no message with row id {row_id}"),
+            )
+        })?;
+        let text = |key: &str| row[key].as_str().unwrap_or_default().to_string();
+        let opt = |key: &str| row[key].as_str().map(str::to_string);
+        let mut attachments = Vec::new();
+        if forward {
+            let dir = self
+                .root
+                .join("attachments")
+                .join(account)
+                .join(row_id.to_string());
+            for part in row["attachments"].as_array().into_iter().flatten() {
+                let name = part["name"].as_str().unwrap_or("part");
+                fs::create_dir_all(&dir)?;
+                let file = dir.join(name);
+                fs::write(&file, format!("fixture attachment {name}\n"))?;
+                attachments.push(file);
+            }
+        }
+        let message = SourceMessage {
+            from: text("from"),
+            to: text("to"),
+            cc: opt("cc"),
+            subject: text("subject"),
+            message_id: opt("message_id"),
+            date: opt("date_display"),
+            body: text("body").trim().to_string(),
+            attachments,
+            html: self.html.get(&row_id).cloned(),
+            reply_to: opt("reply_to"),
+        };
+        let source = DraftSource {
+            id: format!("{mailbox}/{}", row["uid"]),
+            selector: text("selector"),
+        };
+        Ok((message, source))
+    }
+
+    /// A built file renamed to `<id>.md` with its id minted, and the headers
+    /// override applied.
+    fn finish_built(
+        &mut self,
+        built: &Path,
+        headers: Option<&DraftRecipientEdit>,
+    ) -> Result<(String, PathBuf)> {
+        let id = self.mint_id();
+        mp_core::draft::set_draft_id(built, &id)?;
+        let path = built.with_file_name(format!("{id}.md"));
+        fs::rename(built, &path)?;
+        let html = built.with_extension("html");
+        if html.exists() {
+            fs::rename(&html, path.with_extension("html"))?;
+        }
+        if let Some(headers) = headers {
+            mp_core::draft::rewrite_draft_recipients(&path, headers)?;
+        }
+        Ok((id, path))
+    }
+
+    /// The answer of the four methods that write a draft, and its watcher
+    /// event.
+    fn created(
+        &mut self,
+        account: &str,
+        id: &str,
+        path: &Path,
+        source: Option<DraftSource>,
+    ) -> Result<Answered> {
+        self.rescan();
+        let answer = DraftCreated {
+            account: account.to_string(),
+            id: id.to_string(),
+            selector: Selector::for_draft(account, id).to_string(),
+            path: path.display().to_string(),
+            source,
+        };
+        Ok((serde_json::to_value(answer)?, self.watch_events(path)))
+    }
+
+    fn draft_method(&mut self, method: &str, params: &Value) -> Result<Answered> {
+        let account = param_str(method, params, "account")?.to_string();
+        self.account_known(method, &account)?;
+        let dir = self.drafts_dir(&account);
+        match method {
+            "signature.list" => {
+                let mut names: Vec<&String> = self.signatures["signatures"]
+                    .as_object()
+                    .map(|o| o.keys().collect())
+                    .unwrap_or_default();
+                names.sort();
+                let answer = json!({
+                    "account": account, "names": names,
+                    "default": self.signatures["defaults"][&account]
+                });
+                Ok((answer, Vec::new()))
+            }
+            "draft.create" => {
+                let name = param_str(method, params, "name")?;
+                let file_name = match Path::new(name).extension() {
+                    Some(_) => name.to_string(),
+                    None => format!("{name}.md"),
+                };
+                fs::create_dir_all(&dir)?;
+                let path = dir.join(file_name);
+                if path.exists() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("A draft already exists at {}", path.display()),
+                    ));
+                }
+                let id = self.mint_id();
+                let skeleton = mp_core::draft::new_draft_skeleton_with_id(
+                    FIXTURE_FROM,
+                    &rfc3339_in(Duration::ZERO),
+                    &id,
+                    self.signature_for(&account, params).as_deref(),
+                );
+                fs::write(&path, skeleton)?;
+                self.created(&account, &id, &path, None)
+            }
+            "draft.reply" | "draft.forward" => {
+                let reply = method == "draft.reply";
+                let headers = recipient_headers(method, params)?;
+                let (message, source) =
+                    self.source_of(method, &account, &params["source"], !reply)?;
+                let signature = self.signature_for(&account, params);
+                fs::create_dir_all(&dir)?;
+                let built = if reply {
+                    mp_core::draft::create_reply_draft_from(
+                        &message,
+                        params["all"] == true,
+                        FIXTURE_FROM,
+                        Some(&dir),
+                        signature.as_deref(),
+                    )?
+                } else {
+                    mp_core::draft::create_forward_draft_from(
+                        &message,
+                        FIXTURE_FROM,
+                        Some(&dir),
+                        signature.as_deref(),
+                    )?
+                };
+                let (id, path) = self.finish_built(&built, headers.as_ref())?;
+                self.created(&account, &id, &path, Some(source))
+            }
+            "draft.create_from_message" => {
+                let kind: DraftKind =
+                    serde_json::from_value(params["kind"].clone()).map_err(|_| {
+                        refused(method, -32602, "kind is one of reply, reply_all or forward")
+                    })?;
+                let message: DraftMessage = match &params["message"] {
+                    value @ Value::Object(_) => {
+                        serde_json::from_value(value.clone()).map_err(|e| {
+                            refused(
+                                method,
+                                -32602,
+                                &format!("message is not a quotable message: {e}"),
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            "message is the object a reply quotes",
+                        ))
+                    }
+                };
+                let source = SourceMessage {
+                    from: message.from,
+                    to: message.to,
+                    cc: message.cc,
+                    subject: message.subject,
+                    message_id: message.message_id,
+                    date: Some(message.date_display),
+                    body: message.body_text.trim().to_string(),
+                    attachments: Vec::new(),
+                    html: message.html_body,
+                    reply_to: message.reply_to,
+                };
+                let signature = self.signature_for(&account, params);
+                fs::create_dir_all(&dir)?;
+                let built = match kind {
+                    DraftKind::Reply | DraftKind::ReplyAll => {
+                        mp_core::draft::create_reply_draft_from(
+                            &source,
+                            kind == DraftKind::ReplyAll,
+                            FIXTURE_FROM,
+                            Some(&dir),
+                            signature.as_deref(),
+                        )?
+                    }
+                    DraftKind::Forward => mp_core::draft::create_forward_draft_from(
+                        &source,
+                        FIXTURE_FROM,
+                        Some(&dir),
+                        signature.as_deref(),
+                    )?,
+                };
+                let (id, path) = self.finish_built(&built, None)?;
+                self.created(&account, &id, &path, None)
+            }
+            "draft.path" => {
+                let id = param_str(method, params, "id")?;
+                let entry = self.draft(method, &account, id)?;
+                let answer = DraftLocation {
+                    account: account.clone(),
+                    id: entry.id.clone(),
+                    selector: entry.selector.clone(),
+                    path: entry.path.clone(),
+                    status: entry.status.clone(),
+                };
+                Ok((serde_json::to_value(answer)?, Vec::new()))
+            }
+            "draft.approve" | "draft.demote" => {
+                let approve = method == "draft.approve";
+                let id = param_str(method, params, "id")?;
+                let entry = self.parseable(method, &account, id)?;
+                if entry.status == "sent" {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        if approve {
+                            "Cannot approve an already sent email"
+                        } else {
+                            "Cannot revert a sent email back to draft"
+                        },
+                    ));
+                }
+                let path = PathBuf::from(&entry.path);
+                if approve {
+                    mp_core::draft::mark_as_approved(&path)?;
+                } else {
+                    mp_core::draft::mark_as_draft(&path)?;
+                }
+                self.rescan();
+                let answer = json!({
+                    "account": account, "id": id,
+                    "status": if approve { "approved" } else { "draft" },
+                    "path": entry.path,
+                });
+                Ok((answer, self.watch_events(&path)))
+            }
+            "draft.validate" => {
+                let rows: Vec<DraftEntry> = match params["id"].as_str() {
+                    Some(id) => vec![self.draft(method, &account, id)?.clone()],
+                    None => self
+                        .drafts
+                        .get(&account)
+                        .map(|l| l.drafts.clone())
+                        .unwrap_or_default(),
+                };
+                let answer = DraftValidation {
+                    account: account.clone(),
+                    reports: rows.iter().map(|row| report(&account, row)).collect(),
+                };
+                Ok((serde_json::to_value(answer)?, Vec::new()))
+            }
+            "draft.preview" => {
+                let id = param_str(method, params, "id")?;
+                let entry = self.parseable(method, &account, id)?;
+                let draft = mp_core::draft::parse_email_draft(Path::new(&entry.path))
+                    .map_err(|e| refused(method, -32010, &one_line(&e)))?;
+                let outcome = mp_core::draft::validate_draft(&draft);
+                let fm = &draft.frontmatter;
+                let answer = DraftPreview {
+                    account: account.clone(),
+                    id: entry.id.clone(),
+                    selector: entry.selector.clone(),
+                    path: entry.path.clone(),
+                    from: fm.from.clone().unwrap_or_else(|| FIXTURE_FROM.to_string()),
+                    to: fm.to.clone(),
+                    cc: fm.cc.clone(),
+                    bcc: fm.bcc.clone(),
+                    subject: fm.subject.clone(),
+                    body: draft.body_markdown.chars().take(500).collect(),
+                    body_truncated: draft.body_markdown.len() > 500,
+                    status: fm.status.to_string(),
+                    valid: outcome.is_ok(),
+                    error: outcome.as_ref().err().map(|e| e.to_string()),
+                    warnings: outcome.unwrap_or_default(),
+                    font_family: "Calibri".into(),
+                    font_size: "11pt".into(),
+                    signature: None,
+                };
+                Ok((serde_json::to_value(answer)?, Vec::new()))
+            }
+            other => Err(refused(other, -32601, "method not found")),
+        }
+    }
+}
+
 /// The daemon stand-in.
 pub struct Fixture {
     state: Mutex<State>,
@@ -535,8 +1012,14 @@ impl Fixture {
         let accounts: Value = serde_json::from_str(ACCOUNTS).context("fixtures/accounts.json")?;
         let messages: BTreeMap<String, BTreeMap<String, Vec<Value>>> =
             serde_json::from_str(MESSAGES).context("fixtures/messages.json")?;
-        let drafts: BTreeMap<String, Value> =
+        let seeds: BTreeMap<String, DraftListing> =
             serde_json::from_str(DRAFTS).context("fixtures/drafts.json")?;
+        let bodies: BTreeMap<String, String> =
+            serde_json::from_str(DRAFT_BODIES).context("fixtures/draft-bodies.json")?;
+        let signatures: Value =
+            serde_json::from_str(SIGNATURES).context("fixtures/signatures.json")?;
+        let root = fixture_root();
+        seed_drafts(&root, &seeds, &bodies).context("writing the fixture drafts")?;
         let html_by_key: BTreeMap<String, String> =
             serde_json::from_str(HTML).context("fixtures/html.json")?;
         let mut html = BTreeMap::new();
@@ -558,7 +1041,11 @@ impl Fixture {
             bootstrap,
             accounts,
             messages,
-            drafts,
+            drafts: BTreeMap::new(),
+            root,
+            signatures,
+            editor_opens: Vec::new(),
+            next_draft: 0,
             html,
             instance: 1,
             revision,
@@ -575,6 +1062,7 @@ impl Fixture {
             holds: Vec::new(),
             hold_second: Duration::from_secs(1),
         };
+        state.rescan();
         let names: Vec<String> = state.messages.keys().cloned().collect();
         for name in names {
             let counts = state.counts(&name);
@@ -688,6 +1176,8 @@ impl Fixture {
         if s.down {
             return Err(anyhow!("{method}: the daemon is not reachable"));
         }
+        // The daemon's draft queries answer from a fresh directory scan.
+        s.rescan();
         match method {
             "state.bootstrap" => Ok(s.bootstrap()),
             "account.list" => Ok(s.accounts.clone()),
@@ -729,10 +1219,26 @@ impl Fixture {
             }
             "draft.list" => {
                 let account = param_str(method, &params, "account")?;
-                s.drafts
-                    .get(account)
-                    .cloned()
-                    .ok_or_else(|| refused(method, -32005, &format!("account_unknown: {account}")))
+                let listing = s.drafts.get(account).cloned().ok_or_else(|| {
+                    refused(method, -32005, &format!("account_unknown: {account}"))
+                })?;
+                Ok(serde_json::to_value(listing)?)
+            }
+            "draft.create"
+            | "draft.reply"
+            | "draft.forward"
+            | "draft.create_from_message"
+            | "draft.path"
+            | "draft.approve"
+            | "draft.demote"
+            | "draft.validate"
+            | "draft.preview"
+            | "signature.list" => {
+                let (answer, events) = s.draft_method(method, &params)?;
+                for (kind, payload) in events {
+                    self.emit_locked(&mut s, kind, payload);
+                }
+                Ok(answer)
             }
             "message.get" => {
                 let account = param_str(method, &params, "account")?;
@@ -875,25 +1381,10 @@ impl Fixture {
                 let account = param_str(method, &params, "account")?.to_string();
                 let id = param_str(method, &params, "id")?.to_string();
                 let force = params["force"] == true;
-                let Some(listing) = s.drafts.get_mut(&account) else {
-                    return Err(refused(
-                        method,
-                        -32005,
-                        &format!("account_unknown: {account}"),
-                    ));
-                };
+                s.account_known(method, &account)?;
                 let selector = Selector::for_draft(&account, &id).to_string();
-                let drafts = listing["drafts"]
-                    .as_array_mut()
-                    .ok_or_else(|| anyhow!("fixtures/drafts.json: no drafts array"))?;
-                let Some(at) = drafts.iter().position(|d| d["id"] == id.as_str()) else {
-                    return Err(refused(
-                        method,
-                        -32602,
-                        &format!("no draft matches {selector}"),
-                    ));
-                };
-                let status = drafts[at]["status"].clone();
+                let entry = s.draft(method, &account, &id)?.clone();
+                let status = entry.status.clone();
                 if status == "approved" && !force {
                     return Err(refused(
                         method,
@@ -904,10 +1395,9 @@ impl Fixture {
                         ),
                     ));
                 }
-                drafts.remove(at);
-                if let Some(seeded) = s.bootstrap["snapshot"]["drafts"][&account].as_array_mut() {
-                    seeded.retain(|d| d["id"] != id.as_str());
-                }
+                mp_core::draft::remove_draft_files(Path::new(&entry.path))
+                    .with_context(|| format!("removing {}", entry.path))?;
+                s.rescan();
                 drop(s);
                 // The daemon's draft watcher sees the file go.
                 self.emit(
@@ -1180,6 +1670,8 @@ impl Fixture {
                 self.simulate_hold();
                 return Ok(());
             }
+            "editor_save" => return self.simulate_editor(false),
+            "editor_invalid" => return self.simulate_editor(true),
             _ => {}
         }
         match what {
@@ -1292,12 +1784,12 @@ impl Fixture {
         let status = {
             let mut s = self.state();
             let id = s.next_operation_id("fixture-hold");
-            let draft = s.drafts["work"]["drafts"][0].clone();
+            let draft = s.drafts.get("work").and_then(|l| l.drafts.first());
             let status = HoldStatus {
                 operation_id: id,
                 account: "work".into(),
-                draft_id: draft["id"].as_str().unwrap_or("fixture-draft").into(),
-                subject: draft["subject"].as_str().unwrap_or_default().into(),
+                draft_id: draft.map_or("fixture-draft", |d| d.id.as_str()).into(),
+                subject: draft.and_then(|d| d.subject.clone()).unwrap_or_default(),
                 hold_secs: SIMULATED_HOLD_SECS,
                 remaining_secs: SIMULATED_HOLD_SECS,
                 fires_at: String::new(),
@@ -1312,6 +1804,235 @@ impl Fixture {
         );
         self.spawn_hold(id);
     }
+
+    /// Journal an `editor_open` instead of spawning anything.
+    pub fn record_editor(&self, path: &str, command: Vec<String>) {
+        self.state().editor_opens.push(EditorOpen {
+            path: path.to_string(),
+            command,
+        });
+    }
+
+    /// Every stubbed `editor_open`, oldest first.
+    pub fn editor_opens(&self) -> Vec<EditorOpen> {
+        self.state().editor_opens.clone()
+    }
+
+    /// A client wrote the draft file at `path` (a recipient rewrite): publish
+    /// what the daemon's watcher would, `draft.changed` or `draft.invalid`.
+    pub fn file_written(&self, path: &Path) {
+        let mut s = self.state();
+        s.rescan();
+        for (kind, payload) in s.watch_events(path) {
+            self.emit_locked(&mut s, kind, payload);
+        }
+    }
+
+    /// The editor saved the newest draft `editor_open` named: a line appended
+    /// (`editor_save`), or a frontmatter that no longer parses
+    /// (`editor_invalid`), and the watcher's event for it.
+    fn simulate_editor(&self, broken: bool) -> Result<()> {
+        let mut s = self.state();
+        let open = s.editor_opens.last().cloned().ok_or_else(|| {
+            anyhow!("no draft was opened in the editor yet; editor_open names the file")
+        })?;
+        let path = PathBuf::from(&open.path);
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let next = if broken {
+            content.replacen("---\n", "---\nto: [unclosed\n", 1)
+        } else {
+            format!("{}\n{EDITOR_SAVE_LINE}\n", content.trim_end_matches('\n'))
+        };
+        fs::write(&path, next).with_context(|| format!("writing {}", path.display()))?;
+        s.rescan();
+        let events = s.watch_events(&path);
+        if events.is_empty() {
+            return Err(anyhow!(
+                "{} is not a fixture draft any more",
+                path.display()
+            ));
+        }
+        for (kind, payload) in events {
+            self.emit_locked(&mut s, kind, payload);
+        }
+        Ok(())
+    }
+}
+
+/// `<temp>/mp-desktop-fixture-<pid>`, with a `-<n>` suffix for every fixture
+/// after the first in one process (the tests load many).
+fn fixture_root() -> PathBuf {
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+    let n = RUNS.fetch_add(1, Ordering::SeqCst);
+    let base = format!("mp-desktop-fixture-{}", std::process::id());
+    std::env::temp_dir().join(if n == 0 { base } else { format!("{base}-{n}") })
+}
+
+/// Write `drafts.json`'s rows as files under `root`, with the bodies of
+/// `draft-bodies.json`, the first of each account the newest, so the listing
+/// keeps the file's order. The rows' own paths are ignored.
+fn seed_drafts(
+    root: &Path,
+    seeds: &BTreeMap<String, DraftListing>,
+    bodies: &BTreeMap<String, String>,
+) -> Result<()> {
+    // A directory left by an earlier run under a reused pid.
+    let _ = fs::remove_dir_all(root);
+    let now = SystemTime::now();
+    for (account, listing) in seeds {
+        let dir = root.join("drafts").join(account);
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        for (i, row) in listing.drafts.iter().enumerate() {
+            let id = row.id.as_str();
+            let path = dir.join(format!("{id}.md"));
+            let skeleton = mp_core::draft::new_draft_skeleton_with_id(
+                FIXTURE_FROM,
+                row.date.as_deref().unwrap_or_default(),
+                id,
+                None,
+            );
+            let body = bodies.get(id).map_or("", String::as_str);
+            fs::write(&path, format!("{skeleton}{body}"))?;
+            let text = |v: &Option<String>| v.clone().unwrap_or_default();
+            mp_core::draft::rewrite_draft_recipients(
+                &path,
+                &DraftRecipientEdit {
+                    to: text(&row.to),
+                    cc: text(&row.cc),
+                    bcc: String::new(),
+                    subject: text(&row.subject),
+                },
+            )?;
+            if row.status == "approved" {
+                mp_core::draft::mark_as_approved(&path)?;
+            }
+            fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(now - Duration::from_secs(60 * (i as u64 + 1)))?;
+        }
+    }
+    Ok(())
+}
+
+/// A file stem, the id the daemon's watcher names an unparseable draft by.
+fn stem_of(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn one_line(error: &anyhow::Error) -> String {
+    format!("{error:#}").replace('\n', " ")
+}
+
+/// The daemon's `index_dir` over one directory: the rows that parse, newest
+/// file first then by id, and the files that do not.
+fn scan_drafts(account: &str, dir: &Path) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
+    let mut rows: Vec<(SystemTime, DraftEntry)> = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|x| x != "md") {
+            continue;
+        }
+        let shown = path.display().to_string();
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        match mp_core::draft::parse_email_draft(&path) {
+            Ok(draft) => {
+                let fm = &draft.frontmatter;
+                let id = fm.id.clone().unwrap_or_else(|| stem_of(&shown));
+                let filled = |v: &Option<String>| v.clone().filter(|v| !v.trim().is_empty());
+                rows.push((
+                    mtime,
+                    DraftEntry {
+                        selector: Selector::for_draft(account, &id).to_string(),
+                        id,
+                        path: shown,
+                        status: fm.status.to_string(),
+                        to: filled(&fm.to),
+                        cc: filled(&fm.cc),
+                        subject: Some(fm.subject.clone()),
+                        date: fm.date.clone(),
+                        valid: true,
+                        ready: mp_core::draft::validate_draft(&draft).is_ok(),
+                    },
+                ));
+            }
+            Err(e) => skipped.push(DraftSkip {
+                path: shown,
+                error: one_line(&e),
+            }),
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    (rows.into_iter().map(|(_, row)| row).collect(), skipped)
+}
+
+/// A listed draft as the snapshot and `draft.changed` carry it, less the
+/// account.
+fn snapshot_row(entry: &DraftEntry) -> Value {
+    json!({
+        "id": entry.id, "path": entry.path, "to": entry.to,
+        "subject": entry.subject.clone().unwrap_or_default(), "status": entry.status,
+        "valid": entry.valid, "ready": entry.ready
+    })
+}
+
+/// One draft's diagnostics, as `draft.validate` reports them.
+fn report(account: &str, row: &DraftEntry) -> DraftReport {
+    let outcome = mp_core::draft::parse_email_draft(Path::new(&row.path))
+        .and_then(|draft| mp_core::draft::validate_draft(&draft));
+    DraftReport {
+        id: row.id.clone(),
+        selector: Selector::for_draft(account, &row.id).to_string(),
+        valid: outcome.is_ok(),
+        error: outcome.as_ref().err().map(|e| e.to_string()),
+        warnings: outcome.unwrap_or_default(),
+    }
+}
+
+/// The `headers` override of `draft.reply` and `draft.forward`: all four
+/// keys once present, as the daemon requires.
+fn recipient_headers(method: &str, params: &Value) -> Result<Option<DraftRecipientEdit>> {
+    let headers = match &params["headers"] {
+        Value::Null => return Ok(None),
+        Value::Object(headers) => headers,
+        _ => {
+            return Err(refused(
+                method,
+                -32602,
+                "headers is an object of to, cc, bcc and subject",
+            ))
+        }
+    };
+    let field = |name: &str| {
+        headers
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                refused(
+                    method,
+                    -32602,
+                    &format!(
+                        "headers overrides all four of to, cc, bcc and subject; {name} is missing"
+                    ),
+                )
+            })
+    };
+    Ok(Some(DraftRecipientEdit {
+        to: field("to")?,
+        cc: field("cc")?,
+        bcc: field("bcc")?,
+        subject: field("subject")?,
+    }))
 }
 
 /// Row keys a listing sends as `""` when the header was absent, where the
@@ -1722,7 +2443,8 @@ mod tests {
             serde_json::from_value(f.call("state.bootstrap", json!({})).expect("b")).expect("b");
         assert_eq!(b.snapshot.drafts["work"].len(), 1);
 
-        f.state().drafts.get_mut("work").expect("work")["drafts"][0]["status"] = json!("approved");
+        let path = f.state().drafts["work"].drafts[0].path.clone();
+        mp_core::draft::mark_as_approved(Path::new(&path)).expect("approved");
         let e = f
             .call(
                 "draft.discard",
@@ -1868,6 +2590,103 @@ mod tests {
         assert!(f
             .call("sync.full", json!({"account": "work", "limit": 5}))
             .is_err());
+    }
+
+    #[test]
+    fn the_seeded_drafts_are_files_with_frontmatter_in_a_per_run_dir() {
+        let (f, _rx) = fixture();
+        let listed = f
+            .call("draft.list", json!({"account": "work"}))
+            .expect("list");
+        let listing: DraftListing = serde_json::from_value(listed).expect("decodes");
+        let ids: Vec<&str> = listing.drafts.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["angebot-antwort", "offsite-note"], "the seed order");
+        let root = f.state().root.clone();
+        assert!(root
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("mp-desktop-fixture-")));
+        for draft in &listing.drafts {
+            assert!(Path::new(&draft.path).starts_with(root.join("drafts/work")));
+            let text = fs::read_to_string(&draft.path).expect("a real file");
+            assert!(
+                text.starts_with(&format!("---\nid: {}\n", draft.id)),
+                "{text}"
+            );
+        }
+        let angebot = &listing.drafts[0];
+        assert_eq!(angebot.to.as_deref(), Some("robin@example.com"));
+        assert!(angebot.valid && angebot.ready);
+        assert!(!listing.drafts[1].ready, "no recipient, no subject");
+        let b: Bootstrap =
+            serde_json::from_value(f.call("state.bootstrap", json!({})).expect("b")).expect("b");
+        assert_eq!(b.snapshot.drafts["work"][0].path, angebot.path);
+    }
+
+    #[test]
+    fn a_broken_draft_is_published_invalid_skipped_and_refused() {
+        let (f, rx) = fixture();
+        assert!(
+            f.simulate("editor_save").is_err(),
+            "nothing was opened in the editor yet"
+        );
+        let path = f.state().drafts["work"].drafts[1].path.clone();
+        f.record_editor(&path, vec!["zed".into(), path.clone()]);
+        f.simulate("editor_invalid").expect("broken");
+        let e = next_event(&rx);
+        assert_eq!(e.kind, KIND_DRAFT_INVALID);
+        let invalid: DraftInvalid = serde_json::from_value(e.payload).expect("decodes");
+        assert_eq!(
+            (
+                invalid.account.as_str(),
+                invalid.id.as_str(),
+                invalid.path.as_str()
+            ),
+            ("work", "offsite-note", path.as_str())
+        );
+        assert!(!invalid.diagnostics.is_empty());
+
+        let listed = f
+            .call("draft.list", json!({"account": "work"}))
+            .expect("list");
+        assert_eq!(listed["drafts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed["skipped"][0]["path"], path.as_str());
+        let b: Bootstrap =
+            serde_json::from_value(f.call("state.bootstrap", json!({})).expect("b")).expect("b");
+        let row = b.snapshot.drafts["work"]
+            .iter()
+            .find(|d| d.id == "offsite-note")
+            .expect("the invalid row");
+        assert_eq!((row.status.as_str(), row.valid), ("invalid", false));
+        for method in ["draft.approve", "draft.preview"] {
+            let e = f
+                .call(method, json!({"account": "work", "id": "offsite-note"}))
+                .expect_err("unparseable");
+            assert_eq!(
+                crate::error::rpc_code(&format!("{e:#}")),
+                Some(-32010),
+                "{method}"
+            );
+        }
+        f.simulate("editor_save").expect("saved, still broken");
+        assert_eq!(next_event(&rx).kind, KIND_DRAFT_INVALID);
+    }
+
+    #[test]
+    fn a_created_draft_takes_its_name_and_a_discard_removes_the_file() {
+        let (f, rx) = fixture();
+        let created = f
+            .call("draft.create", json!({"account": "home", "name": "note"}))
+            .expect("created");
+        let path = created["path"].as_str().expect("path").to_string();
+        assert!(path.ends_with("/drafts/home/note.md"));
+        assert_eq!(next_event(&rx).kind, KIND_DRAFT_CHANGED);
+        let id = created["id"].as_str().expect("id");
+        let discarded = f
+            .call("draft.discard", json!({"account": "home", "id": id}))
+            .expect("discarded");
+        assert_eq!(discarded["status"], "draft");
+        assert!(!Path::new(&path).exists());
+        assert_eq!(next_event(&rx).kind, "state.remove");
     }
 
     #[test]
