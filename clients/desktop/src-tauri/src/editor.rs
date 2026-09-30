@@ -611,14 +611,16 @@ mod tests {
 
     #[test]
     fn a_terminal_editor_in_the_environment_falls_through_to_the_probes() {
+        // The earlier name sits in the later directory, so the assertion only
+        // holds when the probes go name by name, then directory by directory.
         let files =
-            |p: &Path| p == Path::new("/usr/bin/cursor") || p == Path::new("/opt/homebrew/bin/zed");
+            |p: &Path| p == Path::new("/usr/bin/zed") || p == Path::new("/opt/homebrew/bin/cursor");
         let env = env_of(&[("VISUAL", "/usr/bin/nvim"), ("EDITOR", "hx")]);
         let r = resolve(&lookup(&env, None, &files));
         assert_eq!(
             (r.template.as_str(), r.source),
-            ("/opt/homebrew/bin/zed", EditorSource::Probe),
-            "zed comes before cursor in the probe order"
+            ("/usr/bin/zed", EditorSource::Probe),
+            "zed comes before cursor in the probe order, whatever the directory"
         );
         // An explicit choice is taken as it is, terminal or not.
         let explicit = env_of(&[(EDITOR_ENV, "hx")]);
