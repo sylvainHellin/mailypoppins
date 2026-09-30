@@ -95,12 +95,13 @@ export function emptyReader(): ReaderState {
 
 /** One search result, local or from the server, in the list's shape. */
 export type SearchHit = {
-  /** Unique within one search: the mailbox and the message_id. */
+  /** Unique within one search: the mailbox and the message_id, or the hit's position when it has none. */
   key: string;
   account: string;
   /** The mailbox slug (local) or sidebar label (server) it was found under. */
   mailbox: string;
-  message_id: string;
+  /** Null for a server hit whose server returned no `Message-ID:`, which can be listed and not opened. */
+  message_id: string | null;
   /** Null for a server-only hit the store has never ingested. */
   row_id: number | null;
   selector: string | null;

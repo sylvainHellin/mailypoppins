@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
+import { openableHits } from "@/app/search";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
 import type { Bootstrap, MessageListRow } from "@/protocol/types";
 import type { AccountInfo, MessageList } from "@/lib/gui-types";
@@ -226,13 +227,13 @@ describe("the reducer", () => {
 });
 
 describe("the search reducer", () => {
-  const hitPayload = (operation_id: string, message_id: string) => ({
+  const hitPayload = (operation_id: string, message_id: string | null) => ({
     operation_id,
     hit: {
       account: "work", mailbox: "Inbox", message_id, row_id: null, selector: null, from: "a@example.com", to: "",
       cc: null, reply_to: null, bcc: null, subject: message_id, date_display: "", date_sort: "",
       flags: { seen: true, answered: false, forwarded: false, flagged: false }, has_attachments: false,
-      is_invite: false, body_text: null, html_body: null,
+      is_invite: false, body_text: "", html_body: null,
     },
   });
   const envelope = (kind: string, payload: unknown, revision: number): Action => ({
@@ -249,6 +250,22 @@ describe("the search reducer", () => {
     s = run(s, { type: "search_server_started", seq, operation_id: "op-7" });
     expect(s.search).toMatchObject({ status: "running", operationId: "op-7", early: [] });
     expect(s.search?.hits.map((h) => h.message_id)).toEqual(["<a>", "<b>"]);
+  });
+
+  it("keeps every server hit without a Message-ID, each under its own key, and none of them openable", () => {
+    let s = run(booted(), { type: "search_server", query: "x" });
+    s = run(s, { type: "search_server_started", seq: s.search!.seq, operation_id: "op-9" });
+    s = run(
+      s,
+      envelope("message.server_hit", hitPayload("op-9", null), 910),
+      envelope("message.server_hit", hitPayload("op-9", null), 911),
+      envelope("message.server_hit", hitPayload("op-9", "<c>"), 912),
+      envelope("message.server_hit", hitPayload("op-9", "<c>"), 913),
+    );
+    const hits = s.search!.hits;
+    expect(hits.map((h) => h.message_id)).toEqual([null, null, "<c>"]);
+    expect(new Set(hits.map((h) => h.key)).size).toBe(3);
+    expect(openableHits(s.search!)).toEqual([]);
   });
 
   it("drops a start answer for a superseded run", () => {

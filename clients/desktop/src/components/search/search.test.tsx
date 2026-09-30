@@ -31,7 +31,7 @@ function serverHit(mailbox: string, rowId: number | null, subject: string): Serv
     flags: { seen: true, answered: false, forwarded: false, flagged: false },
     has_attachments: false,
     is_invite: false,
-    body_text: null,
+    body_text: "",
     html_body: null,
   };
 }

@@ -26,7 +26,7 @@ export function SearchResults({ search }: { search: SearchState }) {
 
   const pick = useCallback(
     (hit: SearchHit, focus?: "reader") => {
-      if (hit.row_id === null || hit.selector === null) return;
+      if (hit.row_id === null || hit.selector === null || hit.message_id === null) return;
       dispatch({
         type: "select_message",
         message: { row_id: hit.row_id, message_id: hit.message_id, selector: hit.selector },

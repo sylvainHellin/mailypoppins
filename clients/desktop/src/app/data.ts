@@ -142,7 +142,10 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
       ? { mode: search.mode, seq: search.seq, account: search.account, query: search.query }
       : null;
   const wantKey = want ? `${want.mode}:${want.seq}` : null;
-  const exclude = search && search.mode === "server" && search.status === "searching" ? search.hits.map((h) => h.message_id) : [];
+  const exclude =
+    search && search.mode === "server" && search.status === "searching"
+      ? search.hits.flatMap((h) => (h.message_id === null ? [] : [h.message_id]))
+      : [];
   const excludeRef = useRef(exclude);
   excludeRef.current = exclude;
 

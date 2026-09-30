@@ -49,7 +49,7 @@ export function serverHit(h: ServerSearchHit): SearchHit {
 /** The hits the reader can open: those the store holds a row for. */
 export function openableHits(search: SearchState): Omit<MessageRef, "verified">[] {
   return search.hits.flatMap((h) =>
-    h.row_id !== null && h.selector !== null
+    h.row_id !== null && h.selector !== null && h.message_id !== null
       ? [{ row_id: h.row_id, message_id: h.message_id, selector: h.selector }]
       : [],
   );
@@ -86,6 +86,12 @@ export function startSearch(s: AppState, mode: "local" | "server", query: string
 }
 
 function addHit(search: SearchState, hit: SearchHit): SearchState {
+  // `message_id` is the dedup key, so a hit without one is never a duplicate
+  // and is keyed by its position instead.
+  if (hit.message_id === null) {
+    const keyed = { ...hit, key: `${hit.mailbox}\u0000#${search.hits.length}` };
+    return { ...search, hits: [...search.hits, keyed] };
+  }
   if (search.hits.some((h) => h.message_id === hit.message_id && h.mailbox === hit.mailbox)) return search;
   return { ...search, hits: [...search.hits, hit] };
 }
