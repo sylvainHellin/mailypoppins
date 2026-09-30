@@ -2257,3 +2257,24 @@ The desktop client reads the code back off the trailing parenthesis (`error::rpc
 A sender who writes `<!doctype html <meta content="default-src 'none'; report-uri https://t.example/r" http-equiv=Content-Security-Policy>` keeps that string, and it lands ahead of the daemon's tag; the browser reads it as part of the doctype, so the document itself is safe.
 A reader that copies "the first CSP meta" into a response header is not: a header may carry `report-uri`, a meta may not, and every blocked remote image becomes a violation report to the sender.
 The desktop reader (`clients/desktop/src-tauri/src/reader.rs`) therefore sends its own `MESSAGE_CSP` constant as the header and never a value taken from the message; fixture row 1006 carries the trick.
+
+## TypeScript 6 no longer loads `@types/node` on its own
+
+TypeScript 6 defaults `types` to `[]`, so an installed `@types/node` stops being global: `tsc` fails on `node:fs` and `process` in a test file even though vitest runs it happily.
+The desktop client's two tests that read files (`src/app/colour-guard.test.ts`, `src/design/contrast.test.ts`) open with `/// <reference types="node" />` rather than adding `node` to the app's `types`, which would let app code reach Node APIs a webview does not have.
+Under vitest's jsdom environment `new URL("..", import.meta.url)` is jsdom's `URL` and `fileURLToPath` rejects it ("The URL must be of scheme file"), so those tests resolve paths from `process.cwd()`.
+
+## shadcn's mobile breakpoint and Tailwind's `md` are both 768 px
+
+The inset sidebar renders as an off-screen `Sheet` below `useIsMobile`'s breakpoint and hides its desktop container below Tailwind's `md`, both 768 px by default.
+The desktop shell's medium layout starts at 760 px, so between 760 and 767 the icon rail vanished; `src/hooks/use-mobile.ts` and `--breakpoint-md` in `src/index.css` both move to 760 px, the value `src/app/layout.ts` uses.
+
+## A native menu accelerator takes the key before the webview
+
+A menu item's key equivalent is handled by AppKit ahead of the page, so an accelerator on a key the web keymap also owns either fires twice (Cmd+B, which shadcn's sidebar binds) or, for a bare key like `z`, stops the user typing it into a field.
+`clients/desktop/src-tauri/src/menu.rs` gives its items no accelerators; they emit a `menu` event and the frontend runs the same action as the key.
+
+## Screenshots of the desktop window without assistive access
+
+`osascript` cannot resize another app's window without the Accessibility permission (`-1719`), so the medium and narrow layouts are opened with `MP_DESKTOP_WINDOW_SIZE=950x800` or `600x820`.
+`screencapture -l <id>` needs the CGWindowID, which a four-line Swift script over `CGWindowListCopyWindowInfo` prints (filter on owner `mp-desktop` and title `mailypoppins`); window titles come back empty for other apps without Screen Recording permission, the owner name does not.
