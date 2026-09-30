@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop client has the TUI's Calendar and Contacts views, manages signatures, and sets up accounts (#0131).** The keys are the TUI's, each is also in the palette, and `MP_DESKTOP_FIXTURE=1` has a simulation for every outcome below.
+  - `Space c`, `Space a` and `Space m` switch between Contacts, Calendar and Mail, as do the sidebar and the palette; Settings is a fourth view, from the sidebar or the palette.
+  - The Calendar view lists the agenda of the selected account, upcoming only until `t` shows the past; `r` reads it again, Enter or `e` opens an event's `invite.ics` in your editor, and an updated or cancelled invitation shows without a refresh.
+  - An invitation in the reader shows its event with Accept, Tentative and Decline, and `tv`, or `V` in the Calendar view, opens the same choice; the buttons say why when an invitation cannot be answered, such as one on a Microsoft Graph account.
+  - New invitation, in the Calendar view or the palette, sends a calendar invitation from a small form.
+  - The Contacts view lists your ranked contacts with a fuzzy search on `/`; Enter or `n` writes to a contact, `v` sends it as a vCard, `c` copies its address and `r` rebuilds the index.
+  - `cs` opens the signatures, to create, rename, edit in your editor, delete and pick the account's default.
+  - `sl` shows everything the window reported since it started, with a filter; `!` hides the notices, never a send that is still held; `sc` and `sf` open `config.toml` and the daemon's log in your editor.
+  - The reader's Copy menu copies the sender's address, the `mp://` link or the subject.
+  - Settings shows the configuration the daemon runs, reloads `config.toml`, stores an SMTP or IMAP password, and signs a Microsoft 365 account in with a device code; a `config.toml` the daemon refused shows as a banner with the line.
+  - Add account walks through the CLI's four providers, and a daemon with no `config.toml` yet opens on a setup screen that writes the first one.
 - **The desktop client writes, sends and follows mail through the outbox (#0131).** The keys are the TUI's, each is also in the palette, and `MP_DESKTOP_FIXTURE=1` has a simulation for every outcome below.
   - `cn` opens a small wizard for the recipients, the subject and the signature, then opens the new draft in your editor.
   - `r` or `cr` replies, `ca` replies to all and `cf` forwards, from the list, the reader's toolbar or a search hit that exists only on the server.
