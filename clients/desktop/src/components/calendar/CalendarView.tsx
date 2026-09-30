@@ -1,5 +1,5 @@
 import { useCallback, useRef } from "react";
-import { ArrowLeft, CalendarCheck, History, RotateCw } from "lucide-react";
+import { ArrowLeft, CalendarCheck, CalendarPlus, History, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AgendaList } from "@/components/calendar/AgendaList";
@@ -29,7 +29,7 @@ export function CalendarView() {
   const rows = calendarRows(s);
   const current = cursorEvent(s, rows);
   const showPast = view?.showPast ?? false;
-  const run = (id: "calendar_toggle_past" | "calendar_refresh" | "calendar_rsvp") => runAction(id, s, dispatch);
+  const run = (id: "calendar_toggle_past" | "calendar_refresh" | "calendar_rsvp" | "new_invitation") => runAction(id, s, dispatch);
   const refusal = current && account ? (agendaRsvpRefusal(current, s.inviteRefusals[account] ?? null) ?? (rsvpOf(s, account, current.row_id) ? "A reply to this invitation is being sent" : null)) : null;
   const select = useCallback((rowId: number) => dispatch({ type: "calendar_select", row_id: rowId }), [dispatch]);
   const latest = useRef(s);
@@ -59,6 +59,10 @@ export function CalendarView() {
         <div className="flex items-center justify-between gap-2">
           <h2 className="truncate text-sm font-semibold">Calendar</h2>
           <span className="flex shrink-0 gap-1">
+            <Button size="xs" variant="ghost" onClick={() => run("new_invitation")} title="New invitation" disabled={!view}>
+              <CalendarPlus aria-hidden="true" />
+              New invitation
+            </Button>
             <Button size="xs" variant="ghost" aria-pressed={showPast} onClick={() => run("calendar_toggle_past")} title="Show past events / upcoming only (t)">
               <History aria-hidden="true" />
               Past events

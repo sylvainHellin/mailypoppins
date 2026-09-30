@@ -103,9 +103,10 @@ export const LIST_WIDTH_STEP = 40;
  * `mutation` is the confirmation or the move picker `dialog` describes;
  * `compose` is the wizard or the recipients dialog `composeDialog` describes;
  * `attachments` is the open, save or attach dialog `attachDialog` describes;
- * `rsvp` is the reply choice `rsvpDialog` describes.
+ * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
+ * invitation form `inviteDialog` describes.
  */
-export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | "attachments" | "rsvp" | null;
+export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | "attachments" | "rsvp" | "invite" | null;
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
@@ -423,6 +424,12 @@ export type RsvpDialog = { account: string; row_id: number; summary: string };
  */
 export type RsvpRun = { token: number; account: string; row_id: number; response: RsvpResponse; summary: string; operation_id: string | null };
 
+/** The New invitation form: the account it sends from. */
+export type InviteDialog = { account: string };
+
+/** A new invitation this window sent, until it settles or is dropped; `operation_id` is null until `send_invite` answers. */
+export type InviteSendRun = { token: number; account: string; subject: string; operation_id: string | null };
+
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
 
@@ -542,6 +549,12 @@ export type AppState = {
   rsvps: RsvpRun[];
   /** Operation ends that arrived while a `calendar_rsvp` was unanswered, for its id. */
   rsvpEarly: OperationEnd[];
+  /** What the `invite` overlay shows; null whenever another overlay or none is open. */
+  inviteDialog: InviteDialog | null;
+  /** New invitations this window sent, in start order. */
+  inviteSends: InviteSendRun[];
+  /** Operation ends that arrived while a `send_invite` was unanswered, for its id. */
+  inviteSendEarly: OperationEnd[];
   /**
    * The last `operation.progress` of each operation this window awaits, by
    * `operation_id`, until it finishes, settles or is dropped. The Rust layer
@@ -607,6 +620,9 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     rsvpDialog: null,
     rsvps: [],
     rsvpEarly: [],
+    inviteDialog: null,
+    inviteSends: [],
+    inviteSendEarly: [],
     progress: {},
   };
 }

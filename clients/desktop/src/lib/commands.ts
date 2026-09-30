@@ -247,6 +247,22 @@ export const calendarRsvp = (account: string, row_id: number, response: "accept"
 export const inviteRefusal = (account: string): Promise<InviteRefusal> =>
   invoke<InviteRefusal>("invite_refusal", { account });
 
+/** The New invitation form's fields; an empty one is not sent, and `end` and `duration` are exclusive. */
+export type InviteFields = {
+  subject: string;
+  start: string;
+  to?: string | null;
+  cc?: string | null;
+  end?: string | null;
+  duration?: string | null;
+  location?: string | null;
+  description?: string | null;
+};
+
+/** Send a new invitation; the end arrives as `send_invite`, its result a `SendOutcome`. A refusal's message is the daemon's sentence. */
+export const sendInvite = (account: string, fields: InviteFields): Promise<OperationStarted> =>
+  invoke<OperationStarted>("send_invite", { account, ...fields });
+
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });
 

@@ -9,6 +9,7 @@ import * as send from "@/app/send";
 import * as attachments from "@/app/attachments";
 import { openEventSource } from "@/app/calendar";
 import { openAgendaRsvp, openRsvp } from "@/app/rsvp";
+import { newInvitation } from "@/app/invite";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { hiddenNotice, viewPanes } from "@/app/views";
 import { actionTargets, type Action } from "@/app/reducer";
@@ -279,6 +280,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return openAgendaRsvp(s, dispatch);
     case "rsvp":
       return void openRsvp(s, dispatch);
+    case "new_invitation":
+      return newInvitation(s, dispatch);
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;

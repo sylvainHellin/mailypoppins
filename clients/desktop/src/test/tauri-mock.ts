@@ -176,7 +176,15 @@ export const mock = {
   rsvps: [] as { operation_id: string; account: string; row_id: number; response: string }[],
   /** The next RSVP's operation id counter. */
   nextRsvp: 1,
+  /** The invitations `send_invite` started and no test settled yet, oldest first. */
+  invitesSent: [] as { operation_id: string; account: string; subject: string; to: string[] }[],
+  /** The next invitation's operation id counter. */
+  nextInvite: 1,
 };
+
+/** fixture.rs's `GRAPH_INVITE_REFUSAL`, the daemon's `send.invite` refusal of a Graph account. */
+export const GRAPH_INVITE_REFUSAL =
+  "`mp send --invite` is not supported for Graph accounts yet (Graph calendar send is tracked by #0036, blocked on #0035). Use an SMTP-configured account.";
 
 /** fixture.rs's `GRAPH_RSVP_REFUSAL`, what the probe answers for `home`. */
 export const GRAPH_RSVP_REFUSAL = "RSVP is not supported for Graph accounts yet (#0036, blocked on #0035)";
@@ -225,6 +233,39 @@ export function resetMock(): void {
   mock.invites = {};
   mock.rsvps = [];
   mock.nextRsvp = 1;
+  mock.invitesSent = [];
+  mock.nextInvite = 1;
+}
+
+/** fixture.rs's invitation end: the oldest invitation settles with every recipient delivered, or fails with `fail`. */
+export function settleInvite(opts: { fail?: boolean; refused?: number } = {}): string {
+  const run = mock.invitesSent.shift();
+  if (!run) throw new Error("no invitation is waiting to settle");
+  if (opts.fail) {
+    emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: SEND_FAIL_REASON } });
+    return run.operation_id;
+  }
+  const refused = opts.refused ?? 0;
+  emitEnvelope("state.invalidate", { resource: `mailbox:${run.account}/sent`, scope: { query: "counts" } });
+  emitEnvelope("operation.finished", {
+    operation_id: run.operation_id,
+    state: "succeeded",
+    result: {
+      account: run.account,
+      selector: null,
+      message_id: `<${run.operation_id}@fixture.example>`,
+      status_line: "sent + saved",
+      recipients: run.to.map((address, i) => ({
+        address,
+        role: "To",
+        delivered: i < run.to.length - refused,
+        error: i < run.to.length - refused ? null : "550 5.1.1 fixture: no such mailbox",
+      })),
+      sent_copy: "filed",
+      settle_error: null,
+    },
+  });
+  return run.operation_id;
 }
 
 /** The event row `rowId` of `account` carries: its agenda row's, else the version an email delivered. */
@@ -1083,6 +1124,22 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       const operation_id = `fixture-rsvp-${mock.nextRsvp++}`;
       mock.rsvps.push({ operation_id, account, row_id: rowId, response });
+      return { operation_id };
+    }
+    case "send_invite": {
+      knownAccount(cmd, account);
+      const text = (k: string) => String(args[k] ?? "").trim();
+      const refuse = (message: string) => ({ kind: "protocol", code: -32602, message });
+      // The Rust layer's own checks, then the daemon's `plan_invite` order.
+      if (!text("subject")) throw { kind: "protocol", code: null, message: "An invitation needs a subject" };
+      if (!text("start")) throw { kind: "protocol", code: null, message: "An invitation needs a start" };
+      const to = [...text("to").split(/[,;]/), ...text("cc").split(/[,;]/)].map((a) => a.trim()).filter(Boolean);
+      if (to.length === 0) throw { kind: "protocol", code: null, message: "An invitation needs at least one recipient in To or Cc" };
+      if (fixtures.accounts.find((x) => x.name === account)?.backend === "graph") throw refuse(GRAPH_INVITE_REFUSAL);
+      if (text("end") && text("duration")) throw refuse("Provide exactly one of --end or --duration, not both");
+      if (!text("end") && !text("duration")) throw refuse("An invite needs --end or --duration");
+      const operation_id = `fixture-invite-${mock.nextInvite++}`;
+      mock.invitesSent.push({ operation_id, account, subject: text("subject"), to: to.map((a) => a.replace(/^.*<([^>]+)>$/, "$1")) });
       return { operation_id };
     }
     case "outbox_retry": {

@@ -131,13 +131,14 @@ export function inviteRefusalLoaded(s: AppState, account: string, refusal: strin
   return s.inviteRefusals[account] === refusal ? s : { ...s, inviteRefusals: { ...s.inviteRefusals, [account]: refusal } };
 }
 
-/** The accounts whose Graph refusal the window needs: the reader's invitation's, the agenda's. */
+/** The accounts whose Graph refusal the window needs: the reader's invitation's, the agenda's, the New invitation form's. */
 export function refusalsWanted(s: AppState): string[] {
   const out = new Set<string>();
   const meta = s.reader.meta;
   if (meta?.invite && s.view === "mail") out.add(meta.account);
   if (s.view === "calendar" && s.calendarView) out.add(s.calendarView.account);
   if (s.rsvpDialog) out.add(s.rsvpDialog.account);
+  if (s.inviteDialog) out.add(s.inviteDialog.account);
   return [...out].filter((a) => !(a in s.inviteRefusals));
 }
 
@@ -154,7 +155,7 @@ export function rsvpOf(s: AppState, account: string, rowId: number): RsvpRun | n
 }
 
 export function openRsvpDialog(s: AppState, dialog: RsvpDialog): AppState {
-  return { ...s, overlay: "rsvp", rsvpDialog: dialog, dialog: null, composeDialog: null, attachDialog: null };
+  return { ...s, overlay: "rsvp", rsvpDialog: dialog, dialog: null, composeDialog: null, attachDialog: null, inviteDialog: null };
 }
 
 export function rsvpRequested(s: AppState, run: Omit<RsvpRun, "operation_id">): AppState {

@@ -145,6 +145,15 @@ import {
   staleInvitations,
   wantInvite,
 } from "@/app/rsvp";
+import {
+  inviteSendFailed,
+  inviteSending,
+  inviteSendRequested,
+  inviteSendStarted,
+  inviteSignal,
+  isInviteOperation,
+  openInviteDialog,
+} from "@/app/invite";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -276,6 +285,11 @@ export type Action =
   | { type: "rsvp_requested"; token: number; account: string; row_id: number; response: RsvpResponse; summary: string }
   | { type: "rsvp_started"; token: number; operation_id: string }
   | { type: "rsvp_failed"; token: number; error: GuiError }
+  // A new invitation (app/invite.ts).
+  | { type: "open_invite"; account: string }
+  | { type: "invite_send_requested"; token: number; account: string; subject: string }
+  | { type: "invite_send_started"; token: number; operation_id: string }
+  | { type: "invite_send_failed"; token: number }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -792,12 +806,14 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       if (isSendOperation(s, sig.operation_id)) return sendSignal(s, end);
       if (isOutboxOperation(s, sig.operation_id)) return outboxSignal(s, end);
       if (isRsvpOperation(s, sig.operation_id)) return rsvpSignal(s, end);
+      if (isInviteOperation(s, sig.operation_id)) return inviteSignal(s, end);
       // An unknown id may be a sync, a send, a retry or an RSVP whose start
       // has not answered yet, or the search's: each holds it until its id is known.
       let next = s.syncStarting > 0 ? syncSignal(s, end) : s;
       if (sendStarting(next)) next = sendSignal(next, end);
       if (retryStarting(next)) next = outboxSignal(next, end);
       if (rsvpStarting(next)) next = rsvpSignal(next, end);
+      if (inviteSending(next)) next = inviteSignal(next, end);
       return signal(next, sig);
     }
     default:
@@ -857,6 +873,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "outbox_retry") return outboxSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "rsvp") return rsvpSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "send_invite") return inviteSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       s = endProgress(s, e.operation_id);
@@ -864,6 +881,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "outbox_retry") return outboxSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       if (e.kind === "rsvp") return rsvpSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "send_invite") return inviteSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -1149,13 +1167,14 @@ function reduce(s: AppState, a: Action): AppState {
         composeDialog: a.overlay === "compose" ? s.composeDialog : null,
         attachDialog: a.overlay === "attachments" ? s.attachDialog : null,
         rsvpDialog: a.overlay === "rsvp" ? s.rsvpDialog : null,
+        inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
       };
     case "open_dialog":
-      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null };
+      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null };
     case "open_compose":
-      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null, rsvpDialog: null };
+      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null };
     case "open_attachments":
-      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null, rsvpDialog: null };
+      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null, rsvpDialog: null, inviteDialog: null };
     case "save_dir":
       return a.dir.trim() ? { ...s, saveDir: a.dir.trim() } : s;
     case "hit_fetch_started":
@@ -1324,6 +1343,14 @@ function reduce(s: AppState, a: Action): AppState {
       return rsvpStarted(s, a.token, a.operation_id);
     case "rsvp_failed":
       return rsvpStartFailed(s, a.token, a.error.message);
+    case "open_invite":
+      return openInviteDialog(s, a.account);
+    case "invite_send_requested":
+      return inviteSendRequested(s, { token: a.token, account: a.account, subject: a.subject });
+    case "invite_send_started":
+      return inviteSendStarted(s, a.token, a.operation_id);
+    case "invite_send_failed":
+      return inviteSendFailed(s, a.token);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

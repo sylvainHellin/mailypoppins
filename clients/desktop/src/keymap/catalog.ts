@@ -79,7 +79,8 @@ export type ActionId =
   | "calendar_toggle_past"
   | "calendar_refresh"
   | "calendar_rsvp"
-  | "rsvp";
+  | "rsvp"
+  | "new_invitation";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -262,6 +263,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "ACTIVITY", label: "Dismiss all notices", keys: [], id: "dismiss_all_notices", badge: null },
   // The TUI has no outbox view: `go` is free in its `g` go family, and `R`
   // in every context; `d` is the view's own reading of Delete.
+  // The TUI has no invitation form (the CLI's `mp send --invite`) and no key
+  // for one: the palette and the Calendar view's toolbar.
+  { section: "CALENDAR", label: "New invitation", keys: [], id: "new_invitation", badge: null },
   { section: "OUTBOX", label: "Open outbox", keys: ["go"], id: "open_outbox", badge: null },
   { section: "OUTBOX", label: "Retry outbox row", keys: ["R"], id: "outbox_retry", badge: null },
   { section: "OUTBOX", label: "Discard outbox row", keys: ["d"], id: "outbox_discard", badge: null },
