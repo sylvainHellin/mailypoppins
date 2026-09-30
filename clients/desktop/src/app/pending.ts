@@ -216,18 +216,23 @@ function applyRow(
     }
   }
 
+  // A second change of the same kind restores to before the first; a change
+  // of another kind starts from what the model shows now.
+  const same = old?.kind === kind;
+  const nowRow = listRow && s.messages.key ? { key: s.messages.key, row: listRow, index: inList } : null;
+  const nowHit = hit && s.search ? { hit, index: hitIdx, seq: s.search.seq } : null;
   const entry: PendingChange = {
     batch,
     kind,
     target: t,
     destination: dest,
     value,
-    prevRow: old?.prevRow ?? (listRow && s.messages.key ? { key: s.messages.key, row: listRow, index: inList } : null),
-    prevHit: old?.prevHit ?? (hit && s.search ? { hit, index: hitIdx, seq: s.search.seq } : null),
+    prevRow: same ? (old.prevRow ?? nowRow) : (nowRow ?? old?.prevRow ?? null),
+    prevHit: same ? (old.prevHit ?? nowHit) : (nowHit ?? old?.prevHit ?? null),
     prevDraft: null,
-    prevValue: old ? old.prevValue : flags ? flags[flagName(kind)] : null,
+    prevValue: same ? old.prevValue : flags ? flags[flagName(kind)] : null,
     source,
-    counts: [...(old?.counts ?? []), ...counts],
+    counts: same ? [...old.counts, ...counts] : counts,
   };
 
   let next: AppState = { ...s, pending: { ...s.pending, [key]: entry } };

@@ -381,6 +381,15 @@ describe("mutations and pending state", () => {
     expect(s.pending["work#1001"]).toMatchObject({ batch: 2, prevValue: false });
   });
 
+  it("a change of another kind restores its own axis only", () => {
+    let s = run(booted(), { type: "mutation_apply", batch: 1, kind: "flag", targets: [row(1002)], value: true });
+    s = run(s, { type: "mutation_apply", batch: 2, kind: "read", targets: [row(1002)], value: true });
+    s = run(s, { type: "mutation_failed", batch: 2, kind: "read", account: "work", targets: [row(1002)], error: { kind: "timeout", message: "slow" } });
+    const r = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows.find((x) => x.id === 1002)!;
+    expect(r.flags).toMatchObject({ flagged: true, seen: false });
+    expect(box(s, "inbox").unread).toBe(4);
+  });
+
   it("restores the rolled-back account's pending rows only, and re-reads its lists", () => {
     let s = run(booted(), archive(1, 1002));
     s = run(s, { type: "mutation_apply", batch: 2, kind: "archive", targets: [{ account: "home", row_id: 1015 }] });
