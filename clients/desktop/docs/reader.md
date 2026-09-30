@@ -55,4 +55,27 @@ Also observed in the same run:
 - The main document stayed on `http://localhost:1420/` (the dev origin) throughout.
 - No `[open] stubbed` line appeared: nothing called `open_external`.
 
-Still open for a person at the Mac: click (a) the plain link, (b) the `target=_blank` link and (c) the Verify button in row 1006, and check that each lands in the footer notice or, for the form, that nothing happens; then click "Open in browser" once and check for exactly one `[open] stubbed` line.
+## Known limitation
+
+Once focus is inside the reader frame (a click in the message body), the app's keys no longer reach the app: the frame is cross-origin to it and runs no script, so its key events stay in its own document and the keymap never hears them.
+Escape, `j`/`k`, `:` and every other app key do nothing until focus returns to the app, by a click on the header, the list or the sidebar.
+`j`/`k` on the reader pane scroll `#mp-reader-scroll`, which holds the header block and the frame; the body scrolls inside the frame, so from the keyboard only the header area moves.
+
+## Manual verification
+
+Cases (a), (b) and (c) of the table above need a real click, which the agent could not post (see the run above).
+
+1. In a herdr tab: `cd clients/desktop && MP_DESKTOP_STUB_OPENER=1 MP_DESKTOP_FIXTURE=1 pnpm tauri dev`, and keep its output in view (it also goes to `<data>/logs/mp-desktop.log`).
+2. In the Inbox of `work`, click row 1006, "Action required: verify your account" from Security Team, the sixth row, and wait for the body.
+3. Case (a): click "plain https link".
+   Expected: the footer shows the "Blocked link" notice, "Link blocked: https://evil.example/?from=plain-link"; the log gains `[nav] refused Navigation: https://evil.example/?from=plain-link`; the frame still shows the message; no `[open] stubbed` line appears.
+   Click "Dismiss".
+4. Case (b): click "target=_blank link".
+   Expected: the notice shows `https://evil.example/?from=target-blank`; the log gains `[nav] refused NewWindow: https://evil.example/?from=target-blank`; no window opens; no `[open] stubbed` line appears.
+   Click "Dismiss".
+5. Case (c): type anything in the password field and click "Verify".
+   Expected: nothing happens; no notice, no `[nav] refused` line for `https://evil.example/collect`, no `[open] stubbed` line; the frame still shows the message.
+6. Last, show the notice again with step 3 and click "Open in browser" once.
+   Expected: exactly one `[open] stubbed: https://evil.example/?from=plain-link` line and no browser window; the palette's "Show intercepted links" lists it as "opener stub".
+
+The verdict of each step goes into the table above, with the date of the run.
