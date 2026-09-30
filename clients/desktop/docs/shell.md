@@ -135,15 +135,24 @@ From the Drafts list it says "Quick-move is not available in this mailbox", the 
 Toggling read or flag over several rows follows the TUI: flagging wins when any row is unflagged, and marking read when any is unread.
 
 The activity area is a stack at the bottom right of the window, raised above the reader's blocked-link notice while that shows.
-Held sends come first, then the notices of `state.activity`:
+Held sends come first, then the failures, then the applied notices of `state.activity`:
 
-- An applied batch is a `role="status"` notice that leaves after five seconds.
+- An applied batch is a notice that leaves after five seconds.
 - A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel and a failed or dropped sync are `role="alert"` notices that stay until dismissed.
 - Every notice has a Dismiss button.
 - A cancelled hold's own notice is not shown, since the hold says so itself.
 
+The area stays mounted when it is empty, and the applied notices render into one `role="status"` region inside it, mounted empty before the first of them: a live region that mounts with its text already inside may not be announced.
+The list's "N marked" count follows the same rule, in a `role="status"` element that is mounted, empty and visually hidden, while nothing is marked.
+
+The area sits outside every pane, so Tab never reaches its Dismiss buttons.
+`X` dismisses the newest notice shown, one per press, and the palette has "Dismiss the newest notice" and "Dismiss all notices".
+The TUI binds `X` only as the continuation of `cX`, so a bare `X` is free in every TUI context.
+`state.activity` keeps the newest 20 notices (`ACTIVITY_CAP` in `src/app/pending.ts`), and a newer one drops the oldest, failure or not.
+
 Each send hold shows "Sending in N s" with the subject and the account, a progress bar, and Cancel.
 The seconds are the last `send.hold_tick`'s; Cancel calls `send_cancel_hold` and is disabled while that call is in flight.
+A `u` while every live hold is already being cancelled does nothing and says nothing, as the TUI re-queues its cancel silently; "No send is being held" shows only when no hold is live.
 A hold that fired or was cancelled shows "Sent" or "Send cancelled" for three seconds, then `dismiss_hold` removes it.
 The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1` shows it at start.
 
@@ -195,6 +204,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
+- `X`: dismiss the newest activity notice, a desktop key.
 - `ss`, `sS`: quick and full sync of the selected account.
 - Shift+click marks the range from the last mark to the row, and Cmd+click or Ctrl+click marks one row; the palette's "Mark range" does the same from the cursor.
 - The palette's and the View menu's "Widen list" and "Narrow list" move the splitter by 40 px, since Tab cycles panes and never lands on it.

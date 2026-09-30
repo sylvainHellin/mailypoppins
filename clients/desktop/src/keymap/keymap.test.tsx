@@ -192,6 +192,25 @@ describe("mutation keys (the TUI's)", () => {
     await waitFor(() => expect(callsOf("message_set_read")).toEqual([{ account: "work", row_ids: [1001], read: false }]));
   });
 
+  it("X dismisses the newest notice, one per press", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j*");
+    const area = screen.getByRole("region", { name: "Activity" });
+    expect(await within(area).findByText("Flagged 1 message")).toBeInTheDocument();
+    mock.failing.set("sync_trigger", { kind: "internal", message: "no route" });
+    await user.keyboard("ss");
+    expect(await within(area).findByRole("alert")).toHaveTextContent("Sync of work did not start: no route");
+    await user.keyboard("X");
+    expect(within(area).queryByRole("alert")).toBeNull();
+    expect(within(area).getByText("Flagged 1 message")).toBeInTheDocument();
+    await user.keyboard("X");
+    expect(within(area).queryByText("Flagged 1 message")).toBeNull();
+    // Nothing left: X is a no-op, and the held send stays.
+    await user.keyboard("X");
+    expect(within(area).getByRole("group", { name: /^Held send: / })).toBeInTheDocument();
+  });
+
   it("M opens the mailbox picker, typing filters it and Enter moves", async () => {
     const { user } = renderApp();
     await shellReady();

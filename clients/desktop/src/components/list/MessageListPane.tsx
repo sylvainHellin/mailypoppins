@@ -150,17 +150,18 @@ export function MessageListPane() {
             <Server aria-hidden="true" />
           </Button>
         </div>
-        {anyMarked ? (
-          <div data-slot="marked-bar" className="flex items-center gap-2 text-xs">
-            <span role="status" className="flex-1 text-muted-foreground tabular-nums">
-              {`${markedCount} marked`}
-            </span>
+        {/* Mounted with no marks, visually hidden and empty, so the first count is announced. */}
+        <div data-slot="marked-bar" className={anyMarked ? "flex items-center gap-2 text-xs" : "sr-only"}>
+          <span role="status" data-slot="marked-count" className="flex-1 text-muted-foreground tabular-nums">
+            {anyMarked ? `${markedCount} marked` : null}
+          </span>
+          {anyMarked ? (
             <Button size="xs" variant="ghost" onClick={() => dispatch({ type: "mark_clear" })} title="Clear marks (Esc)">
               <X aria-hidden="true" />
               Clear marks
             </Button>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
         {search ? (
           <SearchStatusBar
             search={search}

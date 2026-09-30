@@ -49,6 +49,8 @@ export type ActionId =
   | "mark_all"
   | "mark_clear"
   | "cancel_hold"
+  | "dismiss_notice"
+  | "dismiss_all_notices"
   | "quick_sync"
   | "full_sync";
 
@@ -205,6 +207,10 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "EMAIL LIST", label: "Clear marks", keys: ["Esc"], id: "mark_clear", badge: null },
   { section: "EMAIL LIST", label: "Discard draft (Drafts only)", keys: ["d"], id: "delete", badge: null },
   { section: "SEND", label: "Cancel the held send", keys: ["u"], id: "cancel_hold", badge: null },
+  // `X` is free in every TUI context (its `cX` is a `c` continuation) and
+  // names the notice's close button.
+  { section: "ACTIVITY", label: "Dismiss the newest notice", keys: ["X"], id: "dismiss_notice", badge: null },
+  { section: "ACTIVITY", label: "Dismiss all notices", keys: [], id: "dismiss_all_notices", badge: null },
 ];
 
 /** The KEYMAP row a single printable key names in the mail sections, if any. */

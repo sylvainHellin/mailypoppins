@@ -27,7 +27,8 @@ import {
   type Target,
 } from "@/app/state";
 
-const ACTIVITY_CAP = 50;
+/** The notices `state.activity` keeps; a newer one drops the oldest, failure or not. */
+export const ACTIVITY_CAP = 20;
 const SYNC_EARLY_CAP = 16;
 
 /** Archive, delete, move and discard take the row out of the list. */

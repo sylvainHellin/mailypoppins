@@ -374,6 +374,14 @@ export function liveHolds(s: AppState): HoldEntry[] {
   return Object.values(s.holds).filter((h) => h.state === "started" || h.state === "tick");
 }
 
+/**
+ * The notices the activity area shows, oldest first. A cancelled hold's
+ * notice stays in the model and is not shown, since the hold's own toast says so.
+ */
+export function shownNotices(s: AppState): ActivityNotice[] {
+  return s.activity.filter((n) => n.kind !== "hold_cancelled");
+}
+
 export const listKey = (account: string, mailbox: string): string => `${account}/${mailbox}`;
 export const readerKey = (account: string, rowId: number): string => `${account}#${rowId}`;
 

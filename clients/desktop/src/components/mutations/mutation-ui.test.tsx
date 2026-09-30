@@ -209,8 +209,9 @@ describe("activity notices", () => {
     await shellReady();
     await user.keyboard("j*");
     const area = screen.getByRole("region", { name: "Activity" });
-    const applied = (await within(area).findByText("Flagged 1 message")).closest<HTMLElement>("[role='status']")!;
+    const applied = (await within(area).findByText("Flagged 1 message")).closest<HTMLElement>("[data-notice]")!;
     expect(applied).toHaveAttribute("data-notice", "applied");
+    expect(applied.closest("[role='status']")).toBe(within(area).getByRole("status"));
     await user.click(within(applied).getByRole("button", { name: "Dismiss" }));
     expect(within(area).queryByText("Flagged 1 message")).toBeNull();
   });
@@ -249,7 +250,9 @@ describe("activity notices", () => {
         <NoticeToast notice={failed} onDismiss={onDismiss} />
       </>,
     );
-    expect(screen.getByRole("status")).toHaveTextContent("Archived 1 message");
+    // The applied toast takes no role: the area's status region announces it.
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText("Archived 1 message").closest("[role]")).toBeNull();
     expect(screen.getByRole("alert")).toHaveTextContent("Could not archive 1 message");
     act(() => vi.advanceTimersByTime(APPLIED_MS - 1));
     expect(onDismiss).not.toHaveBeenCalled();

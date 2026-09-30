@@ -178,6 +178,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return run("list_bottom");
         case "y":
           return handled(), run("copy_selector");
+        // Desktop only: the activity area sits outside every pane, so Tab never reaches it.
+        case "X":
+          return handled(), run("dismiss_notice");
         case "Escape":
           handled();
           if (s.marked.keys.size > 0) return run("mark_clear");

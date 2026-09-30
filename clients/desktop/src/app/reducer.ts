@@ -163,6 +163,7 @@ export type Action =
   | { type: "sync_started"; operation_id: string; account: string; mode: SyncMode }
   | { type: "sync_failed"; account: string; error: GuiError }
   | { type: "dismiss_notice"; id: number }
+  | { type: "dismiss_all_notices" }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -963,6 +964,8 @@ export function reducer(s: AppState, a: Action): AppState {
       return syncStartFailed(s, a.account, a.error.message);
     case "dismiss_notice":
       return s.activity.some((n) => n.id === a.id) ? { ...s, activity: s.activity.filter((n) => n.id !== a.id) } : s;
+    case "dismiss_all_notices":
+      return s.activity.length > 0 ? { ...s, activity: [] } : s;
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

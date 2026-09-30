@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import * as cmd from "@/lib/commands";
+import { runAction } from "@/app/actions";
 import { createMutations } from "@/app/mutations";
 import { reducer, type Action } from "@/app/reducer";
 import { initialState, listKey, type AppState } from "@/app/state";
@@ -116,6 +117,19 @@ describe("holds and syncs", () => {
     await m.cancelHold("gone");
     expect(get().activity.map((n) => n.kind)).toEqual(["hold_cancelled", "hold_cancel_failed"]);
     expect((await cmd.sendHoldStatus()).holds).toEqual([]);
+  });
+
+  it("cancel_hold does nothing while every live hold is being cancelled, and says so only with no hold", async () => {
+    const { get, dispatch } = await store();
+    dispatch({ type: "hold_cancel_requested", operation_id: "fixture-hold-seed" });
+    const before = get();
+    runAction("cancel_hold", before, dispatch);
+    expect(get()).toBe(before);
+    expect(calls("send_cancel_hold")).toEqual([]);
+
+    dispatch({ type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-1", revision: 900, kind: "send.hold_fired", payload: { ...fixtures.bootstrap.snapshot.holds[0], remaining_secs: 0 } } } });
+    runAction("cancel_hold", get(), dispatch);
+    expect(get().notice).toBe("No send is being held");
   });
 
   it("starts a sync and awaits its id, and reports one that did not start", async () => {

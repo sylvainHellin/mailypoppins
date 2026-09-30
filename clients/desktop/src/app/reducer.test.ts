@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { actionTargets, reducer, type Action } from "@/app/reducer";
+import { ACTIVITY_CAP } from "@/app/pending";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
 import { openableHits } from "@/app/search";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
@@ -630,6 +631,28 @@ describe("mutations and pending state", () => {
       s = run(s, { type: "sync_requested" }, { type: "sync_started", operation_id: "op-2", account: "work", mode: "quick" });
       s = run(s, { type: "gui_event", event: { type: "operation_dropped", operation_id: "op-2", kind: "sync", reason: "the daemon restarted" } });
       expect(last(s)?.text).toBe("Sync of work was dropped: the daemon restarted");
+    });
+  });
+
+  describe("the activity notices", () => {
+    const failSync = (n: number): Action => ({ type: "sync_failed", account: `acct${n}`, error: { kind: "internal", message: "no route" } });
+
+    it("keeps the newest ACTIVITY_CAP notices, failures included, and drops the oldest", () => {
+      expect(ACTIVITY_CAP).toBe(20);
+      const s = run(booted(), ...Array.from({ length: 25 }, (_, i) => failSync(i + 1)));
+      expect(s.activity).toHaveLength(20);
+      expect(s.activity[0].account).toBe("acct6");
+      expect(last(s).account).toBe("acct25");
+      expect(s.activitySeq).toBe(25);
+    });
+
+    it("dismisses one notice by id, or all of them", () => {
+      let s = run(booted(), failSync(1), failSync(2), failSync(3));
+      s = run(s, { type: "dismiss_notice", id: s.activity[1].id });
+      expect(s.activity.map((n) => n.account)).toEqual(["acct1", "acct3"]);
+      s = run(s, { type: "dismiss_all_notices" });
+      expect(s.activity).toEqual([]);
+      expect(run(s, { type: "dismiss_all_notices" })).toBe(s);
     });
   });
 });

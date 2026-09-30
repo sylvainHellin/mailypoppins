@@ -11,6 +11,7 @@ import {
   LIST_WIDTH_STEP,
   PANES,
   readerKey,
+  shownNotices,
   targetKey,
   type AppState,
   type MessageTarget,
@@ -167,14 +168,25 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "mark_clear" });
     case "cancel_hold": {
       // The newest hold still counting, as the TUI's `u` cancels its one hold.
-      const hold = liveHolds(s).filter((h) => !h.cancelling).pop();
-      if (!hold) {
+      const live = liveHolds(s);
+      if (live.length === 0) {
         dispatch({ type: "notice", text: "No send is being held" });
         return;
       }
-      void createMutations(dispatch).cancelHold(hold.operation_id);
+      // Every live hold is already being cancelled: the TUI re-queues its
+      // cancel and says nothing, and the countdown still shows.
+      const hold = live.filter((h) => !h.cancelling).pop();
+      if (hold) void createMutations(dispatch).cancelHold(hold.operation_id);
       return;
     }
+    case "dismiss_notice": {
+      const shown = shownNotices(s);
+      const newest = shown[shown.length - 1];
+      if (newest) dispatch({ type: "dismiss_notice", id: newest.id });
+      return;
+    }
+    case "dismiss_all_notices":
+      return dispatch({ type: "dismiss_all_notices" });
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;

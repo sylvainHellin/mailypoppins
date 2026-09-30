@@ -1,8 +1,8 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { GUI_ENTRIES, paletteEntries, SECTIONS } from "@/keymap/catalog";
-import { mock } from "@/test/tauri-mock";
+import { emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
 
 describe("the command palette", () => {
   it("lists every action of the generated keymap", async () => {
@@ -43,6 +43,8 @@ describe("the command palette", () => {
       "mark_all",
       "mark_clear",
       "cancel_hold",
+      "dismiss_notice",
+      "dismiss_all_notices",
       "quick_sync",
       "full_sync",
     ] as const) {
@@ -101,6 +103,32 @@ describe("the command palette", () => {
     );
   });
 
+  it("Cancel the held send says so when no send is held", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    act(() => emitEnvelope("send.hold_fired", { ...fixtures.bootstrap.snapshot.holds[0], remaining_secs: 0 }));
+    await user.keyboard(":");
+    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("Cancel the held send"));
+    expect(await screen.findByText("No send is being held")).toBeInTheDocument();
+    expect(mock.calls.filter((c) => c.cmd === "send_cancel_hold")).toEqual([]);
+  });
+
+  it("Dismiss the newest notice and Dismiss all notices run from the palette", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    for (const failed of [1, 2, 3]) act(() => emitEnvelope("mutations.rolled_back", { account: "work", failed }));
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(3));
+    await user.keyboard(":");
+    let dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("Dismiss the newest notice"));
+    await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+    await user.keyboard(":");
+    dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(dialog).getByText("Dismiss all notices"));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
   it("runs an enabled action", async () => {
     const { user } = renderApp();
     await shellReady();
@@ -118,6 +146,7 @@ describe("the command palette", () => {
     const desktop = within(help).getByRole("region", { name: "DESKTOP" });
     expect(desktop).toHaveTextContent("Cancel the held send");
     expect(desktop).toHaveTextContent("Mark range");
+    expect(desktop).toHaveTextContent("Dismiss the newest notice");
     // The M2 rows lost their badge.
     const archive = within(help).getAllByText("Archive")[0].closest("tr");
     expect(archive).not.toHaveTextContent("M2");

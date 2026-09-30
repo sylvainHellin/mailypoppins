@@ -1,7 +1,13 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import type { Dispatch } from "react";
 import { windowFor, WINDOW_FROM } from "@/components/list/useWindow";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
+import { mock } from "@/test/tauri-mock";
+import { ActivityStack } from "@/components/mutations/ActivityStack";
+import type { Action } from "@/app/reducer";
+import { initialState } from "@/app/state";
+import { StoreProvider, useDispatch } from "@/app/store";
 
 describe("accessibility primitives", () => {
   it("has the nav, main and complementary landmarks and a labelled listbox", async () => {
@@ -114,5 +120,51 @@ describe("accessibility primitives", () => {
     await user.keyboard("d");
     const dialog = await screen.findByRole("dialog", { name: "Delete this email?" });
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete" })).toHaveFocus());
+  });
+
+  it("mounts the notice and marked-count live regions empty, before their first text", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const activity = screen.getByRole("region", { name: "Activity" });
+    const notices = within(activity).getByRole("status");
+    expect(notices).toBeEmptyDOMElement();
+    const list = screen.getByRole("region", { name: "Message list" });
+    const count = list.querySelector<HTMLElement>('[data-slot="marked-count"]')!;
+    expect(count).toHaveAttribute("role", "status");
+    expect(count).toBeEmptyDOMElement();
+
+    // The same nodes take the text, so a screen reader hears the first one.
+    await user.keyboard("jv");
+    expect(list.querySelector('[data-slot="marked-count"]')).toBe(count);
+    expect(count).toHaveTextContent("1 marked");
+    await user.keyboard("k*");
+    await waitFor(() => expect(notices).toHaveTextContent("Flagged"));
+    expect(within(activity).getByRole("status")).toBe(notices);
+    // A failure stays an alert of its own, outside the polite region.
+    mock.failing.set("sync_trigger", { kind: "internal", message: "no route" });
+    await user.keyboard("ss");
+    const alert = await within(activity).findByRole("alert");
+    expect(notices).not.toContainElement(alert);
+  });
+
+  it("keeps the activity area and its status region mounted with no hold and no notice", () => {
+    let dispatch: Dispatch<Action> = () => {};
+    function Grab() {
+      dispatch = useDispatch();
+      return null;
+    }
+    render(
+      <StoreProvider initial={initialState()}>
+        <Grab />
+        <ActivityStack />
+      </StoreProvider>,
+    );
+    const area = screen.getByRole("region", { name: "Activity" });
+    const status = within(area).getByRole("status");
+    expect(status).toBeEmptyDOMElement();
+    const done = [{ account: "work", row_id: 1 }];
+    act(() => dispatch({ type: "mutation_settled", batch: 1, kind: "archive", account: "work", done, failed: [] }));
+    expect(within(area).getByRole("status")).toBe(status);
+    expect(status).toHaveTextContent("Archived 1 message");
   });
 });
