@@ -25,6 +25,9 @@ pub mod paths;
 pub mod reader;
 pub mod session;
 
+#[cfg(test)]
+mod ts_bindings;
+
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 

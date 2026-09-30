@@ -92,6 +92,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
 
 /// Why a connect failed, for the connection screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectFailure {
     /// No daemon, and none could be started.
@@ -104,6 +106,8 @@ pub enum ConnectFailure {
 
 /// A connect that did not produce a session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct ConnectError {
     pub kind: ConnectFailure,
     pub why: String,
@@ -145,6 +149,8 @@ impl From<ConnectError> for GuiError {
 
 /// What the last successful handshake reported.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct Hello {
     pub daemon_version: String,
     pub protocol: u32,

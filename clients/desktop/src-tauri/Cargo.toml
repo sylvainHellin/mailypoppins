@@ -36,6 +36,14 @@ anyhow = "1.0.104"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 
+# TypeScript bindings for the result and event types (src/ts_bindings.rs). A
+# dev-dependency with `cfg_attr(test, ...)` derives, so a plain `cargo test`
+# runs the stale check and the app build never compiles ts-rs; mp-protocol's
+# `ts` feature gives the wire types these embed their `TS` impls.
+[dev-dependencies]
+ts-rs = { version = "12", features = ["serde-compat"] }
+mp-protocol = { path = "../../../crates/mp-protocol", features = ["ts"] }
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

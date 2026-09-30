@@ -94,6 +94,8 @@ impl mp_client::queries::Queries for Budgeted<'_> {
 
 /// Why a bootstrap was taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum BootstrapCause {
     /// The session came up.
@@ -113,6 +115,8 @@ pub enum BootstrapCause {
 
 /// What kind of operation the GUI awaits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum PendingKind {
     ServerSearch,
@@ -120,6 +124,8 @@ pub enum PendingKind {
 
 /// Where an intercepted URL came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum InterceptSource {
     /// A navigation (a link click in the reader, a meta refresh, a redirect).
@@ -132,6 +138,8 @@ pub enum InterceptSource {
 
 /// One URL the webview was refused.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct InterceptedUrl {
     pub url: String,
     /// Milliseconds since the Unix epoch.
@@ -151,6 +159,8 @@ impl InterceptedUrl {
 
 /// The connection as the frontend shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ConnectionStatus {
     Connecting,
@@ -174,6 +184,8 @@ pub enum ConnectionStatus {
 
 /// One message on the event channel, in order.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuiEvent {
     /// One `state.event` envelope, verbatim, that applied above the watermark.

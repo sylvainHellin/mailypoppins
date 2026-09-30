@@ -15,6 +15,8 @@ use crate::paths::Paths;
 
 /// The protocol range this build speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct ProtocolRange {
     pub min: u32,
     pub max: u32,
@@ -31,6 +33,8 @@ impl ProtocolRange {
 
 /// What a command failed with, tagged by `kind`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GuiError {
     /// No daemon answers (none running, could not be started, or the session

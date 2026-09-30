@@ -85,6 +85,8 @@ where
 
 /// One configured account.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct AccountInfo {
     pub name: String,
     /// The first configured account.
@@ -104,6 +106,8 @@ pub struct AccountInfo {
 
 /// What a sidebar row is, from its role (the TUI's `MailboxKind`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum MailboxKind {
     Inbox,
@@ -127,6 +131,8 @@ impl MailboxKind {
 
 /// One sidebar mailbox: the TUI's `MailboxInfo` projection plus its counts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct MailboxInfo {
     /// The store key `list_messages` takes.
     pub slug: String,
@@ -140,6 +146,8 @@ pub struct MailboxInfo {
 
 /// One account's sidebar.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct MailboxListing {
     pub account: String,
     pub mailboxes: Vec<MailboxInfo>,
@@ -152,6 +160,8 @@ pub struct MailboxListing {
 
 /// A mailbox's contents: messages, or the Drafts listing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageList {
     Messages {
@@ -169,6 +179,8 @@ pub enum MessageList {
 
 /// The stored plain text of one message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct MessageText {
     pub account: String,
     pub row_id: i64,
@@ -178,6 +190,8 @@ pub struct MessageText {
 
 /// One attachment of a message.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct Attachment {
     #[serde(default)]
     pub name: String,
@@ -192,6 +206,8 @@ pub struct Attachment {
 /// (`read_cmd::ShownMessage`), which `#[serde(default)]` alone does not
 /// accept, so every header is an `Option`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct MessageMeta {
     #[serde(default)]
     pub row_id: i64,
@@ -228,6 +244,8 @@ pub struct MessageMeta {
 
 /// `message.search`'s params, mirroring `mp search --local`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct LocalSearchParams {
     pub account: String,
     #[serde(default)]
@@ -259,6 +277,8 @@ pub struct LocalSearchParams {
 
 /// One local hit: a listing row plus the mailbox it was found in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct LocalSearchHit {
     pub mailbox: String,
     #[serde(flatten)]
@@ -267,6 +287,8 @@ pub struct LocalSearchHit {
 
 /// `message.search_server`'s params.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct ServerSearchParams {
     pub account: String,
     pub query: String,
@@ -284,12 +306,16 @@ pub struct ServerSearchParams {
 /// A started server search. Hits arrive as `message.server_hit` events and
 /// the end as `operation.finished`, both carrying this id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct OperationStarted {
     pub operation_id: String,
 }
 
 /// What a cancel came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum CancelOutcome {
     Cancelled,
@@ -299,6 +325,8 @@ pub enum CancelOutcome {
 
 /// Versions on both sides of the socket.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct VersionInfo {
     pub app_version: String,
     pub protocol_min: u32,
