@@ -140,9 +140,10 @@ A server search streams `message.server_hit` events and ends with `operation.fin
 
 `message_html_meta` answers the headers and `html_url`, `mpmsg://localhost/<account>/<row_id>`.
 The iframe loads that URL with `sandbox="allow-popups"` and no `allow-scripts`; the plan's section "Reading HTML bodies" explains both.
+The header is always `MESSAGE_CSP` and never a policy read out of the message: a sender can hide a meta-looking policy inside the doctype, ahead of the daemon's tag, and a header may carry `report-uri`.
 The scheme answers:
 
-- 200 with the rendition, its own CSP as a `Content-Security-Policy` header, `X-Content-Type-Options: nosniff` and `X-Mp-Rendition: html`;
+- 200 with the rendition, the daemon's policy (`reader::MESSAGE_CSP`) as a `Content-Security-Policy` header, `X-Content-Type-Options: nosniff` and `X-Mp-Rendition: html`;
 - 200 with the stored plain text in a minimal document and `X-Mp-Rendition: text` when the message has no markup;
 - 404 for an unknown account or row, 400 for a malformed URL, 503 while no daemon answers, 504 on a timeout.
 
@@ -182,7 +183,7 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 ## Fixture mode
 
 The fixtures hold 2 accounts, 6 mailboxes, 20 messages, 2 drafts and 3 HTML bodies.
-Row 1006 is the hostile one: a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
+Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
 `fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds.
 

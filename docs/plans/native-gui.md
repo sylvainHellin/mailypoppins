@@ -154,7 +154,7 @@ A message without markup is `-32602`, and the reader shows the stored plain text
 The rendering rule, decided on 2026-09-30 from the M0 findings:
 
 - The reader loads the rendition as its own document from the custom URI scheme, `mpmsg://localhost/<account>/<row_id>` on macOS.
-- A Rust scheme handler answers that URL with the `message.html` string and a `Content-Security-Policy` response header copied from the rendition's meta tag, so the message's own policy governs the document.
+- A Rust scheme handler answers that URL with the `message.html` string and the daemon's policy above as a `Content-Security-Policy` response header, a constant in the handler and never a value read out of the message, since a header may carry `report-uri` and a sender can hide a meta-looking policy inside the doctype.
 - The app CSP stays strict: the scheme document ignores it, whereas a `srcdoc` document inherits it, and M0 lost the `data:` images of a `srcdoc` message under `img-src 'self'`.
 - Tauri issue #12767 did not reproduce on macOS 26.6, where the scheme iframe loads, renders and fires `load`; it is retested on macOS 15 before M6.
 - The string never goes through `innerHTML` into the application's own document.

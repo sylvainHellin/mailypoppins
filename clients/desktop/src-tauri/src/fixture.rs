@@ -624,9 +624,23 @@ fn server_only_hit(account: &str, query: &str) -> Value {
     })
 }
 
-/// A body as the daemon's rendition shapes it: the CSP meta tag first.
+/// A body as the daemon's rendition shapes it: the CSP meta tag first, after
+/// a leading doctype, which ends at its first `>` (`parse.rs`'s
+/// `insert_at_document_start`).
 fn rendition(body: &str) -> String {
-    format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{MESSAGE_CSP}\">\n{body}")
+    let tag = format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{MESSAGE_CSP}\">\n");
+    let lead = body.len() - body.trim_start().len();
+    let rest = &body[lead..];
+    let doctype = rest
+        .get(..9)
+        .is_some_and(|s| s.eq_ignore_ascii_case("<!doctype"));
+    match rest.find('>').filter(|_| doctype) {
+        Some(gt) => {
+            let at = lead + gt + 1;
+            format!("{}{tag}{}", &body[..at], &body[at..])
+        }
+        None => format!("{tag}{body}"),
+    }
 }
 
 #[cfg(test)]

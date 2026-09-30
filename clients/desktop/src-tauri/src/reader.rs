@@ -2,9 +2,14 @@
 //! answers the `message.html` rendition as its own document.
 //!
 //! The plan's reader rule (docs/plans/native-gui.md, "Reading HTML bodies"):
-//! the document carries a `Content-Security-Policy` response header copied
-//! from the rendition's own meta tag, so the message's policy governs it and
-//! the app CSP stays strict. A rendition over 8 MiB is refused inline with
+//! the document carries [`MESSAGE_CSP`] as its `Content-Security-Policy`
+//! response header, and the app CSP stays strict. The header is this
+//! constant and never a value read out of the message: a sender can hide a
+//! meta-looking string inside the doctype, ahead of the daemon's own tag, and
+//! a header (unlike a meta) may carry `report-uri`, which would turn every
+//! blocked remote image into a violation report to the sender. The daemon's
+//! meta tag still sits in the document, and a browser enforces both policies,
+//! so a sender's leftover meta can only tighten. A rendition over 8 MiB is refused inline with
 //! `-32004`, and the handler falls back to `message.materialise_html`, reads
 //! the file and releases the handle at once. A message without markup is
 //! served as a plain-text document under the same policy (header
@@ -19,13 +24,9 @@ use tauri::http::{header, Response, StatusCode};
 use crate::error::{rpc_code, Addressing, GuiError};
 use crate::session::Door;
 
-/// The policy `message.html` prepends as a meta tag, and what the handler
-/// falls back to when the rendition carries none it can trust.
+/// The policy `message.html` prepends as a meta tag, and the one every reader
+/// response carries as its header, whatever the rendition says.
 pub const MESSAGE_CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
-
-/// How far into a rendition the CSP meta tag is looked for: the daemon
-/// prepends it, so it is at the very start.
-const CSP_SCAN_BYTES: usize = 16 * 1024;
 
 const HTML_BUDGET: Duration = Duration::from_secs(15);
 const TEXT_BUDGET: Duration = Duration::from_secs(10);
@@ -90,118 +91,6 @@ fn percent_encode(s: &str) -> String {
         }
     }
     out
-}
-
-// ---------------------------------------------------------------------------
-// CSP extraction
-// ---------------------------------------------------------------------------
-
-/// The `content` of the first `<meta http-equiv="Content-Security-Policy">`
-/// in the head of `html`.
-///
-/// Only the first counts: the daemon prepends its own, and a later one the
-/// sender wrote cannot loosen it (a document enforces every policy it is
-/// given, so the browser still applies the sender's too, which only
-/// tightens).
-pub fn extract_csp(html: &str) -> Option<String> {
-    let mut end = html.len().min(CSP_SCAN_BYTES);
-    while !html.is_char_boundary(end) {
-        end -= 1;
-    }
-    let head = &html[..end];
-    let lower = head.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(at) = lower[from..].find("<meta") {
-        let start = from + at;
-        let close = lower[start..].find('>').map_or(lower.len(), |c| start + c);
-        let attrs = parse_attributes(&head[start + 5..close]);
-        let is_csp = attrs.iter().any(|(k, v)| {
-            k.eq_ignore_ascii_case("http-equiv")
-                && v.trim().eq_ignore_ascii_case("content-security-policy")
-        });
-        if is_csp {
-            return attrs
-                .into_iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("content"))
-                .map(|(_, v)| unescape(&v));
-        }
-        from = close;
-    }
-    None
-}
-
-/// The policy the response carries: the rendition's own when it is at least
-/// as strict as `default-src 'none'`, else [`MESSAGE_CSP`].
-pub fn effective_csp(html: &str) -> String {
-    match extract_csp(html) {
-        Some(csp) if csp.contains("default-src 'none'") => csp,
-        Some(csp) => {
-            tracing::warn!(
-                "[reader] the rendition's CSP is not default-src 'none', using ours: {csp}"
-            );
-            MESSAGE_CSP.to_string()
-        }
-        None => MESSAGE_CSP.to_string(),
-    }
-}
-
-/// `name=value` pairs of one tag's attribute text, values unquoted.
-fn parse_attributes(text: &str) -> Vec<(String, String)> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        while i < chars.len() && (chars[i].is_whitespace() || chars[i] == '/') {
-            i += 1;
-        }
-        let start = i;
-        while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '=' && chars[i] != '/' {
-            i += 1;
-        }
-        let name: String = chars[start..i].iter().collect();
-        while i < chars.len() && chars[i].is_whitespace() {
-            i += 1;
-        }
-        let mut value = String::new();
-        if i < chars.len() && chars[i] == '=' {
-            i += 1;
-            while i < chars.len() && chars[i].is_whitespace() {
-                i += 1;
-            }
-            if i < chars.len() && (chars[i] == '"' || chars[i] == '\'') {
-                let quote = chars[i];
-                i += 1;
-                let vstart = i;
-                while i < chars.len() && chars[i] != quote {
-                    i += 1;
-                }
-                value = chars[vstart..i].iter().collect();
-                i += 1;
-            } else {
-                let vstart = i;
-                while i < chars.len() && !chars[i].is_whitespace() {
-                    i += 1;
-                }
-                value = chars[vstart..i].iter().collect();
-            }
-        }
-        if !name.is_empty() {
-            out.push((name, value));
-        } else if i == start {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn unescape(s: &str) -> String {
-    s.replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
 }
 
 fn escape_html(s: &str) -> String {
@@ -276,11 +165,11 @@ fn text_document(body: Option<&str>) -> String {
     )
 }
 
-fn document(html: String, csp: &str, rendition: &str) -> Response<Vec<u8>> {
+fn document(html: String, rendition: &str) -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CONTENT_SECURITY_POLICY, csp)
+        .header(header::CONTENT_SECURITY_POLICY, MESSAGE_CSP)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::CACHE_CONTROL, "no-store")
@@ -315,12 +204,15 @@ pub fn respond(method: &str, path: &str, door: Result<Door, GuiError>) -> Respon
         Err(Malformed(why)) => return failure(StatusCode::BAD_REQUEST, &why),
     };
     let rendered = door.and_then(|door| render(&door, &account, row_id));
+    answer(path, rendered)
+}
+
+/// The response for one fetched rendition, or for the failure to fetch it.
+/// The header is always [`MESSAGE_CSP`], never a policy the message carries.
+fn answer(path: &str, rendered: Result<Rendered, GuiError>) -> Response<Vec<u8>> {
     match rendered {
-        Ok(Rendered::Html(html)) => {
-            let csp = effective_csp(&html);
-            document(html, &csp, "html")
-        }
-        Ok(Rendered::Text(body)) => document(text_document(body.as_deref()), MESSAGE_CSP, "text"),
+        Ok(Rendered::Html(html)) => document(html, "html"),
+        Ok(Rendered::Text(body)) => document(text_document(body.as_deref()), "text"),
         Err(e) => {
             let status = match &e {
                 GuiError::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -375,37 +267,45 @@ mod tests {
         assert_eq!(parse_path(parsed.path()), Ok(("my mail/ü".to_string(), 9)));
     }
 
+    /// The daemon's tag, as `inject_csp_meta` writes it.
+    fn daemon_meta() -> String {
+        format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{MESSAGE_CSP}\">")
+    }
+
     #[test]
-    fn the_first_csp_meta_is_extracted() {
+    fn a_policy_hidden_in_the_doctype_never_reaches_the_header() {
+        // What survives the daemon: its stripping regex wants http-equiv
+        // before content, and it inserts its own tag after the doctype's
+        // first `>`, which here closes the sender's fake meta.
         let html = format!(
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"{MESSAGE_CSP}\">\n\
-             <html><head><meta http-equiv='content-security-policy' content='default-src *'></head></html>"
+            "<!doctype html <meta content=\"default-src 'none'; report-uri https://t.example/r\" \
+             http-equiv=Content-Security-Policy>{}<html><body><img src=\"https://t.example/p.gif\"></body></html>",
+            daemon_meta()
         );
-        assert_eq!(extract_csp(&html).as_deref(), Some(MESSAGE_CSP));
-    }
-
-    #[test]
-    fn attribute_order_case_and_quotes_do_not_matter() {
-        let html = "<html><HEAD><META charset=utf-8><Meta CONTENT='default-src &#39;none&#39;; img-src data:' HTTP-EQUIV=Content-Security-Policy></HEAD>";
+        let response = answer("/work/1", Ok(Rendered::Html(html)));
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            extract_csp(html).as_deref(),
-            Some("default-src 'none'; img-src data:")
-        );
-        assert_eq!(
-            extract_csp("<html><meta charset=utf-8><p>no policy</p>"),
-            None
-        );
-    }
-
-    #[test]
-    fn a_lax_or_missing_policy_is_replaced_by_ours() {
-        assert_eq!(effective_csp("<p>none</p>"), MESSAGE_CSP);
-        assert_eq!(
-            effective_csp(
-                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\">"
-            ),
+            response.headers()[header::CONTENT_SECURITY_POLICY],
             MESSAGE_CSP
         );
+    }
+
+    #[test]
+    fn a_lax_or_missing_policy_does_not_change_the_header() {
+        for html in [
+            "<p>none</p>".to_string(),
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src *\">".to_string(),
+            format!(
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; report-uri https://t.example/r\">{}",
+                daemon_meta()
+            ),
+        ] {
+            let response = answer("/work/1", Ok(Rendered::Html(html)));
+            assert_eq!(
+                response.headers()[header::CONTENT_SECURITY_POLICY],
+                MESSAGE_CSP
+            );
+        }
     }
 
     #[test]
@@ -417,6 +317,13 @@ mod tests {
         assert_eq!(h[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
         assert_eq!(h["X-Mp-Rendition"], "html");
+        let body = String::from_utf8(response.into_body()).expect("utf-8");
+        assert!(
+            body.starts_with("<!doctype html <meta content="),
+            "the fixture carries the doctype trick"
+        );
+        assert!(body.contains("report-uri"));
+        assert!(body.contains(&daemon_meta()), "the daemon's tag is present");
     }
 
     #[test]
