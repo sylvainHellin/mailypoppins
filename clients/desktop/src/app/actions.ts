@@ -26,6 +26,7 @@ import {
   type Target,
 } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
+import { copyText } from "@/lib/clipboard";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
 
@@ -90,10 +91,7 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "copy_selector": {
       const selector = s.selection.message?.selector;
       if (!selector) return;
-      void navigator.clipboard
-        ?.writeText(selector)
-        .then(() => dispatch({ type: "notice", text: `Copied ${selector}` }))
-        .catch(() => dispatch({ type: "notice", text: "The clipboard refused the selector" }));
+      void copyText(selector, selector, dispatch);
       return;
     }
     case "clear_selection":

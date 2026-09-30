@@ -10,6 +10,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/lib/commands.ts` | One typed wrapper per Tauri command |
 | `src/lib/events.ts` | The `subscribe_events` channel and the native `menu` event |
 | `src/lib/gui-types.ts` | The Tauri layer's result and event types |
+| `src/lib/clipboard.ts` | Every copy: `copyText(text, what, dispatch)` writes through `navigator.clipboard` from the key or click handler and says "Copied <what>" or "The clipboard refused <what>" |
 | `src/protocol/types.ts` | Wire shapes embedded in them, hand-written until ts-rs generates them |
 | `src/app/state.ts`, `reducer.ts` | The model and the one reducer: GuiEvents, answers, intents |
 | `src/app/search.ts` | Search hits in one shape, and the server search's transitions |

@@ -4,6 +4,7 @@
 
 import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
+import { copyText } from "@/lib/clipboard";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
 
@@ -20,13 +21,5 @@ export function openInBrowser(url: string, dispatch: Dispatch<Action>): void {
 }
 
 export function copyLink(url: string, dispatch: Dispatch<Action>): void {
-  const clipboard = navigator.clipboard;
-  if (!clipboard) {
-    dispatch({ type: "notice", text: "The clipboard is not available" });
-    return;
-  }
-  clipboard
-    .writeText(url)
-    .then(() => dispatch({ type: "notice", text: "Copied the link" }))
-    .catch(() => dispatch({ type: "notice", text: "The clipboard refused the link" }));
+  void copyText(url, "the link", dispatch);
 }
