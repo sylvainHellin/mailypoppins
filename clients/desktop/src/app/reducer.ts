@@ -950,8 +950,10 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         marked: sameInstance ? next.marked : NO_MARKS,
         // Operation ids are per daemon instance.
         progress: sameInstance ? next.progress : {},
-        // Another daemon may serve another configuration.
+        // Another daemon may serve another configuration, and its
+        // config.toml banner comes from its own config.get or config.invalid.
         config: markStale(next.config),
+        configProblem: sameInstance ? next.configProblem : null,
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
         overlay: closeOverlay ? null : next.overlay,

@@ -7,7 +7,7 @@ import { StoreProvider, useAppState } from "@/app/store";
 import type { AppState } from "@/app/state";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
-import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, resetMock } from "@/test/tauri-mock";
+import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, resetMock, simulateConfigAbsent } from "@/test/tauri-mock";
 
 const SECRET = "hunter2-correct-horse";
 
@@ -131,6 +131,22 @@ describe("the Settings view", () => {
     expect(banner).toHaveTextContent(`config.toml was refused (${MOCK_CONFIG_PATH}): retention: body_horizon_days is negative`);
     act(() => emitEnvelope("config.changed", { added: [], updated: [], removed: [], config_revision: 1 }));
     await waitFor(() => expect(screen.queryByRole("alert", { name: "Configuration problem" })).toBeNull());
+  });
+
+  it("a daemon that started on a bad file says it serves no configuration, with no event seen", async () => {
+    resetMock();
+    simulateConfigAbsent();
+    mock.configState = "invalid";
+    setWidth(1400);
+    render(
+      <StoreProvider>
+        <TooltipProvider>
+          <AppShell />
+        </TooltipProvider>
+      </StoreProvider>,
+    );
+    const banner = await screen.findByRole("alert", { name: "Configuration problem" });
+    expect(banner).toHaveTextContent(`config.toml did not load (${MOCK_CONFIG_PATH}); the daemon serves no configuration until a reload loads it`);
   });
 });
 

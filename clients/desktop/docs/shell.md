@@ -703,6 +703,12 @@ A refusal shows in the dialog's alert with the field empty and focused for a ret
 A banner above the panes, in every view, then says "config.toml was refused (<path>, line N): <message>; the daemon keeps the configuration it had", with "Open config.toml".
 It is a `role="alert"` element named "Configuration problem", inserted with its text so it is announced, and removed when `config.changed` says a configuration loaded.
 
+A daemon that started on a file that did not load serves no configuration, and says so only through `config_get`'s state `invalid`.
+The window reads `config_get` with no account at all, so an answer to the current read with that state sets `state.configProblem` with `atStartup`.
+The banner then says "config.toml did not load (<path>); the daemon serves no configuration until a reload loads it", with the line and the message of a later `config.invalid` when one comes.
+An answer in another state drops a startup banner, since the file has loaded since; an answer to a read that went stale leaves the banner alone.
+A re-bootstrap from another daemon instance clears the banner, since that daemon's startup is no swap and publishes no `config.changed`; its own `config_get` or `config.invalid` raises it again.
+
 ### config.changed
 
 The event clears the banner and makes the configuration and the account list stale.

@@ -46,17 +46,35 @@ export function openSettings(s: AppState): AppState {
   return { ...s, config: markStale(s.config) };
 }
 
+/**
+ * `config.get` answered. An answer to the current read also says whether
+ * the daemon started on a file that did not load: `invalid` shows the
+ * banner, with the reason of a `config.invalid` when one came, and any
+ * other state drops a startup banner, since the file has loaded since. An
+ * older answer, such as one from a daemon that has since restarted, leaves
+ * the banner alone.
+ */
 export function configLoaded(s: AppState, gen: number, snapshot: ConfigSnapshot): AppState {
-  return { ...s, config: { ...s.config, data: snapshot, loadedGen: gen, error: null } };
+  const next: AppState = { ...s, config: { ...s.config, data: snapshot, loadedGen: gen, error: null } };
+  if (gen !== s.config.gen) return next;
+  const p = s.configProblem;
+  if (snapshot.state === "invalid") {
+    return { ...next, configProblem: p ? { ...p, atStartup: true } : { path: snapshot.path, line: null, message: "", atStartup: true } };
+  }
+  return p?.atStartup ? { ...next, configProblem: null } : next;
 }
 
 export function configFailed(s: AppState, gen: number, error: GuiError): AppState {
   return { ...s, config: { ...s.config, loadedGen: gen, error } };
 }
 
-/** `config.invalid`: the banner shows the file, the line and why, until a configuration loads. */
+/**
+ * `config.invalid`: the banner shows the file, the line and why, until a
+ * configuration loads. A refused reload changes nothing the daemon serves,
+ * so a daemon that started on a bad file still serves none.
+ */
 export function configInvalid(s: AppState, p: ConfigInvalid): AppState {
-  return { ...s, configProblem: { path: p.path, line: p.line ?? null, message: p.message } };
+  return { ...s, configProblem: { path: p.path, line: p.line ?? null, message: p.message, atStartup: s.configProblem?.atStartup ?? false } };
 }
 
 /**

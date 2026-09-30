@@ -44,6 +44,16 @@ export const VIEWS: readonly View[] = ["mail", "contacts", "calendar", "settings
 export type Layout = "wide" | "medium" | "narrow";
 
 /**
+ * A refused config.toml: the file, the line and why, as `config.invalid`
+ * carries them. `atStartup` says the daemon started on a file that did not
+ * load (`config.get`'s state `invalid`), so it serves no configuration;
+ * without it the daemon kept the one it had. The startup state has no
+ * reason of its own, so its `message` is empty until a `config.invalid`
+ * gives one.
+ */
+export type ConfigProblem = ConfigInvalid & { atStartup: boolean };
+
+/**
  * A fetched answer. `gen` moves every time the answer goes stale, even when
  * it already is, and `loadedGen` is the generation the data (or the error)
  * was fetched at; the answer is stale while they differ. An event arriving
@@ -691,11 +701,11 @@ export type AppState = {
    */
   config: Loadable<ConfigSnapshot>;
   /**
-   * The last `config.invalid`: the file, the line and why the daemon
-   * refused it, shown as a banner until a `config.changed` says a
-   * configuration loaded.
+   * The config.toml banner: the last `config.invalid` of this daemon
+   * instance, or `config.get`'s `invalid` state, until a `config.changed`
+   * says a configuration loaded or another instance answers.
    */
-  configProblem: ConfigInvalid | null;
+  configProblem: ConfigProblem | null;
   /** What the `password` overlay shows; null whenever another overlay or none is open. */
   passwordDialog: PasswordDialog | null;
   /** What the `account_wizard` overlay shows; null whenever another overlay or none is open. */

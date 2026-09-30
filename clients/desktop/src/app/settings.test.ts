@@ -42,13 +42,47 @@ describe("the configuration in the model", () => {
     s = run(s, { type: "config_loaded", gen: s.config.gen, snapshot: { revision: 0, path: "/c/config.toml", state: "ok", config: fixtures.config } });
     expect(isStale(s.config)).toBe(false);
     s = run(s, envelope("config.invalid", invalid));
-    expect(s.configProblem).toEqual(invalid);
+    expect(s.configProblem).toEqual({ ...invalid, atStartup: false });
     // A refused file changes nothing the daemon serves.
     expect(isStale(s.config)).toBe(false);
     s = run(s, envelope("config.changed", { added: [], updated: [], removed: [], config_revision: 1 }));
     expect(s.configProblem).toBeNull();
     expect(isStale(s.config)).toBe(true);
     expect(isStale(s.accounts)).toBe(true);
+  });
+
+  it("a daemon restart drops the banner of the instance before it, and the same instance keeps it", () => {
+    let s = run(booted(), envelope("config.invalid", invalid));
+    s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "resync", bootstrap: fixtures.bootstrap } });
+    expect(s.configProblem).toEqual({ ...invalid, atStartup: false });
+    // The file was fixed and the daemon restarted: its startup is no swap, so no config.changed comes.
+    const restarted = { ...fixtures.bootstrap, instance_id: "fixture-instance-2" };
+    s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: restarted } });
+    expect(s.configProblem).toBeNull();
+    s = run(s, { type: "switch_view", view: "settings" });
+    s = run(s, { type: "config_loaded", gen: s.config.gen, snapshot: { revision: 0, path: "/c/config.toml", state: "ok", config: fixtures.config } });
+    expect(s.configProblem).toBeNull();
+  });
+
+  it("a daemon that started on a bad file raises the startup banner from config.get, until the file loads", () => {
+    const empty = { ...fixtures.config, accounts: [] };
+    const invalidAtStart = { revision: 0, path: "/c/config.toml", state: "invalid" as const, config: empty };
+    let s = run(booted(), envelope("config.invalid", invalid));
+    const restarted = { ...fixtures.bootstrap, instance_id: "fixture-instance-2" };
+    s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: restarted } });
+    // An answer the old daemon gave to a read the restart superseded changes no banner.
+    s = run(s, { type: "config_loaded", gen: s.config.gen - 1, snapshot: invalidAtStart });
+    expect(s.configProblem).toBeNull();
+    s = run(s, { type: "config_loaded", gen: s.config.gen, snapshot: invalidAtStart });
+    expect(s.configProblem).toEqual({ path: "/c/config.toml", line: null, message: "", atStartup: true });
+    // A refused reload gives the reason, and the daemon still serves no configuration.
+    s = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "fixture-instance-2", revision: 701, kind: "config.invalid", payload: invalid } } });
+    expect(s.configProblem).toEqual({ ...invalid, atStartup: true });
+    s = run(s, { type: "config_loaded", gen: s.config.gen, snapshot: invalidAtStart });
+    expect(s.configProblem).toEqual({ ...invalid, atStartup: true });
+    // Read once the file loaded, whether or not its config.changed came first.
+    s = run(s, { type: "config_loaded", gen: s.config.gen, snapshot: { ...invalidAtStart, revision: 1, state: "ok", config: fixtures.config } });
+    expect(s.configProblem).toBeNull();
   });
 
   it("config.changed reads the updated account's mailboxes and list again, and leaves the others", () => {
