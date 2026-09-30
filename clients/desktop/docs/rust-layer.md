@@ -194,6 +194,7 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 |---|---|
 | `MP_DESKTOP_FIXTURE=1` (or `--fixture`) | Serve `clients/desktop/fixtures/*.json`, no daemon |
 | `MP_DESKTOP_MP_BIN` | The `mp` binary to start the daemon with; else the sidecar next to the executable, then `PATH`, then `~/.cargo/bin/mp`, `/opt/homebrew/bin/mp`, `/usr/local/bin/mp` |
+| `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one; default `1400x900` |
 | `MP_DESKTOP_STUB_OPENER=1` | `open_external` records instead of opening |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`; to stderr and `<data>/logs/mp-desktop.log` |
 | `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR` | The same overrides the binary reads |

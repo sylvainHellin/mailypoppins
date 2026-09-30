@@ -34,6 +34,25 @@ use crate::session::{GuiEvent, InterceptSource, SessionHandle};
 /// `MP_DESKTOP_FIXTURE=1` or `--fixture`: serve the fixtures, no daemon.
 pub const FIXTURE_ENV: &str = "MP_DESKTOP_FIXTURE";
 
+/// `MP_DESKTOP_WINDOW_SIZE=WxH`: the initial window size in logical pixels,
+/// so a fixture run can open straight into the medium or narrow layout.
+pub const WINDOW_SIZE_ENV: &str = "MP_DESKTOP_WINDOW_SIZE";
+const DEFAULT_WINDOW_SIZE: (f64, f64) = (1400.0, 900.0);
+
+/// `"950x800"` to `(950.0, 800.0)`; anything else is `None`.
+fn parse_window_size(v: &str) -> Option<(f64, f64)> {
+    let (w, h) = v.trim().split_once(['x', 'X'])?;
+    let (w, h): (f64, f64) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
+}
+
+fn window_size() -> (f64, f64) {
+    std::env::var(WINDOW_SIZE_ENV)
+        .ok()
+        .and_then(|v| parse_window_size(&v))
+        .unwrap_or(DEFAULT_WINDOW_SIZE)
+}
+
 /// How long the scheme handler waits for a session still connecting.
 const READER_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -87,11 +106,12 @@ pub fn run() {
             } else {
                 None
             };
+            let (width, height) = window_size();
             let nav_app = app.handle().clone();
             let win_app = app.handle().clone();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("mailypoppins")
-                .inner_size(1400.0, 900.0)
+                .inner_size(width, height)
                 .min_inner_size(480.0, 400.0)
                 .on_navigation(move |url| {
                     let allowed = navigation_allowed(url, dev_origin.as_ref());
@@ -131,6 +151,20 @@ pub fn run() {
         tracing::error!("[app] the application failed: {e}");
         eprintln!("mp-desktop: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_window_size;
+
+    #[test]
+    fn a_window_size_parses_as_width_x_height() {
+        assert_eq!(parse_window_size("950x800"), Some((950.0, 800.0)));
+        assert_eq!(parse_window_size(" 600 X 820 "), Some((600.0, 820.0)));
+        assert_eq!(parse_window_size("600"), None);
+        assert_eq!(parse_window_size("0x800"), None);
+        assert_eq!(parse_window_size("wide"), None);
     }
 }
 
