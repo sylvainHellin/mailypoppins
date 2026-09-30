@@ -378,7 +378,7 @@ pub fn open_on(
         )));
     }
     if !file.is_file() {
-        return Err(GuiError::not_found(format!("no draft file at {path}")));
+        return Err(GuiError::not_found(format!("no file at {path}")));
     }
     let resolved = resolve(lookup);
     let mut argv =

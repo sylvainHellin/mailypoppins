@@ -193,7 +193,20 @@ export const mock = {
   vcards: [] as { account: string; id: string; vcf: string }[],
   /** The signatures and each account's default, what the `signature_*` commands read and change. */
   signatures: clone(fixtures.signatures),
+  /** `config.get`'s `state`: `absent` makes `config_open` refuse with fixture.rs's `NO_CONFIG`. */
+  configState: "ok" as "ok" | "absent" | "invalid",
+  /** Whether the daemon's log file exists, which `log_open` checks. */
+  logExists: true,
 };
+
+/** Where `config_open` opens config.toml in the mock, `config.get`'s `path`. */
+export const MOCK_CONFIG_PATH = "/fixture/config.toml";
+
+/** Where `log_open` opens the daemon log in the mock, `diagnostic.log_path`'s answer. */
+export const MOCK_LOG_PATH = "/fixture/logs/mailypoppins-2026-09-30.log";
+
+/** daemon_files.rs's `NO_CONFIG`. */
+export const NO_CONFIG = "There is no config.toml yet; add an account first";
 
 /** fixture.rs's `GRAPH_INVITE_REFUSAL`, the daemon's `send.invite` refusal of a Graph account. */
 export const GRAPH_INVITE_REFUSAL =
@@ -253,6 +266,8 @@ export function resetMock(): void {
   mock.nextRebuild = 1;
   mock.vcards = [];
   mock.signatures = clone(fixtures.signatures);
+  mock.configState = "ok";
+  mock.logExists = true;
 }
 
 /** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
@@ -1181,6 +1196,17 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "editor_open": {
       const path = String(args.path);
+      mock.editorOpens.push(path);
+      const failure = mock.editorFailure;
+      mock.editorFailure = null;
+      if (failure) throw failure;
+      return { editor: `code --wait '${path}'`, source: "probe" };
+    }
+    case "config_open":
+    case "log_open": {
+      if (cmd === "config_open" && mock.configState === "absent") throw { kind: "not_found", message: NO_CONFIG, code: null };
+      if (cmd === "log_open" && !mock.logExists) throw { kind: "not_found", message: `No log file found at ${MOCK_LOG_PATH}`, code: null };
+      const path = cmd === "config_open" ? MOCK_CONFIG_PATH : MOCK_LOG_PATH;
       mock.editorOpens.push(path);
       const failure = mock.editorFailure;
       mock.editorFailure = null;

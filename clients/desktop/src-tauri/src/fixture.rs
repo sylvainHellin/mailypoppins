@@ -36,6 +36,12 @@
 //! [`REBUILD_DELAY`] with `saved: written`; after `rebuild_refused` the next
 //! one settles `refused_shrunk` with 3 contacts found and the index kept.
 //!
+//! `config.get` answers `<temp>/mp-desktop-fixture-<pid>/config.toml`, written
+//! at load from the `config.toml` template (its accounts are
+//! `accounts.json`'s), with state `ok` and `config.json` as the effective
+//! configuration; `diagnostic.log_path` answers
+//! `<root>/logs/mailypoppins-2026-09-30.log`, written at load with ten lines.
+//!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
 //! real file. `signature.list` and the pseudo-methods `signature.read`,
@@ -122,6 +128,15 @@ const DRAFT_BODIES: &str = include_str!("../../fixtures/draft-bodies.json");
 const SIGNATURES: &str = include_str!("../../fixtures/signatures.json");
 const CALENDAR: &str = include_str!("../../fixtures/calendar.json");
 const CONTACTS: &str = include_str!("../../fixtures/contacts.json");
+const CONFIG: &str = include_str!("../../fixtures/config.json");
+const CONFIG_TOML: &str = include_str!("../../fixtures/config.toml");
+
+/// The daemon's dated log file the fixture writes and `diagnostic.log_path`
+/// names, under `<root>/logs/`.
+pub const FIXTURE_LOG_NAME: &str = "mailypoppins-2026-09-30.log";
+
+/// How many lines that log holds.
+pub const FIXTURE_LOG_LINES: usize = 10;
 
 /// The agenda row `invite_update` and `invite_cancel` change: `work`'s
 /// steering committee, the inbox invitation of `messages.json`.
@@ -207,6 +222,12 @@ const SIGNATURES_DIR: &str = "signatures";
 /// The line `signature_changed` appends to `work`, as an edit in another
 /// window would.
 pub const SIGNATURE_EDIT_LINE: &str = "Edited behind the fixture's back.";
+
+/// The file `config.get` names, under the per-run root.
+const CONFIG_FILE: &str = "config.toml";
+
+/// The directory under the per-run root the daemon log lives in.
+const LOGS_DIR: &str = "logs";
 
 /// What [`Fixture::simulate`] can do.
 pub const SIMULATIONS: &[&str] = &[
@@ -396,6 +417,10 @@ struct State {
     /// The next rebuild is refused by the cache guard (`rebuild_refused`).
     rebuild_refused: bool,
     rebuild_delay: Duration,
+    /// The effective configuration `config.get` answers (`config.json`).
+    config: Value,
+    /// `config.get`'s `state`: `ok`, `absent` or `invalid`.
+    config_state: String,
 }
 
 impl State {
@@ -2053,6 +2078,7 @@ impl Fixture {
             serde_json::from_str(CALENDAR).context("fixtures/calendar.json")?;
         let contacts: BTreeMap<String, Vec<Value>> =
             serde_json::from_str(CONTACTS).context("fixtures/contacts.json")?;
+        let config: Value = serde_json::from_str(CONFIG).context("fixtures/config.json")?;
         let mut ics = BTreeMap::new();
         for (key, text) in &calendar.ics {
             let id: i64 = key
@@ -2063,6 +2089,7 @@ impl Fixture {
         let root = fixture_root();
         seed_drafts(&root, &seeds, &bodies).context("writing the fixture drafts")?;
         seed_signatures(&root, &signatures).context("writing the fixture signatures")?;
+        seed_daemon_files(&root).context("writing the fixture's config.toml and log")?;
         let html_by_key: BTreeMap<String, String> =
             serde_json::from_str(HTML).context("fixtures/html.json")?;
         let mut html = BTreeMap::new();
@@ -2119,6 +2146,8 @@ impl Fixture {
             contacts,
             rebuild_refused: false,
             rebuild_delay: REBUILD_DELAY,
+            config,
+            config_state: "ok".to_string(),
         };
         state.rescan();
         state.seed_outbox();
@@ -2283,6 +2312,22 @@ impl Fixture {
         match method {
             "state.bootstrap" => Ok(s.bootstrap()),
             "account.list" => Ok(s.accounts.clone()),
+            // The daemon's `config.get`: the file it reads, whether it
+            // loaded, and the effective configuration, passwords redacted.
+            "config.get" => {
+                only(method, &params, &[])?;
+                Ok(json!({
+                    "revision": 0,
+                    "path": s.root.join(CONFIG_FILE).display().to_string(),
+                    "state": s.config_state,
+                    "config": s.config,
+                }))
+            }
+            "diagnostic.log_path" => {
+                only(method, &params, &[])?;
+                let path = s.root.join(LOGS_DIR).join(FIXTURE_LOG_NAME);
+                Ok(json!({"path": path.display().to_string()}))
+            }
             "mailbox.list" => {
                 let account = param_str(method, &params, "account")?;
                 if !s.messages.contains_key(account) {
@@ -3787,6 +3832,12 @@ impl Fixture {
         self.state().root.clone()
     }
 
+    /// Set `config.get`'s `state` (`ok`, `absent`, `invalid`).
+    #[cfg(test)]
+    pub fn set_config_state(&self, state: &str) {
+        self.state().config_state = state.to_string();
+    }
+
     /// A client wrote the draft file at `path` (a recipient rewrite): publish
     /// what the daemon's watcher would, `draft.changed` or `draft.invalid`.
     pub fn file_written(&self, path: &Path) {
@@ -3985,6 +4036,61 @@ fn seed_drafts(
                 .set_modified(now - Duration::from_secs(60 * (i as u64 + 1)))?;
         }
     }
+    Ok(())
+}
+
+/// Write the two files the daemon names: `<root>/config.toml` from the
+/// `config.toml` template and `<root>/logs/<FIXTURE_LOG_NAME>` with
+/// [`FIXTURE_LOG_LINES`] lines in the daemon's log format.
+fn seed_daemon_files(root: &Path) -> Result<()> {
+    fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    fs::write(root.join(CONFIG_FILE), CONFIG_TOML)?;
+    let dir = root.join(LOGS_DIR);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let lines: [(&str, &str); FIXTURE_LOG_LINES] = [
+        (
+            "INFO",
+            "mailypoppins::daemon: listening on the fixture socket",
+        ),
+        (
+            "INFO",
+            "mailypoppins::daemon::config: loaded config.toml (2 accounts)",
+        ),
+        (
+            "INFO",
+            "mailypoppins::daemon::runtime: work: runtime started (imap)",
+        ),
+        (
+            "INFO",
+            "mailypoppins::daemon::runtime: home: runtime started (graph)",
+        ),
+        (
+            "INFO",
+            "mailypoppins::daemon::session: client connected (gui)",
+        ),
+        (
+            "INFO",
+            "mailypoppins::sync: work: Synced: 3 new, 120 existing",
+        ),
+        ("WARN", "mailypoppins::sync: home: token refresh took 4.2 s"),
+        (
+            "INFO",
+            "mailypoppins::sync: home: Synced: 0 new, 48 existing",
+        ),
+        ("INFO", "mailypoppins::send: work: hold armed for 10 s"),
+        (
+            "INFO",
+            "mailypoppins::daemon::session: client connected (tui)",
+        ),
+    ];
+    let text: String = lines
+        .iter()
+        .enumerate()
+        .map(|(i, (level, message))| {
+            format!("2026-09-30T08:{:02}:00.000000Z  {level} {message}\n", i * 3)
+        })
+        .collect();
+    fs::write(dir.join(FIXTURE_LOG_NAME), text)?;
     Ok(())
 }
 
@@ -4259,6 +4365,43 @@ mod tests {
                 "{method}"
             );
         }
+    }
+
+    /// `config.get` names the `config.toml` written at load, whose accounts
+    /// are `accounts.json`'s in its order, as `config.json`'s are.
+    #[test]
+    fn config_get_names_the_written_config_toml_which_matches_the_accounts() {
+        let (f, _rx) = fixture();
+        let answer = f.call("config.get", json!({})).expect("config.get");
+        assert_eq!(answer["state"], "ok");
+        let path = PathBuf::from(answer["path"].as_str().expect("path"));
+        assert_eq!(path, f.root().join("config.toml"));
+        let toml = fs::read_to_string(&path).expect("written");
+        let accounts = f.call("account.list", json!({})).expect("accounts");
+        let names: Vec<&str> = accounts["accounts"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|a| a["name"].as_str())
+            .collect();
+        let configured: Vec<&str> = answer["config"]["accounts"]
+            .as_array()
+            .expect("config accounts")
+            .iter()
+            .filter_map(|a| a["name"].as_str())
+            .collect();
+        assert_eq!(configured, names);
+        let in_toml: Vec<&str> = toml
+            .lines()
+            .filter_map(|l| l.strip_prefix("name = \"")?.strip_suffix('"'))
+            .collect();
+        assert_eq!(in_toml, names);
+        let log = f.call("diagnostic.log_path", json!({})).expect("log path");
+        let log = PathBuf::from(log["path"].as_str().expect("path"));
+        assert_eq!(log, f.root().join("logs").join(FIXTURE_LOG_NAME));
+        let text = fs::read_to_string(&log).expect("log written");
+        assert_eq!(text.lines().count(), FIXTURE_LOG_LINES);
+        assert!(f.call("config.get", json!({"x": 1})).is_err());
     }
 
     #[test]

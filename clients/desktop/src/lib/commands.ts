@@ -207,6 +207,15 @@ export const signatureSetDefault = (account: string, name: string | null): Promi
 /** Opens the file in the resolved editor and never waits for it; a launch failure is `setup`. */
 export const editorOpen = (path: string): Promise<EditorLaunch> => invoke<EditorLaunch>("editor_open", { path });
 
+/**
+ * Opens the daemon's config.toml (`config.get`'s path) in the resolved editor;
+ * `not_found` when the daemon has no configuration yet.
+ */
+export const configOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("config_open");
+
+/** Opens the daemon's log file (`diagnostic.log_path`) in the resolved editor; `not_found` when it does not exist yet. */
+export const logOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("log_open");
+
 export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetting>("editor_setting_get");
 
 /** `null` clears the setting. */

@@ -122,6 +122,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "send.invite",
     "contact.search",
     "contact.rebuild",
+    "config.get",
+    "diagnostic.log_path",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -844,6 +846,8 @@ mod tests {
             "send.invite",
             "contact.search",
             "contact.rebuild",
+            "config.get",
+            "diagnostic.log_path",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }

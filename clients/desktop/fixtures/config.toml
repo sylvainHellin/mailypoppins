@@ -1,0 +1,29 @@
+# The fixture's config.toml, written to <root>/config.toml at start; what
+# config.get's `path` names. It matches accounts.json and config.json.
+
+[email]
+send_hold_secs = 10
+
+[[accounts]]
+name = "work"
+default_from = "Me <me@example.com>"
+
+[accounts.smtp]
+host = "smtp.work.example"
+username = "me@example.com"
+
+[accounts.imap]
+host = "imap.work.example"
+username = "me@example.com"
+
+[[accounts]]
+name = "home"
+default_from = "Me <me@example.com>"
+auth_method = "graph"
+
+[accounts.smtp]
+username = "me@example.com"
+
+[accounts.oauth2]
+client_id = "00000000-0000-0000-0000-00000000f1x7"
+tenant_id = "common"

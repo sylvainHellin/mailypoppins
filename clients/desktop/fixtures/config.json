@@ -1,0 +1,83 @@
+{
+  "theme": "",
+  "notifications": false,
+  "secrets_backend": "encrypted-file",
+  "email": {
+    "font_family": "Helvetica, Arial, sans-serif",
+    "font_size": "16px",
+    "include_signature": true,
+    "send_hold_secs": 10
+  },
+  "retention": {
+    "metadata_horizon_days": 0,
+    "body_horizon_days": 365,
+    "attachment_horizon_days": 90,
+    "max_disk_bytes": 10000000000
+  },
+  "accounts": [
+    {
+      "name": "work",
+      "default_from": "Me <me@example.com>",
+      "auth_method": "password",
+      "oauth2": null,
+      "smtp": {
+        "host": "smtp.work.example",
+        "port": 465,
+        "username": "me@example.com",
+        "accept_invalid_certs": false,
+        "password": "<redacted>"
+      },
+      "imap": {
+        "host": "imap.work.example",
+        "port": 993,
+        "username": "me@example.com",
+        "accept_invalid_certs": false,
+        "fetch_concurrency": 4,
+        "body_fetch_deadline_secs": 30,
+        "sync_interval_secs": 900,
+        "password": "<redacted>"
+      },
+      "mailboxes": {"inbox": null, "archive": null, "sent": null, "extra": []},
+      "retention": {
+        "metadata_horizon_days": 0,
+        "body_horizon_days": 365,
+        "attachment_horizon_days": 90,
+        "max_disk_bytes": 10000000000
+      },
+      "save_to_sent": "auto",
+      "hooks": []
+    },
+    {
+      "name": "home",
+      "default_from": "Me <me@example.com>",
+      "auth_method": "graph",
+      "oauth2": {"client_id": "00000000-0000-0000-0000-00000000f1x7", "tenant_id": "common"},
+      "smtp": {
+        "host": "",
+        "port": 465,
+        "username": "me@example.com",
+        "accept_invalid_certs": false,
+        "password": "<redacted>"
+      },
+      "imap": {
+        "host": "",
+        "port": 993,
+        "username": "me@example.com",
+        "accept_invalid_certs": false,
+        "fetch_concurrency": 4,
+        "body_fetch_deadline_secs": 30,
+        "sync_interval_secs": 900,
+        "password": "<redacted>"
+      },
+      "mailboxes": {"inbox": null, "archive": null, "sent": null, "extra": []},
+      "retention": {
+        "metadata_horizon_days": 0,
+        "body_horizon_days": 365,
+        "attachment_horizon_days": 90,
+        "max_disk_bytes": 10000000000
+      },
+      "save_to_sent": "auto",
+      "hooks": []
+    }
+  ]
+}
