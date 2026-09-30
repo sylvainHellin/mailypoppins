@@ -3,12 +3,14 @@
 // answers them. A rejected promise carries a GuiError (see asGuiError).
 
 import { invoke, type Channel } from "@/lib/tauri";
-import type { Bootstrap } from "@/protocol/types";
+import type { Bootstrap, HoldListing } from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
+  DraftDiscardBatch,
   FixtureSimulation,
   GuiEvent,
+  HoldCancelled,
   InterceptedUrl,
   LocalSearchHit,
   LocalSearchParams,
@@ -16,7 +18,10 @@ import type {
   MessageList,
   MessageMeta,
   MessageText,
+  MutationBatch,
+  OperationStarted,
   ServerSearchParams,
+  SyncMode,
   VersionInfo,
 } from "@/lib/gui-types";
 
@@ -54,6 +59,48 @@ export const searchServerCancel = (
   operation_id: string,
 ): Promise<"cancelled" | "already_settled"> =>
   invoke<"cancelled" | "already_settled">("search_server_cancel", { operation_id });
+
+// Mutations take a list of row ids, one call per id in the list's order, all with
+// `settle: false`; a row the daemon refused is in `failed` and the rest go ahead.
+
+export const messageArchive = (account: string, row_ids: number[]): Promise<MutationBatch> =>
+  invoke<MutationBatch>("message_archive", { account, row_ids });
+
+export const messageDelete = (account: string, row_ids: number[]): Promise<MutationBatch> =>
+  invoke<MutationBatch>("message_delete", { account, row_ids });
+
+export const messageMove = (
+  account: string,
+  row_ids: number[],
+  destination: string,
+): Promise<MutationBatch> =>
+  invoke<MutationBatch>("message_move", { account, row_ids, destination });
+
+export const messageSetFlag = (
+  account: string,
+  row_ids: number[],
+  flagged: boolean,
+): Promise<MutationBatch> =>
+  invoke<MutationBatch>("message_set_flag", { account, row_ids, flagged });
+
+export const messageSetRead = (
+  account: string,
+  row_ids: number[],
+  read: boolean,
+): Promise<MutationBatch> =>
+  invoke<MutationBatch>("message_set_read", { account, row_ids, read });
+
+export const draftDiscard = (account: string, ids: string[]): Promise<DraftDiscardBatch> =>
+  invoke<DraftDiscardBatch>("draft_discard", { account, ids });
+
+export const sendHoldStatus = (account?: string): Promise<HoldListing> =>
+  invoke<HoldListing>("send_hold_status", { account: account ?? null });
+
+export const sendCancelHold = (operation_id: string): Promise<HoldCancelled> =>
+  invoke<HoldCancelled>("send_cancel_hold", { operation_id });
+
+export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
+  invoke<OperationStarted>("sync_trigger", { account, mode });
 
 export const restartDaemon = (): Promise<void> => invoke<void>("restart_daemon");
 

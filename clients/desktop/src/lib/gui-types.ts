@@ -7,14 +7,20 @@ import type { GuiError } from "@/protocol/generated/gui";
 
 export type * from "@/protocol/generated/gui";
 
-/** What `fixture_simulate` takes; the command reads it as a plain string. */
+/**
+ * What `fixture_simulate` takes; the command reads it as a plain string.
+ * `rollback` reverts every fixture mutation, `rollback:<n>` the last n.
+ */
 export type FixtureSimulation =
   | "disconnect"
   | "reconnect"
   | "restart"
   | "resync"
   | "new_mail"
-  | "shutdown";
+  | "shutdown"
+  | "rollback"
+  | `rollback:${number}`
+  | "hold";
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {
