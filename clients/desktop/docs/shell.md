@@ -22,6 +22,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/keymap/catalog.ts` | The KEYMAP row to GUI action binding, or the milestone that brings it |
 | `src/keymap/useKeymap.ts` | Keyboard routing |
 | `src/components/{shell,sidebar,list,search,reader,screens,palette}` | The views; `components/ui` is shadcn's; the reader frame is [reader.md](reader.md) |
+| `src/components/mutations` | The archive and delete confirmation, the move picker, and the activity area (notices and send holds) |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
 
@@ -58,7 +59,7 @@ Shift+Enter, the header's server button, `ff` (the TUI's "Search all mail") and 
 `state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`) and the list selection and focus to restore.
 Hits stream in from `message.server_hit`; a hit or a finish that overtakes the `search_server_start` answer is held in `search.early` and replayed once the id is known.
 Cancel calls `search_server_cancel`; leaving a running search (Escape, a new query, another mailbox) cancels it too.
-A server-only hit (`row_id: null`) is listed with a "server only" badge and does not open: fetching it into the store is M2's.
+A server-only hit (`row_id: null`) is listed with a "server only" badge and does not open: fetching it into the store needs a `message.fetch` command the Tauri layer does not have yet.
 Escape, from the list or the field, returns to the mailbox list with the selection it had before the search; choosing a mailbox or an account ends the search as well.
 A `rebootstrapped` keeps the search and its hits: the selection to restore goes through the same rules as a live one, a local search runs again after a daemon restart (row ids are per instance), and a server search waits for the `operation_settled` or `operation_dropped` the Rust layer's re-query sends.
 
@@ -107,6 +108,37 @@ A hold that fired or was cancelled stays so whatever tick arrives late, and a ca
 A sync is awaited by the `operation_id` `sync_trigger` answers; an end that overtakes the answer is held until the id is known.
 The marks follow the list: a mailbox change or a search clears them, a row that leaves drops its mark, and a reload drops the marks of rows it no longer lists.
 
+## Actions, dialogs and the activity area
+
+Every mutation runs through `runMutation` in `src/app/actions.ts`, whichever path asks: a key, the palette, a row toggle or the reader toolbar.
+The keys and the palette act on `actionTargets(state)`: the marked rows, else the cursor row.
+A row toggle acts on its own row and the reader toolbar on the open message, whatever is marked.
+Marks a batch acted on are cleared once it is dispatched, as the TUI clears its selection.
+
+Archive and delete ask first, as the TUI's confirmations do: "Archive this email?" with the sender and subject, or "Delete 3 emails?" over marks.
+`y` or Enter confirms and `n` or Escape cancels; the confirm button has the initial focus.
+Delete over a draft discards it with `draft_discard`, and a batch that holds messages and drafts calls both.
+Archive over drafts only says that a draft leaves by send or delete.
+The dialog keeps the targets it opened with, and a `rebootstrapped` from another daemon instance closes it, since row ids are per instance.
+
+Move opens the mailbox picker: the account's mailboxes less Drafts and the mailbox the rows are in, filtered as the name is typed, Enter to move, Escape to cancel.
+From the Drafts list it says "Quick-move is not available in this mailbox", the TUI's words.
+
+Toggling read or flag over several rows follows the TUI: flagging wins when any row is unflagged, and marking read when any is unread.
+
+The activity area is a stack at the bottom right of the window, raised above the reader's blocked-link notice while that shows.
+Held sends come first, then the notices of `state.activity`:
+
+- An applied batch is a `role="status"` notice that leaves after five seconds.
+- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel and a failed or dropped sync are `role="alert"` notices that stay until dismissed.
+- Every notice has a Dismiss button.
+- A cancelled hold's own notice is not shown, since the hold says so itself.
+
+Each send hold shows "Sending in N s" with the subject and the account, a progress bar, and Cancel.
+The seconds are the last `send.hold_tick`'s; Cancel calls `send_cancel_hold` and is disabled while that call is in flight.
+A hold that fired or was cancelled shows "Sent" or "Send cancelled" for three seconds, then `dismiss_hold` removes it.
+The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1` shows it at start.
+
 ## Layouts
 
 | Width | Layout | Shows |
@@ -131,7 +163,11 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation) are Base UI dialogs: they trap focus while open and return it when closed.
+Dialogs (palette, key help, restart confirmation, the archive and delete confirmation, the move picker) are Base UI dialogs: they trap focus while open and return it when closed.
+The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
+A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
+A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name.
+The reader's toolbar (`role="toolbar"`, "Message actions") sits above the headers; Tab leaves the reader for the next pane, so the toolbar is reached by pointer and its actions by their keys.
 Every focusable draws the solid `ring` outline on `:focus-visible`, and the connection banners sit in one polite `aria-live` region.
 
 ## Keys
@@ -145,13 +181,18 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector.
-- `Escape`: back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
+- `Escape`: clear the marks when any are set; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
 - `Enter` in the field: search the store; `Shift+Enter` or `ff`: search the server.
 - `Cmd+[` or `Alt+Left`: back through the focus history.
+- `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
+- `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
+- `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
+- `ss`, `sS`: quick and full sync of the selected account.
+- Shift+click marks the range from the last mark to the row, and Cmd+click or Ctrl+click marks one row; the palette's "Mark range" does the same from the cursor.
 - The palette's and the View menu's "Widen list" and "Narrow list" move the splitter by 40 px, since Tab cycles panes and never lands on it.
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
-A key whose action a later milestone brings (`a`, `d`, `r`, `cn`, …) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
+A key whose action a later milestone brings (`r`, `cn`, …) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
 
 ## Tests
 
