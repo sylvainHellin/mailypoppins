@@ -1,4 +1,5 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
+import { windowFor, WINDOW_FROM } from "@/components/list/useWindow";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 
@@ -14,6 +15,26 @@ describe("accessibility primitives", () => {
     expect(options.length).toBe(8);
     for (const o of options) expect(o).toHaveAttribute("aria-selected");
     expect(list).toBeInTheDocument();
+  });
+
+  it("gives every row its position and the set size, messages and drafts", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const options = screen.getAllByRole("option");
+    expect(options.map((o) => o.getAttribute("aria-posinset"))).toEqual(options.map((_, i) => String(i + 1)));
+    for (const o of options) expect(o).toHaveAttribute("aria-setsize", String(options.length));
+
+    await user.keyboard("2");
+    const drafts = await screen.findByRole("listbox", { name: "Drafts messages" });
+    const rows = within(drafts).getAllByRole("option");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.map((o) => o.getAttribute("aria-posinset"))).toEqual(rows.map((_, i) => String(i + 1)));
+    for (const o of rows) expect(o).toHaveAttribute("aria-setsize", String(rows.length));
+  });
+
+  it("mounts every row: windowing is off in M1", () => {
+    expect(WINDOW_FROM).toBe(Number.POSITIVE_INFINITY);
+    expect(windowFor(5000, 40_000, 800)).toEqual({ start: 0, end: 5000, padTop: 0, padBottom: 0 });
   });
 
   it("keeps one tab stop per list (roving tabindex)", async () => {

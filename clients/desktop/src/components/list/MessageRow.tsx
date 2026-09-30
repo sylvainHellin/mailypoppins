@@ -9,12 +9,15 @@ export type MessageRowProps = {
   selected: boolean;
   /** The roving tab stop: the selected row, or the first when none is. */
   tabStop: boolean;
+  /** 1-based, with the list's length: the set is complete only unwindowed. */
+  position: number;
+  setSize: number;
   onSelect: (row: MessageListRow) => void;
   onOpen: (row: MessageListRow) => void;
 };
 
 /** One message in the list. Pure: it renders its props and nothing else. */
-export const MessageRow = memo(function MessageRow({ row, selected, tabStop, onSelect, onOpen }: MessageRowProps) {
+export const MessageRow = memo(function MessageRow({ row, selected, tabStop, position, setSize, onSelect, onOpen }: MessageRowProps) {
   const unread = !row.flags.seen;
   const subject = row.subject || "(no subject)";
   const sender = senderName(row.from);
@@ -31,6 +34,8 @@ export const MessageRow = memo(function MessageRow({ row, selected, tabStop, onS
       role="option"
       id={`msg-${row.id}`}
       aria-selected={selected}
+      aria-posinset={position}
+      aria-setsize={setSize}
       aria-label={`${sender}, ${subject}, ${row.date_display || "no date"}${state.length ? `, ${state.join(", ")}` : ""}`}
       tabIndex={tabStop ? 0 : -1}
       data-roving={tabStop ? "active" : undefined}

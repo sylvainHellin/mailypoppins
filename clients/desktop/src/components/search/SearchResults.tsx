@@ -55,6 +55,8 @@ export function SearchResults({ search }: { search: SearchState }) {
           mailboxLabel={h.origin === "local" ? labelOf(h.mailbox) : h.mailbox}
           selected={i === selectedIndex}
           tabStop={i === tabIndexRow}
+          position={i + 1}
+          setSize={search.hits.length}
           onSelect={onSelect}
           onOpen={onOpen}
         />

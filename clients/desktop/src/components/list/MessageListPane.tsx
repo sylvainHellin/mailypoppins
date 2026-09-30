@@ -157,6 +157,8 @@ export function MessageListPane() {
                     draft={d}
                     selected={d.id === s.selection.draft}
                     tabStop={win.start + i === tabIndexRow}
+                    position={win.start + i + 1}
+                    setSize={count}
                     onSelect={onSelectDraft}
                   />
                 ))
@@ -166,6 +168,8 @@ export function MessageListPane() {
                     row={r}
                     selected={win.start + i === selectedIndex}
                     tabStop={win.start + i === tabIndexRow}
+                    position={win.start + i + 1}
+                    setSize={count}
                     onSelect={onSelect}
                     onOpen={onOpen}
                   />

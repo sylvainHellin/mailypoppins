@@ -8,17 +8,22 @@ export type DraftRowProps = {
   draft: DraftEntry;
   selected: boolean;
   tabStop: boolean;
+  /** 1-based, with the list's length. */
+  position: number;
+  setSize: number;
   onSelect: (id: string) => void;
 };
 
 /** One draft in the Drafts listing. Pure. */
-export const DraftRow = memo(function DraftRow({ draft, selected, tabStop, onSelect }: DraftRowProps) {
+export const DraftRow = memo(function DraftRow({ draft, selected, tabStop, position, setSize, onSelect }: DraftRowProps) {
   const subject = draft.subject || "(no subject)";
   const to = draft.to || "(no recipient)";
   return (
     <div
       role="option"
       aria-selected={selected}
+      aria-posinset={position}
+      aria-setsize={setSize}
       aria-label={`Draft to ${to}, ${subject}, ${draft.ready ? "ready to send" : "not ready"}`}
       tabIndex={tabStop ? 0 : -1}
       data-roving={tabStop ? "active" : undefined}

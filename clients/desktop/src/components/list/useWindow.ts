@@ -1,10 +1,16 @@
 // A fixed-row-height windowing hook: past WINDOW_FROM rows only the visible
 // slice (plus overscan) is mounted. Below it every row renders.
+//
+// Off in M1 (WINDOW_FROM is Infinity): the fixtures hold at most 8 rows, and
+// the hook loses DOM focus when `G` or `gg` jumps the selection past the
+// overscan, since the focused row unmounts before the new one mounts.
+// TODO(#0129): keep the roving row mounted across a jump (or move focus
+// after revealRow lands), then set a real threshold again.
 
 import { useEffect, useState, type RefObject } from "react";
 
 export const ROW_HEIGHT = 64;
-export const WINDOW_FROM = 200;
+export const WINDOW_FROM = Number.POSITIVE_INFINITY;
 const OVERSCAN = 10;
 
 export type Window = { start: number; end: number; padTop: number; padBottom: number };

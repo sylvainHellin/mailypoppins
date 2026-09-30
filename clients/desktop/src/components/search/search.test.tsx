@@ -64,6 +64,9 @@ describe("local search", () => {
     await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(3));
     const badges = [...list.querySelectorAll('[data-slot="mailbox-badge"]')].map((b) => b.textContent);
     expect(badges).toEqual(["Inbox", "Sent", "Archive"]);
+    const options = within(list).getAllByRole("option");
+    expect(options.map((o) => o.getAttribute("aria-posinset"))).toEqual(["1", "2", "3"]);
+    for (const o of options) expect(o).toHaveAttribute("aria-setsize", "3");
     expect(status()).toHaveAttribute("data-status", "done");
     expect(status()).toHaveTextContent("3 results in the store");
   });

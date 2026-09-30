@@ -79,6 +79,7 @@ The window has three panes, each one tab stop, in reading order:
 
 Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, reader, sidebar), starting from the pane the model holds as focused, and only while focus sits in a pane or on the page; anywhere else (a dialog, a screen's buttons, the splitter) they are the browser's.
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
+Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
 Dialogs (palette, key help, restart confirmation) are Base UI dialogs: they trap focus while open and return it when closed.
 Every focusable draws the solid `ring` outline on `:focus-visible`, and the connection banners sit in one polite `aria-live` region.

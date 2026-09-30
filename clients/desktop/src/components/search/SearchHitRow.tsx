@@ -10,6 +10,9 @@ export type SearchHitRowProps = {
   mailboxLabel: string;
   selected: boolean;
   tabStop: boolean;
+  /** 1-based, with the number of hits. */
+  position: number;
+  setSize: number;
   onSelect: (hit: SearchHit) => void;
   onOpen: (hit: SearchHit) => void;
 };
@@ -24,6 +27,8 @@ export const SearchHitRow = memo(function SearchHitRow({
   mailboxLabel,
   selected,
   tabStop,
+  position,
+  setSize,
   onSelect,
   onOpen,
 }: SearchHitRowProps) {
@@ -42,6 +47,8 @@ export const SearchHitRow = memo(function SearchHitRow({
     <div
       role="option"
       aria-selected={selected}
+      aria-posinset={position}
+      aria-setsize={setSize}
       aria-disabled={openable ? undefined : true}
       aria-label={`${sender}, ${subject}, ${hit.date_display || "no date"}, ${state.join(", ")}`}
       tabIndex={tabStop ? 0 : -1}
