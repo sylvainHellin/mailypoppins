@@ -48,7 +48,7 @@ The hand-written set had two wire mismatches, both in `ServerSearchHit`: `messag
 
 The ticket stays open for the first item; the rest are known limits of M1.
 
-- The live launchd check below is not taken.
+- The live launchd check below is half taken (2026-09-30): `install-service` wrote and bootstrapped the agent, and after `mp daemon stop` plus `launchctl kickstart` the daemon runs as launchd's child (ppid 1); the log-out and log-in half that proves `RunAtLoad` is pinned for the owner, with `mp daemon status` and `launchctl print gui/501/dev.mailypoppins.daemon` (`runs = 1`) as the evidence. The on-demand-start race it surfaced is a BACKLOG item under Now.
 - The three guard cases that need a real click inside the reader frame (a plain link, a `target=_blank` link, a form submit) were verified by hand on 2026-09-30, recorded in `clients/desktop/docs/reader.md`; they are repeated after any change to the scheme handler, the navigation hooks or the frame's `sandbox`.
 - `mp dump-keys --json` carries no action ids, so the palette matches keymap rows by their description; an `id` per row in the dump would replace that match.
 - App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
