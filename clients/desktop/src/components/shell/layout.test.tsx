@@ -1,6 +1,7 @@
 import { act, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { layoutFor } from "@/app/layout";
+import { layoutFor, listWidthFor } from "@/app/layout";
+import { READER_MIN } from "@/app/state";
 import { renderApp, shellReady } from "@/test/render";
 import { emitMenu } from "@/test/tauri-mock";
 
@@ -58,6 +59,43 @@ describe("the adaptive layout", () => {
     expect(sep).toHaveAttribute("aria-valuenow", "436");
     const saved = JSON.parse(localStorage.getItem("mailypoppins.desktop.prefs.v1") ?? "{}");
     expect(saved.listWidth).toBe(436);
+  });
+
+  it("clamps a stored list width to what leaves the reader READER_MIN", () => {
+    expect(listWidthFor(720, 0)).toEqual({ width: 720, max: 720 });
+    expect(listWidthFor(720, 850)).toEqual({ width: 530, max: 530 });
+    expect(listWidthFor(400, 850)).toEqual({ width: 400, max: 530 });
+    expect(listWidthFor(720, 400)).toEqual({ width: 260, max: 260 });
+  });
+
+  it("medium: a persisted 720 px list leaves the reader its minimum", async () => {
+    const Real = globalThis.ResizeObserver;
+    // The pane row measures 850 px; other observed elements hear nothing.
+    class Measured {
+      constructor(private cb: ResizeObserverCallback) {}
+      observe(el: Element) {
+        if (!el.hasAttribute("data-panes")) return;
+        this.cb([{ target: el, contentRect: { width: 850 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = Measured as unknown as typeof ResizeObserver;
+    try {
+      renderApp(900, () =>
+        localStorage.setItem("mailypoppins.desktop.prefs.v1", JSON.stringify({ sidebarCollapsed: false, listWidth: 720 })),
+      );
+      await shellReady();
+      const listPane = screen.getByRole("region", { name: "Message list" }).parentElement;
+      await waitFor(() => expect(listPane).toHaveStyle({ width: `${850 - READER_MIN}px` }));
+      const sep = screen.getByRole("separator", { name: /Resize/ });
+      expect(sep).toHaveAttribute("aria-valuenow", "530");
+      expect(sep).toHaveAttribute("aria-valuemax", "530");
+      // The preference is kept for a wider window.
+      expect(JSON.parse(localStorage.getItem("mailypoppins.desktop.prefs.v1") ?? "{}").listWidth).toBe(720);
+    } finally {
+      globalThis.ResizeObserver = Real;
+    }
   });
 
   it("resizes the list from the palette and the View menu, not only the pointer", async () => {

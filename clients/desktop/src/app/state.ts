@@ -72,6 +72,8 @@ export type Prefs = {
 export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420 };
 export const LIST_WIDTH_MIN = 260;
 export const LIST_WIDTH_MAX = 720;
+/** The reader keeps at least this much of the pane row, whatever the list width. */
+export const READER_MIN = 320;
 /** What "Widen list" and "Narrow list" move the splitter by. */
 export const LIST_WIDTH_STEP = 40;
 

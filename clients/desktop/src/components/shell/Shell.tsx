@@ -7,7 +7,8 @@ import { NarrowBar } from "@/components/shell/NarrowBar";
 import { Splitter } from "@/components/shell/Splitter";
 import { StatusRegion } from "@/components/shell/StatusRegion";
 import { useAppState, useDispatch } from "@/app/store";
-import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, type Pane } from "@/app/state";
+import { listWidthFor, useWidth } from "@/app/layout";
+import { LIST_WIDTH_MIN, type Pane } from "@/app/state";
 
 /** Move DOM focus to the focused pane's roving item when the model asks. */
 function useFocusFollow(focus: Pane, seq: number): void {
@@ -31,6 +32,8 @@ export function Shell() {
   const s = useAppState();
   const dispatch = useDispatch();
   useFocusFollow(s.focus, s.focusSeq);
+  const [panesRef, paneWidth] = useWidth();
+  const list = listWidthFor(s.prefs.listWidth, paneWidth);
 
   const layout = s.layout;
   const narrow = layout === "narrow";
@@ -58,20 +61,20 @@ export function Shell() {
         <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
           <StatusRegion state={s} />
           {narrow ? <NarrowBar view={s.focus} onUp={() => dispatch({ type: "up" })} /> : null}
-          <div className="flex min-h-0 flex-1">
+          <div ref={panesRef} className="flex min-h-0 flex-1" data-panes="">
             {showList ? (
               <div
                 className="min-h-0 min-w-0 shrink-0"
-                style={narrow || !showReader ? { flex: "1 1 auto" } : { width: s.prefs.listWidth }}
+                style={narrow || !showReader ? { flex: "1 1 auto" } : { width: list.width }}
               >
                 <MessageListPane />
               </div>
             ) : null}
             {showList && showReader && !narrow ? (
               <Splitter
-                value={s.prefs.listWidth}
+                value={list.width}
                 min={LIST_WIDTH_MIN}
-                max={LIST_WIDTH_MAX}
+                max={list.max}
                 onChange={(px) => dispatch({ type: "set_list_width", px })}
                 label="Resize the message list"
               />

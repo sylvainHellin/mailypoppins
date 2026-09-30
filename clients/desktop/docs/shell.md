@@ -68,6 +68,7 @@ A `rebootstrapped` keeps the search and its hits: the selection to restore goes 
 
 Tailwind's `md` and shadcn's `useIsMobile` both move to 760 px, so the rail never turns into an off-screen sheet between 760 and 767.
 The list width and the collapsed sidebar are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
+The list is drawn at the stored width only while the reader keeps `READER_MIN` (320 px) of the pane row, measured by a ResizeObserver; a 720 px width stored in a wide window draws narrower in the medium layout, and the stored value is kept for when the window grows.
 
 ## Focus order
 
