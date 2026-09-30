@@ -695,6 +695,7 @@ The value lives in the dialog's own state, in a field labelled "Password" with `
 The field is emptied on submit, whatever the answer, and on close.
 Enter stores through `config_set_password`, and Escape or Cancel closes.
 Once stored the dialog closes and the notice line says "Stored the SMTP password for work".
+The store may wait on a keyring prompt, and Escape and Cancel still close the dialog meanwhile; its answer then closes only the password dialog of the same account and kind, so an overlay opened since stays.
 A refusal shows in the dialog's alert with the field empty and focused for a retry.
 
 ### The config.toml banner
@@ -753,6 +754,8 @@ The daemon's `config.changed` then names the account as added, so the account li
 
 A password preset hands over to the password dialog for the SMTP password, which IMAP falls back to; "Set IMAP password" in Settings stores a different one.
 A Microsoft 365 preset starts the sign-in and opens the device-code dialog.
+A wizard dismissed while the write runs hands over to nothing, since either dialog would close the overlay opened since; the notice says what comes next, and Settings has the buttons.
+The first-run screen's wizard cannot be dismissed, and always hands over.
 
 ### The device-code dialog
 

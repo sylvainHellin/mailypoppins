@@ -95,6 +95,16 @@ export function AccountWizardForm({ preset, init, taken, onCancel, firstRef }: A
   const [busy, setBusy] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
+  // The dialog's form unmounts once the wizard closes, so a write that
+  // settles after hands over to nothing; the first-run screen's cannot be
+  // dismissed, and goes as the write succeeds, so it always hands over.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // A step's first field takes the focus once the user moved to it.
   useEffect(() => {
@@ -136,7 +146,7 @@ export function AccountWizardForm({ preset, init, taken, onCancel, firstRef }: A
       return;
     }
     setBusy(true);
-    const refused = await writeAccount(dispatch, form, init);
+    const refused = await writeAccount(dispatch, form, init, () => !onCancel || mounted.current);
     setBusy(false);
     setRefusal(refused);
   };

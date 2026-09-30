@@ -112,6 +112,17 @@ export function openPasswordDialog(s: AppState, dialog: PasswordDialog): AppStat
   };
 }
 
+/**
+ * A stored password closes its dialog, and only it: while the store ran,
+ * the user may have closed the dialog and opened another overlay, or the
+ * dialog of another password, which stay.
+ */
+export function closePasswordDialog(s: AppState, dialog: PasswordDialog): AppState {
+  const d = s.passwordDialog;
+  if (s.overlay !== "password" || d?.account !== dialog.account || d.kind !== dialog.kind) return s;
+  return { ...s, overlay: null, passwordDialog: null };
+}
+
 /** Open the account wizard on `preset`. */
 export function openAccountWizard(s: AppState, preset: AccountWizard["preset"]): AppState {
   return {
@@ -159,7 +170,7 @@ export async function reloadConfig(dispatch: Dispatch<Action>): Promise<void> {
 export async function storePassword(dispatch: Dispatch<Action>, account: string, kind: SecretKind, value: string): Promise<string | null> {
   try {
     await cmd.configSetPassword(account, kind, value);
-    dispatch({ type: "overlay", overlay: null });
+    dispatch({ type: "close_password", account, kind });
     dispatch({ type: "notice", text: storedLine(account, kind) });
     return null;
   } catch (e: unknown) {

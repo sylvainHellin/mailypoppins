@@ -152,6 +152,29 @@ describe("the account wizard", () => {
     expect(document.body.innerHTML).not.toContain(SECRET);
   });
 
+  it("a write that answers after the wizard closed opens no password dialog over the overlay opened since", async () => {
+    const { user, probe, dialog } = await openWizard();
+    let release = () => {};
+    mock.gates.set("config_add_account", new Promise<void>((r) => (release = r)));
+    await next(user, dialog);
+    await fill(user, dialog, "Account name", "late");
+    await next(user, dialog);
+    await fill(user, dialog, "SMTP host", "h");
+    await fill(user, dialog, "SMTP username", "u");
+    await next(user, dialog);
+    await next(user, dialog);
+    await user.click(within(dialog).getByRole("button", { name: "Add account" }));
+    await waitFor(() => expect(callsOf("config_add_account")).toHaveLength(1));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add account" })).toBeNull());
+    await user.click(screen.getByRole("button", { name: "Activity log, key s l" }));
+    await screen.findByRole("dialog", { name: "Activity log" });
+    await act(async () => release());
+    await waitFor(() => expect(probe.state.notice).toMatch(/^Added the account late; store its SMTP password next/));
+    expect(probe.state.overlay).toBe("activity");
+    expect(screen.queryByRole("dialog", { name: "Set SMTP password" })).toBeNull();
+  });
+
   it("shows the daemon's refusal and stays open", async () => {
     const { user, dialog } = await openWizard();
     mock.failing.set("config_add_account", { kind: "protocol", code: -32007, message: "accounts[2].smtp.host: invalid" });

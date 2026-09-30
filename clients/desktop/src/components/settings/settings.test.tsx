@@ -183,6 +183,25 @@ describe("the password dialog", () => {
     expect(within(again).getByLabelText("Password")).toHaveValue("");
   });
 
+  it("a store that answers after the dialog closed leaves the overlay opened since alone", async () => {
+    const { user, probe, view } = await openSettings();
+    let release = () => {};
+    mock.gates.set("config_set_password", new Promise<void>((r) => (release = r)));
+    await user.click(within(card(view, "work")).getByRole("button", { name: "Set SMTP password" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set SMTP password" });
+    await user.type(within(dialog).getByLabelText("Password"), SECRET);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(callsOf("config_set_password")).toHaveLength(1));
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Set SMTP password" })).toBeNull());
+    await user.click(screen.getByRole("button", { name: "Activity log, key s l" }));
+    await screen.findByRole("dialog", { name: "Activity log" });
+    await act(async () => release());
+    await waitFor(() => expect(probe.state.notice).toBe("Stored the SMTP password for work"));
+    expect(probe.state.overlay).toBe("activity");
+    expect(screen.getByRole("dialog", { name: "Activity log" })).toBeInTheDocument();
+  });
+
   it("clears the value when it closes, and shows a refusal with the field empty for a retry", async () => {
     const { user, probe, view } = await openSettings();
     await user.click(within(card(view, "work")).getByRole("button", { name: "Set SMTP password" }));

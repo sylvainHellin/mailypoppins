@@ -282,8 +282,16 @@ export function writtenLine(name: string, preset: Preset, init: boolean): string
  * for the SMTP password, which IMAP falls back to) or the sign-in step
  * (the device-code dialog). Answers the daemon's refusal for the wizard to
  * show, or null once the account is written and the wizard handed over.
+ * The hand-over opens an overlay, which closes whatever else is open, so
+ * it runs only while `shown` says the wizard is still in front of the user;
+ * after a wizard dismissed during the write, only the notice says what is next.
  */
-export async function writeAccount(dispatch: Dispatch<Action>, form: WizardForm, init: boolean): Promise<string | null> {
+export async function writeAccount(
+  dispatch: Dispatch<Action>,
+  form: WizardForm,
+  init: boolean,
+  shown: () => boolean = () => true,
+): Promise<string | null> {
   const draft = accountDraft(form);
   try {
     if (init) await cmd.configInit(draft);
@@ -292,6 +300,7 @@ export async function writeAccount(dispatch: Dispatch<Action>, form: WizardForm,
     return asGuiError(e).message;
   }
   dispatch({ type: "notice", text: writtenLine(draft.name, form.preset, init) });
+  if (!shown()) return null;
   if (signsIn(form.preset)) void startSignIn(dispatch, draft.name);
   else dispatch({ type: "open_password", account: draft.name, kind: "smtp" });
   return null;

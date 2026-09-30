@@ -131,6 +131,19 @@ describe("the configuration in the model", () => {
     expect(s.passwordDialog).toBeNull();
   });
 
+  it("a stored password closes its own dialog and no other overlay", () => {
+    const stored = { type: "close_password", account: "work", kind: "smtp" } as const;
+    let s = run(booted(), { type: "open_password", account: "work", kind: "smtp" }, stored);
+    expect(s.overlay).toBeNull();
+    expect(s.passwordDialog).toBeNull();
+    s = run(booted(), { type: "open_password", account: "work", kind: "smtp" }, { type: "overlay", overlay: "palette" }, stored);
+    expect(s.overlay).toBe("palette");
+    s = run(booted(), { type: "open_password", account: "work", kind: "imap" }, stored);
+    expect(s.passwordDialog).toEqual({ account: "work", kind: "imap" });
+    s = run(booted(), { type: "open_password", account: "home", kind: "smtp" }, stored);
+    expect(s.passwordDialog).toEqual({ account: "home", kind: "smtp" });
+  });
+
   it("a reload's notice is the log's words and adds no second log line", () => {
     let s = run(booted(), envelope("config.changed", { added: ["x"], updated: [], removed: ["y"], config_revision: 1 }));
     const lines = s.activityLog.length;

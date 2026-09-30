@@ -178,7 +178,16 @@ import {
 } from "@/app/contacts";
 import type { ConfigSnapshot, ContactSearch, SecretKind, SignatureListing } from "@/lib/gui-types";
 import type { ConfigChanged, ConfigInvalid } from "@/protocol/types";
-import { configChanged, configFailed, configInvalid, configLoaded, openAccountWizard, openPasswordDialog, openSettings } from "@/app/settings";
+import {
+  closePasswordDialog,
+  configChanged,
+  configFailed,
+  configInvalid,
+  configLoaded,
+  openAccountWizard,
+  openPasswordDialog,
+  openSettings,
+} from "@/app/settings";
 import {
   isSignInOperation,
   signInCancelling,
@@ -358,6 +367,7 @@ export type Action =
   /** A reload answered: the notice line says so, and the daemon's own event already logged it. */
   | { type: "config_reloaded"; text: string }
   | { type: "open_password"; account: string; kind: SecretKind }
+  | { type: "close_password"; account: string; kind: SecretKind }
   | { type: "open_account_wizard"; preset?: AccountWizard["preset"] }
   | { type: "sign_in_requested"; token: number; account: string }
   | { type: "sign_in_started"; token: number; operation_id: string }
@@ -1515,6 +1525,8 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, notice: a.text };
     case "open_password":
       return openPasswordDialog(s, { account: a.account, kind: a.kind });
+    case "close_password":
+      return closePasswordDialog(s, { account: a.account, kind: a.kind });
     case "open_account_wizard":
       return openAccountWizard(s, a.preset ?? "imap");
     case "sign_in_requested":
