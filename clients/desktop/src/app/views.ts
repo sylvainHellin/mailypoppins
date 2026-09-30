@@ -23,6 +23,15 @@ export const VIEW_ACTIONS: Record<View, ActionId> = {
 
 export const BACK_TO_MAIL_FIRST = "Go back to Mail first (Escape): this acts on the mailbox selection";
 
+/** The Calendar view's own actions, which act on its cursor and scope only. */
+export const CALENDAR_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
+  "calendar_open_source",
+  "calendar_toggle_past",
+  "calendar_refresh",
+]);
+
+export const OPEN_CALENDAR_FIRST = "Switch to the Calendar view first (Space a): this acts on the agenda";
+
 /**
  * Whether a full-pane view hides what `id` acts on: outside Mail the mailbox
  * selection and its marks are out of sight, so the actions that read them
@@ -33,11 +42,13 @@ export function hiddenByView(s: AppState, id: ActionId): boolean {
 }
 
 /**
- * Why `id` cannot run over what the window shows, or null when it can: a
- * full-pane view first, then the outbox view inside Mail. Keys drop such an
+ * Why `id` cannot run over what the window shows, or null when it can: an
+ * agenda action outside the Calendar view, a full-pane view, then the
+ * outbox view inside Mail. Keys drop such an
  * action silently, and the palette and the menu say this.
  */
 export function hiddenNotice(s: AppState, id: ActionId): string | null {
+  if (s.view !== "calendar" && CALENDAR_ACTIONS.has(id)) return OPEN_CALENDAR_FIRST;
   if (hiddenByView(s, id)) return BACK_TO_MAIL_FIRST;
   if (hiddenByOutbox(s, id)) return CLOSE_OUTBOX_FIRST;
   return null;

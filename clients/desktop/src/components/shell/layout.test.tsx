@@ -55,7 +55,7 @@ describe("the adaptive layout", () => {
     await shellReady();
     await user.keyboard(" a");
     expect(await screen.findByRole("region", { name: "Calendar" })).toBeInTheDocument();
-    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.queryByRole("listbox", { name: /messages/ })).toBeNull();
     await user.click(screen.getByRole("button", { name: /Back to Mailboxes/ }));
     const nav = await screen.findByRole("navigation", { name: /mailboxes/ });
     expect(nav.querySelector('[data-view-entry="calendar"]')).toHaveAttribute("aria-current", "page");

@@ -109,6 +109,22 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     }
   }, [hasBootstrap, outbox, dispatch]);
 
+  // The agenda the Calendar view shows, and only while it shows: an agenda
+  // that went stale behind another view is read when the view comes back.
+  const calendarAccount = state.view === "calendar" ? (state.calendarView?.account ?? null) : null;
+  const agenda = calendarAccount ? state.calendar[calendarAccount] : undefined;
+  useEffect(() => {
+    if (!hasBootstrap || !calendarAccount || !agenda || !isStale(agenda)) return;
+    const gen = agenda.gen;
+    const account = calendarAccount;
+    run(`calendar:${account}@${gen}`, () =>
+      cmd
+        .calendarEvents(account)
+        .then((events) => dispatch({ type: "calendar_loaded", account, gen, events }))
+        .catch((e: unknown) => dispatch({ type: "calendar_failed", account, gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, calendarAccount, agenda, dispatch]);
+
   // The selected mailbox's list.
   // The answer carries the list generation it was asked at, so a reload that
   // started before an optimistic mutation is dropped when it lands.

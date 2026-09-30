@@ -5,12 +5,14 @@
 import { vi } from "vitest";
 import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
+import calendarFx from "../../fixtures/calendar.json";
 import draftBodiesFx from "../../fixtures/draft-bodies.json";
 import draftsFx from "../../fixtures/drafts.json";
 import htmlFx from "../../fixtures/html.json";
 import messagesFx from "../../fixtures/messages.json";
 import signaturesFx from "../../fixtures/signatures.json";
 import type {
+  AgendaEvent,
   Bootstrap,
   DraftCreated,
   DraftEntry,
@@ -48,6 +50,7 @@ export const fixtures = {
   drafts: draftsFx as unknown as Record<string, DraftListing>,
   draftBodies: draftBodiesFx as Record<string, string>,
   signatures: signaturesFx as { signatures: Record<string, string>; defaults: Record<string, string> },
+  calendar: calendarFx as unknown as { events: Record<string, AgendaEvent[]>; ics: Record<string, string> },
 };
 
 export class Channel<T> {
@@ -162,6 +165,10 @@ export const mock = {
   savedIn: {} as Record<string, string[]>,
   /** The next materialised handle's counter. */
   nextHandle: 1,
+  /** Each account's agenda, what `calendar_events` answers once sorted. */
+  calendar: clone(fixtures.calendar.events),
+  /** The `invite.ics` of a row, by row id. */
+  ics: clone(fixtures.calendar.ics),
 };
 
 /** The home directory `~` expands to in the mock. */
@@ -200,6 +207,63 @@ export function resetMock(): void {
   mock.draftAttachments = {};
   mock.savedIn = {};
   mock.nextHandle = 1;
+  mock.calendar = clone(fixtures.calendar.events);
+  mock.ics = clone(fixtures.calendar.ics);
+}
+
+/** The agenda row `invite_update` and `invite_cancel` change, as fixture.rs's `INVITE_ROW`. */
+export const INVITE_ROW = 1008;
+
+/** `account`'s agenda in the daemon's order: by start, undated last. */
+function agendaOf(account: string): AgendaEvent[] {
+  const key = (e: AgendaEvent) => `${e.start_sort === "" ? 1 : 0}${e.start_sort}`;
+  return clone(mock.calendar[account] ?? []).sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+}
+
+/**
+ * fixture.rs's `invite_update` and `invite_cancel`: row 1008 of `work`'s
+ * agenda changes in place, the email that carried the change lands at the
+ * top of `work`'s inbox, and `state.invalidate` of `mailbox:work/inbox` says so.
+ */
+export function simulateInvite(cancel: boolean): void {
+  const e = mock.calendar.work.find((x) => x.row_id === INVITE_ROW)!;
+  if (cancel) {
+    e.cancelled = true;
+    e.event.cancelled = true;
+  } else {
+    e.event.sequence += 1;
+    const day = String(Math.min(14 + e.event.sequence, 28)).padStart(2, "0");
+    e.event.start = `2099-10-${day}T10:00:00+02:00`;
+    e.event.end = `2099-10-${day}T11:00:00+02:00`;
+    e.start_sort = `2099-10-${day}T08:00:00`;
+    e.end_sort = `2099-10-${day}T09:00:00`;
+    e.start_display = `2099-10-${day} 10:00`;
+  }
+  const id = Math.max(...Object.values(mock.rows).flatMap((b) => Object.values(b).flatMap((rs) => rs.map((r) => r.id)))) + 1;
+  const tag = cancel ? "invite-cancel" : "invite-update";
+  const subject = `${cancel ? "Cancelled" : "Updated invitation"}: ${e.event.summary}`;
+  mock.ics[String(id)] = `BEGIN:VCALENDAR\r\nMETHOD:${cancel ? "CANCEL" : "REQUEST"}\r\nEND:VCALENDAR\r\n`;
+  const row = {
+    id,
+    uid: id,
+    message_id: `<${tag}-${id}@fixture.example>`,
+    from: "Calendar <calendar@example.com>",
+    to: "me@example.com",
+    cc: null,
+    reply_to: null,
+    bcc: null,
+    subject,
+    date_sort: "2026-09-30T12:00:00",
+    date_display: "Wed, 30 Sep 2026 12:00:00 +0200",
+    flags: { seen: false, answered: false, forwarded: false, flagged: false },
+    has_attachments: true,
+    is_invite: true,
+    selector: `mp://work/inbox/${tag}-${id}@fixture.example`,
+    body: `${subject}.`,
+    attachments: [{ name: "invite.ics", size: 400 }],
+  } as unknown as FixtureRow;
+  mock.rows.work.inbox.unshift(row);
+  emitEnvelope("state.invalidate", { resource: "mailbox:work/inbox", scope: { query: "counts" } });
 }
 
 const expandHome = (p: string) => (p === "~" ? MOCK_HOME : p.startsWith("~/") ? `${MOCK_HOME}/${p.slice(2)}` : p);
@@ -897,6 +961,23 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "outbox_list":
       knownAccount(cmd, account);
       return outboxListing(account);
+    case "calendar_events":
+      knownAccount(cmd, account);
+      return agendaOf(account);
+    case "invite_source_open": {
+      knownAccount(cmd, account);
+      const rowId = Number(args.row_id);
+      if (!findRow(account, rowId) && !(mock.calendar[account] ?? []).some((e) => e.row_id === rowId)) {
+        throw refusedRow("message.ics", `no message has row_id ${rowId}`);
+      }
+      if (!(String(rowId) in mock.ics)) throw { kind: "not_found", message: "That event has no ics source in the store", code: null };
+      const path = `/fixture/cache/renditions/invite-${account}-${rowId}.ics`;
+      mock.editorOpens.push(path);
+      const failure = mock.editorFailure;
+      mock.editorFailure = null;
+      if (failure) throw failure;
+      return { editor: `code --wait '${path}'`, source: "probe" };
+    }
     case "outbox_retry": {
       knownAccount(cmd, account);
       const rowId = Number(args.row_id);

@@ -74,7 +74,10 @@ export type ActionId =
   | "view_mail"
   | "view_contacts"
   | "view_calendar"
-  | "open_settings";
+  | "open_settings"
+  | "calendar_open_source"
+  | "calendar_toggle_past"
+  | "calendar_refresh";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -150,13 +153,22 @@ const BY_ACTION: Record<string, Binding> = {
 /** A section none of whose rows run in M1 yet. */
 const BY_SECTION: Record<string, Badge> = {
   CONTACTS: "M4",
-  CALENDAR: "M4",
   "ACTIVITY LOG": "M4",
 };
 
 /** A section's own reading of a shared description. */
 const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
   BODY: { "Half-page down / up": { badge: "key" } },
+  // The Calendar view's own keys (src/keymap/viewKeys.ts); its moves are
+  // the list's, which reach the view's cursor.
+  CALENDAR: {
+    "Navigate events": { badge: "key" },
+    "Jump to top / bottom": { id: "list_top" },
+    "Open the invite email in $EDITOR": { id: "calendar_open_source" },
+    "RSVP to invitation (Accept/Tentative/Decline)": { badge: "M4" },
+    "Show past events / upcoming only": { id: "calendar_toggle_past" },
+    "Refresh events from disk": { id: "calendar_refresh" },
+  },
   // The results list is the message list pane while a search shows, so its
   // moves are the list's; what acts on a hit arrives with its milestone.
   "SERVER SEARCH": {

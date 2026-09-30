@@ -60,12 +60,20 @@ function listView(keys: Record<string, ActionId> = {}): ViewKeyTable {
 
 /**
  * Each full-pane view's table. The units that fill a view add its keys here:
- * Contacts `/`, Enter, `n`, `v`, `c`, `r` (U4); Calendar Enter, `e`, `t`,
- * `r`, `V` (U2, U3). Settings owns no letter keys.
+ * Contacts `/`, Enter, `n`, `v`, `c`, `r` (U4); Calendar `V` (U3). Settings
+ * owns no letter keys.
  */
 export const VIEW_KEYS: Readonly<Record<Exclude<View, "mail">, ViewKeyTable>> = {
   contacts: listView(),
-  calendar: listView(),
+  // The TUI's CALENDAR (keymap.rs): Enter and `e` open the entry's
+  // invite.ics, `t` shows or hides past events and never arms the `t`
+  // family, `r` reads the agenda again; `j`/`k`, `gg`, `G` move its cursor.
+  calendar: listView({
+    Enter: "calendar_open_source",
+    e: "calendar_open_source",
+    t: "calendar_toggle_past",
+    r: "calendar_refresh",
+  }),
   settings: { keys: {}, prefixes: new Set(ARM_ALWAYS), combos: {} },
 };
 

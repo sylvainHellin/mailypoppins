@@ -116,7 +116,19 @@ import {
   staleAllOutboxes,
   staleOutbox,
 } from "@/app/outbox";
-import type { OutboxListing } from "@/protocol/types";
+import type { AgendaEvent, OutboxListing } from "@/protocol/types";
+import {
+  calendarFailed,
+  calendarLoaded,
+  dropCalendar,
+  followCalendar,
+  moveCalendarCursor,
+  refreshCalendar,
+  selectCalendarRow,
+  staleAllCalendars,
+  staleCalendar,
+  toggleCalendarPast,
+} from "@/app/calendar";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -234,6 +246,12 @@ export type Action =
   | { type: "outbox_retry_started"; token: number; operation_id: string }
   | { type: "outbox_discarded"; token: number; message_id: string }
   | { type: "outbox_action_failed"; token: number; error: GuiError }
+  // The Calendar view (app/calendar.ts).
+  | { type: "calendar_loaded"; account: string; gen: number; events: AgendaEvent[] }
+  | { type: "calendar_failed"; account: string; gen: number; error: GuiError }
+  | { type: "calendar_select"; row_id: number }
+  | { type: "calendar_toggle_past" }
+  | { type: "calendar_refresh" }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -504,6 +522,7 @@ function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): A
 function removeAccount(s: AppState, name: string): AppState {
   if (s.search?.account === name) s = endSearch(s);
   if (s.outboxView?.account === name) s = closeOutbox(s);
+  s = dropCalendar(s, name);
   const mailboxes = { ...s.mailboxes };
   delete mailboxes[name];
   let next: AppState = {
@@ -653,6 +672,8 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const { resource } = payload as StateInvalidatePayload;
       const { family, parts } = parseResource(resource);
       const account = parts[0] ?? "";
+      // No resource names the agenda: it is a fold over the account's mail.
+      if (family === "mailbox" || family === "message") s = staleCalendar(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
         return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === slug);
@@ -671,6 +692,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const { resource } = payload as StateRemovePayload;
       const { family, parts } = parseResource(resource);
       const account = parts[0] ?? "";
+      if (family === "mailbox" || family === "message") s = staleCalendar(s, account);
       if (family === "account") return removeAccount(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
@@ -712,7 +734,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "sync.completed": {
       const p = payload as SyncCompletedPayload;
       const health = p.error === null ? "ok" : "failed";
-      const next = staleMailboxes(patchAccount(s, p.account, { sync_health: health }), p.account);
+      const next = staleMailboxes(patchAccount(staleCalendar(s, p.account), p.account, { sync_health: health }), p.account);
       return staleListIf(next, (a) => a === p.account);
     }
     case "draft.changed":
@@ -773,7 +795,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // Row ids are per daemon instance, and the reloaded lists are the
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
-      const next = staleAllOutboxes(applyBootstrap(s, e.bootstrap));
+      const next = staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap)));
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
@@ -900,7 +922,12 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_server",
 ]);
 
+/** The reducer; the Calendar view follows the selection's account after every action. */
 export function reducer(s: AppState, a: Action): AppState {
+  return followCalendar(reduce(s, a));
+}
+
+function reduce(s: AppState, a: Action): AppState {
   // A move inside a full-pane view moves the view's cursor, not the mail selection.
   const viewMove = a.type === "move_selection" && s.view !== "mail";
   if (s.selectionAuto && USER_SELECTION.has(a.type) && !viewMove) s = { ...s, selectionAuto: false };
@@ -985,6 +1012,7 @@ export function reducer(s: AppState, a: Action): AppState {
     }
     case "move_selection": {
       // A full-pane view moves its own cursor, once its unit gives it one.
+      if (s.view === "calendar") return moveCalendarCursor(s, a.to, a.relative);
       if (s.view !== "mail") return s;
       if (s.outboxView) return moveOutboxCursor(s, a.to, a.relative);
       const items = visibleItems(s);
@@ -1242,6 +1270,16 @@ export function reducer(s: AppState, a: Action): AppState {
       return outboxDiscarded(s, a.token, a.message_id);
     case "outbox_action_failed":
       return outboxActionFailed(s, a.token, a.error.message);
+    case "calendar_loaded":
+      return calendarLoaded(s, a.account, a.gen, a.events);
+    case "calendar_failed":
+      return calendarFailed(s, a.account, a.gen, a.error);
+    case "calendar_select":
+      return selectCalendarRow(s, a.row_id);
+    case "calendar_toggle_past":
+      return toggleCalendarPast(s);
+    case "calendar_refresh":
+      return refreshCalendar(s);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

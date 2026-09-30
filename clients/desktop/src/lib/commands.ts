@@ -4,6 +4,7 @@
 
 import { invoke, type Channel } from "@/lib/tauri";
 import type {
+  AgendaEvent,
   Bootstrap,
   DraftCreated,
   DraftKind,
@@ -218,6 +219,16 @@ export const outboxRetry = (account: string, row_id: number): Promise<OperationS
 
 export const outboxDiscard = (account: string, row_id: number): Promise<OutboxDiscarded> =>
   invoke<OutboxDiscarded>("outbox_discard", { account, row_id });
+
+// The agenda (docs/rust-layer.md, "The calendar").
+
+/** Every row, past ones included: the past/upcoming filter is the frontend's. Rejects with code -32006 for a store not ready yet. */
+export const calendarEvents = (account: string): Promise<AgendaEvent[]> =>
+  invoke<AgendaEvent[]>("calendar_events", { account });
+
+/** Open an agenda row's `invite.ics` in the editor; `not_found` when the row has none. */
+export const inviteSourceOpen = (account: string, row_id: number): Promise<EditorLaunch> =>
+  invoke<EditorLaunch>("invite_source_open", { account, row_id });
 
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });

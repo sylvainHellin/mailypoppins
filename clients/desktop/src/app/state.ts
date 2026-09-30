@@ -2,6 +2,7 @@
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
 import type {
+  AgendaEvent,
   Bootstrap,
   DraftEntry,
   DraftMessage,
@@ -396,6 +397,13 @@ export type OutboxView = { account: string; cursor: number | null };
  */
 export type OutboxAction = { token: number; kind: "retry" | "discard"; account: string; row_id: number; operation_id: string | null };
 
+/**
+ * The Calendar view: the account whose agenda it shows (the selection's),
+ * the row under its cursor by `row_id`, whether past events show (the TUI's
+ * `t`), and whether an `r` waits for its answer to say how many events came.
+ */
+export type CalendarView = { account: string; cursor: number | null; showPast: boolean; refreshing: boolean };
+
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
 
@@ -491,6 +499,14 @@ export type AppState = {
   /** Operation ends that arrived while an `outbox_retry` was unanswered, for its id. */
   outboxEarly: OperationEnd[];
   /**
+   * Each account's agenda (`calendar_events`), created on the first open of
+   * the Calendar view for it, stale again on every change to its mail and
+   * every bootstrap; only the shown one is read.
+   */
+  calendar: Record<string, Loadable<AgendaEvent[]>>;
+  /** The Calendar view's account, cursor and scope, kept while another view shows. */
+  calendarView: CalendarView | null;
+  /**
    * The last `operation.progress` of each operation this window awaits, by
    * `operation_id`, until it finishes, settles or is dropped. The Rust layer
    * passes only its awaited operations' reports, so another client's never land here.
@@ -548,6 +564,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     outboxView: null,
     outboxActions: [],
     outboxEarly: [],
+    calendar: {},
+    calendarView: null,
     progress: {},
   };
 }

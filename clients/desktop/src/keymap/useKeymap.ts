@@ -182,6 +182,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       // prefixes it names still arm, and what it neither binds nor shares
       // does nothing, as the TUI's views ignore the mail keys.
       if (view) {
+        // Enter on a sidebar mailbox brings Mail back with it, whatever the view binds Enter to.
+        if (e.key === "Enter" && s.focus === "sidebar") return handled(), run("select_mailbox");
         const id = view.keys[e.key];
         if (id) return handled(), run(id);
         if (view.prefixes.has(e.key)) {
@@ -190,7 +192,6 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return;
         }
         if (e.key === "Escape") return handled(), run("view_mail");
-        if (e.key === "Enter" && s.focus === "sidebar") return handled(), run("select_mailbox");
         // While a send is held, `u` cancels it from every view (the TUI's rule).
         if (e.key === "u" && liveHolds(s).length > 0) return handled(), run("cancel_hold");
         if (!VIEW_SHARED_KEYS.has(e.key)) {
