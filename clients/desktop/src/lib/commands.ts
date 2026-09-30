@@ -3,11 +3,24 @@
 // answers them. A rejected promise carries a GuiError (see asGuiError).
 
 import { invoke, type Channel } from "@/lib/tauri";
-import type { Bootstrap, HoldListing } from "@/protocol/types";
+import type {
+  Bootstrap,
+  DraftCreated,
+  DraftKind,
+  DraftLocation,
+  DraftMessage,
+  DraftPreview,
+  DraftValidation,
+  HoldListing,
+} from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
   DraftDiscardBatch,
+  DraftHeaders,
+  DraftStatusBatch,
+  EditorLaunch,
+  EditorSetting,
   FixtureSimulation,
   GuiEvent,
   HoldCancelled,
@@ -21,6 +34,7 @@ import type {
   MutationBatch,
   OperationStarted,
   ServerSearchParams,
+  SignatureListing,
   SyncMode,
   VersionInfo,
 } from "@/lib/gui-types";
@@ -92,6 +106,81 @@ export const messageSetRead = (
 
 export const draftDiscard = (account: string, ids: string[]): Promise<DraftDiscardBatch> =>
   invoke<DraftDiscardBatch>("draft_discard", { account, ids });
+
+// Drafts and the editor (docs/rust-layer.md, "Drafts and the editor"). Every
+// write answers the file's absolute path; the watcher's `draft.changed` or
+// `draft.invalid` then reaches the frontend, and the commands publish nothing.
+
+/** `name` is the file name; `headers` are written into the new file client-side. */
+export const draftCreate = (
+  account: string,
+  name: string,
+  opts: { signature?: string; no_signature?: boolean; headers?: DraftHeaders } = {},
+): Promise<DraftCreated> =>
+  invoke<DraftCreated>("draft_create", {
+    account,
+    name,
+    signature: opts.signature ?? null,
+    no_signature: opts.no_signature ?? null,
+    headers: opts.headers ?? null,
+  });
+
+export const draftReply = (
+  account: string,
+  row_id: number,
+  all: boolean,
+  headers?: DraftHeaders,
+): Promise<DraftCreated> =>
+  invoke<DraftCreated>("draft_reply", { account, row_id, all, headers: headers ?? null });
+
+export const draftForward = (account: string, row_id: number, headers?: DraftHeaders): Promise<DraftCreated> =>
+  invoke<DraftCreated>("draft_forward", { account, row_id, headers: headers ?? null });
+
+/** A reply, reply-all or forward of a server-only search hit, with no attachments. */
+export const draftFromMessage = (account: string, kind: DraftKind, message: DraftMessage): Promise<DraftCreated> =>
+  invoke<DraftCreated>("draft_from_message", { account, kind, message });
+
+export const draftPath = (account: string, id: string): Promise<DraftLocation> =>
+  invoke<DraftLocation>("draft_path", { account, id });
+
+export const draftApprove = (account: string, ids: string[]): Promise<DraftStatusBatch> =>
+  invoke<DraftStatusBatch>("draft_approve", { account, ids });
+
+export const draftDemote = (account: string, ids: string[]): Promise<DraftStatusBatch> =>
+  invoke<DraftStatusBatch>("draft_demote", { account, ids });
+
+export const draftValidate = (account: string, id: string): Promise<DraftValidation> =>
+  invoke<DraftValidation>("draft_validate", { account, id });
+
+export const draftPreview = (account: string, id: string): Promise<DraftPreview> =>
+  invoke<DraftPreview>("draft_preview", { account, id });
+
+/** Rewrites the recipient lines; `subject` absent keeps the draft's own. */
+export const draftSetRecipients = (
+  account: string,
+  id: string,
+  fields: { to: string; cc: string; bcc: string; subject?: string },
+): Promise<DraftLocation> =>
+  invoke<DraftLocation>("draft_set_recipients", {
+    account,
+    id,
+    to: fields.to,
+    cc: fields.cc,
+    bcc: fields.bcc,
+    subject: fields.subject ?? null,
+  });
+
+export const signatureList = (account: string): Promise<SignatureListing> =>
+  invoke<SignatureListing>("signature_list", { account });
+
+/** Opens the file in the resolved editor and never waits for it; a launch failure is `setup`. */
+export const editorOpen = (path: string): Promise<EditorLaunch> => invoke<EditorLaunch>("editor_open", { path });
+
+export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetting>("editor_setting_get");
+
+/** `null` clears the setting. */
+export const editorSettingSet = (editor: string | null): Promise<EditorSetting> =>
+  invoke<EditorSetting>("editor_setting_set", { editor });
 
 export const sendHoldStatus = (account?: string): Promise<HoldListing> =>
   invoke<HoldListing>("send_hold_status", { account: account ?? null });

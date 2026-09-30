@@ -5,9 +5,21 @@
 import { vi } from "vitest";
 import accountsFx from "../../fixtures/accounts.json";
 import bootstrapFx from "../../fixtures/bootstrap.json";
+import draftBodiesFx from "../../fixtures/draft-bodies.json";
 import draftsFx from "../../fixtures/drafts.json";
 import messagesFx from "../../fixtures/messages.json";
-import type { Bootstrap, DraftListing, HoldStatus, MessageListRow } from "@/protocol/types";
+import signaturesFx from "../../fixtures/signatures.json";
+import type {
+  Bootstrap,
+  DraftCreated,
+  DraftEntry,
+  DraftInvalid,
+  DraftListing,
+  DraftMessage,
+  DraftPreview,
+  HoldStatus,
+  MessageListRow,
+} from "@/protocol/types";
 import type {
   AccountInfo,
   ConnectionStatus,
@@ -31,6 +43,8 @@ export const fixtures = {
   accounts: accountsFx.accounts as { name: string; default: boolean; backend: "imap" | "graph"; state: string }[],
   messages: messagesFx as unknown as Record<string, Record<string, FixtureRow[]>>,
   drafts: draftsFx as unknown as Record<string, DraftListing>,
+  draftBodies: draftBodiesFx as Record<string, string>,
+  signatures: signaturesFx as { signatures: Record<string, string>; defaults: Record<string, string> },
 };
 
 export class Channel<T> {
@@ -69,6 +83,16 @@ export const mock = {
    * that overtook a later write would be.
    */
   gates: new Map<string, Promise<unknown>>(),
+  /** Every path `editor_open` was asked to open, in order. */
+  editorOpens: [] as string[],
+  /** What `editor_open` rejects with instead of opening, once. */
+  editorFailure: null as GuiError | null,
+  /** A draft's fields the listing does not carry, by `<account>/<id>`. */
+  draftExtra: {} as Record<string, { bcc: string; body: string }>,
+  /** The next minted draft id's counter. */
+  nextDraft: 1,
+  /** The `editor` key of the settings file. */
+  editorSetting: null as string | null,
 };
 
 export function resetMock(): void {
@@ -87,6 +111,11 @@ export function resetMock(): void {
   mock.revision = 1000;
   mock.nextSync = 1;
   mock.gates.clear();
+  mock.editorOpens = [];
+  mock.editorFailure = null;
+  mock.draftExtra = {};
+  mock.nextDraft = 1;
+  mock.editorSetting = null;
 }
 
 /** Push a daemon event on the channel, as the fixture publishes it. */
@@ -200,6 +229,155 @@ function mutate(cmd: string, account: string, args: Record<string, unknown>): Mu
       ack.read = row.flags.seen;
     }
     out.done.push(ack);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Drafts, as fixture.rs keeps them: every write publishes `draft.changed`, a
+// file that does not parse is under `skipped` and is refused with -32010.
+// ---------------------------------------------------------------------------
+
+function draftsOf(account: string): DraftListing {
+  return (mock.drafts[account] ??= { account, drafts: [], skipped: [], collisions: [] });
+}
+
+function draftSelector(account: string, id: string): string {
+  return `mp://${account}/drafts/${id}`;
+}
+
+function stemOf(path: string): string {
+  return (path.split("/").pop() ?? path).replace(/\.md$/, "");
+}
+
+/** The `draft.invalid` payload of a file under `skipped`, by its stem. */
+function invalidDraft(account: string, id: string): DraftInvalid | null {
+  const skip = draftsOf(account).skipped.find((k) => stemOf(k.path) === id);
+  return skip ? { account, id, path: skip.path, diagnostics: [{ line: null, message: skip.error }] } : null;
+}
+
+function draftInvalidError(method: string, invalid: DraftInvalid): GuiError {
+  const why = invalid.diagnostics.map((d) => d.message).join("; ");
+  return { kind: "protocol", message: `${method}: the daemon refused the call: ${why} (-32010)`, code: -32010 };
+}
+
+function draftChanged(account: string, d: DraftEntry): void {
+  emitEnvelope("draft.changed", {
+    account,
+    id: d.id,
+    path: d.path,
+    to: d.to,
+    subject: d.subject ?? "",
+    status: d.status,
+    valid: d.valid,
+    ready: d.ready,
+  });
+}
+
+/** Write a new draft at the top of the listing, as a rescan orders it (newest first). */
+function writeDraft(
+  account: string,
+  fields: { id?: string; name?: string; to: string | null; cc: string | null; bcc?: string; subject: string; body?: string },
+  source: DraftCreated["source"],
+): DraftCreated {
+  const id = fields.id ?? `fixture-draft-${mock.nextDraft++}`;
+  const path = `/fixture/${account}/drafts/${fields.name ?? id}.md`;
+  const entry: DraftEntry = {
+    id,
+    selector: draftSelector(account, id),
+    path,
+    status: "draft",
+    to: fields.to || null,
+    cc: fields.cc || null,
+    subject: fields.subject,
+    date: "2026-09-30T12:00:00",
+    valid: true,
+    ready: Boolean(fields.to) && fields.subject !== "",
+  };
+  draftsOf(account).drafts.unshift(entry);
+  mock.draftExtra[`${account}/${id}`] = { bcc: fields.bcc ?? "", body: fields.body ?? "" };
+  draftChanged(account, entry);
+  return { account, id, selector: entry.selector, path, source };
+}
+
+function findDraft(method: string, account: string, id: string): DraftEntry {
+  const d = draftsOf(account).drafts.find((x) => x.id === id);
+  if (!d) throw refusedRow(method, `no draft matches ${draftSelector(account, id)}`);
+  return d;
+}
+
+function replySubject(subject: string): string {
+  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+function fwdSubject(subject: string): string {
+  return subject.toLowerCase().startsWith("fwd: ") ? subject : `Fwd: ${subject}`;
+}
+
+function draftFromRow(cmd: string, account: string, args: Record<string, unknown>): DraftCreated {
+  knownAccount(cmd, account);
+  const method = cmd === "draft_reply" ? "draft.reply" : "draft.forward";
+  const hit = findRow(account, Number(args.row_id));
+  if (!hit) throw refusedRow(method, `${account} holds no message with row id ${String(args.row_id)}`);
+  const row = hit[1];
+  const headers = args.headers as { to: string; cc: string; bcc: string; subject: string } | null | undefined;
+  const reply = cmd === "draft_reply";
+  const derived = reply
+    ? { to: row.from ?? "", cc: args.all ? (row.to ?? "") : "", bcc: "", subject: replySubject(row.subject ?? "") }
+    : { to: "", cc: "", bcc: "", subject: fwdSubject(row.subject ?? "") };
+  const f = headers ?? derived;
+  return writeDraft(account, { ...f, body: `> ${row.body ?? ""}` }, { id: row.message_id, selector: row.selector });
+}
+
+function draftPreview(account: string, id: string): DraftPreview {
+  const invalid = invalidDraft(account, id);
+  if (invalid) throw draftInvalidError("draft.preview", invalid);
+  const d = findDraft("draft.preview", account, id);
+  const extra = mock.draftExtra[`${account}/${id}`];
+  const body = extra?.body ?? fixtures.draftBodies[id] ?? "";
+  const warnings = d.subject ? [] : ["the subject is empty"];
+  return {
+    account,
+    id,
+    selector: d.selector,
+    path: d.path,
+    from: "Me <me@example.com>",
+    to: d.to,
+    cc: d.cc,
+    bcc: extra?.bcc || null,
+    subject: d.subject ?? "",
+    body,
+    body_truncated: false,
+    status: d.status,
+    valid: d.valid,
+    error: d.to ? null : "no recipient: to, cc and bcc are all empty",
+    warnings,
+    font_family: "Aptos",
+    font_size: "11pt",
+    signature: null,
+  };
+}
+
+/** `draft_approve` or `draft_demote` over `ids`, in order, each failing alone. */
+function setDraftStatus(cmd: string, account: string, ids: string[]): unknown {
+  knownAccount(cmd, account);
+  const method = cmd === "draft_approve" ? "draft.approve" : "draft.demote";
+  const status = cmd === "draft_approve" ? "approved" : "draft";
+  const out: { done: unknown[]; failed: unknown[] } = { done: [], failed: [] };
+  for (const id of ids) {
+    const invalid = invalidDraft(account, id);
+    if (invalid) {
+      out.failed.push({ id, error: draftInvalidError(method, invalid), invalid });
+      continue;
+    }
+    const d = draftsOf(account).drafts.find((x) => x.id === id);
+    if (!d) {
+      out.failed.push({ id, error: refusedRow(method, `no draft matches ${draftSelector(account, id)}`) });
+      continue;
+    }
+    d.status = status;
+    draftChanged(account, d);
+    out.done.push({ account, id, status, path: d.path });
   }
   return out;
 }
@@ -335,6 +513,95 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         out.done.push({ account, id, selector, status: gone.status });
       }
       return out;
+    }
+    case "draft_create": {
+      knownAccount(cmd, account);
+      const name = String(args.name).replace(/\.md$/, "");
+      if (draftsOf(account).drafts.some((d) => stemOf(d.path) === name)) {
+        throw refusedRow("draft.create", `A draft already exists at /fixture/${account}/drafts/${name}.md`);
+      }
+      const headers = (args.headers as { to: string; cc: string; bcc: string; subject: string } | null) ?? null;
+      const sig = args.no_signature ? null : ((args.signature as string | null) ?? fixtures.signatures.defaults[account] ?? null);
+      const body = sig ? `\n\n${fixtures.signatures.signatures[sig] ?? ""}\n` : "";
+      return writeDraft(
+        account,
+        { name, to: headers?.to ?? null, cc: headers?.cc ?? null, bcc: headers?.bcc ?? "", subject: headers?.subject ?? "", body },
+        null,
+      );
+    }
+    case "draft_reply":
+    case "draft_forward":
+      return draftFromRow(cmd, account, args);
+    case "draft_from_message": {
+      knownAccount(cmd, account);
+      const m = args.message as DraftMessage;
+      const kind = String(args.kind);
+      const fields =
+        kind === "forward"
+          ? { to: "", cc: "", subject: fwdSubject(m.subject) }
+          : { to: m.reply_to ?? m.from, cc: kind === "reply_all" ? m.to : "", subject: replySubject(m.subject) };
+      return writeDraft(account, { ...fields, body: `> ${m.body_text}` }, null);
+    }
+    case "draft_path": {
+      knownAccount(cmd, account);
+      const id = String(args.id);
+      const invalid = invalidDraft(account, id);
+      if (invalid) return { account, id, selector: draftSelector(account, id), path: invalid.path, status: "invalid" };
+      const d = findDraft("draft.path", account, id);
+      return { account, id, selector: d.selector, path: d.path, status: d.status };
+    }
+    case "draft_approve":
+    case "draft_demote":
+      return setDraftStatus(cmd, account, args.ids as string[]);
+    case "draft_validate": {
+      knownAccount(cmd, account);
+      const id = String(args.id);
+      const invalid = invalidDraft(account, id);
+      if (invalid) {
+        const error = invalid.diagnostics[0].message;
+        return { account, reports: [{ id, selector: draftSelector(account, id), valid: false, error, warnings: [] }] };
+      }
+      const p = draftPreview(account, id);
+      return { account, reports: [{ id, selector: p.selector, valid: p.error === null, error: p.error, warnings: p.warnings }] };
+    }
+    case "draft_preview":
+      knownAccount(cmd, account);
+      return draftPreview(account, String(args.id));
+    case "draft_set_recipients": {
+      knownAccount(cmd, account);
+      const d = findDraft("draft.path", account, String(args.id));
+      d.to = String(args.to) || null;
+      d.cc = String(args.cc) || null;
+      if (typeof args.subject === "string") d.subject = args.subject;
+      d.ready = Boolean(d.to) && Boolean(d.subject);
+      const key = `${account}/${d.id}`;
+      mock.draftExtra[key] = { body: mock.draftExtra[key]?.body ?? fixtures.draftBodies[d.id] ?? "", bcc: String(args.bcc) };
+      draftChanged(account, d);
+      return { account, id: d.id, selector: d.selector, path: d.path, status: d.status };
+    }
+    case "signature_list": {
+      knownAccount(cmd, account);
+      const names = Object.keys(fixtures.signatures.signatures).sort();
+      return { account, names, default: fixtures.signatures.defaults[account] ?? null };
+    }
+    case "editor_open": {
+      const path = String(args.path);
+      mock.editorOpens.push(path);
+      const failure = mock.editorFailure;
+      mock.editorFailure = null;
+      if (failure) throw failure;
+      return { editor: `code --wait '${path}'`, source: "probe" };
+    }
+    case "editor_setting_get":
+    case "editor_setting_set": {
+      if (cmd === "editor_setting_set") mock.editorSetting = (args.editor as string | null) ?? null;
+      return {
+        editor: mock.editorSetting,
+        file: "/fixture/config/desktop.json",
+        env_override: null,
+        effective: mock.editorSetting ?? "code --wait {path}",
+        effective_source: mock.editorSetting ? "setting" : "probe",
+      };
     }
     case "send_hold_status": {
       const only = args.account as string | null;
