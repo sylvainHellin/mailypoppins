@@ -38,6 +38,7 @@ type GuiError =
 ```
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
+The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, `signature.list` aside.
 `setup` is the desktop's own configuration: an editor that did not start, or a settings file that does not read; its message names what to change.
 
 ## Types

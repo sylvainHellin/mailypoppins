@@ -73,7 +73,8 @@ const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Every method the GUI calls, required at the handshake so an older daemon
 /// is a `capability_missing` there (the restart screen) rather than a
-/// `-32601` in the middle of a read.
+/// `-32601` in the middle of a read. Under test the fixture door panics on a
+/// method missing here, so a call a test reaches cannot ship unlisted.
 pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "state.bootstrap",
     "account.list",
@@ -84,8 +85,19 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "message.search",
     "message.search_server",
     "message.materialise_html",
+    "message.materialise_attachment",
     "message.release_handle",
+    "message.fetch",
     "draft.list",
+    "draft.create",
+    "draft.create_from_message",
+    "draft.reply",
+    "draft.forward",
+    "draft.path",
+    "draft.validate",
+    "draft.preview",
+    "draft.approve",
+    "draft.demote",
     "operation.status",
     "operation.cancel",
     "message.archive",
@@ -96,6 +108,11 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "draft.discard",
     "send.cancel_hold",
     "send.hold_status",
+    "send.draft",
+    "send.approved",
+    "send.outbox_list",
+    "send.outbox_retry",
+    "send.outbox_discard",
     "sync.quick",
     "sync.full",
 ];
@@ -789,6 +806,36 @@ mod tests {
             GuiError::VersionMismatch { .. }
         ));
         assert!(classify(&ClientError::NotRunning).is_none());
+    }
+
+    /// The compose, send and attachment methods are required too, so a
+    /// daemon older than M3 is refused at the handshake; each name once.
+    #[test]
+    fn the_required_capabilities_cover_compose_send_and_attachments() {
+        for method in [
+            "draft.create",
+            "draft.create_from_message",
+            "draft.reply",
+            "draft.forward",
+            "draft.path",
+            "draft.validate",
+            "draft.preview",
+            "draft.approve",
+            "draft.demote",
+            "send.draft",
+            "send.approved",
+            "send.outbox_list",
+            "send.outbox_retry",
+            "send.outbox_discard",
+            "message.fetch",
+            "message.materialise_attachment",
+        ] {
+            assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
+        }
+        let mut names = REQUIRED_CAPABILITIES.to_vec();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), REQUIRED_CAPABILITIES.len());
     }
 
     #[test]

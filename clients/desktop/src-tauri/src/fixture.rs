@@ -1844,6 +1844,15 @@ impl Fixture {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params.clone()));
         }
+        // Fixture mode skips the handshake, so under test every call is
+        // held against the list a real daemon is asked for there.
+        // `signature.list` is the fixture's own: over a daemon the GUI reads
+        // the signatures directory itself.
+        #[cfg(test)]
+        assert!(
+            crate::connector::REQUIRED_CAPABILITIES.contains(&method) || method == "signature.list",
+            "{method} is called but missing from REQUIRED_CAPABILITIES"
+        );
         let mut s = self.state();
         if s.down {
             return Err(anyhow!("{method}: the daemon is not reachable"));
