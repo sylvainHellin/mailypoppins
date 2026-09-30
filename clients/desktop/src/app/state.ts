@@ -174,30 +174,49 @@ export function targetKey(t: Target): string {
 export type CountDelta = { account: string; mailbox: string; total: number; unread: number };
 
 /**
- * One row's optimistic change, from the moment the user acted until the
- * command's answer confirms or refuses it. `batch` is the dispatch that owns
- * it: a second mutation of the same row takes the entry over and keeps the
- * first one's `prev*`, so the restore is always to what the daemon holds.
+ * A flag or read change of one row. `batch` is the dispatch that set it last:
+ * a second change of the same axis takes it over and keeps the first one's
+ * `prev`, so the restore is to what the daemon held before either.
  */
-export type PendingChange = {
+export type PendingFlag = {
+  batch: number;
+  /** The state the change set. */
+  value: boolean | null;
+  /** The state before the change, when it was known. */
+  prev: boolean | null;
+  counts: CountDelta[];
+};
+
+/** An archive, delete, move or discard: the row is out of its list. */
+export type PendingLeave = {
   batch: number;
   kind: MutationKind;
-  target: Target;
   /** The mailbox slug an archive or a move puts the row in. */
   destination: string | null;
-  /** The state a flag or read change set. */
-  value: boolean | null;
   /** The row as the shown list had it, and where. */
   prevRow: { key: string; row: MessageListRow; index: number } | null;
   /** The search hit as the shown search (`seq`) had it, and where. */
   prevHit: { hit: SearchHit; index: number; seq: number } | null;
   /** The draft as the shown Drafts list had it, and where. */
   prevDraft: { key: string; entry: DraftEntry; index: number } | null;
-  /** The flag or read state before the change, when it was known. */
-  prevValue: boolean | null;
+  counts: CountDelta[];
+};
+
+/**
+ * One row's optimistic changes, from the moment the user acted until the
+ * commands' answers confirm or refuse them. Each axis (the flag, the read
+ * state, leaving the list) keeps its own saved state and the batch that owns
+ * it, so the answer of one batch settles or restores its own axis only.
+ */
+export type PendingChange = {
+  target: Target;
   /** The mailbox slug the row was in, when it was known. */
   source: string | null;
-  counts: CountDelta[];
+  /** The subject, for a failure notice. */
+  subject: string | null;
+  flag: PendingFlag | null;
+  read: PendingFlag | null;
+  leave: PendingLeave | null;
 };
 
 /** Where a hold stands, from the `send.hold_*` event that last moved it. */

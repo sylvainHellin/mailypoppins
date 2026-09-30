@@ -3,8 +3,9 @@
 //
 // A mutation applies at once, as the TUI's does, and waits in `pending`
 // until its command answers: a confirmed row keeps the optimistic state, a
-// refused one is put back from what `pending` kept. The daemon has no undo,
-// and a later server refusal arrives only as `mutations.rolled_back`.
+// refused one is put back from what `pending` kept, axis by axis (the flag,
+// the read state, leaving the list). The daemon has no undo, and a later
+// server refusal arrives only as `mutations.rolled_back`.
 
 import type { HoldStatus, MessageListRow, MutationsRolledBackPayload, OperationStatus } from "@/protocol/types";
 import type { MailboxListing, MessageList, MovedTo, SyncMode } from "@/lib/gui-types";
@@ -21,6 +22,8 @@ import {
   type MutationKind,
   type OperationEnd,
   type PendingChange,
+  type PendingFlag,
+  type PendingLeave,
   type Target,
 } from "@/app/state";
 
@@ -104,20 +107,31 @@ function bumpList(s: AppState, keys: Iterable<string | null>): AppState {
   return moved ? { ...s, listGen } : s;
 }
 
-function flagName(kind: MutationKind): "flagged" | "seen" {
-  return kind === "flag" ? "flagged" : "seen";
+/** The two in-place axes of a row; leaving the list is the third. */
+type FlagAxis = "flag" | "read";
+type Axis = FlagAxis | "leave";
+
+/** The order a rollback puts the axes back in: the row first, then its flags. */
+const AXES: readonly Axis[] = ["leave", "read", "flag"];
+
+function flagAxis(kind: MutationKind): FlagAxis {
+  return kind === "flag" ? "flag" : "read";
+}
+
+function flagName(axis: FlagAxis): "flagged" | "seen" {
+  return axis === "flag" ? "flagged" : "seen";
 }
 
 /** The reader's `flags` words, with one of them set or cleared. */
-function readerFlags(flags: string[], kind: MutationKind, on: boolean): string[] {
-  const word = kind === "flag" ? "flagged" : "read";
+function readerFlags(flags: string[], axis: FlagAxis, on: boolean): string[] {
+  const word = axis === "flag" ? "flagged" : "read";
   const rest = flags.filter((f) => f !== word);
   return on ? [...rest, word] : rest;
 }
 
 /** Set a flag on a row wherever the model shows it: the list, the search, the reader. */
-function setFlagEverywhere(s: AppState, account: string, rowId: number, kind: MutationKind, on: boolean): AppState {
-  const flag = flagName(kind);
+function setFlagEverywhere(s: AppState, account: string, rowId: number, axis: FlagAxis, on: boolean): AppState {
+  const flag = flagName(axis);
   const list = s.messages.data;
   if (list?.kind === "messages" && list.account === account && list.rows.some((r) => r.id === rowId)) {
     const rows = list.rows.map((r) => (r.id === rowId ? { ...r, flags: { ...r.flags, [flag]: on } } : r));
@@ -130,7 +144,7 @@ function setFlagEverywhere(s: AppState, account: string, rowId: number, kind: Mu
     s = { ...s, search: { ...s.search, hits } };
   }
   if (s.reader.meta && s.reader.key === readerKey(account, rowId)) {
-    s = { ...s, reader: { ...s.reader, meta: { ...s.reader.meta, flags: readerFlags(s.reader.meta.flags, kind, on) } } };
+    s = { ...s, reader: { ...s.reader, meta: { ...s.reader.meta, flags: readerFlags(s.reader.meta.flags, axis, on) } } };
   }
   return s;
 }
@@ -172,8 +186,7 @@ function failedText(kind: MutationKind, n: number): string {
 }
 
 function labelOf(e: PendingChange | undefined, t: Target): string {
-  const subject = e?.prevRow?.row.subject ?? e?.prevHit?.hit.subject ?? e?.prevDraft?.entry.subject ?? null;
-  if (subject) return subject;
+  if (e?.subject) return e.subject;
   return "row_id" in t ? `(no subject) #${t.row_id}` : t.draft;
 }
 
@@ -192,7 +205,7 @@ function applyRow(
   const key = targetKey(t);
   const old = s.pending[key];
   // Already on its way out: a second archive of a row the list no longer shows.
-  if (old && leaves(old.kind) && leaves(kind)) return s;
+  if (old?.leave && leaves(kind)) return s;
 
   const list = s.messages.data;
   const inList = list?.kind === "messages" && list.account === t.account ? list.rows.findIndex((r) => r.id === t.row_id) : -1;
@@ -216,24 +229,25 @@ function applyRow(
     }
   }
 
-  // A second change of the same kind restores to before the first; a change
-  // of another kind starts from what the model shows now.
-  const same = old?.kind === kind;
-  const nowRow = listRow && s.messages.key ? { key: s.messages.key, row: listRow, index: inList } : null;
-  const nowHit = hit && s.search ? { hit, index: hitIdx, seq: s.search.seq } : null;
-  const entry: PendingChange = {
-    batch,
-    kind,
-    target: t,
-    destination: dest,
-    value,
-    prevRow: same ? (old.prevRow ?? nowRow) : (nowRow ?? old?.prevRow ?? null),
-    prevHit: same ? (old.prevHit ?? nowHit) : (nowHit ?? old?.prevHit ?? null),
-    prevDraft: null,
-    prevValue: same ? old.prevValue : flags ? flags[flagName(kind)] : null,
-    source,
-    counts: same ? [...old.counts, ...counts] : counts,
-  };
+  // Each axis keeps its own saved state and batch. A second change of the
+  // same axis restores to before the first; the other axes stay as they are.
+  const base: PendingChange = old ?? { target: t, source, subject: null, flag: null, read: null, leave: null };
+  let entry: PendingChange = { ...base, source, subject: base.subject ?? listRow?.subject ?? hit?.subject ?? null };
+  if (leaves(kind)) {
+    const prevRow = listRow && s.messages.key ? { key: s.messages.key, row: listRow, index: inList } : null;
+    const prevHit = hit && s.search ? { hit, index: hitIdx, seq: s.search.seq } : null;
+    entry = { ...entry, leave: { batch, kind, destination: dest, prevRow, prevHit, prevDraft: null, counts } };
+  } else {
+    const axis = flagAxis(kind);
+    const was = base[axis];
+    const saved: PendingFlag = {
+      batch,
+      value,
+      prev: was ? was.prev : flags ? flags[flagName(axis)] : null,
+      counts: was ? [...was.counts, ...counts] : counts,
+    };
+    entry = { ...entry, [axis]: saved };
+  }
 
   let next: AppState = { ...s, pending: { ...s.pending, [key]: entry } };
   if (leaves(kind)) {
@@ -245,7 +259,7 @@ function applyRow(
       next = { ...next, search: { ...next.search, hits: next.search.hits.filter((_, i) => i !== hitIdx) } };
     }
   } else if (value !== null) {
-    next = setFlagEverywhere(next, t.account, t.row_id, kind, value);
+    next = setFlagEverywhere(next, t.account, t.row_id, flagAxis(kind), value);
   }
   next = adjustCounts(next, counts);
   return bumpList(next, [listRow ? s.messages.key : null, source ? listKey(t.account, source) : null]);
@@ -260,17 +274,20 @@ function applyDraft(s: AppState, batch: number, t: { account: string; draft: str
   const source = slugByRole(s, t.account, "drafts");
   const counts: CountDelta[] = source ? [{ account: t.account, mailbox: source, total: -1, unread: 0 }] : [];
   const change: PendingChange = {
-    batch,
-    kind: "discard",
     target: t,
-    destination: null,
-    value: null,
-    prevRow: null,
-    prevHit: null,
-    prevDraft: entry && s.messages.key ? { key: s.messages.key, entry, index: idx } : null,
-    prevValue: null,
     source,
-    counts,
+    subject: entry?.subject ?? null,
+    flag: null,
+    read: null,
+    leave: {
+      batch,
+      kind: "discard",
+      destination: null,
+      prevRow: null,
+      prevHit: null,
+      prevDraft: entry && s.messages.key ? { key: s.messages.key, entry, index: idx } : null,
+      counts,
+    },
   };
   let next: AppState = { ...s, pending: { ...s.pending, [key]: change } };
   if (entry && list?.kind === "drafts") {
@@ -307,31 +324,81 @@ export function applyMutation(
   return next;
 }
 
-/** Put one pending row back the way the model had it before the change. */
-function restore(s: AppState, e: PendingChange): AppState {
-  const t = e.target;
-  if (leaves(e.kind)) {
-    const list = s.messages.data;
-    if (e.prevRow && list?.kind === "messages" && s.messages.key === e.prevRow.key && !list.rows.some((r) => r.id === e.prevRow!.row.id)) {
-      const rows = [...list.rows];
-      rows.splice(Math.min(e.prevRow.index, rows.length), 0, e.prevRow.row);
-      s = { ...s, messages: { ...s.messages, data: { ...list, rows, total: list.total + 1 } } };
-    }
-    const search = s.search;
-    if (e.prevHit && search && search.seq === e.prevHit.seq && !search.hits.some((h) => h.key === e.prevHit!.hit.key)) {
-      const hits = [...search.hits];
-      hits.splice(Math.min(e.prevHit.index, hits.length), 0, e.prevHit.hit);
-      s = { ...s, search: { ...search, hits } };
-    }
-    if (e.prevDraft && list?.kind === "drafts" && s.messages.key === e.prevDraft.key && !list.listing.drafts.some((d) => d.id === e.prevDraft!.entry.id)) {
-      const drafts = [...list.listing.drafts];
-      drafts.splice(Math.min(e.prevDraft.index, drafts.length), 0, e.prevDraft.entry);
-      s = { ...s, messages: { ...s.messages, data: { ...list, listing: { ...list.listing, drafts } } } };
-    }
-  } else if (e.prevValue !== null && "row_id" in t) {
-    s = setFlagEverywhere(s, t.account, t.row_id, e.kind, e.prevValue);
+/** The axis of a row's entry that `batch` owns, if any. */
+function axisOf(e: PendingChange, batch: number): Axis | null {
+  return AXES.find((a) => e[a]?.batch === batch) ?? null;
+}
+
+/** The entry less one axis, or null when nothing of it is left pending. */
+function withoutAxis(e: PendingChange, axis: Axis): PendingChange | null {
+  const rest: PendingChange = { ...e, [axis]: null };
+  return rest.flag || rest.read || rest.leave ? rest : null;
+}
+
+/** The list keys an entry touches: the list it left, and its source mailbox's. */
+function entryKeys(e: PendingChange): (string | null)[] {
+  const shown = e.leave?.prevRow?.key ?? e.leave?.prevDraft?.key ?? null;
+  return [shown, e.source ? listKey(e.target.account, e.source) : null];
+}
+
+/** A saved row and hit with one flag set, so a row still out of its list comes back with it. */
+function withSavedFlag(l: PendingLeave, axis: FlagAxis, on: boolean): PendingLeave {
+  const flag = flagName(axis);
+  const prevRow = l.prevRow && { ...l.prevRow, row: { ...l.prevRow.row, flags: { ...l.prevRow.row.flags, [flag]: on } } };
+  const prevHit = l.prevHit && { ...l.prevHit, hit: { ...l.prevHit.hit, flags: { ...l.prevHit.hit.flags, [flag]: on } } };
+  return { ...l, prevRow, prevHit };
+}
+
+/**
+ * Put a row back at its saved index. The index is a guess: another change of
+ * the list since the apply moves it, which is why a restore re-reads the list.
+ */
+function restoreLeave(s: AppState, l: PendingLeave): AppState {
+  const list = s.messages.data;
+  if (l.prevRow && list?.kind === "messages" && s.messages.key === l.prevRow.key && !list.rows.some((r) => r.id === l.prevRow!.row.id)) {
+    const rows = [...list.rows];
+    rows.splice(Math.min(l.prevRow.index, rows.length), 0, l.prevRow.row);
+    s = { ...s, messages: { ...s.messages, data: { ...list, rows, total: list.total + 1 } } };
   }
-  return adjustCounts(s, negate(e.counts));
+  const search = s.search;
+  if (l.prevHit && search && search.seq === l.prevHit.seq && !search.hits.some((h) => h.key === l.prevHit!.hit.key)) {
+    const hits = [...search.hits];
+    hits.splice(Math.min(l.prevHit.index, hits.length), 0, l.prevHit.hit);
+    s = { ...s, search: { ...search, hits } };
+  }
+  if (l.prevDraft && list?.kind === "drafts" && s.messages.key === l.prevDraft.key && !list.listing.drafts.some((d) => d.id === l.prevDraft!.entry.id)) {
+    const drafts = [...list.listing.drafts];
+    drafts.splice(Math.min(l.prevDraft.index, drafts.length), 0, l.prevDraft.entry);
+    s = { ...s, messages: { ...s.messages, data: { ...list, listing: { ...list.listing, drafts } } } };
+  }
+  return adjustCounts(s, negate(l.counts));
+}
+
+/**
+ * Put one axis of a pending row back the way the model had it before that
+ * axis changed; the other axes stay pending. Returns what is left of the entry.
+ */
+function restoreAxis(s: AppState, e: PendingChange, axis: Axis): { s: AppState; rest: PendingChange | null } {
+  const t = e.target;
+  let rest = withoutAxis(e, axis);
+  if (axis === "leave") {
+    s = restoreLeave(s, e.leave!);
+    // The row is back: a flag or read change still pending on it shows again.
+    if (rest && "row_id" in t) {
+      for (const a of ["flag", "read"] as const) {
+        const v = rest[a]?.value;
+        if (v !== null && v !== undefined) s = setFlagEverywhere(s, t.account, t.row_id, a, v);
+      }
+    }
+    return { s, rest };
+  }
+  const f = e[axis]!;
+  if (f.prev !== null && "row_id" in t) {
+    s = setFlagEverywhere(s, t.account, t.row_id, axis, f.prev);
+    // Still out of its list: it comes back with the flag put back.
+    if (rest?.leave) rest = { ...rest, leave: withSavedFlag(rest.leave, axis, f.prev) };
+  }
+  return { s: adjustCounts(s, negate(f.counts)), rest };
 }
 
 function staleCounts(s: AppState, account: string): AppState {
@@ -339,10 +406,18 @@ function staleCounts(s: AppState, account: string): AppState {
   return l ? { ...s, mailboxes: { ...s.mailboxes, [account]: markStale(l) } } : s;
 }
 
+/** Re-read the shown list when it is one of `keys`. */
+function staleList(s: AppState, keys: ReadonlySet<string>): AppState {
+  return s.messages.key !== null && keys.has(s.messages.key)
+    ? { ...s, messages: { ...markStale(s.messages), key: s.messages.key } }
+    : s;
+}
+
 /**
  * A batch's command answered: every done row keeps its optimistic state and
- * leaves `pending`, every refused row is put back, and the activity area
- * says what happened. Rows a newer batch took over are that batch's.
+ * its axis leaves `pending`, every refused row has its axis put back, and
+ * the activity area says what happened. An axis a newer batch took over is
+ * that batch's; a refused row this batch owns no axis of any more is re-read.
  */
 export function settleMutation(
   s: AppState,
@@ -355,34 +430,47 @@ export function settleMutation(
   movedTo: MovedTo | null,
 ): AppState {
   const pending = { ...s.pending };
+  const keep = (key: string, rest: PendingChange | null) => {
+    if (rest) pending[key] = rest;
+    else delete pending[key];
+  };
   const touched: (string | null)[] = [];
   let next = s;
   for (const t of done) {
     const key = targetKey(t);
     const e = pending[key];
-    if (e?.batch !== batch) continue;
-    touched.push(e.prevRow?.key ?? e.prevDraft?.key ?? null, e.source ? listKey(account, e.source) : null);
-    delete pending[key];
+    const axis = e ? axisOf(e, batch) : null;
+    if (!e || !axis) continue;
+    touched.push(...entryKeys(e));
+    keep(key, withoutAxis(e, axis));
   }
   const rows: ActivityNotice["rows"] = failed.map((f) => {
     const key = targetKey(f.target);
     return { key, label: labelOf(pending[key], f.target), reason: f.reason };
   });
   // Last applied, first put back: each row's index was taken after the
-  // batch's earlier rows had left, so the reverse order lands every one where it was.
-  let restored = false;
+  // batch's earlier rows had left, so the reverse order lands every one
+  // where it was, as long as nothing else changed the list meanwhile.
+  const reread = new Set<string>();
   for (const f of [...failed].reverse()) {
     const key = targetKey(f.target);
     const e = pending[key];
-    if (e?.batch !== batch) continue;
-    touched.push(e.prevRow?.key ?? e.prevDraft?.key ?? null, e.source ? listKey(account, e.source) : null);
-    delete pending[key];
-    next = restore(next, e);
-    restored = true;
+    if (!e) continue;
+    const keys = entryKeys(e);
+    touched.push(...keys);
+    for (const k of keys) if (k !== null) reread.add(k);
+    // A newer change of the same axis took it over, and what this batch set
+    // is not the model's to put back: the daemon's rows and counts say.
+    const axis = axisOf(e, batch);
+    if (!axis) continue;
+    const r = restoreAxis(next, e, axis);
+    next = r.s;
+    keep(key, r.rest);
   }
   next = bumpList({ ...next, pending }, touched);
-  // The counts put back are a guess; the daemon's are the truth.
-  if (restored) next = staleCounts(next, account);
+  // What was put back is a guess: a saved index predates any other change of
+  // the list, and the counts are the model's. The daemon's replace both.
+  if (reread.size > 0) next = staleList(staleCounts(next, account), reread);
   if (done.length > 0) {
     next = pushNotice(next, { kind: "applied", account, text: appliedText(next, kind, account, done.length, value, movedTo) });
   }
@@ -403,7 +491,12 @@ export function rolledBack(s: AppState, payload: MutationsRolledBackPayload): Ap
   let next = s;
   // Newest first, for the reason `settleMutation` gives.
   for (const [, e] of [...entries].reverse()) {
-    if (e.target.account === payload.account) next = restore(next, e);
+    if (e.target.account !== payload.account) continue;
+    let rest: PendingChange | null = e;
+    for (const axis of AXES) {
+      if (!rest?.[axis]) continue;
+      ({ s: next, rest } = restoreAxis(next, rest, axis));
+    }
   }
   const pending = Object.fromEntries(entries.filter(([, e]) => e.target.account !== payload.account));
   next = { ...next, pending };
@@ -428,11 +521,16 @@ export function overlayPending(s: AppState, list: MessageList): MessageList {
   const rows = list.rows.flatMap((r) => {
     const e = byId.get(r.id);
     if (!e) return [r];
-    if (leaves(e.kind)) {
+    if (e.leave) {
       removed += 1;
       return [];
     }
-    return e.value === null ? [r] : [{ ...r, flags: { ...r.flags, [flagName(e.kind)]: e.value } }];
+    let flags = r.flags;
+    for (const axis of ["flag", "read"] as const) {
+      const v = e[axis]?.value;
+      if (v !== null && v !== undefined) flags = { ...flags, [flagName(axis)]: v };
+    }
+    return flags === r.flags ? [r] : [{ ...r, flags }];
   });
   return { ...list, rows, total: Math.max(0, list.total - removed) };
 }

@@ -72,7 +72,7 @@ A row is `{ account, row_id }`, a single row is a batch of one, and `actionTarge
 
 The model keeps what the daemon has not confirmed yet:
 
-- `pending`, by row key (`<account>#<row_id>`, or `<account>#draft:<id>`): the kind, the batch that owns it, the destination or the flag value, the row as the list, the search and the Drafts list had it with its index, the flag before the change, and the sidebar counts it moved.
+- `pending`, by row key (`<account>#<row_id>`, or `<account>#draft:<id>`): one saved state per axis of the row (the flag, the read state, leaving the list), each with the batch that owns it. A flag or read axis keeps the value set, the value before and the unread count it moved; the leave axis keeps the destination, the row as the list, the search and the Drafts list had it with its index, and the sidebar counts it moved.
 - `listGen`, by list key: moved by every optimistic change and every answer that settles one.
 - `holds`, by `operation_id`: each `HoldStatus` with its state (`started`, `tick`, `cancelled`, `fired`) and whether this window's cancel is in flight.
 - `marked`: the multi-select's row keys and its range anchor.
@@ -85,10 +85,13 @@ The sidebar counts move with them: total and unread of the source and of the arc
 
 The answer reconciles the batch.
 Each row in `done` leaves `pending` and keeps its optimistic state, and an archive or a move names its destination in the notice.
-Each row in `failed` is put back where it was, with the daemon's reason in a `failed` notice, and the account's counts are re-read.
-The rows are put back in the reverse order they left, since each index was taken after the batch's earlier rows had gone.
+Each row in `failed` has the axis its batch changed put back, with the daemon's reason in a `failed` notice.
+A row that left goes back at its saved index, in the reverse order the batch's rows left, since each index was taken after the batch's earlier rows had gone.
+That index is a guess once anything else changed the list since the apply, such as a second archive or new mail, so every restore also marks the shown list and the account's counts stale, and the daemon's order replaces the guess.
 A command that throws puts back every row of its batch.
-A second mutation of a pending row takes its entry over and keeps the first one's saved row, and the first batch's answer then leaves that row alone.
+A change of another axis leaves the pending ones alone, so a flag and a read in flight on one row settle and fail each on its own.
+A second change of the same axis takes it over and keeps the first one's saved value.
+The first batch's confirmation then leaves the row alone, and its refusal re-reads the list and the counts, since the model kept nothing of that batch to put back.
 
 The generation guard is the TUI's `mailbox_load_generation`.
 The loader sends `listGen[key]` with each list read, and a `messages_loaded` carrying an older value is dropped and read again, so a reload that started before an archive cannot bring the row back.

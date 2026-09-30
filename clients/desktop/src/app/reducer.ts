@@ -893,7 +893,7 @@ export function reducer(s: AppState, a: Action): AppState {
         .map((h) => localHit(search.account, h))
         .filter((h) => {
           const e = h.row_id === null ? undefined : s.pending[targetKey({ account: h.account, row_id: h.row_id })];
-          return !(e && leaves(e.kind));
+          return !e?.leave;
         });
       return { ...s, search: { ...search, status: "done", hits } };
     }

@@ -323,7 +323,7 @@ describe("mutations and pending state", () => {
     let s = pick(booted(), 1002);
     s = run(s, archive(1, 1002));
     expect(rows(s)).toEqual([1001, 1003, 1004, 1005, 1006, 1007, 1008]);
-    expect(s.pending["work#1002"]).toMatchObject({ batch: 1, kind: "archive", destination: "archive", source: "inbox" });
+    expect(s.pending["work#1002"]).toMatchObject({ source: "inbox", leave: { batch: 1, kind: "archive", destination: "archive" } });
     expect(box(s, "inbox")).toMatchObject({ total: 7, unread: 3 });
     expect(box(s, "archive")).toMatchObject({ total: 4, unread: 1 });
     expect(s.selection.message?.row_id).toBe(1003);
@@ -378,7 +378,72 @@ describe("mutations and pending state", () => {
     let s = run(booted(), { type: "mutation_apply", batch: 1, kind: "flag", targets: [row(1001)], value: true });
     s = run(s, { type: "mutation_apply", batch: 2, kind: "flag", targets: [row(1001)], value: false });
     s = run(s, { type: "mutation_settled", batch: 1, kind: "flag", account: "work", done: [row(1001)], failed: [] });
-    expect(s.pending["work#1001"]).toMatchObject({ batch: 2, prevValue: false });
+    expect(s.pending["work#1001"]).toMatchObject({ flag: { batch: 2, prev: false } });
+  });
+
+  it("a refused row whose axis a newer batch of the same kind took over re-reads the list and counts", () => {
+    let s = run(booted(), { type: "mutation_apply", batch: 1, kind: "flag", targets: [row(1001)], value: true });
+    s = run(s, { type: "mutation_apply", batch: 2, kind: "flag", targets: [row(1001)], value: false });
+    s = run(s, { type: "mutation_settled", batch: 1, kind: "flag", account: "work", done: [], failed: [{ target: row(1001), reason: "no" }] });
+    expect(s.pending["work#1001"]).toMatchObject({ flag: { batch: 2 } });
+    expect(isStale(s.messages)).toBe(true);
+    expect(isStale(s.mailboxes.work)).toBe(true);
+  });
+
+  const flagsOf = (s: AppState, id: number) =>
+    (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows.find((x) => x.id === id)!.flags;
+
+  it("flag then read, the flag refused: the flag is put back and the read stays", () => {
+    let s = run(booted(), { type: "mutation_apply", batch: 1, kind: "flag", targets: [row(1002)], value: true });
+    s = run(s, { type: "mutation_apply", batch: 2, kind: "read", targets: [row(1002)], value: true });
+    expect(box(s, "inbox").unread).toBe(3);
+    s = run(s, { type: "mutation_settled", batch: 1, kind: "flag", account: "work", done: [], failed: [{ target: row(1002), reason: "no" }] });
+    expect(flagsOf(s, 1002)).toMatchObject({ flagged: false, seen: true });
+    expect(box(s, "inbox").unread).toBe(3);
+    expect(s.pending["work#1002"]).toMatchObject({ flag: null, read: { batch: 2, prev: false, value: true } });
+    expect(isStale(s.messages)).toBe(true);
+
+    s = run(s, { type: "mutation_settled", batch: 2, kind: "read", account: "work", done: [row(1002)], failed: [] });
+    expect(s.pending).toEqual({});
+    expect(flagsOf(s, 1002)).toMatchObject({ flagged: false, seen: true });
+  });
+
+  it("read then flag, the read refused: the unread count and the read state come back, the flag stays", () => {
+    let s = run(booted(), { type: "mutation_apply", batch: 1, kind: "read", targets: [row(1002)], value: true });
+    s = run(s, { type: "mutation_apply", batch: 2, kind: "flag", targets: [row(1002)], value: true });
+    expect(box(s, "inbox").unread).toBe(3);
+    s = run(s, { type: "mutation_failed", batch: 1, kind: "read", account: "work", targets: [row(1002)], error: { kind: "timeout", message: "slow" } });
+    expect(box(s, "inbox").unread).toBe(4);
+    expect(flagsOf(s, 1002)).toMatchObject({ flagged: true, seen: false });
+    expect(s.pending["work#1002"]).toMatchObject({ read: null, flag: { batch: 2, value: true } });
+  });
+
+  it("two archives refused in answer order re-read the list, whose order replaces the guess", () => {
+    let s = run(booted(), archive(1, 1002), archive(2, 1003));
+    expect(rows(s)).toEqual([1001, 1004, 1005, 1006, 1007, 1008]);
+    s = run(s, { type: "mutation_settled", batch: 1, kind: "archive", account: "work", done: [], failed: [{ target: row(1002), reason: "no" }] });
+    s = run(s, { type: "mutation_settled", batch: 2, kind: "archive", account: "work", done: [], failed: [{ target: row(1003), reason: "no" }] });
+    // Each saved index predates the other archive: the immediate guess swaps the two.
+    expect(rows(s)).toEqual([1001, 1003, 1002, 1004, 1005, 1006, 1007, 1008]);
+    expect(isStale(s.messages)).toBe(true);
+    s = run(s, { type: "messages_loaded", key, gen: s.messages.gen, lgen: s.listGen[key], list: inbox("work", "inbox") });
+    expect(rows(s)).toEqual([1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008]);
+  });
+
+  it("a list answer between the apply and the refusal re-reads the list after the restore", () => {
+    let s = run(booted(), archive(1, 1003));
+    // New mail lands at the top while the archive is out; the overlay keeps 1003 hidden.
+    const fresh = inbox("work", "inbox") as Extract<MessageList, { kind: "messages" }>;
+    const withNew: MessageList = { ...fresh, total: fresh.total + 1, rows: [{ ...fresh.rows[0], id: 1000, message_id: "<new@x>", selector: "mp://work/inbox/new" }, ...fresh.rows] };
+    s = run(s, envelope("state.invalidate", { resource: "mailbox:work/inbox", scope: {} }));
+    s = run(s, { type: "messages_loaded", key, gen: s.messages.gen, lgen: s.listGen[key], list: withNew });
+    expect(rows(s)).toEqual([1000, 1001, 1002, 1004, 1005, 1006, 1007, 1008]);
+    s = run(s, { type: "mutation_settled", batch: 1, kind: "archive", account: "work", done: [], failed: [{ target: row(1003), reason: "no" }] });
+    // The saved index predates the new row: the guess lands one place too high.
+    expect(rows(s)).toEqual([1000, 1001, 1003, 1002, 1004, 1005, 1006, 1007, 1008]);
+    expect(isStale(s.messages)).toBe(true);
+    s = run(s, { type: "messages_loaded", key, gen: s.messages.gen, lgen: s.listGen[key], list: withNew });
+    expect(rows(s)).toEqual([1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008]);
   });
 
   it("a change of another kind restores its own axis only", () => {
