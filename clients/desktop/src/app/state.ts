@@ -72,6 +72,8 @@ export type Prefs = {
 export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420 };
 export const LIST_WIDTH_MIN = 260;
 export const LIST_WIDTH_MAX = 720;
+/** What "Widen list" and "Narrow list" move the splitter by. */
+export const LIST_WIDTH_STEP = 40;
 
 export type Overlay = "palette" | "help" | "restart" | "intercepted" | null;
 

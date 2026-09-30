@@ -1,7 +1,8 @@
-import { screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { layoutFor } from "@/app/layout";
 import { renderApp, shellReady } from "@/test/render";
+import { emitMenu } from "@/test/tauri-mock";
 
 describe("the adaptive layout", () => {
   it("maps widths to layouts at 1100 and 760", () => {
@@ -57,5 +58,19 @@ describe("the adaptive layout", () => {
     expect(sep).toHaveAttribute("aria-valuenow", "436");
     const saved = JSON.parse(localStorage.getItem("mailypoppins.desktop.prefs.v1") ?? "{}");
     expect(saved.listWidth).toBe(436);
+  });
+
+  it("resizes the list from the palette and the View menu, not only the pointer", async () => {
+    const { user } = renderApp(1400);
+    await shellReady();
+    const sep = screen.getByRole("separator", { name: /Resize/ });
+    expect(sep).toHaveAttribute("aria-valuenow", "420");
+    await user.keyboard(":");
+    await user.keyboard("Widen list");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(sep).toHaveAttribute("aria-valuenow", "460"));
+    act(() => emitMenu("narrow_list"));
+    act(() => emitMenu("narrow_list"));
+    await waitFor(() => expect(sep).toHaveAttribute("aria-valuenow", "380"));
   });
 });

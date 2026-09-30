@@ -18,6 +18,8 @@ pub const MENU_EVENT: &str = "menu";
 pub const ACTIONS: &[(&str, &str, &str)] = &[
     ("restart_daemon", "Restart Daemon…", "File"),
     ("toggle_sidebar", "Toggle Sidebar", "View"),
+    ("widen_list", "Widen List", "View"),
+    ("narrow_list", "Narrow List", "View"),
     ("zoom_pane", "Zoom Focused Pane", "View"),
     ("command_palette", "Command Palette…", "View"),
     ("key_help", "Key Help", "View"),

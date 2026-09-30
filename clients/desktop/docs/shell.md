@@ -97,6 +97,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `Escape`: back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
 - `Enter` in the field: search the store; `Shift+Enter` or `ff`: search the server.
 - `Cmd+[` or `Alt+Left`: back through the focus history.
+- The palette's and the View menu's "Widen list" and "Narrow list" move the splitter by 40 px, since Tab cycles panes and never lands on it.
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
 A key whose action a later milestone brings (`a`, `d`, `r`, `cn`, …) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.

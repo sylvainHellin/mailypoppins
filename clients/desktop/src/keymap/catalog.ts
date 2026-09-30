@@ -32,6 +32,8 @@ export type ActionId =
   | "half_page_down"
   | "page_down"
   | "toggle_sidebar"
+  | "widen_list"
+  | "narrow_list"
   | "restart_daemon"
   | "back"
   | "search_server"
@@ -179,6 +181,8 @@ export function paletteEntries(sections: KeymapSection[] = SECTIONS): PaletteEnt
 /** The GUI-only rows the palette adds: menu items with no KEYMAP key. */
 export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Toggle sidebar", keys: ["Cmd+b"], id: "toggle_sidebar", badge: null },
+  { section: "APP", label: "Widen list", keys: [], id: "widen_list", badge: null },
+  { section: "APP", label: "Narrow list", keys: [], id: "narrow_list", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },

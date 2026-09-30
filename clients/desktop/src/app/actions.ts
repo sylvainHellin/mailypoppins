@@ -3,7 +3,7 @@
 
 import { useCallback, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
-import type { AppState } from "@/app/state";
+import { LIST_WIDTH_STEP, type AppState } from "@/app/state";
 import type { ActionId } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
@@ -15,6 +15,8 @@ export const READER_SCROLL_ID = "mp-reader-scroll";
 export const MENU_ACTIONS: Record<string, ActionId> = {
   restart_daemon: "restart_daemon",
   toggle_sidebar: "toggle_sidebar",
+  widen_list: "widen_list",
+  narrow_list: "narrow_list",
   zoom_pane: "toggle_zoom",
   command_palette: "open_palette",
   key_help: "toggle_help",
@@ -76,6 +78,11 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>)
       return dispatch({ type: "move_selection", to: PAGE, relative: true });
     case "toggle_sidebar":
       return dispatch({ type: "toggle_sidebar" });
+    // The splitter's keyboard road: the reducer clamps to the width range.
+    case "widen_list":
+      return dispatch({ type: "set_list_width", px: s.prefs.listWidth + LIST_WIDTH_STEP });
+    case "narrow_list":
+      return dispatch({ type: "set_list_width", px: s.prefs.listWidth - LIST_WIDTH_STEP });
     case "restart_daemon":
       return dispatch({ type: "overlay", overlay: "restart" });
     case "back":

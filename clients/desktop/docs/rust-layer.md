@@ -164,6 +164,7 @@ Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by
 |---|---|---|
 | `restart_daemon` | File | the confirm dialog, then `restart_daemon` |
 | `toggle_sidebar` | View | collapse or expand the sidebar |
+| `widen_list`, `narrow_list` | View | the list width, 40 px a step (the splitter's keyboard road) |
 | `zoom_pane` | View | `z` |
 | `command_palette` | View | `:` |
 | `key_help` | View | `?` |
