@@ -81,7 +81,6 @@ import {
   mailboxSlugs,
   markStale,
   NO_MARKS,
-  PANES,
   readerKey,
   targetKey,
   type AppState,
@@ -97,7 +96,9 @@ import {
   type Pane,
   type Selection,
   type Target,
+  type View,
 } from "@/app/state";
+import { viewPanes } from "@/app/views";
 import {
   closeOutbox,
   isOutboxOperation,
@@ -156,6 +157,8 @@ export type Action =
   | { type: "set_sidebar_open"; open: boolean }
   | { type: "set_list_width"; px: number }
   | { type: "set_layout"; layout: Layout }
+  /** Show a view (app/views.ts); focus goes to its pane. */
+  | { type: "switch_view"; view: View }
   | { type: "overlay"; overlay: Overlay }
   | { type: "open_dialog"; dialog: MutationDialog }
   | { type: "open_compose"; dialog: ComposeDialog }
@@ -868,6 +871,25 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "exit_search",
 ]);
 
+/**
+ * The intents that bring Mail back over a full-pane view: each picks a
+ * mailbox, searches it or opens an outbox. Another account keeps the view,
+ * which follows the selection's account.
+ */
+const LEAVES_VIEW: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
+  "select_mailbox",
+  "sidebar_enter",
+  "jump_mailbox",
+  "search_local",
+  "search_server",
+  "open_outbox",
+]);
+
+/** A full-pane view is left for Mail: the list pane shows what it showed before. */
+function toMail(s: AppState): AppState {
+  return s.view === "mail" ? s : { ...s, view: "mail" };
+}
+
 /** The intents that bring the mailbox list back over the outbox view. */
 const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "select_account",
@@ -879,7 +901,10 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
 ]);
 
 export function reducer(s: AppState, a: Action): AppState {
-  if (s.selectionAuto && USER_SELECTION.has(a.type)) s = { ...s, selectionAuto: false };
+  // A move inside a full-pane view moves the view's cursor, not the mail selection.
+  const viewMove = a.type === "move_selection" && s.view !== "mail";
+  if (s.selectionAuto && USER_SELECTION.has(a.type) && !viewMove) s = { ...s, selectionAuto: false };
+  if (s.view !== "mail" && LEAVES_VIEW.has(a.type)) s = toMail(s);
   if (s.outboxView && LEAVES_OUTBOX.has(a.type)) s = closeOutbox(s);
   switch (a.type) {
     case "gui_event":
@@ -959,6 +984,8 @@ export function reducer(s: AppState, a: Action): AppState {
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "move_selection": {
+      // A full-pane view moves its own cursor, once its unit gives it one.
+      if (s.view !== "mail") return s;
       if (s.outboxView) return moveOutboxCursor(s, a.to, a.relative);
       const items = visibleItems(s);
       if (items.length === 0) return s;
@@ -1009,13 +1036,16 @@ export function reducer(s: AppState, a: Action): AppState {
       return { ...s, focus: a.pane, history: [...s.history, s.focus].slice(-HISTORY_CAP) };
     }
     case "cycle_focus": {
-      const i = PANES.indexOf(s.focus);
-      const pane = PANES[(i + a.dir + PANES.length) % PANES.length];
+      const panes = viewPanes(s);
+      const i = panes.indexOf(s.focus);
+      const pane = panes[(i + a.dir + panes.length) % panes.length];
       return { ...withFocus(s, pane), zoomed: false };
     }
     case "back": {
       const history = [...s.history];
-      const pane = history.pop();
+      let pane = history.pop();
+      // A full-pane view has no reader to go back to.
+      while (pane === "reader" && s.view !== "mail") pane = history.pop();
       if (!pane) return reducer(s, { type: "up" });
       return { ...s, focus: pane, history, focusSeq: s.focusSeq + 1 };
     }
@@ -1026,6 +1056,7 @@ export function reducer(s: AppState, a: Action): AppState {
       return s;
     }
     case "clear_selection":
+      if (s.view !== "mail") return withFocus(toMail(s), "list");
       if (s.focus === "reader") return withFocus(s, "list");
       if (s.outboxView) return withFocus(closeOutbox(s), "list");
       if (s.search) return withFocus(endSearch(s), "list");
@@ -1047,6 +1078,12 @@ export function reducer(s: AppState, a: Action): AppState {
     }
     case "set_layout":
       return a.layout === s.layout ? s : { ...s, layout: a.layout };
+    case "switch_view": {
+      // Leaving Mail ends a search, as choosing a mailbox does; the
+      // selection, the marks and the outbox view wait for Mail's return.
+      const next = a.view === "mail" ? toMail(s) : { ...endSearch(s), view: a.view, zoomed: false };
+      return withFocus(next, "list");
+    }
     case "overlay":
       return {
         ...s,

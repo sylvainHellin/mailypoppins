@@ -26,6 +26,14 @@ import type {
 export type Pane = "sidebar" | "list" | "reader";
 export const PANES: readonly Pane[] = ["sidebar", "list", "reader"];
 
+/**
+ * What the window shows beside the sidebar: the mail panes (list and reader,
+ * or the outbox view in the list pane), or one full-pane view. A full-pane
+ * view is the `list` pane for focus; it has no reader.
+ */
+export type View = "mail" | "contacts" | "calendar" | "settings";
+export const VIEWS: readonly View[] = ["mail", "contacts", "calendar", "settings"];
+
 export type Layout = "wide" | "medium" | "narrow";
 
 /**
@@ -416,6 +424,11 @@ export type AppState = {
    * Any user selection clears it.
    */
   selectionAuto: boolean;
+  /**
+   * The view shown. Outside Mail the selection, the marks, the search's
+   * absence and `outboxView` stay as they were, and come back with Mail.
+   */
+  view: View;
   /** Search results replace the mailbox list while this is set. */
   search: SearchState | null;
   sidebarCursor: { account: string; slug: string } | null;
@@ -499,6 +512,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     reader: emptyReader(),
     selection: { account: null, mailbox: null, message: null, draft: null, hit: null },
     selectionAuto: false,
+    view: "mail",
     search: null,
     sidebarCursor: null,
     focus: "list",

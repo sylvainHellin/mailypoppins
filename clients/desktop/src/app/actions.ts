@@ -7,7 +7,8 @@ import { createMutations } from "@/app/mutations";
 import * as compose from "@/app/compose";
 import * as send from "@/app/send";
 import * as attachments from "@/app/attachments";
-import { CLOSE_OUTBOX_FIRST, cursorRow, discardDialog, hiddenByOutbox, retryDialog } from "@/app/outbox";
+import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
+import { hiddenNotice, viewPanes } from "@/app/views";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftItems,
@@ -15,7 +16,6 @@ import {
   liveHolds,
   LIST_WIDTH_MIN,
   LIST_WIDTH_STEP,
-  PANES,
   readerKey,
   sendingRefusal,
   shownNotices,
@@ -62,7 +62,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       const dir = id === "focus_next" ? 1 : -1;
       dispatch({ type: "cycle_focus", dir });
       // Landing in the reader is an explicit open, as the TUI's Tab into the body pane is.
-      const pane = PANES[(PANES.indexOf(s.focus) + dir + PANES.length) % PANES.length];
+      const panes = viewPanes(s);
+      const pane = panes[(panes.indexOf(s.focus) + dir + panes.length) % panes.length];
       if (pane === "reader") openedRead(s, dispatch);
       return;
     }
@@ -96,15 +97,18 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     }
     case "clear_selection":
       // Marks go first, as the TUI's Esc clears a live selection first; over
-      // the outbox view the marks are hidden, and the view closes instead.
-      if (s.marked.keys.size > 0 && !s.outboxView) return dispatch({ type: "mark_clear" });
+      // the outbox view or a full-pane view the marks are hidden, and the
+      // view closes instead.
+      if (s.marked.keys.size > 0 && !s.outboxView && s.view === "mail") return dispatch({ type: "mark_clear" });
       return dispatch({ type: "clear_selection" });
     case "focus_filter": {
       const focus = () => document.getElementById(FILTER_INPUT_ID)?.focus();
-      if (s.outboxView) {
-        // The filter belongs to the mailbox list: the view closes first, as
-        // a search closes it, and the field mounts on the next render.
-        dispatch({ type: "close_outbox" });
+      if (s.outboxView || s.view !== "mail") {
+        // The filter belongs to the mailbox list: Mail comes back and the
+        // outbox view closes first, as a search closes it, and the field
+        // mounts on the next render.
+        if (s.view !== "mail") dispatch({ type: "switch_view", view: "mail" });
+        if (s.outboxView) dispatch({ type: "close_outbox" });
         setTimeout(focus, 0);
         return;
       }
@@ -255,6 +259,14 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return attachments.attachFile(s, dispatch);
     case "fetch_hit":
       return void attachments.fetchHit(s, dispatch);
+    case "view_mail":
+      return dispatch({ type: "switch_view", view: "mail" });
+    case "view_contacts":
+      return dispatch({ type: "switch_view", view: "contacts" });
+    case "view_calendar":
+      return dispatch({ type: "switch_view", view: "calendar" });
+    case "open_settings":
+      return dispatch({ type: "switch_view", view: "settings" });
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;
@@ -484,8 +496,8 @@ export function moveDestinations(s: AppState, account: string, source: string | 
 
 /**
  * A stable runner bound to the latest state, the palette's and the menu's.
- * Over the outbox view an action on the hidden mailbox selection answers a
- * notice instead; the keymap drops those keys itself, and the reader's own
+ * Over a full-pane view or the outbox view an action on the hidden mailbox
+ * selection answers a notice instead; the keymap drops those keys itself, and the reader's own
  * buttons act on what the reader shows.
  */
 export function useRunAction(
@@ -497,7 +509,8 @@ export function useRunAction(
   ref.current = state;
   return useCallback(
     (id: ActionId) => {
-      if (hiddenByOutbox(ref.current, id)) return dispatch({ type: "notice", text: CLOSE_OUTBOX_FIRST });
+      const hidden = hiddenNotice(ref.current, id);
+      if (hidden) return dispatch({ type: "notice", text: hidden });
       runAction(id, ref.current, dispatch, list?.current ?? undefined);
     },
     [dispatch, list],

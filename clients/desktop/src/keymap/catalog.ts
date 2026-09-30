@@ -70,7 +70,11 @@ export type ActionId =
   | "save_attachment"
   | "open_html"
   | "attach_file"
-  | "fetch_hit";
+  | "fetch_hit"
+  | "view_mail"
+  | "view_contacts"
+  | "view_calendar"
+  | "open_settings";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -103,9 +107,9 @@ const BY_ACTION: Record<string, Binding> = {
   "Activity log overlay": { badge: "M4" },
   "Open config.toml in $EDITOR": { badge: "M4" },
   "Open log file in $EDITOR": { badge: "M4" },
-  "Switch to Mail view": { id: "focus_list" },
-  "Switch to Contacts view": { badge: "M4" },
-  "Switch to Calendar view": { badge: "M4" },
+  "Switch to Mail view": { id: "view_mail" },
+  "Switch to Contacts view": { id: "view_contacts" },
+  "Switch to Calendar view": { id: "view_calendar" },
   "Next / previous message": { id: "next_message" },
   "Open in editor (mail read-only)": { id: "open_editor" },
   Reply: { id: "reply" },
@@ -229,6 +233,8 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Narrow list", keys: [], id: "narrow_list", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
+  // The TUI has no settings view, and no key for one (D11): palette and sidebar only.
+  { section: "APP", label: "Open settings", keys: [], id: "open_settings", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },

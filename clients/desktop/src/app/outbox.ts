@@ -193,7 +193,7 @@ export function closeOutbox(s: AppState): AppState {
  * `cn` is left out, since a new draft needs no row and goes to the view's
  * account.
  */
-const SELECTION_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
+export const SELECTION_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   "open_message",
   "copy_selector",
   "archive",

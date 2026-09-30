@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { actionTargets, progressAction, reducer, type Action } from "@/app/reducer";
 import { ACTIVITY_CAP } from "@/app/pending";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
+import { CLOSE_OUTBOX_FIRST } from "@/app/outbox";
+import { BACK_TO_MAIL_FIRST, hiddenByView, hiddenNotice } from "@/app/views";
 import { openableHits } from "@/app/search";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
 import type { Bootstrap, MessageListRow } from "@/protocol/types";
@@ -856,6 +858,85 @@ describe("mutations and pending state", () => {
       expect(Object.keys(s.progress)).toEqual(["op-1"]);
       s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } } });
       expect(s.progress).toEqual({});
+    });
+  });
+
+  describe("views", () => {
+    const view = (v: "mail" | "contacts" | "calendar" | "settings"): Action => ({ type: "switch_view", view: v });
+    const rows = (s: AppState) => (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows;
+
+    it("switches to a view and back keeping the selection and the marks, with focus on the view's pane", () => {
+      let s = booted();
+      const row = rows(s)[1];
+      s = run(s, { type: "select_message", message: { row_id: row.id, message_id: row.message_id, selector: row.selector }, focus: "reader" });
+      s = run(s, { type: "mark_toggle", key: `work#${rows(s)[3].id}` });
+      const seq = s.focusSeq;
+      s = run(s, view("contacts"));
+      expect(s.view).toBe("contacts");
+      expect(s.focus).toBe("list");
+      expect(s.focusSeq).toBeGreaterThan(seq);
+      s = run(s, view("calendar"), view("mail"));
+      expect(s.view).toBe("mail");
+      expect(s.focus).toBe("list");
+      expect(s.selection.message?.row_id).toBe(row.id);
+      expect([...s.marked.keys]).toEqual([`work#${rows(s)[3].id}`]);
+    });
+
+    it("ends a search when it leaves Mail, and Space m inside Mail keeps it", () => {
+      let s = run(booted(), { type: "search_local", query: "ledger" });
+      expect(run(s, view("mail")).search?.query).toBe("ledger");
+      s = run(s, view("contacts"));
+      expect(s.search).toBeNull();
+      expect(s.selection).toMatchObject({ account: "work", mailbox: "inbox" });
+    });
+
+    it("keeps the outbox view inside Mail across a round trip through Contacts", () => {
+      let s = run(booted(), { type: "open_outbox", account: "home" }, view("contacts"));
+      expect(s.outboxView?.account).toBe("home");
+      s = run(s, view("mail"));
+      expect(s.view).toBe("mail");
+      expect(s.outboxView?.account).toBe("home");
+    });
+
+    it("hides the actions on the mailbox selection outside Mail, and names the view first", () => {
+      let s = run(booted(), { type: "open_outbox", account: "work" });
+      expect(hiddenNotice(s, "archive")).toBe(CLOSE_OUTBOX_FIRST);
+      s = run(s, view("calendar"));
+      for (const id of ["archive", "reply", "copy_selector", "mark_toggle", "open_message", "send", "open_attachment"] as const) {
+        expect(hiddenByView(s, id)).toBe(true);
+        expect(hiddenNotice(s, id)).toBe(BACK_TO_MAIL_FIRST);
+      }
+      for (const id of ["quick_sync", "cancel_hold", "toggle_help", "view_mail", "view_contacts", "open_settings", "new_draft", "dismiss_notice"] as const) {
+        expect(hiddenNotice(s, id)).toBeNull();
+      }
+      expect(hiddenByView(run(s, view("mail"), { type: "close_outbox" }), "archive")).toBe(false);
+    });
+
+    it("comes back to Mail for a mailbox, a search, an outbox or Escape, and stays for another account", () => {
+      const contacts = run(booted(), view("contacts"));
+      expect(run(contacts, { type: "select_mailbox", account: "work", slug: "sent", focus: "list" }).view).toBe("mail");
+      expect(run(contacts, { type: "search_local", query: "x" }).view).toBe("mail");
+      expect(run(contacts, { type: "open_outbox", account: "work" }).view).toBe("mail");
+      expect(run(contacts, { type: "clear_selection" })).toMatchObject({ view: "mail", focus: "list" });
+      const other = run(contacts, { type: "next_account" });
+      expect(other.view).toBe("contacts");
+      expect(other.selection.account).toBe("home");
+    });
+
+    it("leaves the hidden mailbox list alone for a move, and Tab skips the reader", () => {
+      let s = run(booted(), view("settings"));
+      expect(run(s, { type: "move_selection", to: 1, relative: true })).toBe(s);
+      s = run(s, { type: "cycle_focus", dir: 1 });
+      expect(s.focus).toBe("sidebar");
+      s = run(s, { type: "cycle_focus", dir: 1 });
+      expect(s.focus).toBe("list");
+      s = run(s, { type: "cycle_focus", dir: -1 }, { type: "cycle_focus", dir: -1 });
+      expect(s.focus).toBe("list");
+    });
+
+    it("never goes back into the reader of a hidden Mail", () => {
+      const s = run(booted(), { type: "focus", pane: "sidebar" }, { type: "focus", pane: "reader" }, view("contacts"), { type: "back" });
+      expect(s.focus).toBe("sidebar");
     });
   });
 });
