@@ -2278,3 +2278,16 @@ A menu item's key equivalent is handled by AppKit ahead of the page, so an accel
 
 `osascript` cannot resize another app's window without the Accessibility permission (`-1719`), so the medium and narrow layouts are opened with `MP_DESKTOP_WINDOW_SIZE=950x800` or `600x820`.
 `screencapture -l <id>` needs the CGWindowID, which a four-line Swift script over `CGWindowListCopyWindowInfo` prints (filter on owner `mp-desktop` and title `mailypoppins`); window titles come back empty for other apps without Screen Recording permission, the owner name does not.
+
+## A click inside the reader frame cannot be scripted, but the guard can still be probed
+
+The reader frame is cross-origin to the app and sandboxed without `allow-scripts`, so no page script can click a link in it, and on a Mac where the terminal lacks the Accessibility permission (`AXIsProcessTrusted()` false) neither System Events nor posted `CGEvent`s reach the window.
+What does work, without touching `src/`, is a probe module injected by a throwaway Vite config (`transformIndexHtml`, served through `/@fs/`) and run with `pnpm tauri dev --config '{"build":{"beforeDevCommand":"pnpm exec vite --config <probe config>"}}'`.
+It drives the keymap with dispatched `keydown` events, navigates the reader frame from its parent, and reports by creating hidden subframes on `https://probe.invalid/<step>?…`: `on_navigation` refuses each and logs it, so the Rust log is an ordered transcript.
+`window.open` from the app document with no user gesture still reaches `on_new_window` in WKWebView (macOS 26.6) and returns `null`.
+The run and what it could not cover are in `clients/desktop/docs/reader.md`.
+
+## A server search's first hits can overtake its start answer
+
+`Session::start_operation` holds the pump lock across the `message.search_server` call and registers the id before it returns, so hits are never dropped in Rust; but the Channel message carrying a hit and the `invoke` answer carrying the id travel separately, and the hit can reach the webview first.
+The desktop reducer holds server signals that arrive while the start is in flight (`search.early`) and replays those of the answered id (`src/app/search.ts`, `serverStarted`).

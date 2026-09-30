@@ -144,6 +144,7 @@ A hit or a finish for an operation this layer no longer awaits (another window's
 
 `message_html_meta` answers the headers and `html_url`, `mpmsg://localhost/<account>/<row_id>`.
 The iframe loads that URL with `sandbox="allow-popups"` and no `allow-scripts`; the plan's section "Reading HTML bodies" explains both.
+The frontend side, the refused-link notice and the guard's verification in a real webview are in [reader.md](reader.md).
 The header is always `MESSAGE_CSP` and never a policy read out of the message: a sender can hide a meta-looking policy inside the doctype, ahead of the daemon's tag, and a header may carry `report-uri`.
 The scheme answers:
 
