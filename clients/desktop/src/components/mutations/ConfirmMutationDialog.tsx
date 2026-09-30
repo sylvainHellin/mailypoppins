@@ -18,11 +18,11 @@ export type ConfirmMutationDialogProps = {
   onConfirm: () => void;
 };
 
-const VERB = { archive: "Archive", delete: "Delete", approve: "Approve", demote: "Mark as draft" } as const;
+const VERB = { archive: "Archive", delete: "Delete", approve: "Approve", demote: "Mark as draft", send: "Send", send_approved: "Send" } as const;
 
 /**
- * The TUI's confirmation before an archive, a delete, or an approve or
- * demote over marked drafts: `y` or Enter runs it, `n` or Escape cancels.
+ * The TUI's confirmation before an archive, a delete, an approve or
+ * demote over marked drafts, or a send: `y` or Enter runs it, `n` or Escape cancels.
  * The confirm button has the initial focus.
  */
 export function ConfirmMutationDialog({ dialog, onOpenChange, onConfirm }: ConfirmMutationDialogProps) {

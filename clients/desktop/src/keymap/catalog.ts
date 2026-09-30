@@ -60,7 +60,9 @@ export type ActionId =
   | "open_editor"
   | "edit_recipients"
   | "approve"
-  | "demote";
+  | "demote"
+  | "send"
+  | "send_all";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -81,7 +83,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Command palette (run an action by name)": { badge: "key" },
   "Zoom / unzoom the focused pane": { id: "toggle_zoom" },
   "Toggle activity log": { badge: "M4" },
-  "Send current draft (approve + send)": { badge: "M3" },
+  "Send current draft (approve + send)": { id: "send" },
   "Search all mail (sender, subject, body)": { id: "search_server" },
   "New draft": { id: "new_draft" },
   "Manage signatures": { badge: "M4" },
@@ -126,7 +128,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Attach file to draft (Drafts only)": { badge: "M3" },
   "Approve draft (Drafts only)": { id: "approve" },
   "Unapprove, back to draft (Drafts only)": { id: "demote" },
-  "Send all approved drafts (Drafts only)": { badge: "M3" },
+  "Send all approved drafts (Drafts only)": { id: "send_all" },
   "Show flagged only (toggle)": { badge: "soon" },
   "Scroll headers": { badge: "key" },
   "Scroll line by line": { badge: "key" },

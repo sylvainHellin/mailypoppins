@@ -61,6 +61,7 @@ const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
   ce: "edit_recipients",
   cA: "approve",
   cD: "demote",
+  cX: "send_all",
 };
 
 /** Tab cycles panes only from a pane (or nothing); elsewhere it is the browser's. */
@@ -200,6 +201,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           return run("list_bottom");
         case "y":
           return handled(), run("copy_selector");
+        // The TUI's `x` is global: it sends the Drafts list's cursor draft from any pane.
+        case "x":
+          return handled(), run("send");
         // Desktop only: the activity area sits outside every pane, so Tab never reaches it.
         case "X":
           return handled(), run("dismiss_notice");

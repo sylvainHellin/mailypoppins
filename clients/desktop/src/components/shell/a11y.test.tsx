@@ -3,7 +3,7 @@ import type { Dispatch } from "react";
 import { windowFor, WINDOW_FROM } from "@/components/list/useWindow";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { mock } from "@/test/tauri-mock";
+import { emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
 import { ActivityStack } from "@/components/mutations/ActivityStack";
 import type { Action } from "@/app/reducer";
 import { initialState } from "@/app/state";
@@ -126,7 +126,9 @@ describe("accessibility primitives", () => {
     const { user } = renderApp();
     await shellReady();
     const activity = screen.getByRole("region", { name: "Activity" });
-    const notices = within(activity).getByRole("status");
+    // The seeded hold's card has a status region of its own.
+    const notices = activity.querySelector<HTMLElement>('[data-slot="activity-status"]')!;
+    expect(notices).toHaveAttribute("role", "status");
     expect(notices).toBeEmptyDOMElement();
     const list = screen.getByRole("region", { name: "Message list" });
     const count = list.querySelector<HTMLElement>('[data-slot="marked-count"]')!;
@@ -139,12 +141,24 @@ describe("accessibility primitives", () => {
     expect(count).toHaveTextContent("1 marked");
     await user.keyboard("k*");
     await waitFor(() => expect(notices).toHaveTextContent("Flagged"));
-    expect(within(activity).getByRole("status")).toBe(notices);
+    expect(activity.querySelector('[data-slot="activity-status"]')).toBe(notices);
     // A failure stays an alert of its own, outside the polite region.
     mock.failing.set("sync_trigger", { kind: "internal", message: "no route" });
     await user.keyboard("ss");
     const alert = await within(activity).findByRole("alert");
     expect(notices).not.toContainElement(alert);
+  });
+
+  it("mounts a hold card's end line empty, and the same node takes Sent", async () => {
+    renderApp();
+    await shellReady();
+    const hold = await screen.findByRole("group", { name: /^Held send:/ });
+    const end = within(hold).getByRole("status");
+    expect(end).toBeEmptyDOMElement();
+    expect(hold).toHaveTextContent("Sending in 60 s");
+    act(() => emitEnvelope("send.hold_fired", { ...fixtures.bootstrap.snapshot.holds[0], remaining_secs: 0 }));
+    expect(within(hold).getByRole("status")).toBe(end);
+    expect(end).toHaveTextContent("Sent");
   });
 
   it("names the new-draft wizard, starts it in To, and keeps Tab inside it", async () => {

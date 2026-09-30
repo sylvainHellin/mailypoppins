@@ -3,6 +3,8 @@
 // The applied notices render into one `role="status"` region that is mounted
 // before the first of them, since a live region that mounts with its text
 // already inside may not be announced; a failure is its own `role="alert"`.
+// A hold card's end line is a status region of the card, mounted empty with
+// the card, for the same reason.
 
 import { useCallback, useEffect } from "react";
 import { CircleAlert, CircleCheck, Send, Undo2, X } from "lucide-react";
@@ -25,6 +27,8 @@ export const FAILURES: ReadonlySet<ActivityNotice["kind"]> = new Set([
   "hold_cancel_failed",
   "sync_failed",
   "compose_failed",
+  "send_failed",
+  "send_partial",
 ]);
 
 export type NoticeToastProps = { notice: ActivityNotice; onDismiss: (id: number) => void };
@@ -75,46 +79,79 @@ export function NoticeToast({ notice, onDismiss }: NoticeToastProps) {
 
 export type HoldToastProps = {
   hold: HoldEntry;
+  /**
+   * A send of this window awaits the hold's operation: after the fire the
+   * card says "Sending…" until the outcome arrives, where a hold another
+   * client armed says "Sent" at the fire.
+   */
+  awaiting?: boolean;
   onCancel: (operationId: string) => void;
   onGone: (operationId: string) => void;
 };
 
 /**
- * A send waiting out its undo window. The seconds are the daemon's, from
- * the last `send.hold_tick`, never a local clock. A hold that fired or was
- * cancelled says so for a moment and leaves.
+ * What a hold's card says once the countdown is over, or null while it counts.
  */
-export function HoldToast({ hold, onCancel, onGone }: HoldToastProps) {
-  const over = hold.state === "fired" || hold.state === "cancelled";
+export function holdEndText(hold: HoldEntry, awaiting: boolean): string | null {
+  if (hold.outcome) return hold.outcome.text;
+  if (hold.state === "cancelled") return "Send cancelled";
+  if (hold.state === "fired") return awaiting ? "Sending…" : "Sent";
+  return null;
+}
+
+/**
+ * A send waiting out its undo window. The seconds are the daemon's, from
+ * the last `send.hold_tick`, never a local clock. Its end ("Sent", "Send
+ * cancelled", "Failed: …", "Partly delivered: …") goes into a status
+ * region the card mounts empty; the card then leaves after a moment, or,
+ * for a failure or a partial delivery of one draft, when dismissed.
+ */
+export function HoldToast({ hold, awaiting = false, onCancel, onGone }: HoldToastProps) {
+  const counting = hold.state === "started" || hold.state === "tick";
+  const end = holdEndText(hold, awaiting);
+  const settled = hold.outcome !== undefined || hold.state === "cancelled" || (hold.state === "fired" && !awaiting);
+  const sticky = hold.outcome?.sticky ?? false;
   useEffect(() => {
-    if (!over) return;
+    if (!settled || sticky) return;
     const t = setTimeout(() => onGone(hold.operation_id), HOLD_END_MS);
     return () => clearTimeout(t);
-  }, [over, hold.operation_id, onGone]);
+  }, [settled, sticky, hold.operation_id, onGone]);
   const subject = hold.subject || "(no subject)";
   const secs = Math.max(0, Math.round(hold.remaining_secs));
   const share = hold.hold_secs > 0 ? Math.min(100, (100 * secs) / hold.hold_secs) : 0;
+  const tone = hold.outcome?.tone;
+  const icon =
+    tone === "failed" || tone === "partial" ? (
+      <CircleAlert aria-hidden="true" className="size-4 shrink-0 text-destructive" />
+    ) : (
+      <Send aria-hidden="true" className="size-4 shrink-0 text-warning" />
+    );
   return (
     <div
       role="group"
       aria-label={`Held send: ${subject}`}
       data-hold={hold.operation_id}
       data-state={hold.state}
+      data-outcome={tone}
       className="flex flex-col gap-1.5 rounded-lg border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
     >
       <div className="flex items-center gap-2">
-        <Send aria-hidden="true" className="size-4 shrink-0 text-warning" />
+        {icon}
         <div className="flex min-w-0 flex-1 flex-col">
-          {over ? (
-            <p role="status">{hold.state === "fired" ? "Sent" : "Send cancelled"}</p>
-          ) : (
-            <p className="tabular-nums">{`Sending in ${secs} s`}</p>
-          )}
+          {counting ? <p className="tabular-nums">{`Sending in ${secs} s`}</p> : null}
+          <p role="status" data-slot="hold-end" className="break-words">
+            {end ?? ""}
+          </p>
           <p className="truncate text-xs text-muted-foreground" title={subject}>
             {`${subject}, from ${hold.account}`}
           </p>
         </div>
-        {over ? null : (
+        {sticky ? (
+          <Button size="icon-xs" variant="ghost" aria-label="Dismiss" onClick={() => onGone(hold.operation_id)}>
+            <X aria-hidden="true" />
+          </Button>
+        ) : null}
+        {!counting ? null : (
           <Button
             size="xs"
             variant="outline"
@@ -128,7 +165,7 @@ export function HoldToast({ hold, onCancel, onGone }: HoldToastProps) {
           </Button>
         )}
       </div>
-      {over ? null : (
+      {!counting ? null : (
         <div
           role="progressbar"
           aria-label="Time left before the send"
@@ -155,6 +192,7 @@ export function ActivityStack() {
   const dispatch = useDispatch();
   const m = useMutations();
   const holds = Object.values(s.holds);
+  const awaited = new Set(s.sends.flatMap((r) => (r.operation_id ? [r.operation_id] : [])));
   const notices = shownNotices(s);
   const applied = notices.filter((n) => !FAILURES.has(n.kind));
   const failures = notices.filter((n) => FAILURES.has(n.kind));
@@ -171,7 +209,7 @@ export function ActivityStack() {
     >
       <div className="flex flex-col gap-2">
         {holds.map((h) => (
-          <HoldToast key={h.operation_id} hold={h} onCancel={onCancel} onGone={onGone} />
+          <HoldToast key={h.operation_id} hold={h} awaiting={awaited.has(h.operation_id)} onCancel={onCancel} onGone={onGone} />
         ))}
       </div>
       <div className="flex flex-col gap-2">

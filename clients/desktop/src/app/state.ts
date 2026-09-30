@@ -245,11 +245,39 @@ export type PendingChange = {
 export type HoldPhase = "started" | "tick" | "cancelled" | "fired";
 
 /**
+ * How a send this window started ended, as its card or notice says it.
+ * `sticky` keeps the card until it is dismissed: a failure or a partial
+ * delivery of one draft, which nothing else reports.
+ */
+export type SendResult = { tone: "sent" | "cancelled" | "failed" | "partial"; text: string; sticky: boolean };
+
+/**
  * A send waiting out its undo window. `remaining_secs` is always the
  * daemon's, never counted down locally. `cancelling` is set while this
- * window's `send_cancel_hold` is in flight.
+ * window's `send_cancel_hold` is in flight. `outcome` is set once a send
+ * this window started settles, and the card then shows it.
  */
-export type HoldEntry = HoldStatus & { state: HoldPhase; cancelling: boolean };
+export type HoldEntry = HoldStatus & { state: HoldPhase; cancelling: boolean; outcome?: SendResult };
+
+/**
+ * A send this window started (`x`, `cX`), from the confirm until it settles
+ * or is dropped. Its drafts are "sending": not removable and not editable.
+ * It lives outside `pending`, which a re-bootstrap clears, since the send's
+ * operation outlives a re-bootstrap of the same daemon.
+ */
+export type SendRun = {
+  /** The local id, until `send_draft` or `send_approved` answers with the operation. */
+  token: number;
+  operation_id: string | null;
+  kind: "draft" | "approved";
+  account: string;
+  /** The draft sent, or the approved drafts the Drafts list showed at the confirm. */
+  drafts: string[];
+  /** The draft's subject, for a notice. */
+  subject: string | null;
+  /** Whether the daemon armed a hold for it, once answered. */
+  held: boolean | null;
+};
 
 export type ActivityKind =
   | "applied"
@@ -258,7 +286,9 @@ export type ActivityKind =
   | "hold_cancelled"
   | "hold_cancel_failed"
   | "sync_failed"
-  | "compose_failed";
+  | "compose_failed"
+  | "send_failed"
+  | "send_partial";
 
 /** One line of the activity area, dismissed by `id`. */
 export type ActivityNotice = {
@@ -282,6 +312,10 @@ export const NO_MARKS: Marked = { keys: new Set<string>(), anchor: null };
  */
 export type MutationDialog =
   | { kind: "archive" | "delete" | "approve" | "demote"; targets: Target[]; title: string; detail: string }
+  /** `x`: one draft, approved first when it is not yet. */
+  | { kind: "send"; targets: [{ account: string; draft: string }]; subject: string | null; title: string; detail: string }
+  /** `cX`: every approved draft of `account`; `targets` are those the Drafts list shows. */
+  | { kind: "send_approved"; account: string; targets: { account: string; draft: string }[]; title: string; detail: string }
   | { kind: "move"; targets: MessageTarget[]; account: string; source: string | null };
 
 /**
@@ -310,8 +344,10 @@ export type ComposeDialog =
 /** A sync `sync_trigger` started, until it finishes, settles or is dropped. */
 export type RunningSync = { account: string; mode: SyncMode };
 
-/** How an operation ended, as `operation.finished` or `operation_settled` says. */
-export type OperationEnd = { operation_id: string; state: string; error: string | null } | { operation_id: string; dropped: string };
+/** How an operation ended, as `operation.finished` or `operation_settled` says, with its `result`. */
+export type OperationEnd =
+  | { operation_id: string; state: string; error: string | null; result?: unknown }
+  | { operation_id: string; dropped: string };
 
 export type AppState = {
   connection: ConnectionStatus;
@@ -376,6 +412,10 @@ export type AppState = {
   syncStarting: number;
   /** Operation ends that arrived while a `sync_trigger` was unanswered, for its id. */
   syncEarly: OperationEnd[];
+  /** Sends this window started, in start order. */
+  sends: SendRun[];
+  /** Operation ends that arrived while a send was unanswered, for its id. */
+  sendEarly: OperationEnd[];
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -418,7 +458,25 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     syncs: {},
     syncStarting: 0,
     syncEarly: [],
+    sends: [],
+    sendEarly: [],
   };
+}
+
+/** The `targetKey` of every draft a send of this window is sending. */
+export function sendingKeys(s: AppState): ReadonlySet<string> {
+  return new Set(s.sends.flatMap((r) => r.drafts.map((draft) => targetKey({ account: r.account, draft }))));
+}
+
+/** The refusal an action on drafts gets while one of them is being sent, else null. */
+export function sendingRefusal(s: AppState, targets: Target[]): string | null {
+  if (s.sends.length === 0) return null;
+  const sending = sendingKeys(s);
+  const busy = targets.filter((t) => "draft" in t && sending.has(targetKey(t)));
+  if (busy.length === 0) return null;
+  return busy.length === 1 && targets.length === 1
+    ? "That draft is being sent; it cannot change until the send ends"
+    : `${busy.length} of these drafts are being sent; they cannot change until the send ends`;
 }
 
 /** The holds still counting down, in arm order. */

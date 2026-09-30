@@ -11,6 +11,8 @@ export type * from "@/protocol/generated/gui";
  * What `fixture_simulate` takes; the command reads it as a plain string.
  * `rollback` reverts every fixture mutation, `rollback:<n>` the last n.
  * `editor_save` and `editor_invalid` save the draft `editor_open` last named.
+ * `send_fail`, `send_partial` and `send_pending_append` decide the next send;
+ * `send_hold:<secs>` is the fixture's `email.send_hold_secs`.
  */
 export type FixtureSimulation =
   | "disconnect"
@@ -23,7 +25,11 @@ export type FixtureSimulation =
   | `rollback:${number}`
   | "hold"
   | "editor_save"
-  | "editor_invalid";
+  | "editor_invalid"
+  | "send_fail"
+  | "send_partial"
+  | "send_pending_append"
+  | `send_hold:${number}`;
 
 /** Narrow an unknown rejection to a GuiError, or wrap it as `internal`. */
 export function asGuiError(e: unknown): GuiError {

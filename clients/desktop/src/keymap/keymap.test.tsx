@@ -106,8 +106,8 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    await user.keyboard("x");
-    expect(await screen.findByText(/Send current draft \(approve \+ send\) arrives later in M3/)).toBeInTheDocument();
+    await user.keyboard("ta");
+    expect(await screen.findByText(/Attach file to draft \(Drafts only\) arrives later in M3/)).toBeInTheDocument();
   });
 });
 
@@ -468,5 +468,95 @@ describe("compose keys (the TUI's)", () => {
     await user.keyboard("cr");
     await user.keyboard("r");
     expect(callsOf("draft_reply")).toEqual([]);
+  });
+});
+
+describe("send keys (the TUI's x and cX)", () => {
+  const draftRow = (id: string) => document.querySelector<HTMLElement>(`[role="option"][data-draft-id="${id}"]`)!;
+
+  async function toDrafts(user: ReturnType<typeof renderApp>["user"]) {
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+  }
+
+  it("x on a draft asks the TUI's approve-and-send question, and y sends it with the hold", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await toDrafts(user);
+    await user.keyboard("jx");
+    const dialog = await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
+    expect(dialog).toHaveTextContent("To: robin@example.com - Re: Angebot Dachsanierung");
+    expect(callsOf("send_draft")).toEqual([]);
+    await user.keyboard("y");
+    await waitFor(() => expect(callsOf("send_draft")).toEqual([{ account: "work", id: "angebot-antwort", hold: true }]));
+    await waitFor(() => expect(draftRow("angebot-antwort")).toHaveAttribute("data-sending", "true"));
+    expect(draftRow("angebot-antwort")).toHaveAttribute("aria-busy", "true");
+    expect(draftRow("angebot-antwort")).toHaveAccessibleName(/being sent/);
+    const cards = await screen.findAllByRole("group", { name: "Held send: Re: Angebot Dachsanierung" });
+    // The seeded hold of another client, and this window's own.
+    expect(cards.map((c) => c.getAttribute("data-hold"))).toEqual(["fixture-hold-seed", "fixture-send-1"]);
+    expect(cards[1]).toHaveTextContent("Sending in 20 s");
+  });
+
+  it("x on an approved draft asks Send this email?, sends the cursor draft only, and leaves the marks", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    mock.drafts.work.drafts[0].status = "approved";
+    await toDrafts(user);
+    await user.keyboard("jv");
+    // `v` marked angebot-antwort and stepped to offsite-note; back to the first.
+    await user.keyboard("k");
+    await user.keyboard("x");
+    const dialog = await screen.findByRole("dialog", { name: "Send this email?" });
+    await user.click(within(dialog).getByRole("button", { name: /Send/ }));
+    await waitFor(() => expect(callsOf("send_draft")).toEqual([{ account: "work", id: "angebot-antwort", hold: true }]));
+    expect(screen.getByText("1 marked")).toBeInTheDocument();
+  });
+
+  it("x on received mail says it needs a draft, and n cancels a send", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jx");
+    expect(await screen.findByText("Send needs a draft; received mail has nothing to send")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await toDrafts(user);
+    await user.keyboard("jx");
+    await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
+    await user.keyboard("n");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(callsOf("send_draft")).toEqual([]);
+  });
+
+  it("cX is Drafts only, and in Drafts sends every approved draft of the account", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jcX");
+    expect(await screen.findByText("Send all approved (c X) is only available in Drafts")).toBeInTheDocument();
+    mock.drafts.work.drafts[1].status = "approved";
+    await toDrafts(user);
+    await user.keyboard("jcX");
+    const dialog = await screen.findByRole("dialog", { name: "Send all approved emails?" });
+    expect(dialog).toHaveTextContent("In Drafts");
+    await user.keyboard("y");
+    await waitFor(() => expect(callsOf("send_approved")).toEqual([{ account: "work", hold: true }]));
+    // Only the approved draft the list shows is sending.
+    await waitFor(() => expect(draftRow("offsite-note")).toHaveAttribute("data-sending", "true"));
+    expect(draftRow("angebot-antwort")).not.toHaveAttribute("data-sending");
+  });
+
+  it("the palette runs both sends", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await toDrafts(user);
+    await user.keyboard("j:");
+    let palette = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(palette).getByText("Send current draft (approve + send)"));
+    expect(await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" })).toBeInTheDocument();
+    await user.keyboard("n");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await user.keyboard(":");
+    palette = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(palette).getByText("Send all approved drafts (Drafts only)"));
+    expect(await screen.findByRole("dialog", { name: "Send all approved emails?" })).toBeInTheDocument();
   });
 });

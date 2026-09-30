@@ -1,5 +1,5 @@
 import { memo, type MouseEvent } from "react";
-import { CircleAlert, CircleCheck, Pencil } from "lucide-react";
+import { CircleAlert, CircleCheck, Pencil, Send } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { StatusPill } from "@/components/compose/DraftPreview";
 import type { DraftItem } from "@/app/state";
@@ -17,6 +17,8 @@ export type DraftRowProps = {
   /** Any row is marked; `aria-selected` then names the marks. */
   anyMarked: boolean;
   pending: boolean;
+  /** A send of this window is sending it: it cannot be discarded, edited, approved or demoted. */
+  sending?: boolean;
   tabStop: boolean;
   /** 1-based, with the list's length. */
   position: number;
@@ -28,9 +30,9 @@ export type DraftRowProps = {
 /**
  * One draft in the Drafts listing, with its status (draft, approved), an
  * `invalid` badge for a file that does not parse (why in its title and its
- * name), and whether the editor has it open. Pure.
+ * name), whether the editor has it open, and whether it is being sent. Pure.
  */
-export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked, anyMarked, pending, tabStop, position, setSize, onSelect, onMark }: DraftRowProps) {
+export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked, anyMarked, pending, sending = false, tabStop, position, setSize, onSelect, onMark }: DraftRowProps) {
   const invalid = draft.diagnostic !== null || !draft.valid;
   const subject = draft.subject || (invalid ? draft.id : "(no subject)");
   const to = draft.to || "(no recipient)";
@@ -46,14 +48,15 @@ export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked,
     <div
       role="option"
       aria-selected={anyMarked ? marked : cursor}
-      aria-busy={pending || undefined}
+      aria-busy={pending || sending || undefined}
       aria-posinset={position}
       aria-setsize={setSize}
-      aria-label={`Draft to ${to}, ${subject}, ${state}${editing ? ", open in the editor" : ""}${pending ? ", change pending" : ""}${marked ? ", marked" : ""}`}
+      aria-label={`Draft to ${to}, ${subject}, ${state}${editing ? ", open in the editor" : ""}${sending ? ", being sent" : pending ? ", change pending" : ""}${marked ? ", marked" : ""}`}
       tabIndex={tabStop ? 0 : -1}
       data-roving={tabStop ? "active" : undefined}
       data-cursor={cursor || undefined}
       data-marked={marked || undefined}
+      data-sending={sending || undefined}
       data-draft-id={draft.id}
       title={invalid ? (draft.diagnostic ?? "The file does not parse") : undefined}
       style={{ height: ROW_HEIGHT }}
@@ -70,7 +73,13 @@ export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked,
           <CircleAlert aria-hidden="true" className={`size-3.5 shrink-0 ${invalid ? "text-destructive" : "text-muted-foreground"}`} />
         )}
         <span className="min-w-0 flex-1 truncate">{to}</span>
-        {pending ? <PendingMark /> : null}
+        {pending || sending ? <PendingMark /> : null}
+        {sending ? (
+          <Badge variant="secondary" data-slot="draft-sending" aria-hidden="true">
+            <Send />
+            sending
+          </Badge>
+        ) : null}
         {editing ? (
           <Badge variant="secondary" data-slot="draft-editing" aria-hidden="true">
             <Pencil />

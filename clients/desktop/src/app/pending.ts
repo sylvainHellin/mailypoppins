@@ -7,7 +7,16 @@
 // the read state, leaving the list). The daemon has no undo, and a later
 // server refusal arrives only as `mutations.rolled_back`.
 
-import type { HoldStatus, MessageListRow, MutationsRolledBackPayload, OperationStatus } from "@/protocol/types";
+import type {
+  ApprovedOutcome,
+  DraftInvalid,
+  HoldStatus,
+  MessageListRow,
+  MutationsRolledBackPayload,
+  OperationStatus,
+  RecipientOutcome,
+  SendOutcome,
+} from "@/protocol/types";
 import type { MailboxListing, MessageList, MovedTo, SyncMode } from "@/lib/gui-types";
 import {
   listKey,
@@ -24,6 +33,8 @@ import {
   type PendingChange,
   type PendingFlag,
   type PendingLeave,
+  type SendResult,
+  type SendRun,
   type Target,
 } from "@/app/state";
 
@@ -742,5 +753,165 @@ export function syncStartFailed(s: AppState, account: string, reason: string): A
 }
 
 export function settledEnd(operationId: string, status: OperationStatus): OperationEnd {
-  return { operation_id: operationId, state: status.state, error: status.error?.message ?? null };
+  return { operation_id: operationId, state: status.state, error: status.error?.message ?? null, result: status.result };
+}
+
+// ---------------------------------------------------------------------------
+// Sends
+// ---------------------------------------------------------------------------
+
+const SEND_EARLY_CAP = 16;
+
+/** What a dropped send says: the daemon restarted, and only the outbox knows. */
+export const SEND_INTERRUPTED = "The send was interrupted; check the outbox";
+
+function refusedList(rs: RecipientOutcome[]): string {
+  return rs.map((r) => (r.error ? `${r.address} (${r.error})` : r.address)).join(", ");
+}
+
+/**
+ * One draft's settled `SendOutcome`. A message some recipients refused is
+ * "Partly delivered" and names them (SND-08), never a plain failure; one
+ * every recipient refused failed.
+ */
+export function sendResult(outcome: SendOutcome): SendResult {
+  const refused = outcome.recipients.filter((r) => !r.delivered);
+  if (refused.length === 0) {
+    const text = outcome.settle_error ? `Sent; the draft file was not retired: ${outcome.settle_error}` : "Sent";
+    return { tone: "sent", text, sticky: false };
+  }
+  if (refused.length < outcome.recipients.length) {
+    return { tone: "partial", text: `Partly delivered: ${refusedList(refused)}`, sticky: true };
+  }
+  return { tone: "failed", text: `Failed: every recipient was refused: ${refusedList(refused)}`, sticky: true };
+}
+
+/** The draft id a batch result names, from its selector. */
+function draftOf(selector: string | null): string {
+  return selector?.split("/").pop() ?? "(unknown draft)";
+}
+
+/**
+ * A settled `send.approved`: "Sent N, failed M" (the TUI's "No approved
+ * emails found" for an empty batch), and every draft that failed or went
+ * to only some of its recipients as a row of the failure notice.
+ */
+export function approvedResult(outcome: ApprovedOutcome, account: string): { result: SendResult; rows: ActivityNotice["rows"] } {
+  if (outcome.sent === 0 && outcome.failed === 0) {
+    return { result: { tone: "sent", text: "No approved emails found", sticky: false }, rows: [] };
+  }
+  const rows = outcome.results.flatMap((r) => {
+    const refused = r.recipients.filter((x) => !x.delivered);
+    const delivered = r.recipients.length - refused.length;
+    if (refused.length === 0 && delivered > 0) return [];
+    const reason = delivered > 0 ? `Partly delivered: ${refusedList(refused)}` : `Failed: ${r.status_line}`;
+    const id = draftOf(r.selector);
+    return [{ key: `${account}#draft:${id}`, label: id, reason }];
+  });
+  const tone = outcome.failed > 0 ? "failed" : rows.length > 0 ? "partial" : "sent";
+  return { result: { tone, text: `Sent ${outcome.sent}, failed ${outcome.failed}`, sticky: false }, rows };
+}
+
+/** Why `send_draft` did not start: the daemon's refusal, or where the file does not parse. */
+export function sendRefusalText(message: string, invalid: DraftInvalid | null): string {
+  if (!invalid) return `Send failed: ${message}`;
+  const why = invalid.diagnostics.map((d) => (d.line !== null ? `line ${d.line}: ${d.message}` : d.message)).join("; ");
+  return `Send failed: the draft does not parse: ${why} (${invalid.path})`;
+}
+
+/** Re-read the Drafts list and the counts of `account`. */
+function staleDrafts(s: AppState, account: string): AppState {
+  const next = staleCounts(s, account);
+  return staleList(next, new Set([listKey(account, slugByRole(s, account, "drafts") ?? "drafts")]));
+}
+
+function runLabel(run: SendRun): string {
+  return run.subject ? `"${run.subject}"` : run.kind === "approved" ? "the approved drafts" : "the draft";
+}
+
+/**
+ * A send of this window ended. Its hold card, when it still shows one,
+ * takes the outcome; otherwise a notice says it: sent and cancelled as
+ * applied notices, a failure or a partial delivery as an alert. A dropped
+ * send (the daemon restarted) is always an alert, and its drafts are
+ * re-read, since only the outbox knows whether it went.
+ */
+function sendEnded(s: AppState, run: SendRun, end: OperationEnd): AppState {
+  let next: AppState = { ...s, sends: s.sends.filter((r) => r !== run) };
+  if ("dropped" in end) {
+    next = staleDrafts(next, run.account);
+    return pushNotice(next, { kind: "send_failed", account: run.account, text: SEND_INTERRUPTED });
+  }
+  let result: SendResult;
+  let rows: ActivityNotice["rows"] = [];
+  if (end.state === "cancelled") {
+    result = { tone: "cancelled", text: "Send cancelled", sticky: false };
+  } else if (end.state === "failed") {
+    result = { tone: "failed", text: `Failed: ${end.error ?? "the send failed"}`, sticky: true };
+  } else if (run.kind === "draft") {
+    result = sendResult(end.result as SendOutcome);
+  } else {
+    ({ result, rows } = approvedResult(end.result as ApprovedOutcome, run.account));
+  }
+  // The send moved the drafts: the answer may predate it, so read again.
+  next = staleDrafts(next, run.account);
+  const hold = run.operation_id ? next.holds[run.operation_id] : undefined;
+  if (hold) {
+    next = { ...next, holds: { ...next.holds, [hold.operation_id]: { ...hold, outcome: result, cancelling: false } } };
+    if (rows.length > 0) next = pushNotice(next, { kind: "send_failed", account: run.account, text: result.text, rows });
+    return next;
+  }
+  // A held send's cancel already said so on its card.
+  if (result.tone === "cancelled" && run.held) return next;
+  const kind = result.tone === "failed" ? "send_failed" : result.tone === "partial" ? "send_partial" : "applied";
+  const text = result.tone === "cancelled" ? `Send of ${runLabel(run)} cancelled` : result.text;
+  return pushNotice(next, { kind, account: run.account, text, rows });
+}
+
+/**
+ * An operation ended. A send this window awaits settles; while a send is
+ * unanswered, an end of an unknown id is held for it.
+ */
+export function sendSignal(s: AppState, end: OperationEnd): AppState {
+  const run = s.sends.find((r) => r.operation_id === end.operation_id);
+  if (run) return sendEnded(s, run, end);
+  if (s.sends.some((r) => r.operation_id === null)) return { ...s, sendEarly: [...s.sendEarly, end].slice(-SEND_EARLY_CAP) };
+  return s;
+}
+
+export function isSendOperation(s: AppState, operationId: string): boolean {
+  return s.sends.some((r) => r.operation_id === operationId);
+}
+
+/** Is a `send_draft` or `send_approved` unanswered? */
+export function sendStarting(s: AppState): boolean {
+  return s.sends.some((r) => r.operation_id === null);
+}
+
+/** The confirm ran: the drafts are sending from now on. */
+export function sendRequested(s: AppState, run: Omit<SendRun, "operation_id" | "held">): AppState {
+  return { ...s, sends: [...s.sends, { ...run, operation_id: null, held: null }] };
+}
+
+/** The command answered: await the id, or settle it now if its end came first. */
+export function sendStarted(s: AppState, token: number, operationId: string, held: boolean): AppState {
+  const run = s.sends.find((r) => r.token === token);
+  if (!run) return s;
+  const started: SendRun = { ...run, operation_id: operationId, held };
+  let next: AppState = { ...s, sends: s.sends.map((r) => (r === run ? started : r)) };
+  const early = next.sendEarly.find((e) => e.operation_id === operationId);
+  const waiting = sendStarting(next);
+  next = { ...next, sendEarly: waiting ? next.sendEarly.filter((e) => e !== early) : [] };
+  return early ? sendEnded(next, started, early) : next;
+}
+
+/** The command was refused: nothing was sent, and the drafts are free again. */
+export function sendStartFailed(s: AppState, token: number, message: string, invalid: DraftInvalid | null): AppState {
+  const run = s.sends.find((r) => r.token === token);
+  if (!run) return s;
+  let next: AppState = { ...s, sends: s.sends.filter((r) => r !== run) };
+  if (!sendStarting(next)) next = { ...next, sendEarly: [] };
+  // An approve may have gone through before the send was refused.
+  next = staleDrafts(next, run.account);
+  return pushNotice(next, { kind: "send_failed", account: run.account, text: sendRefusalText(message, invalid) });
 }

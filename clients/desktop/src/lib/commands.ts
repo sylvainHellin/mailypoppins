@@ -33,6 +33,7 @@ import type {
   MessageText,
   MutationBatch,
   OperationStarted,
+  SendStarted,
   ServerSearchParams,
   SignatureListing,
   SyncMode,
@@ -187,6 +188,17 @@ export const sendHoldStatus = (account?: string): Promise<HoldListing> =>
 
 export const sendCancelHold = (operation_id: string): Promise<HoldCancelled> =>
   invoke<HoldCancelled>("send_cancel_hold", { operation_id });
+
+/**
+ * Send one draft; a `draft` status is validated and approved first. Rejects
+ * with a `SendRefusal`: a GuiError, with `invalid` for a file that does not parse.
+ */
+export const sendDraft = (account: string, id: string, hold: boolean): Promise<SendStarted> =>
+  invoke<SendStarted>("send_draft", { account, id, hold });
+
+/** Send every approved draft of `account`, one operation. */
+export const sendApproved = (account: string, hold: boolean): Promise<SendStarted> =>
+  invoke<SendStarted>("send_approved", { account, hold });
 
 export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationStarted> =>
   invoke<OperationStarted>("sync_trigger", { account, mode });

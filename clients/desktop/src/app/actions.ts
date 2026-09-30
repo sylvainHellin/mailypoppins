@@ -5,6 +5,7 @@ import { useCallback, useRef, type Dispatch, type RefObject } from "react";
 import { listWidthFor } from "@/app/layout";
 import { createMutations } from "@/app/mutations";
 import * as compose from "@/app/compose";
+import * as send from "@/app/send";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftsShown,
@@ -13,6 +14,7 @@ import {
   LIST_WIDTH_STEP,
   PANES,
   readerKey,
+  sendingRefusal,
   shownNotices,
   targetKey,
   type AppState,
@@ -207,6 +209,10 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "approve":
     case "demote":
       return compose.setStatus(s, dispatch, id === "approve");
+    case "send":
+      return send.sendCursor(s, dispatch);
+    case "send_all":
+      return send.sendAll(s, dispatch);
     case "quick_sync":
     case "full_sync": {
       const account = s.search?.account ?? s.selection.account;
@@ -325,6 +331,11 @@ export function runMutation(
         dispatch({ type: "notice", text: "Archive needs a received message; a draft leaves by send or delete" });
         return;
       }
+      const busy = sendingRefusal(s, acting);
+      if (busy) {
+        dispatch({ type: "notice", text: busy });
+        return;
+      }
       const verb = id === "archive" ? "Archive" : "Delete";
       const single = acting.length === 1 && !fromMarks;
       const dialog: MutationDialog = {
@@ -368,6 +379,7 @@ export function runMutation(
 
 /** What the confirmation's OK or the picker's choice runs. */
 export function runDialog(dialog: MutationDialog, dispatch: Dispatch<Action>, destination?: string): void {
+  if (dialog.kind === "send" || dialog.kind === "send_approved") return send.runSend(dialog, dispatch);
   const m = createMutations(dispatch);
   dispatch({ type: "overlay", overlay: null });
   if (dialog.kind === "move") {

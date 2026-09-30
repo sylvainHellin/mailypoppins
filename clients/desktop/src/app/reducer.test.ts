@@ -634,6 +634,154 @@ describe("mutations and pending state", () => {
     });
   });
 
+  describe("sends", () => {
+    const hold = (remaining: number, op = "send-1") => ({
+      operation_id: op,
+      account: "work",
+      draft_id: "angebot-antwort",
+      subject: "Re: Angebot Dachsanierung",
+      hold_secs: 20,
+      remaining_secs: remaining,
+      fires_at: "2026-09-30T12:00:20Z",
+      origin: "gui",
+    });
+    const requested = (token = 1): Action => ({
+      type: "send_requested",
+      token,
+      kind: "draft",
+      account: "work",
+      drafts: ["angebot-antwort"],
+      subject: "Re: Angebot Dachsanierung",
+    });
+    const outcome = (delivered: boolean[]) => ({
+      account: "work",
+      selector: "mp://work/drafts/angebot-antwort",
+      message_id: "<m@x>",
+      status_line: "sent + saved",
+      recipients: delivered.map((d, i) => ({
+        address: `r${i}@example.com`,
+        role: "To",
+        delivered: d,
+        error: d ? null : "550 no such mailbox",
+      })),
+      sent_copy: "filed",
+      settle_error: null,
+    });
+    const finished = (state: string, extra: Record<string, unknown> = {}, op = "send-1", revision = 600) =>
+      envelope("operation.finished", { operation_id: op, state, ...extra }, revision);
+
+    it("started, ticked, fired and settled: the card counts down, then says Sent", () => {
+      let s = run(booted(), requested());
+      expect(s.sends).toHaveLength(1);
+      // The hold's first event overtakes the command's answer.
+      s = run(s, envelope("send.hold_started", hold(20), 501));
+      s = run(s, { type: "send_started", token: 1, operation_id: "send-1", held: true });
+      expect(s.sends[0]).toMatchObject({ operation_id: "send-1", held: true });
+      s = run(s, envelope("send.hold_tick", hold(12), 502), envelope("send.hold_fired", hold(0), 503));
+      expect(s.holds["send-1"].state).toBe("fired");
+      expect(s.holds["send-1"].outcome).toBeUndefined();
+      // Still sending until the operation settles.
+      expect(s.sends).toHaveLength(1);
+      s = run(s, finished("succeeded", { result: outcome([true]) }));
+      expect(s.sends).toEqual([]);
+      expect(s.holds["send-1"].outcome).toEqual({ tone: "sent", text: "Sent", sticky: false });
+      expect(s.activity).toEqual([]);
+    });
+
+    it("started then cancelled: the card says Send cancelled and no notice repeats it", () => {
+      let s = run(booted(), requested(), { type: "send_started", token: 1, operation_id: "send-1", held: true });
+      s = run(s, envelope("send.hold_started", hold(20), 501), envelope("send.hold_cancelled", hold(0), 502));
+      s = run(s, finished("cancelled", { error: { code: -32008, message: "operation_cancelled" } }));
+      expect(s.sends).toEqual([]);
+      expect(s.holds["send-1"]).toMatchObject({ state: "cancelled", outcome: { tone: "cancelled", text: "Send cancelled" } });
+      expect(s.activity.filter((n) => n.kind !== "hold_cancelled")).toEqual([]);
+    });
+
+    it("settled with no hold (send_hold_secs = 0): a plain Sent notice", () => {
+      let s = run(booted(), requested(), { type: "send_started", token: 1, operation_id: "send-1", held: false });
+      s = run(s, finished("succeeded", { result: outcome([true, true]) }));
+      expect(s.holds["send-1"]).toBeUndefined();
+      expect(last(s)).toMatchObject({ kind: "applied", text: "Sent" });
+    });
+
+    it("an end that overtakes the answer is held for it", () => {
+      let s = run(booted(), requested());
+      s = run(s, finished("succeeded", { result: outcome([true]) }));
+      expect(s.sendEarly).toHaveLength(1);
+      s = run(s, { type: "send_started", token: 1, operation_id: "send-1", held: false });
+      expect(s.sends).toEqual([]);
+      expect(s.sendEarly).toEqual([]);
+      expect(last(s)).toMatchObject({ kind: "applied", text: "Sent" });
+    });
+
+    it("a partial delivery reads Partly delivered and names the refused recipients, never a plain failure", () => {
+      let s = run(booted(), requested(), { type: "send_started", token: 1, operation_id: "send-1", held: false });
+      s = run(s, finished("succeeded", { result: outcome([true, false]) }));
+      expect(last(s)).toMatchObject({ kind: "send_partial", text: "Partly delivered: r1@example.com (550 no such mailbox)" });
+      // With a card, the card says it and stays until dismissed.
+      s = run(s, requested(2), { type: "send_started", token: 2, operation_id: "send-2", held: true });
+      s = run(s, envelope("send.hold_started", hold(20, "send-2"), 610), envelope("send.hold_fired", hold(0, "send-2"), 611));
+      s = run(s, finished("succeeded", { result: outcome([true, false]) }, "send-2", 612));
+      expect(s.holds["send-2"].outcome).toEqual({
+        tone: "partial",
+        text: "Partly delivered: r1@example.com (550 no such mailbox)",
+        sticky: true,
+      });
+    });
+
+    it("a failed send says Failed with the daemon's reason", () => {
+      let s = run(booted(), requested(), { type: "send_started", token: 1, operation_id: "send-1", held: false });
+      s = run(s, finished("failed", { error: { code: -32603, message: "421 closed" } }));
+      expect(last(s)).toMatchObject({ kind: "send_failed", text: "Failed: 421 closed" });
+    });
+
+    it("a dropped send says it was interrupted and re-reads the Drafts list", () => {
+      let s = run(booted(), { type: "select_mailbox", account: "work", slug: "drafts" });
+      s = run(s, { type: "messages_loaded", key: listKey("work", "drafts"), gen: s.messages.gen, list: { kind: "drafts", account: "work", listing: fixtures.drafts.work } });
+      expect(isStale(s.messages)).toBe(false);
+      s = run(s, requested(), { type: "send_started", token: 1, operation_id: "send-1", held: true });
+      s = run(s, { type: "gui_event", event: { type: "operation_dropped", operation_id: "send-1", kind: "send", reason: "the daemon restarted" } });
+      expect(s.sends).toEqual([]);
+      expect(last(s)).toMatchObject({ kind: "send_failed", text: "The send was interrupted; check the outbox" });
+      expect(isStale(s.messages)).toBe(true);
+    });
+
+    it("a batch says Sent N, failed M with its failures as an alert", () => {
+      let s = run(booted(), { type: "send_requested", token: 1, kind: "approved", account: "work", drafts: ["a", "b"], subject: null });
+      s = run(s, { type: "send_started", token: 1, operation_id: "send-1", held: false });
+      const result = {
+        account: "work",
+        results: [outcome([true]), { ...outcome([]), selector: "mp://work/drafts/b", status_line: "no recipient" }],
+        sent: 1,
+        failed: 1,
+      };
+      s = run(s, { type: "gui_event", event: { type: "operation_settled", operation_id: "send-1", kind: "send_approved", status: { operation_id: "send-1", method: "send.approved", state: "succeeded", scope: "durable", progress: null, result, error: null } } });
+      expect(last(s)).toMatchObject({ kind: "send_failed", text: "Sent 1, failed 1", rows: [{ label: "b", reason: "Failed: no recipient" }] });
+      s = run(s, { type: "send_requested", token: 2, kind: "approved", account: "work", drafts: [], subject: null });
+      s = run(s, { type: "send_started", token: 2, operation_id: "send-2", held: false });
+      s = run(s, finished("succeeded", { result: { account: "work", results: [], sent: 0, failed: 0 } }, "send-2", 700));
+      expect(last(s)).toMatchObject({ kind: "applied", text: "No approved emails found" });
+    });
+
+    it("a refused start frees the draft and says why, with the file for one that does not parse", () => {
+      let s = run(booted(), requested());
+      const invalid = { account: "work", id: "angebot-antwort", path: "/x/angebot-antwort.md", diagnostics: [{ line: 3, message: "bad yaml" }] };
+      s = run(s, { type: "send_failed", token: 1, error: { kind: "protocol", message: "bad yaml", code: -32010 }, invalid });
+      expect(s.sends).toEqual([]);
+      expect(last(s)).toMatchObject({ kind: "send_failed", text: "Send failed: the draft does not parse: line 3: bad yaml (/x/angebot-antwort.md)" });
+    });
+
+    it("a send outlives a re-bootstrap of the same daemon, and its ended card too", () => {
+      let s = run(booted(), requested(), { type: "send_started", token: 1, operation_id: "send-1", held: true });
+      s = run(s, envelope("send.hold_started", hold(20), 501), envelope("send.hold_fired", hold(0), 502));
+      s = run(s, { type: "gui_event", event: { type: "rebootstrapped", cause: "resync", bootstrap: fixtures.bootstrap } });
+      expect(s.sends).toHaveLength(1);
+      expect(s.holds["send-1"]?.state).toBe("fired");
+      s = run(s, { type: "gui_event", event: { type: "operation_settled", operation_id: "send-1", kind: "send", status: { operation_id: "send-1", method: "send.draft", state: "succeeded", scope: "durable", progress: null, result: outcome([true]), error: null } } });
+      expect(s.holds["send-1"].outcome?.text).toBe("Sent");
+    });
+  });
+
   describe("the activity notices", () => {
     const failSync = (n: number): Action => ({ type: "sync_failed", account: `acct${n}`, error: { kind: "internal", message: "no route" } });
 

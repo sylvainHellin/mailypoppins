@@ -12,6 +12,7 @@ import {
   draftsShown,
   filteredDrafts,
   readerKey,
+  sendingRefusal,
   type AppState,
   type ComposeDialog,
   type MessageTarget,
@@ -161,6 +162,8 @@ export async function editDraft(s: AppState, dispatch: Dispatch<Action>): Promis
   const cur = cursorDraft(s);
   if (!cur) return;
   const { account, row } = cur;
+  const busy = sendingRefusal(s, [{ account, draft: row.id }]);
+  if (busy) return notice(dispatch, busy);
   let path = row.path;
   try {
     path = (await cmd.draftPath(account, row.id)).path;
@@ -186,6 +189,8 @@ export async function editRecipients(s: AppState, dispatch: Dispatch<Action>): P
   const cur = cursorDraft(s);
   if (!cur) return;
   const { account, row } = cur;
+  const busy = sendingRefusal(s, [{ account, draft: row.id }]);
+  if (busy) return notice(dispatch, busy);
   try {
     const p = await cmd.draftPreview(account, row.id);
     dispatch({
@@ -209,6 +214,8 @@ export function setStatus(s: AppState, dispatch: Dispatch<Action>, approve: bool
   }
   const drafts = actionTargets(s).filter((t): t is { account: string; draft: string } => "draft" in t);
   if (drafts.length === 0) return;
+  const busy = sendingRefusal(s, drafts);
+  if (busy) return notice(dispatch, busy);
   if (s.marked.keys.size > 0) {
     const n = drafts.length;
     const dialog: MutationDialog = {

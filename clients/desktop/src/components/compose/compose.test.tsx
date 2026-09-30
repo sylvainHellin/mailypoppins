@@ -262,3 +262,44 @@ describe("compose helpers", () => {
     expect(normalizeRecipients("a@example.com, b@example.com, ")).toBe("a@example.com, b@example.com");
   });
 });
+
+describe("while a draft is being sent", () => {
+  const BUSY = "That draft is being sent; it cannot change until the send ends";
+
+  async function sending(user: User) {
+    await drafts(user);
+    await user.keyboard("jx");
+    await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
+    await user.keyboard("y");
+    await waitFor(() => expect(document.querySelector('[data-draft-id="angebot-antwort"]')).toHaveAttribute("data-sending", "true"));
+  }
+
+  it.each(["d", "cA", "cD", "e", "ce", "x"])("%s on the sending draft is refused with a notice", async (keys) => {
+    const { user } = renderApp();
+    await shellReady();
+    await sending(user);
+    expect(screen.queryByText(BUSY)).toBeNull();
+    await user.keyboard(keys);
+    expect(await screen.findByText(BUSY)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(callsOf("draft_discard")).toEqual([]);
+    expect(callsOf("draft_approve")).toEqual([]);
+    expect(callsOf("draft_demote")).toEqual([]);
+    expect(callsOf("draft_path")).toEqual([]);
+    expect(mock.editorOpens).toEqual([]);
+    expect(callsOf("send_draft")).toHaveLength(1);
+  });
+
+  it("the other draft is not held up, and the settle frees the sent one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await sending(user);
+    await user.keyboard("j");
+    await user.keyboard("cA");
+    await waitFor(() => expect(callsOf("draft_approve")).toEqual([{ account: "work", ids: ["offsite-note"] }]));
+    act(() => emitEnvelope("operation.finished", { operation_id: "fixture-send-1", state: "cancelled", error: { code: -32008, message: "operation_cancelled" } }));
+    await user.keyboard("k");
+    await user.keyboard("e");
+    await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/angebot-antwort.md"]));
+  });
+});

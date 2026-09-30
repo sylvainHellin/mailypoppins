@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
+import { emit, emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
 import { APPLIED_MS, HOLD_END_MS, HoldToast, NoticeToast } from "@/components/mutations/ActivityStack";
 import type { ActivityNotice, HoldEntry } from "@/app/state";
 
@@ -211,7 +211,7 @@ describe("activity notices", () => {
     const area = screen.getByRole("region", { name: "Activity" });
     const applied = (await within(area).findByText("Flagged 1 message")).closest<HTMLElement>("[data-notice]")!;
     expect(applied).toHaveAttribute("data-notice", "applied");
-    expect(applied.closest("[role='status']")).toBe(within(area).getByRole("status"));
+    expect(applied.closest("[role='status']")).toBe(area.querySelector('[data-slot="activity-status"]'));
     await user.click(within(applied).getByRole("button", { name: "Dismiss" }));
     expect(within(area).queryByText("Flagged 1 message")).toBeNull();
   });
@@ -305,5 +305,137 @@ describe("held sends", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Sent");
     act(() => vi.advanceTimersByTime(HOLD_END_MS));
     expect(onGone).toHaveBeenCalledWith("fixture-hold-seed");
+  });
+});
+
+describe("a send's card and outcome", () => {
+  const outcome = (delivered: boolean[]) => ({
+    account: "work",
+    selector: "mp://work/drafts/angebot-antwort",
+    message_id: "<sent@fixture.example>",
+    status_line: "sent + saved",
+    recipients: delivered.map((d, i) => ({
+      address: `r${i}@example.com`,
+      role: "To",
+      delivered: d,
+      error: d ? null : "550 no such mailbox",
+    })),
+    sent_copy: "filed",
+    settle_error: null,
+  });
+  const ownHold = { ...seededHold, operation_id: "fixture-send-1", hold_secs: 20 };
+
+  /** `x` then `y` on the first draft; resolves to this window's card, or null with no hold. */
+  async function sendFirstDraft(user: ReturnType<typeof renderApp>["user"]) {
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("jx");
+    await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
+    await user.keyboard("y");
+    await waitFor(() => expect(callsOf("send_draft")).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    return document.querySelector<HTMLElement>('[data-hold="fixture-send-1"]');
+  }
+
+  const settle = (state: string, extra: Record<string, unknown>) =>
+    act(() => emitEnvelope("operation.finished", { operation_id: "fixture-send-1", state, ...extra }));
+
+  it("counts down, says Sending… once fired, then Sent in the status line mounted with the card", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const card = (await sendFirstDraft(user))!;
+    const end = within(card).getByRole("status");
+    expect(end).toBeEmptyDOMElement();
+    act(() => emitEnvelope("send.hold_tick", { ...ownHold, remaining_secs: 7 }));
+    expect(card).toHaveTextContent("Sending in 7 s");
+    act(() => emitEnvelope("send.hold_fired", { ...ownHold, remaining_secs: 0 }));
+    expect(end).toHaveTextContent("Sending…");
+    expect(within(card).queryByRole("button", { name: "Cancel send" })).toBeNull();
+    const row = document.querySelector('[data-draft-id="angebot-antwort"]')!;
+    expect(row).toHaveAttribute("data-sending", "true");
+    settle("succeeded", { result: outcome([true]) });
+    expect(within(card).getByRole("status")).toBe(end);
+    expect(end).toHaveTextContent("Sent");
+    await waitFor(() => expect(row).not.toHaveAttribute("data-sending"));
+  });
+
+  it("Cancel on this window's card ends in Send cancelled and frees the draft", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const card = (await sendFirstDraft(user))!;
+    await user.click(within(card).getByRole("button", { name: "Cancel send" }));
+    expect(callsOf("send_cancel_hold")).toEqual([{ operation_id: "fixture-send-1" }]);
+    await waitFor(() => expect(within(card).getByRole("status")).toHaveTextContent("Send cancelled"));
+    settle("cancelled", { error: { code: -32008, message: "operation_cancelled" } });
+    await waitFor(() => expect(document.querySelector('[data-draft-id="angebot-antwort"]')).not.toHaveAttribute("data-sending"));
+    expect(screen.queryByText(/Send of .* cancelled/)).toBeNull();
+  });
+
+  it("a failure and a partial delivery stay on the card until dismissed", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const card = (await sendFirstDraft(user))!;
+    act(() => emitEnvelope("send.hold_fired", { ...ownHold, remaining_secs: 0 }));
+    settle("succeeded", { result: outcome([true, false]) });
+    expect(within(card).getByRole("status")).toHaveTextContent("Partly delivered: r1@example.com (550 no such mailbox)");
+    expect(card).toHaveAttribute("data-outcome", "partial");
+    await user.click(within(card).getByRole("button", { name: "Dismiss" }));
+    expect(document.querySelector('[data-hold="fixture-send-1"]')).toBeNull();
+  });
+
+  it("with no hold, the outcome is a notice: Sent in the status region, Failed as an alert", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    mock.sendHeld = false;
+    expect(await sendFirstDraft(user)).toBeNull();
+    settle("failed", { error: { code: -32603, message: "421 closed" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed: 421 closed");
+    // A second send goes out cleanly.
+    mock.drafts.work.drafts[0].status = "approved";
+    await user.keyboard("x");
+    await screen.findByRole("dialog", { name: "Send this email?" });
+    await user.keyboard("y");
+    await waitFor(() => expect(callsOf("send_draft")).toHaveLength(2));
+    act(() => emitEnvelope("operation.finished", { operation_id: "fixture-send-2", state: "succeeded", result: outcome([true]) }));
+    const area = screen.getByRole("region", { name: "Activity" });
+    await waitFor(() => expect(area.querySelector('[data-slot="activity-status"]')).toHaveTextContent("Sent"));
+  });
+
+  it("a send the daemon restart dropped says so and names the outbox", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await sendFirstDraft(user);
+    act(() => emit({ type: "operation_dropped", operation_id: "fixture-send-1", kind: "send", reason: "the daemon restarted" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The send was interrupted; check the outbox");
+  });
+
+  it("a draft that does not parse is refused before anything is sent, naming the file", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    mock.drafts.work.skipped = [{ path: "/fixture/work/drafts/broken.md", error: "line 2: mapping values are not allowed here" }];
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await user.keyboard("G");
+    await user.keyboard("x");
+    await screen.findByRole("dialog", { name: "Send this email?" });
+    await user.keyboard("y");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Send failed: the draft does not parse: line 2: mapping values are not allowed here (/fixture/work/drafts/broken.md)");
+  });
+
+  it("a sticky outcome does not leave by itself", () => {
+    vi.useFakeTimers();
+    const onGone = vi.fn();
+    const entry: HoldEntry = {
+      ...seededHold,
+      remaining_secs: 0,
+      state: "fired",
+      cancelling: false,
+      outcome: { tone: "failed", text: "Failed: 421 closed", sticky: true },
+    };
+    render(<HoldToast hold={entry} awaiting onCancel={() => {}} onGone={onGone} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Failed: 421 closed");
+    act(() => vi.advanceTimersByTime(HOLD_END_MS * 10));
+    expect(onGone).not.toHaveBeenCalled();
   });
 });

@@ -6,7 +6,14 @@
 
 import { useMemo, type Dispatch } from "react";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type DraftStatusFailure, type MovedTo, type MutationBatch, type SyncMode } from "@/lib/gui-types";
+import {
+  asGuiError,
+  type DraftStatusFailure,
+  type MovedTo,
+  type MutationBatch,
+  type SendRefusal,
+  type SyncMode,
+} from "@/lib/gui-types";
 import type { Action } from "@/app/reducer";
 import { useDispatch } from "@/app/store";
 import type { MessageTarget, MutationKind, Target } from "@/app/state";
@@ -28,9 +35,22 @@ export type Mutations = {
   setDraftStatus(account: string, ids: string[], approve: boolean): Promise<MutationOutcome>;
   cancelHold(operation_id: string): Promise<void>;
   sync(account: string, mode: SyncMode): Promise<void>;
+  /**
+   * Send one draft with the daemon's hold, approving it first when it is
+   * not yet (the TUI's `x`); the draft is "sending" until the send settles.
+   */
+  sendDraft(account: string, id: string, subject: string | null): Promise<void>;
+  /** Send every approved draft of `account` (the TUI's `cX`); `ids` are those the list shows. */
+  sendApproved(account: string, ids: string[]): Promise<void>;
 };
 
 let nextBatch = 1;
+let nextSend = 1;
+
+/** The `draft.invalid` payload a `send_draft` refusal carries, if any. */
+function refusalInvalid(e: unknown): NonNullable<SendRefusal["invalid"]> | null {
+  return typeof e === "object" && e !== null && "invalid" in e ? ((e as SendRefusal).invalid ?? null) : null;
+}
 
 /** The rows grouped by account, in first-seen order, each group in the order given. */
 function byAccount<T extends { account: string }>(rows: T[]): [string, T[]][] {
@@ -161,6 +181,27 @@ export function createMutations(dispatch: Dispatch<Action>): Mutations {
         dispatch({ type: "hold_cancel_answered", operation_id, cancelled: answer.cancelled });
       } catch (e: unknown) {
         dispatch({ type: "hold_cancel_failed", operation_id, error: asGuiError(e) });
+      }
+    },
+    async sendDraft(account, id, subject) {
+      const token = nextSend++;
+      dispatch({ type: "send_requested", token, kind: "draft", account, drafts: [id], subject });
+      try {
+        // `hold: true` always: the daemon's `email.send_hold_secs` decides, 0 meaning none.
+        const started = await cmd.sendDraft(account, id, true);
+        dispatch({ type: "send_started", token, operation_id: started.operation_id, held: started.held });
+      } catch (e: unknown) {
+        dispatch({ type: "send_failed", token, error: asGuiError(e), invalid: refusalInvalid(e) });
+      }
+    },
+    async sendApproved(account, ids) {
+      const token = nextSend++;
+      dispatch({ type: "send_requested", token, kind: "approved", account, drafts: ids, subject: null });
+      try {
+        const started = await cmd.sendApproved(account, true);
+        dispatch({ type: "send_started", token, operation_id: started.operation_id, held: started.held });
+      } catch (e: unknown) {
+        dispatch({ type: "send_failed", token, error: asGuiError(e), invalid: null });
       }
     },
     async sync(account, mode) {

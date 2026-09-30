@@ -10,7 +10,7 @@ import { SearchResults } from "@/components/search/SearchResults";
 import { SearchStatusBar } from "@/components/search/SearchStatusBar";
 import { FILTER_INPUT_ID, markOpenRead, runAction, runMutation } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
-import { filteredDrafts, filteredRows, targetKey } from "@/app/state";
+import { filteredDrafts, filteredRows, sendingKeys, targetKey } from "@/app/state";
 import type { MessageListRow } from "@/protocol/types";
 
 export function MessageListPane() {
@@ -97,6 +97,7 @@ export function MessageListPane() {
   const anyMarked = markedCount > 0;
   const rowKey = (id: number) => targetKey({ account: account ?? "", row_id: id });
   const draftKey = (id: string) => targetKey({ account: account ?? "", draft: id });
+  const sending = sendingKeys(s);
 
   const total = list?.kind === "messages" ? list.total : list?.kind === "drafts" ? list.listing.drafts.length : null;
   const search = s.search;
@@ -204,6 +205,7 @@ export function MessageListPane() {
                     marked={s.marked.keys.has(draftKey(d.id))}
                     anyMarked={anyMarked}
                     pending={draftKey(d.id) in s.pending}
+                    sending={sending.has(draftKey(d.id))}
                     tabStop={win.start + i === tabIndexRow}
                     position={win.start + i + 1}
                     setSize={count}

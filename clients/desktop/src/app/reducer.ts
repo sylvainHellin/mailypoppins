@@ -3,6 +3,7 @@
 import type {
   AccountStateChangedPayload,
   Bootstrap,
+  DraftInvalid,
   HoldStatus,
   MutationsRolledBackPayload,
   StateInvalidatePayload,
@@ -41,6 +42,7 @@ import {
   holdCancelFailed,
   holdCancelRequested,
   holdEvent,
+  isSendOperation,
   isSyncOperation,
   leaves,
   listAnswerIsStale,
@@ -50,6 +52,11 @@ import {
   settledEnd,
   settleMutation,
   pushNotice,
+  sendRequested,
+  sendSignal,
+  sendStarted,
+  sendStartFailed,
+  sendStarting,
   syncRequested,
   syncSignal,
   syncStarted,
@@ -176,6 +183,10 @@ export type Action =
   | { type: "sync_requested" }
   | { type: "sync_started"; operation_id: string; account: string; mode: SyncMode }
   | { type: "sync_failed"; account: string; error: GuiError }
+  // A send this window started (app/mutations.ts dispatches these around `send_draft` and `send_approved`).
+  | { type: "send_requested"; token: number; kind: "draft" | "approved"; account: string; drafts: string[]; subject: string | null }
+  | { type: "send_started"; token: number; operation_id: string; held: boolean }
+  | { type: "send_failed"; token: number; error: GuiError; invalid: DraftInvalid | null }
   | { type: "dismiss_notice"; id: number }
   | { type: "dismiss_all_notices" }
   // The list's multi-select, by `targetKey`.
@@ -662,11 +673,14 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "operation.finished": {
       const sig = finishedSignal(payload);
       if (sig.kind !== "finish") return s;
-      const end = { operation_id: sig.operation_id, state: sig.state, error: sig.error };
+      const end = { operation_id: sig.operation_id, state: sig.state, error: sig.error, result: sig.result };
       if (isSyncOperation(s, sig.operation_id)) return syncSignal(s, end);
-      // An unknown id may be a sync whose start has not answered yet, or the
-      // search's: both hold it until their id is known.
-      return signal(s.syncStarting > 0 ? syncSignal(s, end) : s, sig);
+      if (isSendOperation(s, sig.operation_id)) return sendSignal(s, end);
+      // An unknown id may be a sync or a send whose start has not answered
+      // yet, or the search's: each holds it until its id is known.
+      let next = s.syncStarting > 0 ? syncSignal(s, end) : s;
+      if (sendStarting(next)) next = sendSignal(next, end);
+      return signal(next, sig);
     }
     default:
       return s;
@@ -695,10 +709,13 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       const closeDialog = !sameInstance && next.dialog !== null;
       const closeCompose = !sameInstance && next.composeDialog?.kind === "forward";
       const closeOverlay = (closeDialog && next.overlay === "mutation") || (closeCompose && next.overlay === "compose");
+      // The same daemon keeps the cards of holds that ended, so a settle
+      // still finds the card it reports on; the snapshot's are the live ones.
+      const ended = sameInstance ? Object.fromEntries(Object.entries(s.holds).filter(([, h]) => h.state === "fired" || h.state === "cancelled")) : {};
       return {
         ...next,
         pending: {},
-        holds: seedHolds(e.bootstrap.snapshot.holds),
+        holds: { ...ended, ...seedHolds(e.bootstrap.snapshot.holds) },
         marked: sameInstance ? next.marked : NO_MARKS,
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
@@ -716,9 +733,11 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       };
     case "operation_settled":
       if (e.kind === "sync") return syncSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, settledEnd(e.operation_id, e.status));
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       if (e.kind === "sync") return syncSignal(s, { operation_id: e.operation_id, dropped: e.reason });
+      if (e.kind === "send" || e.kind === "send_approved") return sendSignal(s, { operation_id: e.operation_id, dropped: e.reason });
       return signal(s, { kind: "dropped", operation_id: e.operation_id, reason: e.reason });
   }
 }
@@ -1057,6 +1076,12 @@ export function reducer(s: AppState, a: Action): AppState {
       return syncStarted(s, a.operation_id, a.account, a.mode);
     case "sync_failed":
       return syncStartFailed(s, a.account, a.error.message);
+    case "send_requested":
+      return sendRequested(s, { token: a.token, kind: a.kind, account: a.account, drafts: a.drafts, subject: a.subject });
+    case "send_started":
+      return sendStarted(s, a.token, a.operation_id, a.held);
+    case "send_failed":
+      return sendStartFailed(s, a.token, a.error.message, a.invalid);
     case "dismiss_notice":
       return s.activity.some((n) => n.id === a.id) ? { ...s, activity: s.activity.filter((n) => n.id !== a.id) } : s;
     case "dismiss_all_notices":

@@ -93,6 +93,14 @@ export const mock = {
   nextDraft: 1,
   /** The `editor` key of the settings file. */
   editorSetting: null as string | null,
+  /**
+   * Whether `send_draft` and `send_approved` arm a hold, as a daemon with
+   * `email.send_hold_secs` above 0 does; the hold's first event is emitted
+   * before the command answers, as the Rust layer can deliver it.
+   */
+  sendHeld: true,
+  /** The next send's operation id counter. */
+  nextSend: 1,
 };
 
 export function resetMock(): void {
@@ -116,6 +124,43 @@ export function resetMock(): void {
   mock.draftExtra = {};
   mock.nextDraft = 1;
   mock.editorSetting = null;
+  mock.sendHeld = true;
+  mock.nextSend = 1;
+}
+
+/** The hold the mock arms for a send, 20 s as the daemon's default window. */
+function armSendHold(operation_id: string, account: string, d: DraftEntry): HoldStatus {
+  const hold: HoldStatus = {
+    operation_id,
+    account,
+    draft_id: d.id,
+    subject: d.subject ?? "",
+    hold_secs: 20,
+    remaining_secs: 20,
+    fires_at: "2026-09-30T12:00:20Z",
+    origin: "gui",
+  };
+  mock.holds.push(hold);
+  emitEnvelope("send.hold_started", hold);
+  return hold;
+}
+
+/** `send_draft` as the Rust layer runs it: validate, approve a `draft` status, then `send.draft`. */
+function sendDraft(account: string, id: string): unknown {
+  knownAccount("send_draft", account);
+  const invalid = invalidDraft(account, id);
+  if (invalid) throw { ...draftInvalidError("draft.approve", invalid), invalid };
+  const d = findDraft("draft.approve", account, id);
+  const error = draftPreview(account, id).error;
+  if (error) throw { kind: "protocol", code: null, message: `${d.selector} does not validate: ${error}` };
+  const approved = d.status !== "approved";
+  if (approved) {
+    d.status = "approved";
+    draftChanged(account, d);
+  }
+  const operation_id = `fixture-send-${mock.nextSend++}`;
+  if (mock.sendHeld) armSendHold(operation_id, account, d);
+  return { operation_id, held: mock.sendHeld, approved };
 }
 
 /** Push a daemon event on the channel, as the fixture publishes it. */
@@ -618,6 +663,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "sync_trigger":
       knownAccount(cmd, account);
       return { operation_id: `fixture-op-${mock.nextSync++}` };
+    case "send_draft":
+      return sendDraft(account, String(args.id));
+    case "send_approved": {
+      knownAccount(cmd, account);
+      const operation_id = `fixture-send-${mock.nextSend++}`;
+      const first = draftsOf(account).drafts.find((d) => d.status === "approved");
+      const held = mock.sendHeld && first !== undefined;
+      if (held) armSendHold(operation_id, account, first);
+      return { operation_id, held, approved: false };
+    }
     default:
       throw { kind: "internal", message: `the mock does not answer ${cmd}` };
   }
