@@ -10,6 +10,7 @@ import * as attachments from "@/app/attachments";
 import { openEventSource } from "@/app/calendar";
 import { openAgendaRsvp, openRsvp } from "@/app/rsvp";
 import { newInvitation } from "@/app/invite";
+import { manageSignatures } from "@/app/signatures";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { hiddenNotice, viewPanes } from "@/app/views";
@@ -212,6 +213,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "dismiss_all_notices" });
     case "new_draft":
       return compose.newDraft(s, dispatch);
+    case "manage_signatures":
+      return manageSignatures(s, dispatch);
     case "reply":
     case "reply_all":
       return compose.reply(compose.cursorSource(s), id === "reply_all", dispatch);

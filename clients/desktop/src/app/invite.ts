@@ -35,7 +35,7 @@ export function inviteAccount(s: AppState): string | null {
 }
 
 export function openInviteDialog(s: AppState, account: string): AppState {
-  return { ...s, overlay: "invite", inviteDialog: { account }, dialog: null, composeDialog: null, attachDialog: null, rsvpDialog: null };
+  return { ...s, overlay: "invite", inviteDialog: { account }, dialog: null, composeDialog: null, attachDialog: null, rsvpDialog: null, signaturesDialog: null };
 }
 
 export function inviteSendRequested(s: AppState, run: Omit<InviteSendRun, "operation_id">): AppState {

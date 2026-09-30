@@ -54,6 +54,7 @@ export type ActionId =
   | "quick_sync"
   | "full_sync"
   | "new_draft"
+  | "manage_signatures"
   | "reply"
   | "reply_all"
   | "forward"
@@ -110,7 +111,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Send current draft (approve + send)": { id: "send" },
   "Search all mail (sender, subject, body)": { id: "search_server" },
   "New draft": { id: "new_draft" },
-  "Manage signatures": { badge: "M4" },
+  "Manage signatures": { id: "manage_signatures" },
   "Go to mailboxes (sidebar)": { id: "focus_sidebar" },
   "Switch account": { id: "next_account" },
   "Quick sync": { id: "quick_sync" },

@@ -3,7 +3,7 @@
 // wizard fields, less its inline body: `draft_create` takes no body, so the
 // body is written in the editor the draft opens in.
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
@@ -17,9 +17,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { submitCompose, type ComposeFields } from "@/app/compose";
-import { useDispatch } from "@/app/store";
+import { useAppState, useDispatch } from "@/app/store";
 import type { ComposeDialog } from "@/app/state";
-import * as cmd from "@/lib/commands";
 import type { SignatureListing } from "@/lib/gui-types";
 
 /** The signature select's value for "no signature". */
@@ -60,8 +59,10 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
   const dispatch = useDispatch();
   const id = useId();
   const [fields, setFields] = useState<ComposeFields>(() => initialFields(dialog));
-  const [signatures, setSignatures] = useState<SignatureListing | null>(null);
   const [signature, setSignature] = useState<string>(NONE);
+  // Whether the user picked a signature in this dialog: until then the
+  // select follows the account's default as the listing changes.
+  const picked = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
@@ -78,25 +79,33 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
     setFields(initialFields(dialog));
     setError(null);
     setBusy(false);
+    setSignature(NONE);
+    picked.current = false;
   }, [dialog]);
 
-  // Only a new draft picks a signature; the account's default is preselected.
+  // Only a new draft picks a signature, from the account's listing in the
+  // store, which the open wizard reads again on every `signature.changed`
+  // and every change the Signatures dialog makes. A listing that failed
+  // offers none.
+  const loadable = useAppState().signatures;
+  const entry = kind === "new" && account ? loadable[account] : undefined;
+  const data = entry?.data ?? null;
+  const failed = entry?.error != null;
+  const signatures = useMemo<SignatureListing | null>(
+    () => (data ?? (failed && account ? { account, names: [], default: null } : null)),
+    [data, failed, account],
+  );
+
+  // The default is preselected; a pick survives a new listing while its
+  // name is still listed, and falls back to the default when it is not.
   useEffect(() => {
-    setSignatures(null);
-    if (kind !== "new" || !account) return;
-    let live = true;
-    cmd
-      .signatureList(account)
-      .then((listing) => {
-        if (!live) return;
-        setSignatures(listing);
-        setSignature(listing.default && listing.names.includes(listing.default) ? listing.default : NONE);
-      })
-      .catch(() => live && setSignatures({ account, names: [], default: null }));
-    return () => {
-      live = false;
-    };
-  }, [kind, account]);
+    if (!signatures) return;
+    const fallback = signatures.default && signatures.names.includes(signatures.default) ? signatures.default : NONE;
+    setSignature((current) => {
+      if (!picked.current) return fallback;
+      return current === NONE || signatures.names.includes(current) ? current : fallback;
+    });
+  }, [signatures]);
 
   const submit = async () => {
     if (!dialog || busy) return;
@@ -172,7 +181,10 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
                 id={`${id}-signature`}
                 data-field="signature"
                 value={signature}
-                onChange={(e) => setSignature(e.currentTarget.value)}
+                onChange={(e) => {
+                  picked.current = true;
+                  setSignature(e.currentTarget.value);
+                }}
                 className="h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
               >
                 {signatures.names.map((n) => (

@@ -22,6 +22,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  SignatureListing,
   SyncMode,
   VersionInfo,
 } from "@/lib/gui-types";
@@ -105,9 +106,21 @@ export const LIST_WIDTH_STEP = 40;
  * `compose` is the wizard or the recipients dialog `composeDialog` describes;
  * `attachments` is the open, save or attach dialog `attachDialog` describes;
  * `rsvp` is the reply choice `rsvpDialog` describes; `invite` is the New
- * invitation form `inviteDialog` describes.
+ * invitation form `inviteDialog` describes; `signatures` is the Signatures
+ * dialog `signaturesDialog` describes.
  */
-export type Overlay = "palette" | "help" | "restart" | "intercepted" | "mutation" | "compose" | "attachments" | "rsvp" | "invite" | null;
+export type Overlay =
+  | "palette"
+  | "help"
+  | "restart"
+  | "intercepted"
+  | "mutation"
+  | "compose"
+  | "attachments"
+  | "rsvp"
+  | "invite"
+  | "signatures"
+  | null;
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
@@ -444,6 +457,13 @@ export type InviteSendRun = { token: number; account: string; subject: string; o
  */
 export type ContactsView = { account: string; query: string; cursor: string | null; searching: boolean };
 
+/**
+ * The Signatures dialog (`cs`): the account whose default it sets and
+ * clears, the selection's, as the TUI's overlay takes it. The signatures
+ * themselves are global files.
+ */
+export type SignaturesDialog = { account: string };
+
 /** A contact index rebuild this window started, until it settles or is dropped; `operation_id` is null until `contact_rebuild` answers. */
 export type RebuildRun = { token: number; account: string; operation_id: string | null };
 
@@ -590,6 +610,15 @@ export type AppState = {
    * passes only its awaited operations' reports, so another client's never land here.
    */
   progress: Record<string, Progress>;
+  /**
+   * Each account's signature listing (`signature_list`), created or made
+   * stale by every open of the Signatures dialog or the new-draft wizard for
+   * it, stale again on every `signature.changed`, every change the dialog
+   * makes and every bootstrap; only the open dialog's or wizard's is read.
+   */
+  signatures: Record<string, Loadable<SignatureListing>>;
+  /** What the `signatures` overlay shows; null whenever another overlay or none is open. */
+  signaturesDialog: SignaturesDialog | null;
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -657,6 +686,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     rebuilds: [],
     rebuildEarly: [],
     progress: {},
+    signatures: {},
+    signaturesDialog: null,
   };
 }
 

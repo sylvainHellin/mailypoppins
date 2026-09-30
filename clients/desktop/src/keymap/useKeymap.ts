@@ -173,6 +173,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
             return run("search_server");
           case "cn":
             return run("new_draft");
+          // Mail only: a view never arms `c`, as the TUI's do not.
+          case "cs":
+            return run("manage_signatures");
           default:
             if (COMPOSE_ROW_KEYS[combo]) {
               if (s.focus !== "sidebar") run(COMPOSE_ROW_KEYS[combo]);

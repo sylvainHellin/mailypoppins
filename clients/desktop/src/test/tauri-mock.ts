@@ -191,6 +191,8 @@ export const mock = {
   nextRebuild: 1,
   /** The vCard drafts `contact_vcard_draft` wrote, oldest first. */
   vcards: [] as { account: string; id: string; vcf: string }[],
+  /** The signatures and each account's default, what the `signature_*` commands read and change. */
+  signatures: clone(fixtures.signatures),
 };
 
 /** fixture.rs's `GRAPH_INVITE_REFUSAL`, the daemon's `send.invite` refusal of a Graph account. */
@@ -250,6 +252,7 @@ export function resetMock(): void {
   mock.rebuilds = [];
   mock.nextRebuild = 1;
   mock.vcards = [];
+  mock.signatures = clone(fixtures.signatures);
 }
 
 /** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
@@ -579,6 +582,52 @@ function knownAccount(cmd: string, account: string): void {
   if (!fixtures.bootstrap.snapshot.accounts.some((a) => a.name === account)) {
     throw { kind: "not_found", message: `${cmd}: the daemon refused the call: account_unknown: ${account} (-32005)`, code: -32005 };
   }
+}
+
+/** Where the mock keeps a signature's file. */
+export const signaturePath = (name: string): string => `/fixture/signatures/${name}.md`;
+
+function signatureListing(account: string) {
+  return { account, names: Object.keys(mock.signatures.signatures).sort(), default: mock.signatures.defaults[account] ?? null };
+}
+
+/** A refusal of `mp_core::signatures`, as the Rust layer hands it over. */
+function signatureRefusal(message: string): GuiError {
+  return message.startsWith("no signature named") ? { kind: "not_found", message, code: null } : { kind: "protocol", message, code: null };
+}
+
+/** `mp_core::signatures::validate_name`, its sentences. */
+function signatureName(name: string): string {
+  if (name === "") throw signatureRefusal("a signature name cannot be empty");
+  if (name.length > 64) throw signatureRefusal(`signature name '${name}' is longer than 64 characters`);
+  if (name !== name.trim()) throw signatureRefusal(`signature name '${name}' has leading or trailing whitespace`);
+  if (name.startsWith(".")) throw signatureRefusal(`signature name '${name}' cannot start with a dot`);
+  if (name.includes("..")) throw signatureRefusal(`signature name '${name}' cannot contain '..'`);
+  if (/[/\\]/.test(name)) throw signatureRefusal(`signature name '${name}' cannot contain a path separator`);
+  const bad = [...name].find((c) => !/[A-Za-z0-9._ -]/.test(c));
+  if (bad) throw signatureRefusal(`signature name '${name}' contains '${bad}'; use letters, digits, '-', '_', '.' or spaces`);
+  return name;
+}
+
+function signatureKnown(name: string): void {
+  if (!(name in mock.signatures.signatures)) throw signatureRefusal(`no signature named '${name}'`);
+}
+
+function retargetDefaults(old: string, name: string | null): void {
+  for (const [account, current] of Object.entries(mock.signatures.defaults)) {
+    if (current !== old) continue;
+    if (name === null) delete mock.signatures.defaults[account];
+    else mock.signatures.defaults[account] = name;
+  }
+}
+
+/** fixture.rs's `SIGNATURE_EDIT_LINE`. */
+export const SIGNATURE_EDIT_LINE = "Edited behind the fixture's back.";
+
+/** fixture.rs's `signature_changed`: another window edited `work`, and the watcher says so. */
+export function simulateSignatureChanged(): void {
+  mock.signatures.signatures.work = `${mock.signatures.signatures.work.replace(/\n+$/, "")}\n${SIGNATURE_EDIT_LINE}`;
+  emitEnvelope("signature.changed", { name: "work", path: signaturePath("work") });
 }
 
 /** One of the five message mutations over `row_ids`, in order, as fixture.rs answers it. */
@@ -913,8 +962,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         throw refusedRow("draft.create", `A draft already exists at /fixture/${account}/drafts/${name}.md`);
       }
       const headers = (args.headers as { to: string; cc: string; bcc: string; subject: string } | null) ?? null;
-      const sig = args.no_signature ? null : ((args.signature as string | null) ?? fixtures.signatures.defaults[account] ?? null);
-      const body = sig ? `\n\n${fixtures.signatures.signatures[sig] ?? ""}\n` : "";
+      const sig = args.no_signature ? null : ((args.signature as string | null) ?? mock.signatures.defaults[account] ?? null);
+      const body = sig ? `\n\n${mock.signatures.signatures[sig] ?? ""}\n` : "";
       return writeDraft(
         account,
         { name, to: headers?.to ?? null, cc: headers?.cc ?? null, bcc: headers?.bcc ?? "", subject: headers?.subject ?? "", body },
@@ -1083,8 +1132,52 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "signature_list": {
       knownAccount(cmd, account);
-      const names = Object.keys(fixtures.signatures.signatures).sort();
-      return { account, names, default: fixtures.signatures.defaults[account] ?? null };
+      return signatureListing(account);
+    }
+    case "signature_read": {
+      const name = signatureName(String(args.name));
+      signatureKnown(name);
+      return { name, path: signaturePath(name), content: mock.signatures.signatures[name] };
+    }
+    case "signature_create": {
+      const name = signatureName(String(args.name));
+      if (name in mock.signatures.signatures) throw signatureRefusal(`a signature named '${name}' already exists`);
+      mock.signatures.signatures[name] = "";
+      emitEnvelope("signature.changed", { name, path: signaturePath(name) });
+      return { name, path: signaturePath(name), content: "" };
+    }
+    case "signature_rename": {
+      knownAccount(cmd, account);
+      const old = signatureName(String(args.old));
+      const name = signatureName(String(args.new));
+      if (old === name) return signatureListing(account);
+      signatureKnown(old);
+      if (name in mock.signatures.signatures) throw signatureRefusal(`a signature named '${name}' already exists`);
+      mock.signatures.signatures[name] = mock.signatures.signatures[old];
+      delete mock.signatures.signatures[old];
+      retargetDefaults(old, name);
+      emitEnvelope("signature.changed", { name, path: signaturePath(name) });
+      return signatureListing(account);
+    }
+    case "signature_delete": {
+      knownAccount(cmd, account);
+      const name = signatureName(String(args.name));
+      signatureKnown(name);
+      delete mock.signatures.signatures[name];
+      retargetDefaults(name, null);
+      return signatureListing(account);
+    }
+    case "signature_set_default": {
+      knownAccount(cmd, account);
+      const raw = args.name as string | null | undefined;
+      if (raw == null) {
+        delete mock.signatures.defaults[account];
+      } else {
+        const name = signatureName(raw);
+        signatureKnown(name);
+        mock.signatures.defaults[account] = name;
+      }
+      return signatureListing(account);
     }
     case "editor_open": {
       const path = String(args.path);

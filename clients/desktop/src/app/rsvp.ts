@@ -155,7 +155,7 @@ export function rsvpOf(s: AppState, account: string, rowId: number): RsvpRun | n
 }
 
 export function openRsvpDialog(s: AppState, dialog: RsvpDialog): AppState {
-  return { ...s, overlay: "rsvp", rsvpDialog: dialog, dialog: null, composeDialog: null, attachDialog: null, inviteDialog: null };
+  return { ...s, overlay: "rsvp", rsvpDialog: dialog, dialog: null, composeDialog: null, attachDialog: null, inviteDialog: null, signaturesDialog: null };
 }
 
 export function rsvpRequested(s: AppState, run: Omit<RsvpRun, "operation_id">): AppState {

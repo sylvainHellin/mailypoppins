@@ -172,7 +172,15 @@ import {
   setContactsSearching,
   staleAllContacts,
 } from "@/app/contacts";
-import type { ContactSearch } from "@/lib/gui-types";
+import type { ContactSearch, SignatureListing } from "@/lib/gui-types";
+import {
+  dropSignatures,
+  openSignaturesDialog,
+  signaturesFailed,
+  signaturesLoaded,
+  staleAllSignatures,
+  wantSignatures,
+} from "@/app/signatures";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -318,6 +326,12 @@ export type Action =
   | { type: "rebuild_requested"; token: number; account: string }
   | { type: "rebuild_started"; token: number; operation_id: string }
   | { type: "rebuild_failed"; token: number; error: GuiError }
+  // The Signatures dialog (app/signatures.ts).
+  | { type: "open_signatures"; account: string }
+  | { type: "signatures_loaded"; account: string; gen: number; listing: SignatureListing }
+  | { type: "signatures_failed"; account: string; gen: number; error: GuiError }
+  /** A change of the dialog's own, answered or refused: every listing is read again. */
+  | { type: "signatures_changed" }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -588,7 +602,7 @@ function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): A
 function removeAccount(s: AppState, name: string): AppState {
   if (s.search?.account === name) s = endSearch(s);
   if (s.outboxView?.account === name) s = closeOutbox(s);
-  s = dropContacts(dropCalendar(s, name), name);
+  s = dropSignatures(dropContacts(dropCalendar(s, name), name), name);
   const mailboxes = { ...s.mailboxes };
   delete mailboxes[name];
   let next: AppState = {
@@ -808,6 +822,10 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const account = (payload as { account: string }).account;
       return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
     }
+    // A signature file was written or created, here or in another client;
+    // the files are global, so every account's listing is stale.
+    case "signature.changed":
+      return staleAllSignatures(s);
     case "mutations.rolled_back": {
       const p = payload as MutationsRolledBackPayload;
       return staleListIf(staleMailboxes(rolledBack(s, p), p.account), (a) => a === p.account);
@@ -867,7 +885,9 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // Row ids are per daemon instance, and the reloaded lists are the
       // truth: nothing stays pending, and marks survive only the same instance.
       const sameInstance = s.bootstrap?.instance_id === e.bootstrap.instance_id;
-      const next = staleAllContacts(bootstrapInvites(staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance));
+      const next = staleAllSignatures(
+        staleAllContacts(bootstrapInvites(staleAllCalendars(staleAllOutboxes(applyBootstrap(s, e.bootstrap))), sameInstance)),
+      );
       // A confirmation or a picker names rows by id: another instance closes
       // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
@@ -1202,13 +1222,17 @@ function reduce(s: AppState, a: Action): AppState {
         attachDialog: a.overlay === "attachments" ? s.attachDialog : null,
         rsvpDialog: a.overlay === "rsvp" ? s.rsvpDialog : null,
         inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
+        signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
       };
     case "open_dialog":
-      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null };
-    case "open_compose":
-      return { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null };
+      return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
+    case "open_compose": {
+      const next: AppState = { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
+      // The new-draft wizard's signature select reads the listing again.
+      return a.dialog.kind === "new" ? wantSignatures(next, a.dialog.account) : next;
+    }
     case "open_attachments":
-      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null, rsvpDialog: null, inviteDialog: null };
+      return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
     case "save_dir":
       return a.dir.trim() ? { ...s, saveDir: a.dir.trim() } : s;
     case "hit_fetch_started":
@@ -1401,6 +1425,14 @@ function reduce(s: AppState, a: Action): AppState {
       return rebuildStarted(s, a.token, a.operation_id);
     case "rebuild_failed":
       return rebuildStartFailed(s, a.token, a.error.message);
+    case "open_signatures":
+      return openSignaturesDialog(s, a.account);
+    case "signatures_loaded":
+      return signaturesLoaded(s, a.account, a.gen, a.listing);
+    case "signatures_failed":
+      return signaturesFailed(s, a.account, a.gen, a.error);
+    case "signatures_changed":
+      return staleAllSignatures(s);
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

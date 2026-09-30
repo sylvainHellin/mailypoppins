@@ -12,8 +12,14 @@ import {
 } from "@/components/ui/dialog";
 import type { MutationDialog } from "@/app/state";
 
+/**
+ * What the confirmation asks about: a mutation of the `mutation` overlay, or
+ * the Signatures dialog's delete, which it raises over itself.
+ */
+export type Confirmation = Exclude<MutationDialog, { kind: "move" }> | { kind: "signature_delete"; title: string; detail: string };
+
 export type ConfirmMutationDialogProps = {
-  dialog: Exclude<MutationDialog, { kind: "move" }> | null;
+  dialog: Confirmation | null;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 };
@@ -27,12 +33,14 @@ const VERB = {
   send_approved: "Send",
   outbox_retry: "Retry",
   outbox_discard: "Discard",
+  signature_delete: "Delete",
 } as const;
 
 /**
  * The TUI's confirmation before an archive, a delete, an approve or
- * demote over marked drafts, a send, or an outbox row's retry or discard, which
- * also says what the row may already have done: `y` or Enter runs it, `n` or Escape cancels.
+ * demote over marked drafts, a send, an outbox row's retry or discard, which
+ * also says what the row may already have done, or a signature's delete: `y`
+ * or Enter runs it, `n` or Escape cancels.
  * The confirm button has the initial focus.
  */
 export function ConfirmMutationDialog({ dialog, onOpenChange, onConfirm }: ConfirmMutationDialogProps) {
@@ -77,7 +85,7 @@ export function ConfirmMutationDialog({ dialog, onOpenChange, onConfirm }: Confi
           <DialogClose render={<Button variant="outline" />}>
             Cancel <Kbd aria-hidden="true">n</Kbd>
           </DialogClose>
-          <Button ref={confirmRef} variant={dialog?.kind === "delete" || dialog?.kind === "outbox_discard" ? "destructive" : "default"} onClick={onConfirm}>
+          <Button ref={confirmRef} variant={dialog?.kind === "delete" || dialog?.kind === "outbox_discard" || dialog?.kind === "signature_delete" ? "destructive" : "default"} onClick={onConfirm}>
             {verb} <Kbd aria-hidden="true">y</Kbd>
           </Button>
         </DialogFooter>

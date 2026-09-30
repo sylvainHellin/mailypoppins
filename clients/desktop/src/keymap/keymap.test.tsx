@@ -113,8 +113,9 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    await user.keyboard("cs");
-    expect(await screen.findByText(/Manage signatures arrives in M4/)).toBeInTheDocument();
+    // `sc` until the config editor handoff lands (U6).
+    await user.keyboard("sc");
+    expect(await screen.findByText(/Open config.toml in \$EDITOR arrives in M4/)).toBeInTheDocument();
   });
 });
 

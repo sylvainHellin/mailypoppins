@@ -45,6 +45,7 @@ import type {
   SavedAttachments,
   SendStarted,
   ServerSearchParams,
+  SignatureFile,
   SignatureListing,
   SyncMode,
   VcardDraft,
@@ -184,6 +185,24 @@ export const draftSetRecipients = (
 
 export const signatureList = (account: string): Promise<SignatureListing> =>
   invoke<SignatureListing>("signature_list", { account });
+
+/** A signature's file and content; a name that names nothing is `not_found`. */
+export const signatureRead = (name: string): Promise<SignatureFile> => invoke<SignatureFile>("signature_read", { name });
+
+/** A new, empty signature, refused for a name already taken; the editor opens its `path` next. */
+export const signatureCreate = (name: string): Promise<SignatureFile> => invoke<SignatureFile>("signature_create", { name });
+
+/** Renames a signature, carrying every default that named it; answers `account`'s listing. */
+export const signatureRename = (account: string, old: string, name: string): Promise<SignatureListing> =>
+  invoke<SignatureListing>("signature_rename", { account, old, new: name });
+
+/** Deletes a signature, clearing every default that named it; answers `account`'s listing. */
+export const signatureDelete = (account: string, name: string): Promise<SignatureListing> =>
+  invoke<SignatureListing>("signature_delete", { account, name });
+
+/** Makes `name` the account's default, or clears it with null; answers `account`'s listing. */
+export const signatureSetDefault = (account: string, name: string | null): Promise<SignatureListing> =>
+  invoke<SignatureListing>("signature_set_default", { account, name });
 
 /** Opens the file in the resolved editor and never waits for it; a launch failure is `setup`. */
 export const editorOpen = (path: string): Promise<EditorLaunch> => invoke<EditorLaunch>("editor_open", { path });

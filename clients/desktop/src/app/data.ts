@@ -10,6 +10,7 @@ import type { Action } from "@/app/reducer";
 import { accountNames, isStale, readerKey, type AppState } from "@/app/state";
 import { refusalsWanted } from "@/app/rsvp";
 import { CONTACT_LIMIT } from "@/app/contacts";
+import { signaturesWanted } from "@/app/signatures";
 
 /** Subscribe once, read the connection and version, and route menu items. */
 export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => void): void {
@@ -144,6 +145,23 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
         .catch((e: unknown) => dispatch({ type: "contacts_failed", account, gen, error: asGuiError(e) })),
     );
   }, [hasBootstrap, contactsAccount, contactsQuery, contacts, dispatch]);
+
+  // The signature listing the Signatures dialog or the new-draft wizard
+  // shows, and only while one of them is open: a listing that went stale
+  // behind a closed one is read when it opens again.
+  const signaturesAccount = signaturesWanted(state);
+  const signatures = signaturesAccount ? state.signatures[signaturesAccount] : undefined;
+  useEffect(() => {
+    if (!hasBootstrap || !signaturesAccount || !signatures || !isStale(signatures)) return;
+    const gen = signatures.gen;
+    const account = signaturesAccount;
+    run(`signatures:${account}@${gen}`, () =>
+      cmd
+        .signatureList(account)
+        .then((listing) => dispatch({ type: "signatures_loaded", account, gen, listing }))
+        .catch((e: unknown) => dispatch({ type: "signatures_failed", account, gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, signaturesAccount, signatures, dispatch]);
 
   // The selected mailbox's list.
   // The answer carries the list generation it was asked at, so a reload that
