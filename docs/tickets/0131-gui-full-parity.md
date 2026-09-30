@@ -144,7 +144,7 @@ Open for M4 and for Sylvain:
 - Confirm the desktop keys `go`, `R` and `F`.
 - Confirm that `ts` on a draft is declined.
 - Confirm that `d` on a draft file that does not parse shows a notice instead of deleting the file, as the TUI does.
-- `REQUIRED_CAPABILITIES` in `clients/desktop/src-tauri/src/connector.rs` lacks the M3 methods, so a daemon without them connects and fails at the first call.
+- `REQUIRED_CAPABILITIES` in `clients/desktop/src-tauri/src/connector.rs` lacked the M3 methods, so a daemon without them connected and failed at the first call: fixed in `30a9f51c`.
 - `draft.reply` and `draft.forward` take no signature arguments, so a reply or a forward gets no signature choice.
 - `draft.create` takes no body, so the wizard cannot write one.
 - `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`.

@@ -59,6 +59,7 @@ An entry with no file behind it carries a "missing" badge and its Open is disabl
 Remove calls `draft_attachment_remove`, which takes the entry out of the file and leaves the file it named alone.
 The three are read again whenever the listing's row or the list itself changes, which is what a save in the editor or an attach does through `draft.changed`.
 Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), Attach file (`ta`), and Approve (`cA`) or Back to draft (`cD`).
+Approve and Back to draft act on the draft the preview shows and ask nothing, even with drafts marked; a draft being sent is refused with a notice, as by the keys.
 
 Attach file, `ta` in Drafts, opens the "Attach file" dialog, whose File field takes an absolute path or one starting with `~`, stored in the draft as typed.
 The native file picker arrives with the dialog plugin, and the dialog says so under the field.

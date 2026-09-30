@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { runAction } from "@/app/actions";
+import { setShownStatus } from "@/app/compose";
 import { draftItemsOf, openItem, removeItem } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey, type DraftItem } from "@/app/state";
@@ -104,12 +105,12 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
               Attach file
             </Button>
             {status === "approved" ? (
-              <Button size="sm" variant="ghost" title="Back to draft (cD)" onClick={() => runAction("demote", s, dispatch)}>
+              <Button size="sm" variant="ghost" title="Back to draft (cD)" onClick={() => setShownStatus(s, dispatch, account, draft.id, false)}>
                 <Undo2 aria-hidden="true" />
                 Back to draft
               </Button>
             ) : (
-              <Button size="sm" variant="ghost" title="Approve (cA)" onClick={() => runAction("approve", s, dispatch)}>
+              <Button size="sm" variant="ghost" title="Approve (cA)" onClick={() => setShownStatus(s, dispatch, account, draft.id, true)}>
                 <Stamp aria-hidden="true" />
                 Approve
               </Button>

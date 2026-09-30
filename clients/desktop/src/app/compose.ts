@@ -231,6 +231,16 @@ export function setStatus(s: AppState, dispatch: Dispatch<Action>, approve: bool
   void createMutations(dispatch).setDraftStatus(drafts[0].account, [drafts[0].draft], approve);
 }
 
+/**
+ * The draft preview's Approve and Back to draft: the draft the preview shows,
+ * whatever is marked, so no dialog; a draft being sent is refused as by `cA`.
+ */
+export function setShownStatus(s: AppState, dispatch: Dispatch<Action>, account: string, draftId: string, approve: boolean): void {
+  const busy = sendingRefusal(s, [{ account, draft: draftId }]);
+  if (busy) return notice(dispatch, busy);
+  void createMutations(dispatch).setDraftStatus(account, [draftId], approve);
+}
+
 // ---------------------------------------------------------------------------
 // The wizard's and the recipients dialog's submit
 // ---------------------------------------------------------------------------

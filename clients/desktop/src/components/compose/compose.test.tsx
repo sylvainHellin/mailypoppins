@@ -234,6 +234,20 @@ describe("the draft preview", () => {
     expect(within(preview).getByText("line 2: mapping values are not allowed here")).toBeInTheDocument();
     expect(callsOf("draft_preview")).toEqual([]);
   });
+
+  it("Approve acts on the draft it shows, not on the marked drafts, and asks nothing", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("jjv");
+    expect(document.querySelector('[data-draft-id="offsite-note"]')).toHaveAttribute("aria-selected", "true");
+    expect(document.querySelector('[data-draft-id="angebot-antwort"]')).toHaveAttribute("aria-selected", "false");
+    await user.keyboard("k");
+    const preview = await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+    await user.click(within(preview).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(callsOf("draft_approve")).toEqual([{ account: "work", ids: ["angebot-antwort"] }]));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
 });
 
 describe("the reader toolbar", () => {
