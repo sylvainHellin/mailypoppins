@@ -28,7 +28,7 @@ describe("accessibility primitives", () => {
     expect(nav.querySelectorAll('[data-mailbox][tabindex="0"]')).toHaveLength(1);
   });
 
-  it("tabs from the page into the sidebar, then the list, then the reader", async () => {
+  it("Tab from the page continues the pane cycle from the focused pane", async () => {
     const { user } = renderApp();
     await shellReady();
     (document.activeElement as HTMLElement | null)?.blur();

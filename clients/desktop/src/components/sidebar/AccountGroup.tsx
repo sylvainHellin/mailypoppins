@@ -3,7 +3,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { MailboxItem } from "@/components/sidebar/MailboxItem";
 import { OutboxState } from "@/components/sidebar/OutboxState";
 import { SyncHealthBadge } from "@/components/sidebar/SyncHealthBadge";
-import { kindOfRole } from "@/components/sidebar/icons";
 import type { MailboxKind } from "@/lib/gui-types";
 import type { AccountState, OutboxCounts, SyncHealthState } from "@/protocol/types";
 
@@ -68,5 +67,3 @@ export function AccountGroup(p: AccountGroupProps) {
     </SidebarGroup>
   );
 }
-
-export { kindOfRole };

@@ -39,6 +39,8 @@ export const mock = {
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   /** Fail a command with a GuiError-shaped rejection. */
   failing: new Map<string, unknown>(),
+  /** Added to every row_id, as a daemon restart that rebuilt the store would. */
+  rowShift: 0,
 };
 
 export function resetMock(): void {
@@ -47,6 +49,7 @@ export function resetMock(): void {
   mock.menu = null;
   mock.calls = [];
   mock.failing.clear();
+  mock.rowShift = 0;
 }
 
 export function emit(event: GuiEvent): void {
@@ -76,7 +79,7 @@ function strip(row: FixtureRow): MessageListRow {
 
 function findRow(account: string, rowId: number): [string, FixtureRow] | null {
   for (const [mailbox, rows] of Object.entries(fixtures.messages[account] ?? {})) {
-    const row = rows.find((r) => r.id === rowId);
+    const row = rows.find((r) => r.id + mock.rowShift === rowId);
     if (row) return [mailbox, row];
   }
   return null;
@@ -151,7 +154,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (mailbox === "drafts") {
         return { kind: "drafts", account, listing: fixtures.drafts[account] } satisfies MessageList;
       }
-      const rows = (fixtures.messages[account]?.[mailbox] ?? []).map(strip);
+      const rows = (fixtures.messages[account]?.[mailbox] ?? []).map(strip).map((r) => ({ ...r, id: r.id + mock.rowShift }));
       return { kind: "messages", account, mailbox, total: rows.length, rows } satisfies MessageList;
     }
     case "message_text": {
