@@ -37,7 +37,7 @@ A "client-side" entry needs no method at all and stays in the client process.
 
 ### GUI location
 
-Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129's shell plus #0131's read slices, M2 to M4 are #0131, and M6 is #0132.
+Each GUI-parity entry names `clients/desktop` and the milestone of the [native GUI plan](plans/native-gui.md) planned to deliver it, with its ticket: M1 is #0129, which shipped the shell together with the read slices first planned for #0131, M2 to M4 are #0131, and M6 is #0132.
 An entry with another classification reads `not required`, since the plan puts no GUI-parity obligation on it.
 The ticket that ships an entry replaces the milestone with the surface and interaction it built.
 
@@ -148,9 +148,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the global arguments `-A/--account`, `-s/--signature`, `--no-signature` in `src/main.rs` (`no_signature`, `src/main.rs:41`), `src/signatures.rs`
 - Daemon surface: an account parameter on every domain method, `signature.list`, `state.bootstrap`
-- GUI location: clients/desktop (M1 for the account selector, M3 for the signature choice, #0131)
-- Validation: `tests/cli_help_snapshot.rs` pins the global arguments
-- Status: not started
+- GUI location: clients/desktop: the sidebar lists every account, and `ga` or a mailbox chosen in it selects the active account (M1, #0129); the signature choice is M3 (#0131)
+- Validation: `tests/cli_help_snapshot.rs` pins the global arguments; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`)
+- Status: GUI shipped (M1, #0129) for the account selector; the rest not started
 - Note: the GUI equivalent is the active-account selector plus a per-composition signature choice.
 
 ### ACC-10 Signature file management
@@ -200,27 +200,27 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:636`), `gm` (`clients/tui/src/app/keymap.rs:590`), `clients/tui/src/ui/sidebar.rs`
 - Daemon surface: `state.bootstrap` mailbox summaries, `message.list` on selection
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames under `clients/tui/src/`
-- Status: not started
+- GUI location: clients/desktop: the sidebar lists each account's mailboxes, `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox (M1, #0129)
+- Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
+- Status: GUI shipped (M1, #0129)
 
 ### MBX-03 Jump to a mailbox by digit 1 through 9
 
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/app/keymap.rs:558`
 - Daemon surface: client-side over the bootstrap mailbox list, then `message.list`
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `1` to `9` open the selected account's nth mailbox (M1, #0129)
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`digits jump to a mailbox of the selected account`)
+- Status: GUI shipped (M1, #0129)
 
 ### MBX-04 Switch account
 
 - Classification: GUI parity
 - Source anchor: TUI `ga` (`clients/tui/src/app/keymap.rs:591`), guarded by `Guard::MultiAccount` so it appears only with more than one configured account
 - Daemon surface: `account.list`, a second `state.bootstrap`
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `ga` selects the next account and opens its inbox, and a mailbox chosen in the sidebar selects the account it belongs to (M1, #0129)
+- Validation: TUI golden frames; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`)
+- Status: GUI shipped (M1, #0129)
 
 ### MBX-05 Switch between the Mail, Contacts, and Calendar views
 
@@ -246,9 +246,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/ui/sidebar.rs` over the store's mailbox rows
 - Daemon surface: `state.bootstrap`, then `state.event` for count changes
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: the sidebar shows each mailbox's label and unread count, and the account's outbox line while a send is queued or failed (M1, #0129)
+- Validation: TUI golden frames; `clients/desktop/src-tauri/src/commands.rs` (`mailboxes_carry_kind_and_totals`), `clients/desktop/src-tauri/src/fixture.rs` (`counts_are_computed_from_the_rows`), `clients/desktop/src/app/reducer.test.ts` (`marks the list and the counts stale on an invalidation of the selected mailbox`), with no desktop test of the outbox line
+- Status: GUI shipped (M1, #0129)
 - Note: delivered through the bootstrap snapshot rather than a query.
 
 ## Listing, filtering, and search
@@ -258,9 +258,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp list-messages [--mailbox] [-n]`, `src/main.rs`, `list_mailbox` (`src/store/read.rs:178`)
 - Daemon surface: `message.list`, one call per listed mailbox
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
-- Status: routed (P4-U4); GUI not started
+- GUI location: clients/desktop: the list pane shows the selected mailbox, the Drafts mailbox as the draft listing, and reads it again on a `state.invalidate` (M1, #0129)
+- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/app/events.test.tsx` (`refetches the shown list when its mailbox is invalidated`), `clients/desktop/src-tauri/src/commands.rs` (`the_drafts_mailbox_branches_to_the_draft_listing`), `clients/desktop/src-tauri/src/fixture.rs` (`listing_rows_decode_as_protocol_rows`)
+- Status: routed (P4-U4); GUI shipped (M1, #0129)
 - Note: the mailbox argument accepts a role, a slug, or the sidebar label, and the default lists every mailbox of the account. The name is resolved client-side against the configuration, so an unknown one is refused without a round trip and in the words it has always been refused in.
 
 ### LST-02 Navigate a list with per-item movement, top and bottom jumps, and half-page scrolling
@@ -268,9 +268,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k`, `gg/G`, `Ctrl+d`, `Ctrl+u` in the EMAIL LIST and BODY keymap sections (`clients/tui/src/app/keymap.rs`)
 - Daemon surface: client-side over the list `message.list` returned
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `j`/`k` and the arrows, `gg`/`G`, `Ctrl+d`/`Ctrl+u` in the list, the reader following the selection (M1, #0129)
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`j and k move the selection in the list and the reader follows`), with no desktop test of the jumps or the half-page keys
+- Status: GUI shipped (M1, #0129)
 
 ### LST-03 Jump to a date in the list
 
@@ -316,9 +316,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp search --local`, `src/store/search.rs`, `tests/store_search_integration.rs`
 - Daemon surface: `message.search`, whose params mirror the command's flags and whose hits come back in the store's ranking order
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: `tests/store_search_integration.rs`, `tests/daemon_read_slice.rs`
-- Status: routed (P4-U4); GUI not started
+- GUI location: clients/desktop: Enter in the list header's field searches the selected account's store, and each hit carries its mailbox as a badge (M1, #0129)
+- Validation: `tests/store_search_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/components/search/search.test.tsx` (`runs search_local on Enter and lists the hits with their mailbox`, `opens a hit from another mailbox in the reader`), `clients/desktop/src-tauri/src/commands.rs` (`local_search_flattens_the_row_beside_the_mailbox`)
+- Status: routed (P4-U4); GUI shipped (M1, #0129)
 - Note: `--body` is `body_query` on the wire, because `body` is already the `--full` switch; the client sends what the user typed and the daemon builds the query with `search::from_cli`, so one parser still serves every backend.
 
 ### LST-08 Merged search in the TUI
@@ -326,9 +326,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ff` (`clients/tui/src/app/keymap.rs:581`), `Action::ServerSearch` (`clients/tui/src/app/types.rs:1619`)
 - Daemon surface: `message.search` local first, then `message.search_server` as a durable `operation.*` streaming hits on `state.event`
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui_tests/commands.rs`)
-- Status: routed (P5-U6 local, P5-U10c-I1 server); GUI not started
+- GUI location: clients/desktop: Shift+Enter, `ff`, the header's server button and the palette's "Search server" run the server leg, which keeps the hits of a finished local search and excludes their Message-IDs; hits stream in until the settle, and Cancel or leaving the search cancels it (M1, #0129)
+- Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui_tests/commands.rs`); `clients/desktop/src/components/search/search.test.tsx` (the "server search" block), `clients/desktop/src-tauri/src/fixture.rs` (`a_server_search_streams_hits_and_finishes`), `clients/desktop/src-tauri/src/commands.rs` (`a_server_search_is_awaited_until_cancelled`)
+- Status: routed (P5-U6 local, P5-U10c-I1 server); GUI shipped (M1, #0129)
 - Note: `message.search_server`, deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s one-mailbox query. The TUI's background thread is gone: the overlay appends each hit as its `message.server_hit` event arrives, matched by operation id because a fast retype leaves two searches in flight.
   Deduplication is by Message-ID and it is the daemon's: the client sends the Message-IDs the local pass is showing as `exclude_message_ids` and the settle counts them in `deduplicated`, so a message found twice appears once and the count is a fact any client reproduces.
   The local pass is `message.search` with `body: true` since P5-U6.
@@ -398,9 +398,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp show <selector> [--mailbox]`, `src/read_cmd.rs`, `tests/cli_read_surface_integration.rs`
 - Daemon surface: `message.get`, addressed by `"<mailbox>/<uid>"` or by the selector the daemon resolves
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`
-- Status: routed (P4-U4); GUI not started
+- GUI location: clients/desktop: the reader pane shows the selected message's headers above its `message.html` rendition, loaded from the `mpmsg` scheme in a script-free sandboxed frame (M1, #0129)
+- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/components/reader/reader.test.tsx` (`loads the mpmsg URL in a script-free sandbox, with no referrer`), `clients/desktop/src-tauri/src/commands.rs` (`a_message_reads_as_text_and_as_meta`), `clients/desktop/src-tauri/src/reader.rs` (`the_path_parses_into_an_account_and_a_row`)
+- Status: routed (P4-U4); GUI shipped (M1, #0129)
 - Note: the selector crosses the socket unresolved, because resolving one needs the store the client no longer has; which account it names stays a client-side decision.
 
 ### RD-02 Emit one message as a single JSON object with headers, attachments, and body
@@ -418,9 +418,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `wrap_and_style_body` (`clients/tui/src/ui/preview.rs:522`) over the body `parse::html_to_plain` (`src/parse.rs:199`) produced at ingest
 - Daemon surface: `message.get` returns the flattened body
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: unit tests in `clients/tui/src/ui/preview.rs`, `src/parse.rs`, `tests/daemon_read_slice.rs`
-- Status: routed for `mp show` (P4-U4); GUI not started
+- GUI location: clients/desktop: the reader frame shows the `message.html` rendition, and a message without markup as escaped text (M1, #0129)
+- Validation: unit tests in `clients/tui/src/ui/preview.rs`, `src/parse.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src-tauri/src/reader.rs` (`a_message_without_markup_is_served_as_escaped_text`), `clients/desktop/src/components/reader/reader.test.tsx` (`no longer fetches a plain-text body: the frame is the only path`)
+- Status: routed for `mp show` (P4-U4); GUI shipped (M1, #0129)
 - Note: #0111 retired the html2text rich render #0091 had added, so links, emphasis, tables, and lists arrive as a wrapped block and `b` / `tb` is the styled view.
   The GUI reader shows the `message.html` rendition in a sandboxed frame instead, and falls back to this plain text for a message without markup.
 
@@ -487,7 +487,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:613`)
-- Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false` it queues the pair for the next sync tick, which is the TUI's contract (P5-U6)
+- Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false`, the TUI's contract (P5-U6), it queues the pair and answers, and the account's drainer drains it once mutations have been quiet for 1.5 s (#0133)
 - GUI location: clients/desktop: `a` in the list or the reader, the palette's "Archive" and the reader toolbar's Archive, each asking "Archive this email?" first; the row leaves the list at once and comes back on a refusal or a rollback (M2, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`), `clients/desktop/src/app/events.test.tsx` (`archives a row, and the drain's invalidation keeps it gone`), `clients/desktop/src-tauri/src/commands.rs` (`an_archive_moves_every_row_in_order_and_queues`)
 - Status: routed (P4-U8, TUI P5-U6); GUI shipped (M2, #0131)
@@ -513,7 +513,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: clients/desktop: `u` in the list or the reader, the row's "Unread" toggle, the reader toolbar and the palette; over marks, marking read wins when any marked row is unread (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`the flag and unread toggles act on their own row`), `clients/desktop/src/app/reducer.test.ts` (`marks read in place and moves the unread count`), `clients/desktop/src-tauri/src/commands.rs` (`flag_and_read_set_the_state_they_name`)
 - Status: routed (P5-U6); GUI shipped (M2, #0131)
-- Note: the daemon takes the new state rather than a toggle, and the TUI sends `settle: false`, so the row change and the owed `SetRead` commit together and the next sync tick drains them (#0039).
+- Note: the daemon takes the new state rather than a toggle, and the TUI sends `settle: false`, so the row change and the owed `SetRead` commit together (#0039) and the account's drainer drains them once mutations have been quiet for 1.5 s (#0133).
 
 ### MSG-04 Toggle the `\Flagged` star
 
@@ -869,9 +869,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ss` (`clients/tui/src/app/keymap.rs:593`) and `sS` (`clients/tui/src/app/keymap.rs:594`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui_tests/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui_tests/events.rs`)
-- Status: routed (P5-U6); GUI not started
+- GUI location: clients/desktop: `ss` and `sS`, and the palette's "Quick sync" and "Full sync", start a quick or a full sync of the selected account through `sync_trigger`, and a failed or dropped sync stays as an activity alert (M2, #0131)
+- Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui_tests/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui_tests/events.rs`); `clients/desktop/src/keymap/keymap.test.tsx` (`ss and sS start a quick and a full sync of the selected account`), `clients/desktop/src/components/palette/palette.test.tsx` (`Toggle flag/star and Quick sync run from the palette`), `clients/desktop/src/app/mutations.test.ts` (`starts a sync and awaits its id, and reports one that did not start`), `clients/desktop/src-tauri/src/commands.rs` (`a_sync_is_awaited_as_a_sync`)
+- Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
   The TUI's two keys went through them in P5-U6, which also collapsed the client-side IMAP/Graph fork: the daemon's pass body loads whichever configuration the account has, so only the progress line still says which transport it is.
   P5-U8 took the wait off the worker thread: a pass is started by `commands::dispatch` and its finish arrives as an `operation.finished` event, so nothing polls `operation.status` any more.
@@ -915,9 +915,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/sync_health.rs`
 - Daemon surface: `state.bootstrap` health summary, then `state.event`
-- GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: unit tests in `src/sync_health.rs`
-- Status: not started
+- GUI location: clients/desktop: a health badge beside each account in the sidebar, which each `sync.completed` updates (M1, #0129)
+- Validation: unit tests in `src/sync_health.rs`; `clients/desktop/src/app/reducer.test.ts` (`tracks sync health and account state from events`)
+- Status: GUI shipped (M1, #0129)
 
 ### SYN-06 Pending operation queue replayed against the server
 
