@@ -28,6 +28,14 @@
 //! and settles a `SendOutcome` after the send delay, the invitation filed
 //! in Sent and added to the agenda as the user's own; `send_fail` fails it.
 //!
+//! `contact.search` answers each account's ranked contacts from
+//! `fixtures/contacts.json`: a case-insensitive substring match over the
+//! address and the display name, in the file's score order, capped at
+//! `limit` (20 when absent). `contact.rebuild` reports its one progress,
+//! phase `contacts` with the account as its message, and settles after
+//! [`REBUILD_DELAY`] with `saved: written`; after `rebuild_refused` the next
+//! one settles `refused_shrunk` with 3 contacts found and the index kept.
+//!
 //! `send.draft` and `send.approved` arm a hold of the fixture's own
 //! `email.send_hold_secs` when asked for one, count it down through the same
 //! machinery, then "send": the draft file goes, a filed copy lands in Sent,
@@ -102,6 +110,7 @@ const HTML: &str = include_str!("../../fixtures/html.json");
 const DRAFT_BODIES: &str = include_str!("../../fixtures/draft-bodies.json");
 const SIGNATURES: &str = include_str!("../../fixtures/signatures.json");
 const CALENDAR: &str = include_str!("../../fixtures/calendar.json");
+const CONTACTS: &str = include_str!("../../fixtures/contacts.json");
 
 /// The agenda row `invite_update` and `invite_cancel` change: `work`'s
 /// steering committee, the inbox invitation of `messages.json`.
@@ -135,6 +144,16 @@ pub const SEND_FAIL_REASON: &str = "421 4.7.0 fixture: the server closed the con
 
 /// How long an RSVP's submission takes.
 pub const RSVP_DELAY: Duration = Duration::from_millis(500);
+
+/// How long a contact index rebuild walks the store.
+pub const REBUILD_DELAY: Duration = Duration::from_millis(600);
+
+/// How many contacts a rebuild after `rebuild_refused` finds, too few for
+/// the cache guard to let it replace the index.
+pub const REFUSED_REBUILD_FOUND: u64 = 3;
+
+/// `contact.search`'s `limit` when the call names none, the daemon's.
+const CONTACT_SEARCH_LIMIT: usize = 20;
 
 /// The daemon's `GRAPH_REFUSAL` for `send.invite` (`ANO-4`), word for word.
 pub const GRAPH_INVITE_REFUSAL: &str =
@@ -183,6 +202,7 @@ pub const SIMULATIONS: &[&str] = &[
     "invite_update",
     "invite_cancel",
     "rsvp_fail",
+    "rebuild_refused",
 ];
 
 /// `fixtures/calendar.json`: each account's agenda and the `invite.ics`
@@ -344,6 +364,12 @@ struct State {
     /// The next RSVP fails with an SMTP error (`rsvp_fail`).
     rsvp_fail: bool,
     rsvp_delay: Duration,
+    /// account -> its contact index, ranked, each row as `contact.search`
+    /// carries it.
+    contacts: BTreeMap<String, Vec<Value>>,
+    /// The next rebuild is refused by the cache guard (`rebuild_refused`).
+    rebuild_refused: bool,
+    rebuild_delay: Duration,
 }
 
 impl State {
@@ -1820,6 +1846,8 @@ impl Fixture {
             serde_json::from_str(SIGNATURES).context("fixtures/signatures.json")?;
         let calendar: CalendarSeed =
             serde_json::from_str(CALENDAR).context("fixtures/calendar.json")?;
+        let contacts: BTreeMap<String, Vec<Value>> =
+            serde_json::from_str(CONTACTS).context("fixtures/contacts.json")?;
         let mut ics = BTreeMap::new();
         for (key, text) in &calendar.ics {
             let id: i64 = key
@@ -1882,6 +1910,9 @@ impl Fixture {
             invites: BTreeMap::new(),
             rsvp_fail: false,
             rsvp_delay: RSVP_DELAY,
+            contacts,
+            rebuild_refused: false,
+            rebuild_delay: REBUILD_DELAY,
         };
         state.rescan();
         state.seed_outbox();
@@ -1948,6 +1979,12 @@ impl Fixture {
     #[cfg(test)]
     pub fn set_rsvp_delay(&self, delay: Duration) {
         self.state().rsvp_delay = delay;
+    }
+
+    /// How long a contact index rebuild takes; a test shortens it.
+    #[cfg(test)]
+    pub fn set_rebuild_delay(&self, delay: Duration) {
+        self.state().rebuild_delay = delay;
     }
 
     /// How many operations the fixture has started and still knows.
@@ -2596,6 +2633,73 @@ impl Fixture {
                 });
                 Ok(json!({"operation_id": id}))
             }
+            "contact.search" => {
+                only(method, &params, &["account", "limit", "query"])?;
+                let account = param_str(method, &params, "account")?;
+                s.account_ready(method, account)?;
+                let query = params["query"].as_str().unwrap_or_default().to_string();
+                let limit = params["limit"]
+                    .as_u64()
+                    .map_or(CONTACT_SEARCH_LIMIT, |n| n as usize);
+                let contacts = contact_matches(
+                    s.contacts.get(account).map_or(&[][..], Vec::as_slice),
+                    &query,
+                    limit,
+                );
+                Ok(json!({"account": account, "query": query, "contacts": contacts}))
+            }
+            "contact.rebuild" => {
+                only(method, &params, &["account"])?;
+                let account = param_str(method, &params, "account")?.to_string();
+                s.account_known(method, &account)?;
+                let id = s.next_operation_id("fixture-rebuild");
+                s.operations.insert(
+                    id.clone(),
+                    json!({
+                        "operation_id": id, "method": method, "state": "running",
+                        "scope": "durable", "progress": null, "result": null, "error": null
+                    }),
+                );
+                let refused = std::mem::take(&mut s.rebuild_refused);
+                let delay = s.rebuild_delay;
+                let indexed = s.contacts.get(&account).map_or(0, Vec::len) as u64;
+                let cache_path = s
+                    .root
+                    .join("accounts")
+                    .join(&account)
+                    .join("contacts-cache.json")
+                    .display()
+                    .to_string();
+                let progress = json!({
+                    "operation_id": id, "phase": "contacts", "done": 0,
+                    "total": null, "message": account
+                });
+                if let Some(o) = s.operations.get_mut(&id) {
+                    o["progress"] = json!({
+                        "phase": "contacts", "done": 0, "total": null, "message": account
+                    });
+                }
+                self.emit_locked(&mut s, KIND_OPERATION_PROGRESS, progress);
+                drop(s);
+                let (contacts, kept, saved) = if refused {
+                    (REFUSED_REBUILD_FOUND, indexed, "refused_shrunk")
+                } else {
+                    (indexed, 0, "written")
+                };
+                let result = json!({
+                    "account": account, "contacts": contacts, "kept": kept,
+                    "saved": saved, "cache_path": cache_path
+                });
+                let fixture = Arc::clone(self);
+                let op = id.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    if fixture.running(&op) {
+                        fixture.settle(&op, "succeeded", Some(result));
+                    }
+                });
+                Ok(json!({"operation_id": id}))
+            }
             "send.outbox_list" => {
                 only(method, &params, &["account"])?;
                 let account = param_str(method, &params, "account")?;
@@ -3213,6 +3317,10 @@ impl Fixture {
                 self.state().rsvp_fail = true;
                 return Ok(());
             }
+            "rebuild_refused" => {
+                self.state().rebuild_refused = true;
+                return Ok(());
+            }
             "editor_invalid" => return self.simulate_editor(true),
             "send_fail" | "send_partial" | "send_pending_append" => {
                 self.state().send_next = Some(match what {
@@ -3551,6 +3659,26 @@ fn invite_ics(row: &AgendaEvent, method: &str) -> String {
 
 /// Standard base64 with padding, what the daemon's `message.ics` carries the
 /// bytes as (the desktop layer has no base64 crate of its own).
+/// The rows of `index` whose address or display name holds `query`, case
+/// folded, in the index's score order, at most `limit`; an empty query is
+/// every row.
+fn contact_matches(index: &[Value], query: &str, limit: usize) -> Vec<Value> {
+    let needle = query.trim().to_lowercase();
+    let mut hits: Vec<&Value> = index
+        .iter()
+        .filter(|row| {
+            needle.is_empty()
+                || ["address", "display_name"].iter().any(|key| {
+                    row[*key]
+                        .as_str()
+                        .is_some_and(|v| v.to_lowercase().contains(&needle))
+                })
+        })
+        .collect();
+    hits.sort_by_key(|row| std::cmp::Reverse(row["score"].as_u64().unwrap_or(0)));
+    hits.into_iter().take(limit).cloned().collect()
+}
+
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -4321,6 +4449,96 @@ mod tests {
         )
         .expect("started");
         assert_eq!(next_event(&rx).payload["resource"], "mailbox:work/sent");
+    }
+
+    #[test]
+    fn contact_search_matches_address_and_name_in_score_order_up_to_the_limit() {
+        let (f, _rx) = fixture();
+        let search = |params: Value| f.call("contact.search", params).expect("searched");
+        let all = search(json!({"account": "work", "query": "", "limit": 1000}));
+        assert_eq!(all["account"], "work");
+        assert_eq!(all["contacts"].as_array().expect("rows").len(), 25);
+        let first = &all["contacts"][0];
+        for key in [
+            "address",
+            "display_name",
+            "sent_to",
+            "sent_cc",
+            "received",
+            "score",
+        ] {
+            assert!(!first[key].is_null(), "{key}");
+        }
+        let default = search(json!({"account": "work", "query": ""}));
+        assert_eq!(default["contacts"].as_array().expect("rows").len(), 20);
+        let hits = search(json!({"account": "work", "query": "EXAMPLE.com", "limit": 1000}));
+        let scores: Vec<u64> = hits["contacts"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| r["score"].as_u64().expect("score"))
+            .collect();
+        assert!(scores.windows(2).all(|w| w[0] >= w[1]), "{scores:?}");
+        let by_name = search(json!({"account": "work", "query": "doe, j", "limit": 5}));
+        assert_eq!(by_name["contacts"][0]["address"], "jane.doe@example.com");
+        assert_eq!(by_name["query"], "doe, j");
+        let home = search(json!({"account": "home", "query": "", "limit": 1000}));
+        assert_eq!(home["contacts"].as_array().expect("rows").len(), 3);
+        assert!(f
+            .call("contact.search", json!({"account": "work", "q": "x"}))
+            .is_err());
+        assert!(f
+            .call("contact.search", json!({"account": "nobody", "query": ""}))
+            .is_err());
+    }
+
+    #[test]
+    fn contact_rebuild_reports_its_phase_then_settles_written() {
+        let (f, rx) = fixture();
+        f.set_rebuild_delay(Duration::ZERO);
+        let started = f
+            .call("contact.rebuild", json!({"account": "work"}))
+            .expect("started");
+        let id = started["operation_id"].as_str().expect("id").to_string();
+        let progress = next_event(&rx);
+        assert_eq!(progress.kind, KIND_OPERATION_PROGRESS);
+        assert_eq!(
+            progress.payload,
+            json!({
+                "operation_id": id, "phase": "contacts", "done": 0,
+                "total": null, "message": "work"
+            })
+        );
+        let finished = next_event(&rx);
+        assert_eq!(finished.kind, KIND_OPERATION_FINISHED);
+        assert_eq!(finished.payload["state"], "succeeded");
+        let result = &finished.payload["result"];
+        assert_eq!(result["account"], "work");
+        assert_eq!(result["contacts"], 25);
+        assert_eq!(result["kept"], 0);
+        assert_eq!(result["saved"], "written");
+        assert!(result["cache_path"]
+            .as_str()
+            .expect("path")
+            .ends_with("work/contacts-cache.json"));
+    }
+
+    #[test]
+    fn rebuild_refused_settles_the_next_rebuild_refused_shrunk_once() {
+        let (f, rx) = fixture();
+        f.set_rebuild_delay(Duration::ZERO);
+        f.simulate("rebuild_refused").expect("armed");
+        f.call("contact.rebuild", json!({"account": "work"}))
+            .expect("started");
+        next_event(&rx);
+        let result = next_event(&rx).payload["result"].clone();
+        assert_eq!(result["saved"], "refused_shrunk");
+        assert_eq!(result["contacts"], REFUSED_REBUILD_FOUND);
+        assert_eq!(result["kept"], 25);
+        f.call("contact.rebuild", json!({"account": "work"}))
+            .expect("started");
+        next_event(&rx);
+        assert_eq!(next_event(&rx).payload["result"]["saved"], "written");
     }
 
     /// The next event, within five seconds.

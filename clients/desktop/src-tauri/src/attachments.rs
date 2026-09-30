@@ -130,7 +130,7 @@ struct Handle {
 // Paths
 // ---------------------------------------------------------------------------
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)

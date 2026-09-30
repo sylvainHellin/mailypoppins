@@ -1,0 +1,230 @@
+{
+  "work": [
+    {
+      "address": "robin@example.com",
+      "display_name": "Robin Meyer",
+      "sent_to": 42,
+      "sent_cc": 3,
+      "received": 57,
+      "score": 1000
+    },
+    {
+      "address": "jane.doe@example.com",
+      "display_name": "Doe, Jane",
+      "sent_to": 31,
+      "sent_cc": 5,
+      "received": 40,
+      "score": 967
+    },
+    {
+      "address": "kim@example.com",
+      "display_name": "Kim Tanaka",
+      "sent_to": 27,
+      "sent_cc": 9,
+      "received": 33,
+      "score": 921
+    },
+    {
+      "address": "alex.berger@partner.example",
+      "display_name": "Alex Berger",
+      "sent_to": 22,
+      "sent_cc": 1,
+      "received": 19,
+      "score": 888
+    },
+    {
+      "address": "sam@example.com",
+      "display_name": "Sam Okafor",
+      "sent_to": 18,
+      "sent_cc": 6,
+      "received": 25,
+      "score": 842
+    },
+    {
+      "address": "lena.schmidt@tum.example",
+      "display_name": "Lena Schmidt",
+      "sent_to": 15,
+      "sent_cc": 2,
+      "received": 30,
+      "score": 809
+    },
+    {
+      "address": "finance@example.com",
+      "display_name": "Finance Team",
+      "sent_to": 12,
+      "sent_cc": 14,
+      "received": 8,
+      "score": 763
+    },
+    {
+      "address": "marco.rossi@supplier.example",
+      "display_name": "Marco Rossi",
+      "sent_to": 11,
+      "sent_cc": 0,
+      "received": 12,
+      "score": 730
+    },
+    {
+      "address": "priya@example.com",
+      "display_name": "Priya Nair",
+      "sent_to": 9,
+      "sent_cc": 4,
+      "received": 21,
+      "score": 684
+    },
+    {
+      "address": "ops@example.com",
+      "display_name": "",
+      "sent_to": 8,
+      "sent_cc": 3,
+      "received": 5,
+      "score": 651
+    },
+    {
+      "address": "chen.wei@example.com",
+      "display_name": "Chen Wei",
+      "sent_to": 7,
+      "sent_cc": 2,
+      "received": 16,
+      "score": 605
+    },
+    {
+      "address": "anna.keller@partner.example",
+      "display_name": "Anna Keller",
+      "sent_to": 6,
+      "sent_cc": 5,
+      "received": 9,
+      "score": 572
+    },
+    {
+      "address": "tom@example.com",
+      "display_name": "Tom O'Brien",
+      "sent_to": 5,
+      "sent_cc": 1,
+      "received": 11,
+      "score": 526
+    },
+    {
+      "address": "sofia.garcia@example.com",
+      "display_name": "Sofia García",
+      "sent_to": 4,
+      "sent_cc": 7,
+      "received": 6,
+      "score": 480
+    },
+    {
+      "address": "legal@supplier.example",
+      "display_name": "Legal, Supplier Ltd",
+      "sent_to": 3,
+      "sent_cc": 2,
+      "received": 4,
+      "score": 447
+    },
+    {
+      "address": "noah.fischer@example.com",
+      "display_name": "Noah Fischer",
+      "sent_to": 3,
+      "sent_cc": 0,
+      "received": 14,
+      "score": 401
+    },
+    {
+      "address": "eva@example.com",
+      "display_name": "Eva Novak",
+      "sent_to": 2,
+      "sent_cc": 3,
+      "received": 7,
+      "score": 368
+    },
+    {
+      "address": "hr@example.com",
+      "display_name": "HR",
+      "sent_to": 2,
+      "sent_cc": 1,
+      "received": 3,
+      "score": 322
+    },
+    {
+      "address": "lucas.martin@example.com",
+      "display_name": "Lucas Martin",
+      "sent_to": 1,
+      "sent_cc": 4,
+      "received": 10,
+      "score": 289
+    },
+    {
+      "address": "mia.wagner@tum.example",
+      "display_name": "Mia Wagner",
+      "sent_to": 1,
+      "sent_cc": 1,
+      "received": 5,
+      "score": 243
+    },
+    {
+      "address": "david.cohen@example.com",
+      "display_name": "David Cohen",
+      "sent_to": 1,
+      "sent_cc": 0,
+      "received": 8,
+      "score": 210
+    },
+    {
+      "address": "olivia@example.com",
+      "display_name": "Olivia Brown",
+      "sent_to": 0,
+      "sent_cc": 2,
+      "received": 12,
+      "score": 164
+    },
+    {
+      "address": "newsletter@vendor.example",
+      "display_name": "Vendor Newsletter",
+      "sent_to": 0,
+      "sent_cc": 0,
+      "received": 26,
+      "score": 131
+    },
+    {
+      "address": "ben.lee@example.com",
+      "display_name": "Ben Lee",
+      "sent_to": 0,
+      "sent_cc": 1,
+      "received": 2,
+      "score": 85
+    },
+    {
+      "address": "zoe@example.com",
+      "display_name": "",
+      "sent_to": 0,
+      "sent_cc": 0,
+      "received": 1,
+      "score": 52
+    }
+  ],
+  "home": [
+    {
+      "address": "mum@example.org",
+      "display_name": "Mum",
+      "sent_to": 12,
+      "sent_cc": 0,
+      "received": 20,
+      "score": 120
+    },
+    {
+      "address": "friend@example.com",
+      "display_name": "Old Friend",
+      "sent_to": 4,
+      "sent_cc": 2,
+      "received": 9,
+      "score": 87
+    },
+    {
+      "address": "club@example.org",
+      "display_name": "Rowing Club",
+      "sent_to": 0,
+      "sent_cc": 1,
+      "received": 6,
+      "score": 41
+    }
+  ]
+}

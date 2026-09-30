@@ -21,6 +21,7 @@ pub mod attachments;
 pub mod calendar;
 pub mod commands;
 pub mod connector;
+pub mod contacts;
 pub mod editor;
 pub mod error;
 pub mod fixture;
@@ -191,6 +192,9 @@ pub fn run() {
             calendar::calendar_rsvp,
             calendar::invite_refusal,
             calendar::send_invite,
+            contacts::contact_search,
+            contacts::contact_rebuild,
+            contacts::contact_vcard_draft,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

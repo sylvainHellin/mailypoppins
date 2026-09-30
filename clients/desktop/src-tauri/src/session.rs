@@ -132,6 +132,8 @@ pub enum PendingKind {
     Rsvp,
     /// `send.invite`: its `result` is a `SendOutcome`.
     SendInvite,
+    /// `contact.rebuild`: its `result` is a `ContactRebuilt`.
+    ContactRebuild,
 }
 
 /// Where an intercepted URL came from.
@@ -1328,6 +1330,85 @@ mod tests {
             .cloned()
             .expect("dropped");
         assert_eq!(dropped["kind"], "send_invite");
+        assert_eq!(dropped["operation_id"], started.operation_id.as_str());
+    }
+
+    #[test]
+    fn a_contact_rebuild_passes_its_progress_and_settles_as_contact_rebuild() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_rebuild_delay(Duration::ZERO);
+        let started =
+            crate::contacts::contact_rebuild_on(&session, &door, "work").expect("started");
+        let id = started.operation_id;
+        await_terminal(&door, &id);
+        drain(&session, &door, &rx);
+        let events: Vec<Value> = lock(&seen)
+            .iter()
+            .filter(|v| v["type"] == "event")
+            .map(|v| v["event"].clone())
+            .collect();
+        let progress = events
+            .iter()
+            .find(|e| e["kind"] == "operation.progress")
+            .expect("the rebuild's progress");
+        assert_eq!(progress["payload"]["operation_id"], id.as_str());
+        assert_eq!(progress["payload"]["phase"], "contacts");
+        assert_eq!(progress["payload"]["message"], "work");
+        let finished = events
+            .iter()
+            .find(|e| e["kind"] == "operation.finished")
+            .expect("the finish");
+        let rebuilt: crate::contacts::ContactRebuilt =
+            serde_json::from_value(finished["payload"]["result"].clone())
+                .expect("a ContactRebuilt");
+        assert_eq!(rebuilt.saved, "written");
+        assert_eq!(rebuilt.contacts, 25);
+        assert!(session.pending().is_empty());
+    }
+
+    #[test]
+    fn a_contact_rebuild_settled_by_the_requery_carries_its_kind() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_rebuild_delay(Duration::ZERO);
+        fixture.simulate("rebuild_refused").expect("armed");
+        let started =
+            crate::contacts::contact_rebuild_on(&session, &door, "work").expect("started");
+        let id = started.operation_id;
+        await_terminal(&door, &id);
+        while rx.try_recv().is_ok() {}
+        session.handle(
+            &door,
+            Incoming::Resync {
+                instance_id: fixture.instance_id(),
+                reason: "event_queue_overflow".into(),
+            },
+        );
+        let settled = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_settled")
+            .cloned()
+            .expect("settled by the requery");
+        assert_eq!(settled["kind"], "contact_rebuild");
+        let rebuilt: crate::contacts::ContactRebuilt =
+            serde_json::from_value(settled["status"]["result"].clone()).expect("a ContactRebuilt");
+        assert_eq!(rebuilt.saved, "refused_shrunk");
+        assert_eq!(rebuilt.kept, 25);
+    }
+
+    #[test]
+    fn a_restart_drops_a_contact_rebuild_as_contact_rebuild() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_rebuild_delay(Duration::from_secs(5));
+        let started =
+            crate::contacts::contact_rebuild_on(&session, &door, "work").expect("started");
+        fixture.simulate("restart").expect("restart");
+        drain(&session, &door, &rx);
+        let dropped = lock(&seen)
+            .iter()
+            .find(|v| v["type"] == "operation_dropped")
+            .cloned()
+            .expect("dropped");
+        assert_eq!(dropped["kind"], "contact_rebuild");
         assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 
