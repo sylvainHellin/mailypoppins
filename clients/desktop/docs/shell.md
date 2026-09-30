@@ -16,6 +16,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/app/pending.ts` | The transitions of mutations, send holds and syncs |
 | `src/app/mutations.ts` | The mutation dispatch: apply, call, reconcile |
 | `src/app/compose.ts` | New draft, reply, forward, edit, recipients, approve and demote, and the editor handoff |
+| `src/app/send.ts` | `x` and `cX`: the send confirmations and what their OK runs |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
 | `src/app/layout.ts`, `prefs.ts`, `store.tsx` | Breakpoints, localStorage preferences, the context store |
@@ -23,7 +24,7 @@ The frontend under `src/` is a React client of the Tauri layer described in [rus
 | `src/keymap/catalog.ts` | The KEYMAP row to GUI action binding, or the milestone that brings it |
 | `src/keymap/useKeymap.ts` | Keyboard routing |
 | `src/components/{shell,sidebar,list,search,reader,screens,palette}` | The views; `components/ui` is shadcn's; the reader frame is [reader.md](reader.md) |
-| `src/components/mutations` | The archive, delete, approve and demote confirmation, the move picker, and the activity area (notices and send holds) |
+| `src/components/mutations` | The archive, delete, approve, demote and send confirmation, the move picker, and the activity area (notices and send holds) |
 | `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
 
 `components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
@@ -48,9 +49,10 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds` |
+| `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
-| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped) |
+| `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
 ## Search
@@ -69,7 +71,7 @@ A `rebootstrapped` keeps the search and its hits: the selection to restore goes 
 ## Mutations and pending state
 
 Archive, delete, move, flag, read and draft discard change the model at once, as the TUI does, and the command's answer then confirms or refuses each row.
-`src/app/mutations.ts` holds one async function per action: `archive(rows)`, `remove(rows)`, `move(rows, destination)`, `setFlag(rows, flagged)`, `setRead(rows, read)`, `discardDrafts(account, ids)`, `cancelHold(operation_id)` and `sync(account, mode)`.
+`src/app/mutations.ts` holds one async function per action: `archive(rows)`, `remove(rows)`, `move(rows, destination)`, `setFlag(rows, flagged)`, `setRead(rows, read)`, `discardDrafts(account, ids)`, `setDraftStatus(account, ids, approve)`, `cancelHold(operation_id)`, `sync(account, mode)`, `sendDraft(account, id, subject)` and `sendApproved(account, ids)`.
 A row is `{ account, row_id }`, a single row is a batch of one, and `actionTargets(state)` gives the marked rows in list order or else the selected one.
 `useMutations()` binds them to the store; `createMutations(dispatch)` takes any dispatch, which is how the tests drive the reducer without a DOM.
 
@@ -77,10 +79,11 @@ The model keeps what the daemon has not confirmed yet:
 
 - `pending`, by row key (`<account>#<row_id>`, or `<account>#draft:<id>`): one saved state per axis of the row (the flag, the read state, leaving the list, a draft's status), each with the batch that owns it. A flag or read axis keeps the value set, the value before and the unread count it moved; the leave axis keeps the destination, the row as the list, the search and the Drafts list had it with its index, and the sidebar counts it moved; the status axis keeps the status set and the one before.
 - `listGen`, by list key: moved by every optimistic change and every answer that settles one.
-- `holds`, by `operation_id`: each `HoldStatus` with its state (`started`, `tick`, `cancelled`, `fired`) and whether this window's cancel is in flight.
+- `holds`, by `operation_id`: each `HoldStatus` with its state (`started`, `tick`, `cancelled`, `fired`), whether this window's cancel is in flight, and, for a send this window started, the outcome once it settled.
 - `marked`: the multi-select's row keys and its range anchor.
-- `activity`: numbered notices (applied, failed with each row's reason, rolled back, hold cancelled, sync failed, compose failed), dismissed by `dismiss_notice`.
+- `activity`: numbered notices (applied, failed with each row's reason, rolled back, hold cancelled, sync failed, compose failed, send failed, send partly delivered), dismissed by `dismiss_notice`.
 - `syncs`: the syncs this window started, by `operation_id`.
+- `sends`: the sends this window started, in start order, each with its drafts; see Compose, "Send".
 
 A mutation dispatches `mutation_apply` for each account in the rows, then calls the account's command, in the order given.
 Archive, delete, move and discard take the row out of the list and the search, and flag and read change it in place, in the reader's headers too.
@@ -110,8 +113,9 @@ A refusal from the server arrives after the drain as `mutations.rolled_back { ac
 Every row of that account still pending is put back, the account's counts and list are marked stale so the daemon's rows replace the rest, and the notice uses the TUI's words.
 
 A `rebootstrapped` empties `pending`, seeds `holds` from the snapshot, and keeps the marks only on the same daemon instance, since row ids are per instance.
+On the same instance it keeps the cards of holds that fired or were cancelled, so a send settled by the Rust layer's re-query still finds its card; `sends` is left alone, since the send's operation outlives the re-bootstrap, and a daemon restart ends each one with `operation_dropped` first.
 A hold that fired or was cancelled stays so whatever tick arrives late, and a cancel reports once whether its answer or its event lands first.
-A sync is awaited by the `operation_id` `sync_trigger` answers; an end that overtakes the answer is held until the id is known.
+A sync is awaited by the `operation_id` `sync_trigger` answers, and a send by the one `send_draft` or `send_approved` answers; an end that overtakes the answer is held until the id is known.
 The marks follow the list: a mailbox change or a search clears them, a row that leaves drops its mark, and a reload drops the marks of rows it no longer lists.
 
 ## Actions, dialogs and the activity area
@@ -141,7 +145,7 @@ The activity area is a stack at the bottom right of the window, raised above the
 Held sends come first, then the failures, then the applied notices of `state.activity`:
 
 - An applied batch is a notice that leaves after five seconds.
-- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, and a draft that could not be written or an editor that did not open are `role="alert"` notices that stay until dismissed.
+- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, and a send that failed, went to only some recipients or was interrupted are `role="alert"` notices that stay until dismissed.
 - Every notice has a Dismiss button.
 - A cancelled hold's own notice is not shown, since the hold says so itself.
 
@@ -156,7 +160,9 @@ The TUI binds `X` only as the continuation of `cX`, so a bare `X` is free in eve
 Each send hold shows "Sending in N s" with the subject and the account, a progress bar, and Cancel.
 The seconds are the last `send.hold_tick`'s; Cancel calls `send_cancel_hold` and is disabled while that call is in flight.
 A `u` while every live hold is already being cancelled does nothing and says nothing, as the TUI re-queues its cancel silently; "No send is being held" shows only when no hold is live.
-A hold that fired or was cancelled shows "Sent" or "Send cancelled" for three seconds, then `dismiss_hold` removes it.
+The card's end line is a `role="status"` element mounted empty with the card, so the text it takes is announced.
+A hold another client armed says "Sent" when it fires and "Send cancelled" when it is cancelled; a send this window started says "Sending…" from the fire until its operation settles, then its outcome (Compose, "Send").
+An ended card leaves after three seconds through `dismiss_hold`, except a failure or a partial delivery of one draft, which stays until its Dismiss button.
 The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1` shows it at start.
 
 ## Compose
@@ -176,9 +182,11 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `ce` | Edit recipients, Drafts only | list, reader | `draft_preview`, then `draft_set_recipients` |
 | `cA` | Approve, Drafts only | list, reader | `draft_approve` |
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
+| `x` | Send the cursor draft, approving it first | any pane | `send_draft` (`hold: true`) |
+| `cX` | Send all approved drafts, Drafts only | list, reader | `send_approved` (`hold: true`) |
 
 The keys are the TUI's (`clients/tui/src/app/keymap.rs`), and like its MESSAGE and List keys they do nothing from the sidebar.
-`ce`, `cA` and `cD` outside the Drafts list say that they are only available in Drafts, in the TUI's words.
+`ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words.
 A reply or a forward acts on the cursor row, or on the server-only hit under the cursor, which has no row: `draft_from_message` then builds the draft from the hit's headers and bodies, with no attachments.
 On a draft, reply and forward say that a draft has nothing to quote.
 
@@ -217,9 +225,38 @@ Over marks they ask first, with the TUI's words ("Approve 2 drafts?", "Mark 2 dr
 The status changes in the list at once, as a fourth axis of `pending`, `status`, which keeps the status set and the one before, and the answer confirms or puts it back like any other axis.
 A draft whose file does not parse is refused alone with `-32010`, and the failure notice, an alert, names the diagnostic and the path from the `draft.invalid` payload.
 
+### Send
+
+`x` sends the draft under the cursor of the Drafts list, one draft whatever is marked, as the TUI's `x` sends its selected row and leaves its selection alone.
+On a received message it says "Send needs a draft; received mail has nothing to send", the TUI's words, and opens nothing.
+It asks first, with the TUI's texts (`clients/tui/src/app/keys.rs`, `A::Send`): "Draft is not approved. Approve and send?" for a draft whose status is `draft`, else "Send this email?", with the detail "To: <to> - <subject>".
+`cX` asks "Send all approved emails?" with the detail "In <mailbox label>" (`A::SendAll`); its OK sends every approved draft of the account in one operation.
+Both confirmations are the archive and delete dialog, `y` or Enter to send, `n` or Escape to cancel, and the palette's "Send current draft (approve + send)" and "Send all approved drafts (Drafts only)" open the same ones.
+
+The OK calls `send_draft` or `send_approved` with `hold: true`, always: the daemon's `email.send_hold_secs` decides the window, and `0` means none.
+`send_draft` validates the draft and approves a `draft` status before it sends, the TUI's approve-and-send (`SND-03`); a draft that does not validate keeps its status.
+A refusal is an alert, "Send failed: …", and for a file that does not parse it names the diagnostic and the path from the `draft.invalid` payload.
+
+From the OK until the send settles, its drafts are "sending": `state.sends` holds each send this window started, with the drafts it names (the one draft, or the approved drafts the list showed for `cX`).
+A sending draft's row shows a "sending" badge and the pending spinner, is `aria-busy`, and says "being sent" in its name.
+`d`, `cA`, `cD`, `e`, `ce` and `x` on it are refused with the notice "That draft is being sent; it cannot change until the send ends"; the other drafts are not held up.
+`state.sends` is a list of its own rather than a fifth axis of `pending`, because every re-bootstrap empties `pending` while a send's operation outlives a re-bootstrap on the same daemon.
+
+When the daemon arms a hold, the send's card counts down in the activity area and Cancel stops it; after the fire it says "Sending…" until the operation settles, and then its end line says how it went:
+
+- "Sent", once every recipient took the message.
+- "Send cancelled", after a cancel from this window, another window or the TUI; the draft stays approved.
+- "Failed: <reason>", when the operation failed, with the daemon's reason, or when every recipient was refused.
+- "Partly delivered: <address (reason)>, …", when some recipients were refused (`SND-08`); never a plain failure, since the others have the message.
+- "Sent N, failed M" for `cX`, or "No approved emails found" for an empty batch; each draft that failed or went to only some recipients is a row of an alert notice with the same headline.
+
+With no hold (`email.send_hold_secs = 0`) no card shows, and the same words come as a notice: "Sent" among the applied notices, a failure or a partial delivery as an alert.
+A daemon restart while the send runs drops its operation: the alert says "The send was interrupted; check the outbox", and the Drafts list and the counts are read again, since only the outbox knows whether the message went.
+Every settle re-reads the Drafts list; a draft that went out also leaves it through the watcher's `state.remove`.
+
 ### Draft rows
 
-A row of the Drafts list shows its status as a pill (`draft`, `approved`) next to the ready mark, and a pencil badge while the editor has it open.
+A row of the Drafts list shows its status as a pill (`draft`, `approved`) next to the ready mark, a pencil badge while the editor has it open, and a "sending" badge while a send of this window is sending it.
 A file the listing skipped because it does not parse is a row too, named by its file stem, with an `invalid` pill; its diagnostic is the row's `title` on hover and part of its accessible name.
 So a draft whose save broke its frontmatter stays in the list, selected, rather than disappearing.
 Enter on a draft opens its preview in the reader ([reader.md](reader.md), "Drafts and server-only hits").
@@ -248,11 +285,11 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve and demote confirmation, the move picker, the compose wizard and the recipients dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote and send confirmation, the move picker, the compose wizard and the recipients dialog) are Base UI dialogs: they trap focus while open and return it when closed.
 The compose dialogs start in To.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
-A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name.
+A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
 The reader's toolbar (`role="toolbar"`, "Message actions") sits above the headers; Tab leaves the reader for the next pane, so the toolbar is reached by pointer and its actions by their keys.
 Every focusable draws the solid `ring` outline on `:focus-visible`, and the connection banners sit in one polite `aria-live` region.
 
@@ -276,11 +313,12 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `X`: dismiss the newest activity notice, a desktop key.
 - `ss`, `sS`: quick and full sync of the selected account.
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
+- `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - Shift+click marks the range from the last mark to the row, and Cmd+click or Ctrl+click marks one row; the palette's "Mark range" does the same from the cursor.
 - The palette's and the View menu's "Widen list" and "Narrow list" move the splitter by 40 px, since Tab cycles panes and never lands on it.
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
-A key whose action a later milestone brings (`x`, `cX`, `ta`, …) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
+A key whose action a later milestone brings (`ta`, or an M4 key) shows a notice naming that milestone; the palette lists the same actions disabled, with the badge.
 
 ## Tests
 

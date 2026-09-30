@@ -1,4 +1,4 @@
-// Message mutations, send holds and syncs: the reducer's pure transitions
+// Message mutations, send holds, syncs and sends: the reducer's pure transitions
 // for them (clients/desktop/docs/shell.md, "Mutations and pending state").
 //
 // A mutation applies at once, as the TUI's does, and waits in `pending`

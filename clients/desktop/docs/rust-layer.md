@@ -94,6 +94,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
 | `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
+| `send_draft` | `account`, `id`, `hold` | `SendStarted`; rejects with a `SendRefusal` |
+| `send_approved` | `account`, `hold` | `SendStarted` |
 | `sync_trigger` | `account`, `mode: "quick" \| "full"` | `{ operation_id }` |
 | `restart_daemon` | none | nothing; runs `mp daemon restart` (fixture mode: simulates one) |
 | `intercepted_urls` | none | `InterceptedUrl[]`, and the log is cleared |
@@ -157,6 +159,8 @@ type MutationBatch = { done: MutationAck[]; failed: { row_id: number; error: Gui
 type DraftDiscarded = { account: string; id: string; selector: string; status: string };
 type DraftDiscardBatch = { done: DraftDiscarded[]; failed: { id: string; error: GuiError }[] };
 type HoldCancelled = { cancelled: boolean; operation_id: string; revision: number };
+type SendStarted = { operation_id: string; held: boolean; approved: boolean };
+type SendRefusal = GuiError & { invalid?: DraftInvalid };
 
 type DraftHeaders = { to: string; cc: string; bcc: string; subject: string };
 type DraftStatusChanged = { account: string; id: string; status: string; path: string };
@@ -183,7 +187,7 @@ type VersionInfo = {
 A `MessageMeta` header is `null` when the message did not carry it, where a `MessageListRow` of the same message has `""`.
 `AccountInfo.runtime_state`, `sync_health` and `outbox` and `MailboxListing.runtime_state` and `sync_health` come from the latest bootstrap; later changes arrive as events.
 `HoldListing` is the protocol's `{ holds: HoldStatus[] }`.
-`DraftCreated`, `DraftLocation`, `DraftValidation`, `DraftPreview`, `DraftKind`, `DraftMessage` and `DraftInvalid` are the protocol's own types.
+`DraftCreated`, `DraftLocation`, `DraftValidation`, `DraftPreview`, `DraftKind`, `DraftMessage` and `DraftInvalid` are the protocol's own types, and so are `SendOutcome`, `RecipientOutcome` and `ApprovedOutcome`, which a send's `result` carries.
 
 ## Mutations
 
@@ -208,6 +212,34 @@ Its failure carries `invalid`, the `draft.invalid` payload: the session keeps a 
 `send_cancel_hold` stops a hold whichever client armed it; a hold that already fired, or never existed, is `not_found`.
 The countdown itself comes from the bootstrap's `holds` and the `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` events, each carrying one `HoldStatus` with the daemon's `remaining_secs`.
 `sync_trigger` starts `sync.quick` or `sync.full` and awaits it like a server search (`kind: "sync"`); the pass publishes `sync.completed` to every client before its `operation.finished`.
+
+## Sends
+
+`send_draft` is the TUI's `x` (`SND-03`, `clients/tui/src/actions.rs`, `Action::Send` and `validate_then_approve`), in this order:
+
+1. `draft.list`, a fresh scan, for the draft's status;
+2. `draft.validate` of the listed draft, and a report that is not valid stops here with a `protocol` refusal naming the reason, so the draft keeps its status;
+3. `draft.approve` when the status is anything but `approved`, including a draft the listing does not show, whose refusal says why;
+4. `send.draft {account, id, hold}`, awaited as `kind: "send"`.
+
+A refused approve stops the send.
+Its `SendRefusal` is the `GuiError`, and for a file that does not parse (`-32010` `draft_invalid`) `invalid` carries the `draft.invalid` payload, rebuilt from the listing's skipped file as `draft_approve` does.
+A `send.draft` the daemon refuses leaves the approval in place, as the TUI's does, and `approved` in the answer says whether this call approved the draft.
+`send_approved` starts `send.approved {account, hold}`, awaited as `kind: "send_approved"`.
+
+The frontend passes `hold: true` always, as the TUI does: the window is the daemon's `email.send_hold_secs`, and `0` arms none.
+`held` in the answer is the daemon's `held`; with a hold, `send.hold_started` names the operation, and the countdown and the cancel are the hold machinery above.
+A cancelled hold cancels the operation too, which then ends `cancelled`.
+
+| Kind | Started by | Awaits | `result` on success |
+|---|---|---|---|
+| `server_search` | `search_server_start` | `message.search_server` | the search summary |
+| `sync` | `sync_trigger` | `sync.quick`, `sync.full` | the sync outcome |
+| `send` | `send_draft` | `send.draft` | `SendOutcome` |
+| `send_approved` | `send_approved` | `send.approved` | `ApprovedOutcome` |
+
+Each ends one of three ways, as the event stream below says: `operation.finished` with `{operation_id, state, result?, error?}`, `operation_settled` with the whole `OperationStatus` after a re-query, or `operation_dropped` when the daemon restarted.
+A send's `state` is `succeeded` once the submission ran, with each recipient's verdict in `recipients`, `failed` with the transport's error, or `cancelled`; a `succeeded` send every recipient refused is a failure to show.
 
 ## Drafts and the editor
 
@@ -247,14 +279,15 @@ The channel first carries a `connection` event and, once connected, a `rebootstr
 
 ```ts
 type BootstrapCause = "initial" | "subscribed" | "requested" | "resync" | "reconnected" | "instance_changed";
+type PendingKind = "server_search" | "sync" | "send" | "send_approved";
 type GuiEvent =
   | { type: "event"; event: { instance_id: string; revision: number; kind: string; payload: unknown } }
   | { type: "resync"; instance_id: string; reason: string }
   | { type: "disconnected"; reason: string }
   | { type: "reconnected"; instance_id: string }
   | { type: "rebootstrapped"; cause: BootstrapCause; bootstrap: Bootstrap }
-  | { type: "operation_settled"; operation_id: string; kind: "server_search" | "sync"; status: OperationStatus }
-  | { type: "operation_dropped"; operation_id: string; kind: "server_search" | "sync"; reason: string }
+  | { type: "operation_settled"; operation_id: string; kind: PendingKind; status: OperationStatus }
+  | { type: "operation_dropped"; operation_id: string; kind: PendingKind; reason: string }
   | { type: "connection"; status: ConnectionStatus }
   | { type: "link_intercepted"; url: InterceptedUrl };
 ```
@@ -262,7 +295,7 @@ type GuiEvent =
 `event` carries the daemon's envelope verbatim and only when it applied above the watermark; duplicates are dropped in Rust.
 `rebootstrapped` replaces the whole model: restore selection, focus and scroll by stable identifiers (account name, mailbox slug, `message_id` or `selector`, never `row_id` across a daemon restart).
 A server search streams `message.server_hit` events and ends with `operation.finished`, both carrying its `operation_id`; a finish lost to a resync or a reconnect arrives as `operation_settled` instead, and a daemon restart turns every running search into `operation_dropped`.
-A sync started by `sync_trigger` ends the same three ways.
+A sync started by `sync_trigger` and a send started by `send_draft` or `send_approved` end the same three ways.
 A hit or a finish for an operation this layer no longer awaits (another window's, a cancelled one, or one a re-bootstrap already settled) is dropped in Rust, so nothing about an operation follows its `operation_settled`, `operation_dropped` or `operation.finished`.
 
 ## The reader
@@ -335,7 +368,7 @@ The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies 
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
-`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save` and `editor_invalid` below.
+`fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append` and `send_hold:<secs>` below.
 
 The five mutations change the fixture rows in memory: archive moves the row to `archive`, delete removes it, move puts it in the destination, and the flag and read commands set the row's flag.
 Each answers like the daemon and publishes nothing; 1.5 s after the account's last mutation the fixture drains, one `state.invalidate` per mailbox whose counts moved.
@@ -350,6 +383,21 @@ With nothing to roll back it is an error, since the daemon publishes nothing for
 The bootstrap's seeded hold is on `work`'s first draft with a 60 s window, counting from the app's start.
 `hold` arms another one, 10 s long, as the TUI would: `send.hold_started` at once, a `send.hold_tick` each second down to 1, then `send.hold_fired` (the fixture sends nothing).
 `send_cancel_hold` stops either with `send.hold_cancelled`, and `restart` forgets every hold and the rollback journal.
+
+`send.draft` and `send.approved` arm a hold through the same machinery when `hold` is true, with the fixture's `email.send_hold_secs`: 10 s, or what `send_hold:<secs>` set, where `0` arms none and the answer has no `held`.
+The hold names the draft, or the batch's first approved draft; a batch with none arms nothing.
+`send_cancel_hold` on it also ends the operation `cancelled`, and the draft stays as it was.
+When the hold fires, or at once with none, the send runs 0.4 s later, as the daemon's does:
+
+- a draft that is not approved fails the operation with "Email not approved for sending", and one that does not validate fails with its reason;
+- otherwise the draft file is removed and published as `state.remove` of `draft:<account>/<id>`, an outbox row is kept, a copy lands at the top of Sent, and the operation settles with a `SendOutcome`;
+- `send.approved` does that for every approved draft in listing order, with one `operation.progress` each, and settles with an `ApprovedOutcome` whose failed drafts are lines of it.
+
+Each change of the outbox publishes `state.invalidate` of `outbox:<account>` with `{query: "counts"}`, and the filed copy the counts of Sent.
+The outbox lives in memory and survives `restart`, as the daemon's store does; `send.outbox_list` answers it as an `OutboxListing`: the rows that are not `done`, and a `done` row that went to only some recipients, with the three counts.
+The bootstrap's `outbox` counts are read from it, and `home`'s queued message is a `pending_send` row seeded at start.
+`send_fail` fails the next send with a transport error, keeps the draft, and parks a `failed` row; `send_partial` refuses the last recipient (adding `nobody@refused.example` as a second one when the draft has one) and keeps a `partial` row; `send_pending_append` delivers but leaves the Sent copy owed, a `sent_pending_append` row and no copy in Sent.
+Each simulation applies to the next send only.
 
 The drafts are real files in a per-run directory, `<temp>/mp-desktop-fixture-<pid>/drafts/<account>/`, written at start from `drafts.json`'s rows and `draft-bodies.json`.
 Every call rescans that directory, as the daemon's draft queries do, so the listing, the counts and the bootstrap's drafts follow the files.
