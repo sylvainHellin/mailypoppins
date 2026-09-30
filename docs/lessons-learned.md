@@ -2318,3 +2318,10 @@ A refused batch also has to put its rows back in the reverse order they left: ea
 Each account has its own SQLite store, and `messages.id` is that store's autoincrement, so two accounts reuse the same ids.
 `find_by_id` in the daemon looks the id up in the store of the account the call names and has no account filter beyond that, so `message.delete` with `account: "work"` and a row id read from home's list acts on work's row of that id if one exists.
 The desktop fixture happens to scope row ids to their account and refuses the mismatch, which a live daemon does not; the GUI keeps each row id paired with the account it was listed from and never relies on that refusal (`clients/desktop/docs/rust-layer.md`, Mutations).
+
+## A key typed right after a desktop dialog opens can miss it
+
+Base UI moves focus into a dialog a tick after the dialog is in the DOM, so a test that finds the dialog and types at once sends the first keys to the page, where the keymap ignores them because an overlay is open.
+The desktop's move picker puts `autoFocus` on its input, and the archive and delete confirmation reads `y`, `n` and Enter on the window, so neither depends on that tick (`clients/desktop/src/components/mutations`).
+A test that types into another dialog waits for the input to have focus first.
+cmdk's `Command.Input` also sets `aria-labelledby` to its own label, which overrides an `aria-label` passed to it, so a test finds that input by its `combobox` role alone.
