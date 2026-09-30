@@ -75,6 +75,35 @@ describe("accessibility primitives", () => {
     expect(screen.getByRole("button", { name: /^Inbox, 4 unread of 8/ })).toHaveAttribute("aria-current", "page");
   });
 
+  it("makes the views sidebar buttons, one of them or a mailbox the current page, and names each view's region", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const nav = screen.getByRole("navigation", { name: "Accounts and mailboxes" });
+    const current = () => [...nav.querySelectorAll('[aria-current="page"]')].map((e) => e.getAttribute("aria-label"));
+    const views = within(nav).getByRole("list", { name: "Views" });
+    for (const name of [/^Contacts, key Space c$/, /^Calendar, key Space a$/, /^Settings$/]) {
+      const entry = within(views).getByRole("button", { name });
+      expect(entry).toBeEnabled();
+      expect(entry).toHaveAttribute("tabindex", "-1");
+    }
+    expect(within(views).getByRole("button", { name: "Activity" })).toHaveAttribute("aria-disabled", "true");
+    expect(current()).toEqual([expect.stringMatching(/^Inbox, /)]);
+    for (const [entry, region] of [
+      [/^Contacts, key/, "Contacts"],
+      [/^Calendar, key/, "Calendar"],
+      [/^Settings$/, "Settings"],
+    ] as const) {
+      await user.click(within(views).getByRole("button", { name: entry }));
+      const pane = await screen.findByRole("region", { name: region });
+      expect(within(pane).getByRole("heading", { name: region })).toBeInTheDocument();
+      expect(pane.closest("main")).not.toBeNull();
+      expect(current()).toEqual([expect.stringMatching(entry)]);
+    }
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
+    expect(current()).toEqual([expect.stringMatching(/^Inbox, /)]);
+  });
+
   it("names the row controls, keeps them out of the tab order, and says which rows are marked", async () => {
     const { user } = renderApp();
     await shellReady();

@@ -22,6 +22,8 @@ export type AccountGroupProps = {
   outbox: OutboxSummary;
   /** The outbox view shows this account's outbox. */
   outboxOpen: boolean;
+  /** Mail is the view shown, so the selected mailbox or the open outbox is the current page. */
+  mailShown: boolean;
   mailboxes: SidebarMailbox[] | null;
   selected: { account: string | null; mailbox: string | null };
   cursor: { account: string; slug: string } | null;
@@ -60,12 +62,12 @@ export function AccountGroup(p: AccountGroupProps) {
                   unread={m.unread}
                   total={m.total}
                   digit={p.digits && i < 9 ? i + 1 : null}
-                  active={!p.outboxOpen && p.selected.account === p.name && p.selected.mailbox === m.slug}
+                  active={p.mailShown && !p.outboxOpen && p.selected.account === p.name && p.selected.mailbox === m.slug}
                   cursor={p.cursor?.account === p.name && p.cursor.slug === m.slug}
                   onSelect={p.onSelect}
                 />
               ))}
-          <OutboxState account={p.name} outbox={p.outbox} active={p.outboxOpen} onOpen={p.onOpenOutbox} />
+          <OutboxState account={p.name} outbox={p.outbox} active={p.mailShown && p.outboxOpen} onOpen={p.onOpenOutbox} />
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>

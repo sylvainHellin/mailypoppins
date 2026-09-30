@@ -5,8 +5,11 @@ import type { Pane } from "@/app/state";
 const TITLES: Record<Pane, string> = { sidebar: "Mailboxes", list: "Messages", reader: "Message" };
 const PARENT: Record<Pane, Pane | null> = { sidebar: null, list: "sidebar", reader: "list" };
 
-/** The narrow layout's back path: one view at a time, a way up from each. */
-export function NarrowBar({ view, onUp }: { view: Pane; onUp: () => void }) {
+/**
+ * The narrow layout's back path: one view at a time, a way up from each.
+ * `title` names a full-pane view, which stands in the list's place.
+ */
+export function NarrowBar({ view, title, onUp }: { view: Pane; title?: string; onUp: () => void }) {
   const parent = PARENT[view];
   return (
     <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border px-2">
@@ -16,7 +19,7 @@ export function NarrowBar({ view, onUp }: { view: Pane; onUp: () => void }) {
           {TITLES[parent]}
         </Button>
       ) : null}
-      <span className="ml-1 text-sm font-semibold">{TITLES[view]}</span>
+      <span className="ml-1 text-sm font-semibold">{title ?? TITLES[view]}</span>
     </div>
   );
 }

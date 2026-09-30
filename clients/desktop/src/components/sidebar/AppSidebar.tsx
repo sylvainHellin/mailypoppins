@@ -2,10 +2,10 @@ import { useCallback } from "react";
 import { Mail } from "lucide-react";
 import { Sidebar, SidebarContent, SidebarHeader, SidebarSeparator } from "@/components/ui/sidebar";
 import { AccountGroup, type SidebarMailbox } from "@/components/sidebar/AccountGroup";
-import { FutureEntries } from "@/components/sidebar/FutureEntries";
+import { ViewEntries } from "@/components/sidebar/ViewEntries";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { useAppState, useDispatch } from "@/app/store";
-import { accountNames, type AppState } from "@/app/state";
+import { accountNames, type AppState, type View } from "@/app/state";
 import type { AccountState, SyncHealthState } from "@/protocol/types";
 import { outboxSummary, type OutboxSummary } from "@/app/outbox";
 
@@ -51,6 +51,9 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
     [dispatch],
   );
   const onOpenOutbox = useCallback((account: string) => dispatch({ type: "open_outbox", account }), [dispatch]);
+  const onOpenView = useCallback((view: Exclude<View, "mail">) => dispatch({ type: "switch_view", view }), [dispatch]);
+  // Outside Mail no mailbox is the current page, and the digits jump nowhere.
+  const mail = s.view === "mail";
   const cursor =
     s.sidebarCursor ??
     (s.selection.account && s.selection.mailbox ? { account: s.selection.account, slug: s.selection.mailbox } : null);
@@ -79,15 +82,16 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               health={a.health}
               outbox={a.outbox}
               outboxOpen={s.outboxView?.account === a.name}
+              mailShown={mail}
               onOpenOutbox={onOpenOutbox}
               mailboxes={a.mailboxes}
               selected={s.selection}
               cursor={cursor}
-              digits={a.name === selectedAccount}
+              digits={mail && a.name === selectedAccount}
               onSelect={onSelect}
             />
           ))}
-          <FutureEntries />
+          <ViewEntries current={s.view} onOpen={onOpenView} />
         </nav>
       </SidebarContent>
     </Sidebar>

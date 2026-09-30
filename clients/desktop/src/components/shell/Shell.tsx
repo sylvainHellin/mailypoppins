@@ -10,6 +10,8 @@ import { Splitter } from "@/components/shell/Splitter";
 import { StatusRegion } from "@/components/shell/StatusRegion";
 import { ActivityStack } from "@/components/mutations/ActivityStack";
 import { EditingBanner } from "@/components/compose/EditingBanner";
+import { ViewHost } from "@/components/views/ViewHost";
+import { VIEW_TITLES } from "@/app/views";
 import { useAppState, useDispatch } from "@/app/store";
 import { listWidthFor, useWidth } from "@/app/layout";
 import { LIST_WIDTH_MIN, type Pane } from "@/app/state";
@@ -30,7 +32,8 @@ function useFocusFollow(focus: Pane, seq: number): void {
 
 /**
  * The inset shell. Wide: sidebar, list, reader. Medium: the sidebar is an
- * icon rail. Narrow: one of the three at a time, the focused one.
+ * icon rail. Narrow: one of the three at a time, the focused one. Outside
+ * Mail one full-pane view stands for the list and the reader.
  */
 export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry | null> }) {
   const s = useAppState();
@@ -48,6 +51,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
   const showList = narrow ? s.focus === "list" : !(s.zoomed && s.focus === "reader");
   const showReader = narrow ? s.focus === "reader" : !(s.zoomed && s.focus === "list");
   const showSidebar = !narrow || s.focus === "sidebar";
+  const view = s.view === "mail" ? null : s.view;
 
   return (
     <SidebarProvider
@@ -68,9 +72,16 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
         <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
           <StatusRegion state={s} />
           <EditingBanner />
-          {narrow ? <NarrowBar view={s.focus} onUp={() => dispatch({ type: "up" })} /> : null}
+          {narrow ? (
+            <NarrowBar view={view ? "list" : s.focus} title={view ? VIEW_TITLES[view] : undefined} onUp={() => dispatch({ type: "up" })} />
+          ) : null}
           <div ref={panesRef} className="flex min-h-0 flex-1" data-panes="">
-            {showList ? (
+            {view ? (
+              <div className="min-h-0 min-w-0 flex-1">
+                <ViewHost view={view} />
+              </div>
+            ) : null}
+            {!view && showList ? (
               <div
                 className="min-h-0 min-w-0 shrink-0"
                 style={narrow || !showReader ? { flex: "1 1 auto" } : { width: list.width }}
@@ -78,7 +89,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
                 {s.outboxView ? <OutboxView /> : <MessageListPane />}
               </div>
             ) : null}
-            {showList && showReader && !narrow ? (
+            {!view && showList && showReader && !narrow ? (
               <Splitter
                 value={list.width}
                 min={LIST_WIDTH_MIN}
@@ -87,7 +98,7 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
                 label="Resize the message list"
               />
             ) : null}
-            {showReader ? (
+            {!view && showReader ? (
               <div className="min-h-0 min-w-0 flex-1">
                 <ReaderPane />
               </div>
