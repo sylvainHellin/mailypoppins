@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop client has a light theme, a plain-text reader, a filter in the key help, and runs a terminal editor in a terminal (#0136).**
+  - Settings' Theme buttons and the palette's "Theme: dark", "Theme: light" and "Theme: system" switch the window between the dark palette, a light one on cream, and whichever the system uses; dark stays the default.
+  - `tt`, the reader toolbar's HTML and Text, Settings' Reader field and the palette show a message's stored plain text instead of its HTML, in a monospaced block with quoted lines muted, and the choice is remembered; in the TUI `tt` opens the thread, which the desktop does not have yet.
+  - The `?` key help has a filter field that narrows the keys as you type, by key, description or section, and keeps the sections in their usual order.
+  - A terminal editor in `$VISUAL` or `$EDITOR`, such as nvim, vim or hx, now opens your drafts in the first terminal found among WezTerm, Ghostty, kitty, Alacritty and Terminal.app, where before it was skipped.
+  - With `MP_DESKTOP_FIXTURE=1` an editor handoff says the editor was not launched and names the command it would have run.
 - **The desktop client has the TUI's Calendar and Contacts views, manages signatures, and sets up accounts (#0131).** The keys are the TUI's, each is also in the palette, and `MP_DESKTOP_FIXTURE=1` has a simulation for every outcome below.
   - `Space c`, `Space a` and `Space m` switch between Contacts, Calendar and Mail, as do the sidebar and the palette; Settings is a fourth view, from the sidebar or the palette.
   - The Calendar view lists the agenda of the selected account, upcoming only until `t` shows the past; `r` reads it again, Enter or `e` opens an event's `invite.ics` in your editor, and an updated or cancelled invitation shows without a refresh.
