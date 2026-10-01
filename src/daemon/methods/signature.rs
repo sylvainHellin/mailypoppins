@@ -59,7 +59,9 @@ impl Method for SignatureMethod {
             // Any configured account, store or not: signatures are
             // configuration, like a drafts directory.
             let accounts = self.config.accounts();
-            let account = super::account::configured_account(&accounts, &name)?.name.clone();
+            let account = super::account::configured_account(&accounts, &name)?
+                .name
+                .clone();
             let listing = tokio::task::spawn_blocking(move || SignatureListing {
                 names: crate::signatures::list(),
                 default: crate::signatures::default_signature_name(&account),

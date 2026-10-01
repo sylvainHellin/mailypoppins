@@ -811,7 +811,11 @@ fn sweep_orphan_blobs(conn: &Connection, blobs: &BlobStore) -> Result<(u64, u64)
 
     let mut files = 0u64;
     let mut bytes = 0u64;
-    for entry in WalkDir::new(root).contents_first(true).into_iter().flatten() {
+    for entry in WalkDir::new(root)
+        .contents_first(true)
+        .into_iter()
+        .flatten()
+    {
         let path = entry.path();
         if entry.file_type().is_dir() {
             if path != root {
@@ -837,7 +841,10 @@ fn sweep_orphan_blobs(conn: &Connection, blobs: &BlobStore) -> Result<(u64, u64)
                 files += 1;
                 bytes += size;
             }
-            Err(e) => warn!("[store] could not remove orphaned blob {}: {e}", path.display()),
+            Err(e) => warn!(
+                "[store] could not remove orphaned blob {}: {e}",
+                path.display()
+            ),
         }
     }
     Ok((files, bytes))
@@ -1006,15 +1013,42 @@ mod tests {
         let (dir, path, blobs) = account_dir();
         {
             let store = Store::open(&path).unwrap();
-            enqueue(&store, &blobs, "<pending@example.com>", "pending_send", b"raw pending");
-            enqueue(&store, &blobs, "<appending@example.com>", "sent_pending_append", b"raw appending");
-            enqueue(&store, &blobs, "<parked@example.com>", "failed", b"raw parked");
-            enqueue(&store, &blobs, "<finished@example.com>", "done", b"raw finished");
+            enqueue(
+                &store,
+                &blobs,
+                "<pending@example.com>",
+                "pending_send",
+                b"raw pending",
+            );
+            enqueue(
+                &store,
+                &blobs,
+                "<appending@example.com>",
+                "sent_pending_append",
+                b"raw appending",
+            );
+            enqueue(
+                &store,
+                &blobs,
+                "<parked@example.com>",
+                "failed",
+                b"raw parked",
+            );
+            enqueue(
+                &store,
+                &blobs,
+                "<finished@example.com>",
+                "done",
+                b"raw finished",
+            );
         }
         stamp_a_wrong_version(&path);
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), Some(schema::SCHEMA_VERSION));
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
 
         let mut stmt = store
             .conn()
@@ -1058,8 +1092,14 @@ mod tests {
         );
         for raw in [&b"raw pending"[..], b"raw appending", b"raw parked"] {
             let hash = BlobHash::of(raw);
-            assert!(blobs.contains(&hash), "carried bytes must survive the sweep");
-            assert_eq!(super::super::blobs::refcount(store.conn(), &hash).unwrap(), 1);
+            assert!(
+                blobs.contains(&hash),
+                "carried bytes must survive the sweep"
+            );
+            assert_eq!(
+                super::super::blobs::refcount(store.conn(), &hash).unwrap(),
+                1
+            );
         }
         assert!(
             !blobs.contains(&BlobHash::of(b"raw finished")),
@@ -1068,7 +1108,10 @@ mod tests {
 
         let notice = notice_file(dir.path()).expect("a rebuild touching the outbox writes a note");
         let text = fs::read_to_string(notice).unwrap();
-        assert!(text.contains("<pending@example.com> (pending_send)"), "{text}");
+        assert!(
+            text.contains("<pending@example.com> (pending_send)"),
+            "{text}"
+        );
         assert!(text.contains("Carried into the rebuilt store"), "{text}");
     }
 
@@ -1087,7 +1130,9 @@ mod tests {
                     [hash.as_str()],
                 )
                 .unwrap();
-            blobs.acquire(store.conn(), &hash, raw.len() as u64).unwrap();
+            blobs
+                .acquire(store.conn(), &hash, raw.len() as u64)
+                .unwrap();
             // An interrupted write leaves a temp sibling; it is orphaned too.
             let dir = blobs.path_for(&hash).parent().unwrap().to_path_buf();
             fs::write(dir.join(format!(".{hash}.tmp.4242.0")), b"half").unwrap();
@@ -1115,7 +1160,13 @@ mod tests {
         let (dir, path, blobs) = account_dir();
         {
             let store = Store::open(&path).unwrap();
-            enqueue(&store, &blobs, "<orphan@example.com>", "pending_send", b"raw orphan");
+            enqueue(
+                &store,
+                &blobs,
+                "<orphan@example.com>",
+                "pending_send",
+                b"raw orphan",
+            );
         }
         // Retention, a manual cleanup, a half-restored backup: the row points
         // at bytes that are not there any more.
@@ -1131,8 +1182,14 @@ mod tests {
 
         let notice = notice_file(dir.path()).expect("a discarded row must leave a note");
         let text = fs::read_to_string(notice).unwrap();
-        assert!(text.contains("Discarded, because they could not be carried"), "{text}");
-        assert!(text.contains("<orphan@example.com> (pending_send)"), "{text}");
+        assert!(
+            text.contains("Discarded, because they could not be carried"),
+            "{text}"
+        );
+        assert!(
+            text.contains("<orphan@example.com> (pending_send)"),
+            "{text}"
+        );
         assert!(text.contains("no longer in the blob store"), "{text}");
     }
 
@@ -1295,12 +1352,18 @@ mod tests {
         stamp_a_wrong_version(&path);
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), Some(schema::SCHEMA_VERSION));
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
         assert!(
             elsewhere.join("precious.txt").exists(),
             "a symlinked blob root is not the rebuild's to empty"
         );
-        assert!(path.exists(), "and the rebuilt store file survives its own sweep");
+        assert!(
+            path.exists(),
+            "and the rebuilt store file survives its own sweep"
+        );
     }
 
     /// A file that is not ours but happens to hold a table named `outbox`, in
@@ -1338,7 +1401,10 @@ mod tests {
         }
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), Some(schema::SCHEMA_VERSION));
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
         let notice = notice_file(dir.path()).expect("a truncated salvage is not a silent one");
         let text = fs::read_to_string(notice).unwrap();
         assert!(text.contains("too large to read in full"), "{text}");
@@ -1386,7 +1452,10 @@ mod tests {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(state, "failed", "an unknown state must never be re-submitted");
+        assert_eq!(
+            state, "failed",
+            "an unknown state must never be re-submitted"
+        );
         assert!(
             last_error.unwrap().contains("almost_sent"),
             "the note on the row says where it came from"
@@ -1502,7 +1571,8 @@ mod tests {
             .conn()
             .query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, i64>(0))
             .unwrap() as usize;
-        let notice = notice_file(dir.path()).expect("a rebuild that lost submissions writes a note");
+        let notice =
+            notice_file(dir.path()).expect("a rebuild that lost submissions writes a note");
         let text = fs::read_to_string(notice).unwrap();
 
         assert!(
@@ -1561,7 +1631,10 @@ mod tests {
         }
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), Some(schema::SCHEMA_VERSION));
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
         let notice =
             notice_file(dir.path()).expect("a row the file listed and would not produce is a loss");
         let text = fs::read_to_string(notice).unwrap();
@@ -1642,7 +1715,10 @@ mod tests {
         }
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), Some(schema::SCHEMA_VERSION));
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
         assert!(
             notice_file(dir.path()).is_none(),
             "every row was read, so there is nothing to warn about"
@@ -1657,7 +1733,13 @@ mod tests {
         let message_id = format!("<{}@example.com>", "x".repeat(8192));
         {
             let store = Store::open(&path).unwrap();
-            enqueue(&store, &blobs, &message_id, "pending_send", b"raw oversized");
+            enqueue(
+                &store,
+                &blobs,
+                &message_id,
+                "pending_send",
+                b"raw oversized",
+            );
         }
         stamp_a_wrong_version(&path);
 
@@ -1666,7 +1748,10 @@ mod tests {
             .conn()
             .query_row("SELECT message_id FROM outbox", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(carried, message_id, "the row itself keeps every byte it had");
+        assert_eq!(
+            carried, message_id,
+            "the row itself keeps every byte it had"
+        );
 
         let notice = notice_file(dir.path()).expect("a carried row leaves a note");
         let text = fs::read_to_string(notice).unwrap();
@@ -1880,8 +1965,12 @@ mod tests {
             .conn()
             .query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, i64>(0))
             .unwrap() as usize;
-        assert!(carried < ROWS, "the probe is only meaningful if the damage cost something");
-        let notice = notice_file(dir.path()).expect("a rebuild that lost submissions writes a note");
+        assert!(
+            carried < ROWS,
+            "the probe is only meaningful if the damage cost something"
+        );
+        let notice =
+            notice_file(dir.path()).expect("a rebuild that lost submissions writes a note");
         let text = fs::read_to_string(notice).unwrap();
         assert!(
             text.contains("Discarded, because they could not be carried"),
@@ -1904,7 +1993,10 @@ mod tests {
         fs::write(&path, b"not a database, just bytes").unwrap();
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), Some(schema::SCHEMA_VERSION));
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
         assert!(blob_files(blobs.root()).is_empty(), "the orphan is swept");
         assert!(notice_file(dir.path()).is_none());
     }

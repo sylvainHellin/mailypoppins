@@ -61,5 +61,8 @@ fn the_card_shows_the_rsvp_derived_from_the_sent_reply() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("Your RSVP: Declined"), "text=\n{text}");
-    assert!(text.contains("me@example.com \u{2014} Declined"), "text=\n{text}");
+    assert!(
+        text.contains("me@example.com \u{2014} Declined"),
+        "text=\n{text}"
+    );
 }

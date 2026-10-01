@@ -148,13 +148,7 @@ const FETCH_RESULT: [&str; 6] = [
 ];
 
 /// The keys a settled `message.search_server` answers with.
-const SEARCH_RESULT: [&str; 5] = [
-    "account",
-    "deduplicated",
-    "hits",
-    "query",
-    "unreachable",
-];
+const SEARCH_RESULT: [&str; 5] = ["account", "deduplicated", "hits", "query", "unreachable"];
 
 // ---------------------------------------------------------------------------
 // The fixture
@@ -310,7 +304,10 @@ fn assert_keys(value: &Value, expected: &[&str], label: &str) {
     found.sort_unstable();
     let mut want: Vec<&str> = expected.to_vec();
     want.sort_unstable();
-    assert_eq!(found, want, "{label} carries exactly these fields, got {value}");
+    assert_eq!(
+        found, want,
+        "{label} carries exactly these fields, got {value}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +381,10 @@ async fn a_fetch_validates_its_address() {
     let mut conn = slice.connect().await;
 
     for (what, params) in [
-        ("no account", json!({"mailbox": "inbox", "message_id": "<a@b>"})),
+        (
+            "no account",
+            json!({"mailbox": "inbox", "message_id": "<a@b>"}),
+        ),
         (
             "no mailbox",
             json!({"account": fixture::ACCOUNT, "message_id": "<a@b>"}),
@@ -407,7 +407,10 @@ async fn a_fetch_validates_its_address() {
         ),
     ] {
         let error = call_err(&mut conn, FETCH, params).await;
-        assert_eq!(error.code, -32602, "{what} is invalid params, got {error:?}");
+        assert_eq!(
+            error.code, -32602,
+            "{what} is invalid params, got {error:?}"
+        );
     }
 
     let unknown = call_err(
@@ -421,7 +424,10 @@ async fn a_fetch_validates_its_address() {
     )
     .await;
     assert_eq!(unknown.code, ErrorCode::AccountUnknown.code());
-    assert_eq!(unknown.data, Some(json!({"account": fixture::UNKNOWN_ACCOUNT})));
+    assert_eq!(
+        unknown.data,
+        Some(json!({"account": fixture::UNKNOWN_ACCOUNT}))
+    );
 }
 
 /// A message the store already holds is answered from the store, with
@@ -584,7 +590,10 @@ async fn the_server_search_validates_its_parameters() {
         ),
     ] {
         let error = call_err(&mut conn, SEARCH_SERVER, params).await;
-        assert_eq!(error.code, -32602, "{what} is invalid params, got {error:?}");
+        assert_eq!(
+            error.code, -32602,
+            "{what} is invalid params, got {error:?}"
+        );
     }
 
     let unknown = call_err(
@@ -594,7 +603,10 @@ async fn the_server_search_validates_its_parameters() {
     )
     .await;
     assert_eq!(unknown.code, ErrorCode::AccountUnknown.code());
-    assert_eq!(unknown.data, Some(json!({"account": fixture::UNKNOWN_ACCOUNT})));
+    assert_eq!(
+        unknown.data,
+        Some(json!({"account": fixture::UNKNOWN_ACCOUNT}))
+    );
 
     // An account that configures no server at all cannot run a server search,
     // and says so the way a sync of the same account says it.

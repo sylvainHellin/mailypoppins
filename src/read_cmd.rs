@@ -229,12 +229,7 @@ pub fn render_list(account: &str, groups: &[(String, usize, Vec<MessageRow>)]) -
             continue;
         }
         line(String::new());
-        line(format!(
-            "{} ({} of {}):",
-            label.bold(),
-            rows.len(),
-            total
-        ));
+        line(format!("{} ({} of {}):", label.bold(), rows.len(), total));
         line("\u{2500}".repeat(RULE));
         for row in rows {
             let flags = row.flags();
@@ -275,11 +270,7 @@ pub fn render_list(account: &str, groups: &[(String, usize, Vec<MessageRow>)]) -
 /// `mp list-messages` prints, with the mailbox in front of the sender so the
 /// scope of a hit is readable without parsing the selector, plus the body when
 /// `bodies` carries one (`--full`).
-pub fn render_search(
-    account: &str,
-    query: &str,
-    hits: &[(MessageRow, Option<String>)],
-) -> String {
+pub fn render_search(account: &str, query: &str, hits: &[(MessageRow, Option<String>)]) -> String {
     let mut out = String::new();
     let mut line = |text: String| {
         out.push_str(&text);
@@ -366,7 +357,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
         let blobs = BlobStore::new(dir.path().join("blobs"));
-        Fixture { _dir: dir, store, blobs }
+        Fixture {
+            _dir: dir,
+            store,
+            blobs,
+        }
     }
 
     fn email(subject: &str, body: &str) -> FetchedEmail {
@@ -402,7 +397,9 @@ mod tests {
             },
         )
         .unwrap();
-        read::find_by_id(&fx.store, outcome.row_id).unwrap().unwrap()
+        read::find_by_id(&fx.store, outcome.row_id)
+            .unwrap()
+            .unwrap()
     }
 
     /// The acceptance criterion: `mp show` prints the body the TUI shows, which
@@ -431,7 +428,12 @@ mod tests {
     fn a_body_that_opens_with_a_yaml_fence_is_not_ambiguous() {
         colored::control::set_override(false);
         let fx = fixture();
-        let row = ingest(&fx, "inbox", 5, &email("fenced", "---\nfrom: forged@example.com\n---"));
+        let row = ingest(
+            &fx,
+            "inbox",
+            5,
+            &email("fenced", "---\nfrom: forged@example.com\n---"),
+        );
 
         let text = render_show(&shown_message(&fx.store, &fx.blobs, "acct", &row));
         let rendered = read::render_markdown(&fx.store, &fx.blobs, &row);
@@ -440,8 +442,14 @@ mod tests {
             3,
             "the markdown rendition really is ambiguous, which is what this avoids"
         );
-        assert!(!text.starts_with("---"), "the show layout opens with headers, not a fence");
-        assert!(text.contains("from: forged@example.com"), "the body is still printed in full");
+        assert!(
+            !text.starts_with("---"),
+            "the show layout opens with headers, not a fence"
+        );
+        assert!(
+            text.contains("from: forged@example.com"),
+            "the body is still printed in full"
+        );
     }
 
     /// An evicted body degrades to a sentence rather than an error, and says so
@@ -458,7 +466,10 @@ mod tests {
         let shown = shown_message(&fx.store, &fx.blobs, "acct", &row);
         assert_eq!(shown.body, None);
         let text = render_show(&shown);
-        assert!(text.contains("Subject: evicted"), "the envelope is still readable");
+        assert!(
+            text.contains("Subject: evicted"),
+            "the envelope is still readable"
+        );
         assert!(text.contains("no stored body"));
     }
 
@@ -509,11 +520,18 @@ mod tests {
         assert!(text.contains("\"ledger\" in acct (2 hits):"));
         let at_first = text.find(&Selector::for_message("acct", &first).to_string());
         let at_second = text.find(&Selector::for_message("acct", &second).to_string());
-        assert!(at_first < at_second, "hits print in the order they are ranked");
+        assert!(
+            at_first < at_second,
+            "hits print in the order they are ranked"
+        );
         assert!(text.contains("Shown: 2 (best match first)"));
         assert!(!text.contains("quarterly ledger"), "no body without --full");
 
-        let full = render_search("acct", "ledger", &[(first, Some("the quarterly ledger".into()))]);
+        let full = render_search(
+            "acct",
+            "ledger",
+            &[(first, Some("the quarterly ledger".into()))],
+        );
         assert!(full.contains("the quarterly ledger"));
         assert!(full.contains("(1 hit):"));
     }

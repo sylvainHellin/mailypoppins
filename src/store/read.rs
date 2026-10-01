@@ -234,8 +234,7 @@ pub fn list_mailbox_page(
 }
 
 /// How many rows one mailbox holds, as [`list_mailbox_page`] counts them.
-const MAILBOX_TOTAL_SQL: &str =
-    "SELECT COUNT(*) FROM messages WHERE account = ?1 AND mailbox = ?2";
+const MAILBOX_TOTAL_SQL: &str = "SELECT COUNT(*) FROM messages WHERE account = ?1 AND mailbox = ?2";
 
 /// The SQL [`list_mailbox`] runs, factored out so the query-plan regression
 /// test (`the_listing_is_served_by_the_messages_list_index`) checks the exact
@@ -285,9 +284,9 @@ pub fn list_account(store: &Store, account: &str) -> Result<Vec<MessageRow>> {
 /// callers index by name and treat a miss as zero, which keeps the result
 /// aligned with a mailbox list that includes never-synced mailboxes.
 pub fn mailbox_counts(store: &Store, account: &str) -> Result<HashMap<String, usize>> {
-    let mut stmt = store.conn().prepare(
-        "SELECT mailbox, COUNT(*) FROM messages WHERE account = ?1 GROUP BY mailbox",
-    )?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT mailbox, COUNT(*) FROM messages WHERE account = ?1 GROUP BY mailbox")?;
     let rows = stmt.query_map([account], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     })?;
@@ -362,9 +361,9 @@ pub fn message_ids_with_attachments(
     store: &Store,
     account: &str,
 ) -> Result<std::collections::HashSet<String>> {
-    let mut stmt = store.conn().prepare(
-        "SELECT message_id FROM messages WHERE account = ?1 AND has_attachments = 1",
-    )?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT message_id FROM messages WHERE account = ?1 AND has_attachments = 1")?;
     let rows = stmt.query_map([account], |row| row.get::<_, String>(0))?;
     let mut out = std::collections::HashSet::new();
     for row in rows {
@@ -440,11 +439,7 @@ fn thread_messages_sql() -> String {
 /// Ordered by `date_sort ASC` with the row `id` as the tiebreaker, the reverse
 /// of a mailbox listing: a conversation reads oldest to newest, the way a mail
 /// client threads one.
-pub fn thread_messages(
-    store: &Store,
-    account: &str,
-    thread_id: &str,
-) -> Result<Vec<MessageRow>> {
+pub fn thread_messages(store: &Store, account: &str, thread_id: &str) -> Result<Vec<MessageRow>> {
     let mut stmt = store.conn().prepare(&thread_messages_sql())?;
     let rows = stmt.query_map((account, thread_id), row_from_sql)?;
     let mut out: Vec<MessageRow> = Vec::new();
@@ -717,9 +712,11 @@ pub fn unique_in(name: String, used: &[String]) -> String {
 pub fn load_body(store: &Store, blobs: &BlobStore, id: i64) -> Option<String> {
     let hash: Option<String> = store
         .conn()
-        .query_row("SELECT body_blob FROM messages WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT body_blob FROM messages WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
         .optional()
         .unwrap_or_else(|e| {
             warn!("[store] reading the body hash of message {id}: {e:#}");
@@ -966,9 +963,24 @@ mod tests {
     #[test]
     fn a_mailbox_lists_newest_first() {
         let fx = fixture();
-        ingest(&fx, "inbox", 1, &email("older", "Mon, 01 Jan 2024 09:00:00 +0000"));
-        ingest(&fx, "inbox", 2, &email("newer", "Mon, 01 Jan 2024 17:00:00 +0000"));
-        ingest(&fx, "archive", 3, &email("elsewhere", "Mon, 01 Jan 2024 12:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("older", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("newer", "Mon, 01 Jan 2024 17:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "archive",
+            3,
+            &email("elsewhere", "Mon, 01 Jan 2024 12:00:00 +0000"),
+        );
 
         let rows = list_mailbox(&fx.store, "alice", "inbox").unwrap();
         let subjects: Vec<_> = rows.iter().map(|r| r.subject.clone().unwrap()).collect();
@@ -980,8 +992,18 @@ mod tests {
     #[test]
     fn ordering_is_total_and_undated_mail_sorts_last() {
         let fx = fixture();
-        ingest(&fx, "inbox", 1, &email("tie-a", "Mon, 01 Jan 2024 09:00:00 +0000"));
-        ingest(&fx, "inbox", 2, &email("tie-b", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("tie-a", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("tie-b", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         ingest(&fx, "inbox", 3, &email("undated", "not a date"));
 
         let first: Vec<_> = list_mailbox(&fx.store, "alice", "inbox")
@@ -1001,9 +1023,24 @@ mod tests {
     #[test]
     fn counts_group_by_mailbox_and_omit_empty_ones() {
         let fx = fixture();
-        ingest(&fx, "inbox", 1, &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"));
-        ingest(&fx, "inbox", 2, &email("b", "Mon, 01 Jan 2024 09:00:00 +0000"));
-        ingest(&fx, "archive", 1, &email("c", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("b", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "archive",
+            1,
+            &email("c", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
 
         let counts = mailbox_counts(&fx.store, "alice").unwrap();
         assert_eq!(counts.get("inbox"), Some(&2));
@@ -1011,7 +1048,6 @@ mod tests {
         assert_eq!(counts.get("sent"), None, "an empty mailbox has no row");
         assert!(mailbox_counts(&fx.store, "nobody").unwrap().is_empty());
     }
-
 
     /// The grouped counts with the read flag: one query answers both numbers,
     /// and its unread test is `MessageRow::is_read`'s, token by token, so a
@@ -1131,7 +1167,10 @@ mod tests {
             .unwrap()
             .thread_id
             .unwrap();
-        assert_eq!(thread, "<root@example.com>", "a lone message roots its own thread");
+        assert_eq!(
+            thread, "<root@example.com>",
+            "a lone message roots its own thread"
+        );
 
         // A reply points at the root through In-Reply-To in its raw headers.
         let reply = email("reply", "Mon, 01 Jan 2024 11:00:00 +0000");
@@ -1155,14 +1194,28 @@ mod tests {
         ingest(&fx, "archive", 5, &root);
 
         let convo = thread_messages(&fx.store, "alice", "<root@example.com>").unwrap();
-        assert_eq!(convo.len(), 1, "a copy of one message is one conversation entry");
+        assert_eq!(
+            convo.len(),
+            1,
+            "a copy of one message is one conversation entry"
+        );
     }
 
     #[test]
     fn bodies_come_back_from_the_blob_store() {
         let fx = fixture();
-        ingest(&fx, "inbox", 1, &email("hello", "Mon, 01 Jan 2024 09:00:00 +0000"));
-        ingest(&fx, "inbox", 2, &email("second", "Mon, 01 Jan 2024 10:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("hello", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("second", "Mon, 01 Jan 2024 10:00:00 +0000"),
+        );
         let rows = list_mailbox(&fx.store, "alice", "inbox").unwrap();
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
 
@@ -1210,7 +1263,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         assert!(html.contains("html inside the raw"), "{html}");
 
         // A plain-text message has none, and says so rather than inventing one.
-        let plain_id = ingest(&fx, "inbox", 3, &email("plain", "Mon, 01 Jan 2024 11:00:00 +0000"));
+        let plain_id = ingest(
+            &fx,
+            "inbox",
+            3,
+            &email("plain", "Mon, 01 Jan 2024 11:00:00 +0000"),
+        );
         assert_eq!(load_html(&fx.store, &fx.blobs, plain_id), None);
     }
 
@@ -1220,7 +1278,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn a_missing_row_reads_back_as_none() {
         let fx = fixture();
-        let id = ingest(&fx, "inbox", 1, &email("x", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        let id = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("x", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         assert_eq!(load_body(&fx.store, &fx.blobs, id + 999), None);
     }
 
@@ -1229,10 +1292,18 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn an_unreadable_body_blob_does_not_blank_the_list() {
         let fx = fixture();
-        let id = ingest(&fx, "inbox", 1, &email("kept", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        let id = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("kept", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         fx.store
             .conn()
-            .execute("UPDATE messages SET body_blob = 'not-a-hash' WHERE id = ?1", [id])
+            .execute(
+                "UPDATE messages SET body_blob = 'not-a-hash' WHERE id = ?1",
+                [id],
+            )
             .unwrap();
 
         assert_eq!(load_body(&fx.store, &fx.blobs, id).unwrap(), "");
@@ -1264,7 +1335,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         assert_eq!(atts[0].name, "agenda.pdf");
         assert_eq!(atts[0].size, 8);
 
-        let plain = ingest(&fx, "inbox", 2, &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        let plain = ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         assert!(!find_by_id(&fx.store, plain).unwrap().unwrap().is_invite);
         assert!(attachments_for(&fx.store, plain).unwrap().is_empty());
     }
@@ -1314,10 +1390,19 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn the_listing_is_served_by_the_messages_list_index() {
         let fx = fixture();
-        ingest(&fx, "inbox", 1, &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
 
         let sql = super::list_mailbox_sql();
-        let mut stmt = fx.store.conn().prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let mut stmt = fx
+            .store
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
         let plan: Vec<String> = stmt
             .query_map(("alice", "inbox"), |row| row.get::<_, String>(3))
             .unwrap()
@@ -1356,15 +1441,28 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
             (format!("{sql} LIMIT ?3"), 3),
             (super::MAILBOX_TOTAL_SQL.to_string(), 2),
         ] {
-            let mut stmt = fx.store.conn().prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let mut stmt = fx
+                .store
+                .conn()
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
             let query = |row: &rusqlite::Row<'_>| row.get::<_, String>(3);
             let plan: Vec<String> = if params == 3 {
-                stmt.query_map(("alice", "inbox", 10), query).unwrap().map(|r| r.unwrap()).collect()
+                stmt.query_map(("alice", "inbox", 10), query)
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect()
             } else {
-                stmt.query_map(("alice", "inbox"), query).unwrap().map(|r| r.unwrap()).collect()
+                stmt.query_map(("alice", "inbox"), query)
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect()
             };
             let plan = plan.join("\n");
-            assert!(plan.contains("messages_list"), "{sql} must use messages_list, got:\n{plan}");
+            assert!(
+                plan.contains("messages_list"),
+                "{sql} must use messages_list, got:\n{plan}"
+            );
             assert!(
                 !plan.to_uppercase().contains("TEMP B-TREE"),
                 "{sql} must not sort in a temp B-tree, got:\n{plan}"
@@ -1377,10 +1475,19 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn the_thread_read_is_served_by_the_messages_thread_index() {
         let fx = fixture();
-        ingest(&fx, "inbox", 1, &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
 
         let sql = super::thread_messages_sql();
-        let mut stmt = fx.store.conn().prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let mut stmt = fx
+            .store
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
         let plan: Vec<String> = stmt
             .query_map(("alice", "<a@example.com>"), |row| row.get::<_, String>(3))
             .unwrap()
@@ -1394,7 +1501,11 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         );
         // The row columns' per-row invite subquery follows; a thread is a
         // handful of rows, so only the messages access is pinned here.
-        assert_eq!(plan.lines().next().map(str::trim), Some(expected.as_str()), "got:\n{plan}");
+        assert_eq!(
+            plan.lines().next().map(str::trim),
+            Some(expected.as_str()),
+            "got:\n{plan}"
+        );
         assert!(!plan.to_uppercase().contains("TEMP B-TREE"), "got:\n{plan}");
     }
 
@@ -1413,15 +1524,25 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
             }
             ingest(&fx, "inbox", uid, &e);
         }
-        ingest(&fx, "sent", 9, &email("elsewhere", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "sent",
+            9,
+            &email("elsewhere", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
 
         let all = list_mailbox(&fx.store, "alice", "inbox").unwrap();
         assert_eq!(all.len(), 5);
-        let ids = |rows: &[MessageRow]| rows.iter().map(|r| (r.id, r.is_invite)).collect::<Vec<_>>();
+        let ids =
+            |rows: &[MessageRow]| rows.iter().map(|r| (r.id, r.is_invite)).collect::<Vec<_>>();
         for limit in [0, 1, 3, 5, 6, usize::MAX] {
             let (page, total) = list_mailbox_page(&fx.store, "alice", "inbox", limit).unwrap();
             assert_eq!(total, all.len(), "limit {limit}");
-            assert_eq!(ids(&page), ids(&all[..limit.min(all.len())]), "limit {limit}");
+            assert_eq!(
+                ids(&page),
+                ids(&all[..limit.min(all.len())]),
+                "limit {limit}"
+            );
         }
         let (page, total) = list_mailbox_page(&fx.store, "alice", "never", 10).unwrap();
         assert!(page.is_empty());
@@ -1436,7 +1557,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         let mut e = email("invite", "Mon, 01 Jan 2024 10:00:00 +0000");
         e.calendar_ics = Some("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into());
         ingest(&fx, "inbox", 1, &e);
-        ingest(&fx, "inbox", 2, &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
 
         let rows = list_mailbox(&fx.store, "alice", "inbox").unwrap();
         assert_eq!(rows[0].subject.as_deref(), Some("invite"));
@@ -1454,7 +1580,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         e.calendar_ics = Some(ics.into());
         ingest(&fx, "inbox", 1, &e);
         ingest(&fx, "sent", 4, &e);
-        ingest(&fx, "inbox", 2, &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
 
         let invites = list_invites(&fx.store, "alice").unwrap();
         let boxes: Vec<&str> = invites.iter().map(|(r, _)| r.mailbox.as_str()).collect();
@@ -1479,7 +1610,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn a_message_without_an_ics_reads_back_as_none() {
         let fx = fixture();
-        let plain = ingest(&fx, "inbox", 1, &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        let plain = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("plain", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         assert_eq!(load_invite_ics(&fx.store, &fx.blobs, plain), None);
         assert_eq!(read_blob(&fx.blobs, plain, "not-a-hash"), None);
     }
@@ -1487,7 +1623,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn a_row_is_addressable_by_its_synthetic_id() {
         let fx = fixture();
-        let id = ingest(&fx, "inbox", 1, &email("x", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        let id = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("x", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         let row = find_by_id(&fx.store, id).unwrap().unwrap();
         assert_eq!(row.subject.as_deref(), Some("x"));
         assert_eq!(find_by_id(&fx.store, id + 999).unwrap(), None);
@@ -1499,7 +1640,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         let mut e = email("read", "Mon, 01 Jan 2024 09:00:00 +0000");
         e.flags = crate::types::MessageFlags::seen(true);
         ingest(&fx, "inbox", 1, &e);
-        ingest(&fx, "inbox", 2, &email("unread", "Mon, 01 Jan 2024 08:00:00 +0000"));
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("unread", "Mon, 01 Jan 2024 08:00:00 +0000"),
+        );
 
         let rows = list_mailbox(&fx.store, "alice", "inbox").unwrap();
         assert!(rows[0].is_read(), "the \\Seen row must read back as read");
@@ -1592,7 +1738,12 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
     #[test]
     fn the_rendition_parses_as_the_file_era_frontmatter() {
         let fx = fixture();
-        let id = ingest(&fx, "inbox", 1, &email("Bare", "Mon, 01 Jan 2024 09:00:00 +0000"));
+        let id = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("Bare", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
         let row = find_by_id(&fx.store, id).unwrap().unwrap();
 
         let rendered = render_markdown(&fx.store, &fx.blobs, &row);
@@ -1607,7 +1758,10 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
         assert_eq!(parsed.to, "b@example.com");
         assert_eq!(parsed.cc, None);
         assert_eq!(parsed.subject, "Bare");
-        assert_eq!(parsed.date.as_deref(), Some("Mon, 01 Jan 2024 09:00:00 +0000"));
+        assert_eq!(
+            parsed.date.as_deref(),
+            Some("Mon, 01 Jan 2024 09:00:00 +0000")
+        );
         assert_eq!(parsed.message_id.as_deref(), Some("<Bare@example.com>"));
         assert_eq!(parsed.attachments, None);
         assert_eq!(parsed.read, Some(false));

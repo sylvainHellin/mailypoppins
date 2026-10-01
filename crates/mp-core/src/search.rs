@@ -246,7 +246,9 @@ fn resolve_word(text: &str, quoted: bool, pos: usize, input: &str) -> Result<Res
     let field_lc = field.to_ascii_lowercase();
     // `has:` is the only field whose value is a keyword rather than free text.
     if field_lc == "has" {
-        return if value.eq_ignore_ascii_case("attachment") || value.eq_ignore_ascii_case("attachments") {
+        return if value.eq_ignore_ascii_case("attachment")
+            || value.eq_ignore_ascii_case("attachments")
+        {
             Ok(Resolved::Term(Term::HasAttachment))
         } else {
             err(
@@ -261,8 +263,18 @@ fn resolve_word(text: &str, quoted: bool, pos: usize, input: &str) -> Result<Res
     // whole token is searched as the text it is (`re:budget`).
     let known = matches!(
         field_lc.as_str(),
-        "from" | "to" | "cc" | "subject" | "body" | "text" | "filename" | "before" | "after"
-            | "since" | "in" | "message-id"
+        "from"
+            | "to"
+            | "cc"
+            | "subject"
+            | "body"
+            | "text"
+            | "filename"
+            | "before"
+            | "after"
+            | "since"
+            | "in"
+            | "message-id"
     );
     if !known {
         return Ok(Resolved::Term(Term::Text(text.to_string())));
@@ -763,7 +775,10 @@ pub fn to_gmail(q: &Query) -> String {
 /// The full `X-GM-RAW "..."` IMAP search command for a Gmail query, refused
 /// when a value carries a line break or a NUL (the same rule as `to_imap`).
 pub fn to_gmail_search_command(q: &Query) -> Result<String, RenderError> {
-    Ok(format!("X-GM-RAW \"{}\"", imap_quote_checked(&to_gmail(q))?))
+    Ok(format!(
+        "X-GM-RAW \"{}\"",
+        imap_quote_checked(&to_gmail(q))?
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -914,7 +929,8 @@ fn fts_term(term: &Term) -> Result<Option<String>, RenderError> {
         Term::Body(s) => Ok(fts_text_term(Some("body_text"), s)),
         Term::Text(s) => Ok(fts_text_term(None, s)),
         Term::To(_) | Term::Cc(_) => Err(RenderError(
-            "to: and cc: are not indexed by --local; drop --local to search them server-side".into(),
+            "to: and cc: are not indexed by --local; drop --local to search them server-side"
+                .into(),
         )),
         Term::Filename(_) => Err(RenderError(
             "filename: search is not available on --local".into(),
@@ -1169,7 +1185,10 @@ mod tests {
         let query = q("in:Archive message-id:<a@b> from:alice");
         assert_eq!(query.in_mailbox, Some("Archive".into()));
         assert_eq!(query.message_id, Some("<a@b>".into()));
-        assert_eq!(query.clauses, vec![Clause::Single(Term::From("alice".into()))]);
+        assert_eq!(
+            query.clauses,
+            vec![Clause::Single(Term::From("alice".into()))]
+        );
     }
 
     #[test]
@@ -1189,7 +1208,11 @@ mod tests {
         assert!(e4.message.contains("expected OR"), "{}", e4.message);
 
         let e5 = parse("(in:X OR a)").unwrap_err();
-        assert!(e5.message.contains("cannot appear inside"), "{}", e5.message);
+        assert!(
+            e5.message.contains("cannot appear inside"),
+            "{}",
+            e5.message
+        );
     }
 
     #[test]
@@ -1259,7 +1282,10 @@ mod tests {
 
     #[test]
     fn gmail_quotes_spaces_and_converts_dates() {
-        assert_eq!(to_gmail(&q("from:\"Ada Lovelace\"")), "from:\"Ada Lovelace\"");
+        assert_eq!(
+            to_gmail(&q("from:\"Ada Lovelace\"")),
+            "from:\"Ada Lovelace\""
+        );
         assert_eq!(to_gmail(&q("after:2026-01-01")), "after:2026/01/01");
         assert_eq!(to_gmail(&q("filename:pdf")), "filename:pdf");
     }
@@ -1366,7 +1392,10 @@ mod tests {
     #[test]
     fn fts_or_group() {
         assert_eq!(
-            to_fts(&q("(invoice OR receipt)")).unwrap().match_expr.as_deref(),
+            to_fts(&q("(invoice OR receipt)"))
+                .unwrap()
+                .match_expr
+                .as_deref(),
             Some("(\"invoice\" OR \"receipt\")")
         );
     }
@@ -1424,7 +1453,14 @@ mod tests {
         let positional =
             parse("subject:\"quarterly report\" after:2026-01-01 before:2026-07-01").unwrap();
         assert_eq!(built, positional);
-        assert!(from_cli("", &Flags { after: Some("nope".into()), ..Default::default() }).is_err());
+        assert!(from_cli(
+            "",
+            &Flags {
+                after: Some("nope".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]
@@ -1447,7 +1483,10 @@ mod tests {
         assert_eq!(gsearch.as_deref(), Some("(invoice OR receipt)"));
         assert!(gfilter.unwrap().contains("hasAttachments eq true")); // Graph server-side
 
-        assert!(fts.match_expr.unwrap().contains("(\"invoice\" OR \"receipt\")"));
+        assert!(fts
+            .match_expr
+            .unwrap()
+            .contains("(\"invoice\" OR \"receipt\")"));
         assert!(fts.has_attachment); // local index column
     }
     // -- to_query_string: the inverse of the parser -------------------------

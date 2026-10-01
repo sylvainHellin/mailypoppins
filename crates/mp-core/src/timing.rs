@@ -97,10 +97,7 @@ impl Drop for TimingSpan {
     fn drop(&mut self) {
         let total_ms = self.start.elapsed().as_millis();
         match &self.context {
-            Some(ctx) => info!(
-                "[TIMING] {} [{}] done: {} ms",
-                self.name, ctx, total_ms
-            ),
+            Some(ctx) => info!("[TIMING] {} [{}] done: {} ms", self.name, ctx, total_ms),
             None => info!("[TIMING] {} done: {} ms", self.name, total_ms),
         }
     }

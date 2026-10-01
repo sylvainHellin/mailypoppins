@@ -509,9 +509,17 @@ impl XAcctFixture {
 #[test]
 fn a_cross_account_drafts_selector_deletes_from_its_own_account() {
     let fx = XAcctFixture::new();
-    fx.draft(XAcctFixture::OTHER, "4cd422197faf4a57", "Cross-account draft");
+    fx.draft(
+        XAcctFixture::OTHER,
+        "4cd422197faf4a57",
+        "Cross-account draft",
+    );
     // A same-id draft in the default account would be the wrong one to touch.
-    fx.draft(XAcctFixture::DEFAULT, "4cd422197faf4a57", "Default-account draft");
+    fx.draft(
+        XAcctFixture::DEFAULT,
+        "4cd422197faf4a57",
+        "Default-account draft",
+    );
 
     // No `-A`: the selector's account is the only thing naming `tum`.
     let out = fx.ok(&["delete", "mp://tum/drafts/4cd422197faf4a57"]);
@@ -519,9 +527,15 @@ fn a_cross_account_drafts_selector_deletes_from_its_own_account() {
 
     // The `tum` draft is gone; the identically-keyed `perso` draft is not.
     let tum_list = fx.ok(&["list", "-A", "tum"]);
-    assert!(!tum_list.contains("4cd422197faf4a57"), "tum draft survived: {tum_list}");
+    assert!(
+        !tum_list.contains("4cd422197faf4a57"),
+        "tum draft survived: {tum_list}"
+    );
     let perso_list = fx.ok(&["list"]);
-    assert!(perso_list.contains("4cd422197faf4a57"), "perso draft was touched: {perso_list}");
+    assert!(
+        perso_list.contains("4cd422197faf4a57"),
+        "perso draft was touched: {perso_list}"
+    );
 }
 
 /// A received-namespace read command honours a cross-account selector too: it
@@ -531,14 +545,22 @@ fn a_cross_account_drafts_selector_deletes_from_its_own_account() {
 #[test]
 fn a_cross_account_received_selector_reads_from_its_own_account() {
     let fx = XAcctFixture::new();
-    fx.ingest(XAcctFixture::OTHER, "inbox", "xacct@example.com", "In tum inbox");
+    fx.ingest(
+        XAcctFixture::OTHER,
+        "inbox",
+        "xacct@example.com",
+        "In tum inbox",
+    );
 
     // Without the fix this reported "no local store yet" or a wrong-store miss
     // against `perso`; now it finds the `tum` message and reports no
     // attachments to save.
     let stderr = fx.err(&["save", "mp://tum/inbox/xacct@example.com"]);
     assert!(stderr.contains("has no attachments"), "{stderr}");
-    assert!(stderr.contains("mp://tum/inbox/xacct@example.com"), "{stderr}");
+    assert!(
+        stderr.contains("mp://tum/inbox/xacct@example.com"),
+        "{stderr}"
+    );
 }
 
 /// A command bound to its account's transport before the selector is parsed

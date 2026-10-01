@@ -37,7 +37,12 @@ fn ingest(email: &mailypoppins::parse::FetchedEmail, mailbox: &str) -> Ingested 
         },
     )
     .unwrap();
-    Ingested { _tmp: tmp, store, blobs, row: outcome.row_id }
+    Ingested {
+        _tmp: tmp,
+        store,
+        blobs,
+        row: outcome.row_id,
+    }
 }
 
 impl Ingested {
@@ -278,7 +283,6 @@ Content-Type: text/html; charset=UTF-8\r
 
 #[test]
 fn outlook_inline_request_saves_sidecar_and_event() {
-
     let email = parse_rfc822_to_fetched_email(OUTLOOK_INLINE_REQUEST.as_bytes()).unwrap();
     assert!(email.calendar_ics.is_some());
     let ev = email.event.clone().expect("event parsed");
@@ -295,9 +299,14 @@ fn outlook_inline_request_saves_sidecar_and_event() {
     // The invite lands as the sidecar-named attachment blob, and as the only
     // attachment: the inline calendar part is never stored twice.
     let ingested = ingest(&email, "inbox");
-    assert_eq!(ingested.attachment_names(), vec![CALENDAR_SIDECAR_NAME.to_string()]);
+    assert_eq!(
+        ingested.attachment_names(),
+        vec![CALENDAR_SIDECAR_NAME.to_string()]
+    );
     let ics = String::from_utf8(
-        ingested.attachment_bytes(CALENDAR_SIDECAR_NAME).expect("sidecar blob"),
+        ingested
+            .attachment_bytes(CALENDAR_SIDECAR_NAME)
+            .expect("sidecar blob"),
     )
     .unwrap();
     assert!(ics.contains("UID:outlook-uid-1@tum.de"));
@@ -306,7 +315,6 @@ fn outlook_inline_request_saves_sidecar_and_event() {
 
 #[test]
 fn google_ics_attachment_request_saves_sidecar_and_event() {
-
     let email = parse_rfc822_to_fetched_email(GOOGLE_ICS_ATTACHMENT_REQUEST.as_bytes()).unwrap();
     let ev = email.event.clone().expect("event parsed");
     assert_eq!(ev.uid.as_deref(), Some("google-uid-1@google.com"));
@@ -315,7 +323,10 @@ fn google_ics_attachment_request_saves_sidecar_and_event() {
 
     // The `.ics` attachment becomes the sidecar blob, never a second copy.
     let ingested = ingest(&email, "inbox");
-    assert_eq!(ingested.attachment_names(), vec![CALENDAR_SIDECAR_NAME.to_string()]);
+    assert_eq!(
+        ingested.attachment_names(),
+        vec![CALENDAR_SIDECAR_NAME.to_string()]
+    );
 }
 
 #[test]
@@ -332,7 +343,11 @@ fn malformed_calendar_part_stays_a_regular_attachment() {
     let email = parse_rfc822_to_fetched_email(MALFORMED_INVITE.as_bytes()).unwrap();
     assert!(email.calendar_ics.is_none(), "not lifted to a sidecar");
     assert!(email.event.is_none());
-    assert_eq!(email.attachments.len(), 1, "preserved as a regular attachment");
+    assert_eq!(
+        email.attachments.len(),
+        1,
+        "preserved as a regular attachment"
+    );
     // Inline calendar part had no filename, so a `.ics` name is synthesized.
     assert!(
         email.attachments[0].filename.ends_with(".ics"),
@@ -340,8 +355,7 @@ fn malformed_calendar_part_stays_a_regular_attachment() {
         email.attachments[0].filename
     );
     assert_eq!(
-        email.attachments[0].content,
-        b"this is not a valid vcalendar payload at all\r\n",
+        email.attachments[0].content, b"this is not a valid vcalendar payload at all\r\n",
         "original bytes preserved intact"
     );
 
@@ -355,7 +369,6 @@ fn malformed_calendar_part_stays_a_regular_attachment() {
 
 #[test]
 fn invite_plus_shared_ics_lifts_invite_and_keeps_document() {
-
     let email = parse_rfc822_to_fetched_email(INVITE_PLUS_SHARED_ICS.as_bytes()).unwrap();
     // The invite is lifted to the sidecar and parsed into an event block.
     let ev = email.event.clone().expect("invite parsed");
@@ -370,7 +383,9 @@ fn invite_plus_shared_ics_lifts_invite_and_keeps_document() {
         "document bytes preserved"
     );
     assert!(
-        email.attachments[0].content.windows(b"my-export-1@example.com".len())
+        email.attachments[0]
+            .content
+            .windows(b"my-export-1@example.com".len())
             .any(|w| w == b"my-export-1@example.com"),
         "the shared export, not the invite, is the attachment"
     );
@@ -378,7 +393,10 @@ fn invite_plus_shared_ics_lifts_invite_and_keeps_document() {
     let ingested = ingest(&email, "inbox");
     assert_eq!(
         ingested.attachment_names(),
-        vec![CALENDAR_SIDECAR_NAME.to_string(), "my-calendar.ics".to_string()],
+        vec![
+            CALENDAR_SIDECAR_NAME.to_string(),
+            "my-calendar.ics".to_string()
+        ],
         "invite first as the sidecar, then the shared document"
     );
     assert!(ingested
@@ -389,23 +407,27 @@ fn invite_plus_shared_ics_lifts_invite_and_keeps_document() {
 
 #[test]
 fn non_imip_ics_export_is_a_plain_attachment() {
-
     let email = parse_rfc822_to_fetched_email(SHARED_ICS_EXPORT_ONLY.as_bytes()).unwrap();
     // No METHOD -> not an invite: no sidecar, no event block.
-    assert!(email.calendar_ics.is_none(), "no sidecar for a plain export");
+    assert!(
+        email.calendar_ics.is_none(),
+        "no sidecar for a plain export"
+    );
     assert!(email.event.is_none(), "no event block for a plain export");
     // Kept as a regular attachment with its original filename.
     assert_eq!(email.attachments.len(), 1);
     assert_eq!(email.attachments[0].filename, "schedule.ics");
 
     let ingested = ingest(&email, "inbox");
-    assert_eq!(ingested.attachment_names(), vec!["schedule.ics".to_string()]);
+    assert_eq!(
+        ingested.attachment_names(),
+        vec!["schedule.ics".to_string()]
+    );
     assert!(ingested.attachment_bytes(CALENDAR_SIDECAR_NAME).is_none());
 }
 
 #[test]
 fn plain_multipart_email_is_unchanged() {
-
     let email = parse_rfc822_to_fetched_email(PLAIN_MULTIPART.as_bytes()).unwrap();
     assert!(email.calendar_ics.is_none());
     assert!(email.event.is_none());
@@ -441,9 +463,9 @@ fn plain_multipart_email_is_unchanged() {
 #[test]
 fn sent_invite_roundtrips_through_receive_parser() {
     use chrono::{TimeZone, Utc};
+    use lettre::message::Message;
     use mailypoppins::invite::{build_invite_ics, generate_uid, InviteSpec};
     use mailypoppins::send::build_invite_mime_body;
-    use lettre::message::Message;
 
     let organizer = "chair@tum.de";
     let uid = generate_uid(organizer);
@@ -480,10 +502,12 @@ fn sent_invite_roundtrips_through_receive_parser() {
     // contract; the application/ics attachment is the optional hardening.
     let raw_str = String::from_utf8_lossy(&raw);
     assert!(raw_str.contains("multipart/mixed"), "top-level mixed");
-    assert!(raw_str.contains("multipart/alternative"), "alternative present");
     assert!(
-        raw_str.contains("text/calendar")
-            && raw_str.to_lowercase().contains("method=request"),
+        raw_str.contains("multipart/alternative"),
+        "alternative present"
+    );
+    assert!(
+        raw_str.contains("text/calendar") && raw_str.to_lowercase().contains("method=request"),
         "inline text/calendar; method=REQUEST is the contract"
     );
     assert!(
@@ -493,11 +517,17 @@ fn sent_invite_roundtrips_through_receive_parser() {
 
     // Round-trip through the #0027 receive path.
     let email = parse_rfc822_to_fetched_email(&raw).unwrap();
-    let ev = email.event.clone().expect("sent invite parsed back as an event");
+    let ev = email
+        .event
+        .clone()
+        .expect("sent invite parsed back as an event");
     assert_eq!(ev.method.as_deref(), Some("REQUEST"));
     assert_eq!(ev.uid.as_deref(), Some(uid.as_str()));
     assert_eq!(ev.sequence, 0);
-    assert_eq!(ev.summary.as_deref(), Some("LOC Day planning, part 2; final"));
+    assert_eq!(
+        ev.summary.as_deref(),
+        Some("LOC Day planning, part 2; final")
+    );
     assert_eq!(ev.location.as_deref(), Some("Room 4.12; TUM"));
     assert_eq!(ev.organizer.as_deref(), Some("chair@tum.de"));
     assert_eq!(ev.start.as_deref(), Some("2026-07-20T12:00:00Z"));
@@ -510,7 +540,9 @@ fn sent_invite_roundtrips_through_receive_parser() {
     // Ingest into the store and confirm the sidecar bytes are the ones kept.
     let ingested = ingest(&email, "sent");
     let ics = String::from_utf8(
-        ingested.attachment_bytes(CALENDAR_SIDECAR_NAME).expect("sidecar blob"),
+        ingested
+            .attachment_bytes(CALENDAR_SIDECAR_NAME)
+            .expect("sidecar blob"),
     )
     .unwrap();
     assert!(ics.contains(&format!("UID:{uid}")));
@@ -542,7 +574,11 @@ impl Mailstore {
         let tmp = tempdir().unwrap();
         let store = mailypoppins::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = mailypoppins::store::BlobStore::new(tmp.path().join("blobs"));
-        Mailstore { _tmp: tmp, store, blobs }
+        Mailstore {
+            _tmp: tmp,
+            store,
+            blobs,
+        }
     }
 
     /// Ingest raw RFC822 bytes through the real parse + ingest path.
@@ -593,7 +629,10 @@ fn only_imip_classified_messages_reach_the_calendar_path() {
     );
     assert!(invites.iter().all(|i| i.method() == "REQUEST"));
     // The zoned Outlook DTSTART survives the round trip through the blob.
-    assert_eq!(invites[0].parsed.start.as_deref(), Some("2026-07-20T14:00:00+02:00"));
+    assert_eq!(
+        invites[0].parsed.start.as_deref(),
+        Some("2026-07-20T14:00:00+02:00")
+    );
     assert_eq!(invites[0].parsed.sequence, 2);
 }
 
@@ -613,7 +652,8 @@ fn an_rsvp_reply_reconciles_against_the_stored_invite() {
     let ics = mailypoppins::store::read::load_invite_ics(&ms.store, &ms.blobs, request)
         .expect("the invite.ics blob");
     let ctx = mailypoppins::invite::reply_context_from_ics(&ics).unwrap();
-    let reply_ics = mailypoppins::invite::build_reply_ics(&ctx, "me@example.com", Rsvp::Declined).unwrap();
+    let reply_ics =
+        mailypoppins::invite::build_reply_ics(&ctx, "me@example.com", Rsvp::Declined).unwrap();
     let built = mailypoppins::send::build_reply_message(
         "me@example.com",
         &ctx.organizer,

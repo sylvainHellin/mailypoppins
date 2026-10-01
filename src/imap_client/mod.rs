@@ -17,10 +17,10 @@ pub use ops::{
     move_email_on_server, remove_flag_on_server,
 };
 pub use pool::{checkout, PooledSession, ServerCaps};
-pub use sent::ImapSentMailbox;
 pub use search::{
     bracketed_message_id, normalize_message_id, retain_exact_message_id, FetchCriteria,
 };
+pub use sent::ImapSentMailbox;
 pub use store_sync::{
     list_mailboxes, list_mailboxes_detailed, sync_mailboxes, ImapBackend, ServerMailbox,
 };
@@ -148,7 +148,10 @@ async fn authenticate_client(
 ) -> anyhow::Result<ImapSession> {
     match imap_config.auth_method {
         AuthMethod::OAuth2 => {
-            info!("IMAP: authenticating via XOAUTH2 for {}", imap_config.username);
+            info!(
+                "IMAP: authenticating via XOAUTH2 for {}",
+                imap_config.username
+            );
             let auth = XOAuth2Authenticator {
                 user: imap_config.username.clone(),
                 access_token: imap_config.password.clone(), // password field holds the access token for OAuth2
@@ -166,9 +169,7 @@ async fn authenticate_client(
                 .map_err(|e| anyhow!("IMAP login failed: {}", e.0))?;
             Ok(session)
         }
-        AuthMethod::Graph => {
-            Err(anyhow!("Graph accounts use Microsoft Graph API, not IMAP"))
-        }
+        AuthMethod::Graph => Err(anyhow!("Graph accounts use Microsoft Graph API, not IMAP")),
     }
 }
 

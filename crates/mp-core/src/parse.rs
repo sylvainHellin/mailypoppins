@@ -46,7 +46,10 @@ fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
 /// finding the first `>` matches browser behaviour and cannot be abused to
 /// swallow the tag.
 fn insert_at_document_start(html: &str, tag: &str) -> String {
-    let ws_len = html.len() - html.trim_start_matches(|c: char| c.is_ascii_whitespace()).len();
+    let ws_len = html.len()
+        - html
+            .trim_start_matches(|c: char| c.is_ascii_whitespace())
+            .len();
     let rest = &html[ws_len..];
     if rest.len() >= 9 && rest.as_bytes()[..9].eq_ignore_ascii_case(b"<!doctype") {
         if let Some(gt) = rest.find('>') {
@@ -93,10 +96,15 @@ pub fn ensure_utf8_charset(html: &str) -> String {
     if let Some(pos) = find_ascii_ci(html, "<head>") {
         let insert = pos + "<head>".len();
         format!("{}{}{}", &html[..insert], meta, &html[insert..])
-    } else if let Some(tag_end) = find_ascii_ci(html, "<html")
-        .and_then(|pos| html[pos..].find('>').map(|i| pos + i + 1))
+    } else if let Some(tag_end) =
+        find_ascii_ci(html, "<html").and_then(|pos| html[pos..].find('>').map(|i| pos + i + 1))
     {
-        format!("{}<head>{}</head>{}", &html[..tag_end], meta, &html[tag_end..])
+        format!(
+            "{}<head>{}</head>{}",
+            &html[..tag_end],
+            meta,
+            &html[tag_end..]
+        )
     } else {
         // No <head>, and either no <html> or an unclosed one (in which case
         // the browser consumes the rest as attributes and renders nothing).
@@ -194,8 +202,10 @@ fn strip_meta_refresh(html: &str) -> String {
             let start = i + off;
             i = start + "<meta".len();
             // The tag name must end here, or this is `<metafoo>`.
-            if !matches!(b.get(i), None | Some(b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'/' | b'>'))
-            {
+            if !matches!(
+                b.get(i),
+                None | Some(b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'/' | b'>')
+            ) {
                 continue;
             }
             let (end, refresh) = scan_meta_attrs(&out, i, &mut memo);
@@ -273,7 +283,10 @@ fn scan_meta_attrs(
         let value = match b.get(i) {
             Some(&q @ (b'"' | b'\'')) => {
                 let start = i + 1;
-                let close = b[start..].iter().position(|&c| c == q).map_or(b.len(), |p| start + p);
+                let close = b[start..]
+                    .iter()
+                    .position(|&c| c == q)
+                    .map_or(b.len(), |p| start + p);
                 i = (close + 1).min(b.len());
                 &html[start..close]
             }
@@ -287,13 +300,18 @@ fn scan_meta_attrs(
             }
         };
         if name.eq_ignore_ascii_case("http-equiv")
-            && decode_char_refs(value).trim().eq_ignore_ascii_case("refresh")
+            && decode_char_refs(value)
+                .trim()
+                .eq_ignore_ascii_case("refresh")
         {
             last_refresh = Some(path.len() - 1);
         }
     };
     for (idx, &pos) in path.iter().enumerate() {
-        memo.insert(pos, (end, tail_refresh || last_refresh.is_some_and(|r| r >= idx)));
+        memo.insert(
+            pos,
+            (end, tail_refresh || last_refresh.is_some_and(|r| r >= idx)),
+        );
     }
     (end, tail_refresh || last_refresh.is_some())
 }
@@ -336,7 +354,13 @@ fn decode_one_ref(s: &str) -> (Option<char>, usize) {
         };
         let len = digits
             .bytes()
-            .take_while(|b| if hex { b.is_ascii_hexdigit() } else { b.is_ascii_digit() })
+            .take_while(|b| {
+                if hex {
+                    b.is_ascii_hexdigit()
+                } else {
+                    b.is_ascii_digit()
+                }
+            })
             .count();
         if len == 0 {
             return (None, 0);
@@ -489,12 +513,13 @@ pub fn html_to_markdown(html: &str) -> String {
 
     // `<br>` -> Markdown hard break; swallow trailing whitespace so the source's
     // own newline after the tag does not add a blank line.
-    let br = BR.get_or_init(|| regex::Regex::new(r"(?is)<br\s*/?>[ \t]*\n?").expect("static br regex"));
+    let br =
+        BR.get_or_init(|| regex::Regex::new(r"(?is)<br\s*/?>[ \t]*\n?").expect("static br regex"));
     let s = br.replace_all(&s, "  \n").into_owned();
 
     // Paragraph / div close -> blank line.
-    let block_end =
-        BLOCK_END.get_or_init(|| regex::Regex::new(r"(?is)</(p|div)>").expect("static block regex"));
+    let block_end = BLOCK_END
+        .get_or_init(|| regex::Regex::new(r"(?is)</(p|div)>").expect("static block regex"));
     let s = block_end.replace_all(&s, "\n\n").into_owned();
 
     // `<img src="...">` -> Markdown image so logos survive the tag strip.
@@ -719,7 +744,9 @@ fn collect_attachments(
             .map(|h| {
                 let val = h.get_value();
                 // Strip angle brackets: <id@host> -> id@host
-                val.trim_start_matches('<').trim_end_matches('>').to_string()
+                val.trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_string()
             });
         if let Ok(content) = parsed.get_body_raw() {
             attachments.push(AttachmentData {
@@ -824,7 +851,11 @@ pub fn sanitize_message_id_for_path(mid: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(mid.as_bytes());
         let digest = hasher.finalize();
-        let hex: String = digest.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+        let hex: String = digest
+            .iter()
+            .take(8)
+            .map(|b| format!("{:02x}", b))
+            .collect();
         return format!("unknown-mid-{}", hex);
     }
     if cleaned.len() > 200 {
@@ -923,8 +954,8 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     }
     // `symlink_metadata`, not `metadata`: a symlink pointing at a directory
     // someone else owns must be rejected, not followed.
-    let meta = fs::symlink_metadata(dir)
-        .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?;
+    let meta =
+        fs::symlink_metadata(dir).map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?;
     if !meta.is_dir() {
         anyhow::bail!(
             "{} exists and is not a directory; refusing to materialise message files there",
@@ -1000,10 +1031,7 @@ pub fn save_attachment(source: &Path, dest_dir: &Path) -> Result<PathBuf> {
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("Source has no file name"))?
         .to_string_lossy();
-    let stem = source
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let stem = source.file_stem().unwrap_or_default().to_string_lossy();
     let ext = source
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
@@ -1109,7 +1137,15 @@ pub fn slugify_subject(subject: &str) -> String {
     let slug: String = subject
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else if c == ' ' { '-' } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else if c == ' ' {
+                '-'
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1312,7 +1348,11 @@ pub fn embed_inline_images(html: &str, images: &[InlineImage]) -> String {
                 Some(c) if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
             );
             rebuilt.push_str(&out[from..start]);
-            rebuilt.push_str(if boundary { &data_uri } else { &out[start..end] });
+            rebuilt.push_str(if boundary {
+                &data_uri
+            } else {
+                &out[start..end]
+            });
             from = end;
         }
         rebuilt.push_str(&out[from..]);
@@ -1344,7 +1384,12 @@ fn collect_inline_images(
     counter: &mut usize,
     out: &mut Vec<InlineImage>,
 ) {
-    if part.ctype.mimetype.to_ascii_lowercase().starts_with("image/") {
+    if part
+        .ctype
+        .mimetype
+        .to_ascii_lowercase()
+        .starts_with("image/")
+    {
         let cid = part
             .headers
             .iter()
@@ -1546,7 +1591,10 @@ mod tests {
 
     #[test]
     fn test_slugify_sender_quoted_display_name() {
-        assert_eq!(slugify_sender("\"John Doe\" <john@example.com>"), "john-doe");
+        assert_eq!(
+            slugify_sender("\"John Doe\" <john@example.com>"),
+            "john-doe"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1579,7 +1627,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_attachment_filename_slashes() {
-        assert_eq!(sanitize_attachment_filename("path/to/file.pdf"), "path_to_file.pdf");
+        assert_eq!(
+            sanitize_attachment_filename("path/to/file.pdf"),
+            "path_to_file.pdf"
+        );
     }
 
     #[test]
@@ -1593,7 +1644,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_attachment_filename_control_chars() {
-        assert_eq!(sanitize_attachment_filename("file\x00name.pdf"), "file_name.pdf");
+        assert_eq!(
+            sanitize_attachment_filename("file\x00name.pdf"),
+            "file_name.pdf"
+        );
     }
 
     #[test]
@@ -1734,7 +1788,12 @@ mod tests {
         let html = "<p>First paragraph</p><p>Second paragraph</p>";
         let result = html_to_plain(html);
         let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert_eq!(non_empty.len(), 2, "Expected 2 non-empty lines, got: {:?}", non_empty);
+        assert_eq!(
+            non_empty.len(),
+            2,
+            "Expected 2 non-empty lines, got: {:?}",
+            non_empty
+        );
         assert!(non_empty[0].contains("First paragraph"));
         assert!(non_empty[1].contains("Second paragraph"));
     }
@@ -1746,7 +1805,12 @@ mod tests {
         let html = format!("<p>{}</p>", long_word);
         let result = html_to_plain(&html);
         let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert_eq!(non_empty.len(), 1, "Expected 1 non-empty line (no hard wrap), got: {:?}", non_empty);
+        assert_eq!(
+            non_empty.len(),
+            1,
+            "Expected 1 non-empty line (no hard wrap), got: {:?}",
+            non_empty
+        );
         assert!(non_empty[0].contains(&long_word));
     }
 
@@ -1755,9 +1819,16 @@ mod tests {
         let html = "<blockquote>quoted text</blockquote>";
         let result = html_to_plain(html);
         let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert!(!non_empty.is_empty(), "Expected at least one non-empty line");
+        assert!(
+            !non_empty.is_empty(),
+            "Expected at least one non-empty line"
+        );
         for line in &non_empty {
-            assert!(line.starts_with("> "), "Expected line to start with '> ', got: {:?}", line);
+            assert!(
+                line.starts_with("> "),
+                "Expected line to start with '> ', got: {:?}",
+                line
+            );
         }
     }
 
@@ -1766,7 +1837,10 @@ mod tests {
         let html = "<blockquote><blockquote>deep quote</blockquote></blockquote>";
         let result = html_to_plain(html);
         let non_empty: Vec<&str> = result.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert!(!non_empty.is_empty(), "Expected at least one non-empty line");
+        assert!(
+            !non_empty.is_empty(),
+            "Expected at least one non-empty line"
+        );
         for line in &non_empty {
             assert!(
                 line.starts_with("> > "),
@@ -1780,9 +1854,20 @@ mod tests {
     fn test_html_to_plain_no_table_borders() {
         let html = "<table><tr><td>cell</td></tr></table>";
         let result = html_to_plain(html);
-        assert!(!result.contains('+'), "Output should not contain '+' table border chars: {:?}", result);
-        assert!(!result.contains("---"), "Output should not contain '---' table border chars: {:?}", result);
-        assert!(result.contains("cell"), "Output should contain the cell text");
+        assert!(
+            !result.contains('+'),
+            "Output should not contain '+' table border chars: {:?}",
+            result
+        );
+        assert!(
+            !result.contains("---"),
+            "Output should not contain '---' table border chars: {:?}",
+            result
+        );
+        assert!(
+            result.contains("cell"),
+            "Output should contain the cell text"
+        );
     }
 
     #[test]
@@ -1854,7 +1939,10 @@ mod tests {
     #[test]
     fn test_extract_email_address_malformed_angle_brackets() {
         // Only opening bracket, no closing
-        assert_eq!(extract_email_address("John <john@x.com"), "John <john@x.com");
+        assert_eq!(
+            extract_email_address("John <john@x.com"),
+            "John <john@x.com"
+        );
     }
 
     #[test]
@@ -2073,13 +2161,19 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let raw = related_message("<img src=\"cid:logo\">", "logo2", "");
         assert!(inline_images(raw.as_bytes(), "<img src=\"cid:logo\">").is_empty());
         let raw = related_message("<img src=\"cid:logo2\">", "logo2", "");
-        assert_eq!(inline_images(raw.as_bytes(), "<img src=\"cid:logo2\">").len(), 1);
+        assert_eq!(
+            inline_images(raw.as_bytes(), "<img src=\"cid:logo2\">").len(),
+            1
+        );
     }
 
     #[test]
     fn cid_matching_ignores_case_and_angle_brackets() {
         let raw = related_message("<img src=\"CID:Logo@X\">", "Logo@X", "");
-        assert_eq!(inline_images(raw.as_bytes(), "<img src=\"CID:Logo@X\">").len(), 1);
+        assert_eq!(
+            inline_images(raw.as_bytes(), "<img src=\"CID:Logo@X\">").len(),
+            1
+        );
     }
 
     #[test]
@@ -2141,7 +2235,10 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
     fn test_ensure_utf8_charset_injects_after_head() {
         let html = "<html><head><title>Test</title></head><body>hi</body></html>";
         let result = ensure_utf8_charset(html);
-        assert!(result.contains("<head><meta charset=\"UTF-8\"><title>"), "{result}");
+        assert!(
+            result.contains("<head><meta charset=\"UTF-8\"><title>"),
+            "{result}"
+        );
     }
 
     #[test]
@@ -2203,18 +2300,30 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let html = format!("<html><head>{tag}<title>t</title></head><body>hi</body></html>");
         let result = inject_csp_meta(&html);
         assert!(!result.contains("evil.example"), "{tag} -> {result}");
-        assert!(!result.to_lowercase().contains("refresh"), "{tag} -> {result}");
-        assert!(result.contains("<title>t</title></head><body>hi</body></html>"), "{result}");
+        assert!(
+            !result.to_lowercase().contains("refresh"),
+            "{tag} -> {result}"
+        );
+        assert!(
+            result.contains("<title>t</title></head><body>hi</body></html>"),
+            "{result}"
+        );
     }
 
     #[test]
     fn test_strip_meta_refresh_stray_quote_in_unquoted_value() {
         // A regex that reads every quote as opening a value matched nothing
         // here; a browser treats the quote as an ordinary character.
-        assert_refresh_stripped(r#"<meta content=0;url=https://evil.example/?a"b http-equiv=refresh>"#);
-        assert_refresh_stripped(r#"<meta content=0;url=https://evil.example/?a'b http-equiv=refresh>"#);
+        assert_refresh_stripped(
+            r#"<meta content=0;url=https://evil.example/?a"b http-equiv=refresh>"#,
+        );
+        assert_refresh_stripped(
+            r#"<meta content=0;url=https://evil.example/?a'b http-equiv=refresh>"#,
+        );
         // A stray quote inside an attribute name is ordinary too.
-        assert_refresh_stripped(r#"<meta a"b http-equiv=refresh content=0;url=https://evil.example/>"#);
+        assert_refresh_stripped(
+            r#"<meta a"b http-equiv=refresh content=0;url=https://evil.example/>"#,
+        );
     }
 
     #[test]
@@ -2242,13 +2351,19 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         // A comment ends at its first `-->`, so the refresh after it is live
         // even though a naive tag scan from the commented `<meta` swallows it.
         let comment = r#"<!-- <meta name="x --> <meta http-equiv=refresh content=0;url=https://evil.example/> " -->"#;
-        assert!(!inject_csp_meta(comment).contains("evil.example"), "{comment}");
+        assert!(
+            !inject_csp_meta(comment).contains("evil.example"),
+            "{comment}"
+        );
         for wrapped in [
             "<noscript><meta http-equiv=refresh content=0;url=https://evil.example/></noscript>",
             "<template><meta http-equiv=refresh content=0;url=https://evil.example/></template>",
             r#"<div title="<meta a='"> <meta http-equiv=refresh content=0;url=https://evil.example/>"#,
         ] {
-            assert!(!inject_csp_meta(wrapped).contains("evil.example"), "{wrapped}");
+            assert!(
+                !inject_csp_meta(wrapped).contains("evil.example"),
+                "{wrapped}"
+            );
         }
     }
 
@@ -2274,7 +2389,11 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let html = "<meta a=\"".repeat(50_000);
         let started = std::time::Instant::now();
         assert_eq!(strip_meta_refresh(&html), html);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -2292,16 +2411,23 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let html = "<!DOCTYPE html><html><head></head><body>hi</body></html>";
         let result = inject_csp_meta(html);
         // After the doctype (so standards mode is preserved), before all else.
-        assert!(result.starts_with(&format!("<!DOCTYPE html>{CSP_META}<html>")), "{result}");
+        assert!(
+            result.starts_with(&format!("<!DOCTYPE html>{CSP_META}<html>")),
+            "{result}"
+        );
     }
 
     #[test]
     fn test_inject_csp_meta_comment_fake_head() {
         // A <head> hidden in a comment must not lure the tag into the comment
         // (where the browser would never see it).
-        let html = "<html><!--<head>--><head><script>alert(1)</script></head><body>hi</body></html>";
+        let html =
+            "<html><!--<head>--><head><script>alert(1)</script></head><body>hi</body></html>";
         let result = inject_csp_meta(html);
-        assert!(result.find(CSP_META).unwrap() < result.find("<!--").unwrap(), "{result}");
+        assert!(
+            result.find(CSP_META).unwrap() < result.find("<!--").unwrap(),
+            "{result}"
+        );
     }
 
     #[test]
@@ -2310,7 +2436,10 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         // the attribute (where it would be inert text).
         let html = r#"<html data-x="<head>"><head><script>alert(1)</script></head></html>"#;
         let result = inject_csp_meta(html);
-        assert!(result.find(CSP_META).unwrap() < result.find("data-x").unwrap(), "{result}");
+        assert!(
+            result.find(CSP_META).unwrap() < result.find("data-x").unwrap(),
+            "{result}"
+        );
     }
 
     #[test]
@@ -2342,7 +2471,10 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         assert!(!result.contains("default-src *"), "{result}");
         assert!(result.contains(CSP_META), "{result}");
         assert_eq!(
-            result.to_lowercase().matches("content-security-policy").count(),
+            result
+                .to_lowercase()
+                .matches("content-security-policy")
+                .count(),
             1
         );
     }

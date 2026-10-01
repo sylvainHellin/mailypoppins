@@ -275,7 +275,10 @@ pub fn remove_handle_dir(id: &HandleId) {
 pub fn remove_leftover_handles() {
     let dir = super::runtime::runtime_dir().join(HANDLES_DIR);
     match std::fs::remove_dir_all(&dir) {
-        Ok(()) => info!("[daemon] removed the handles a previous daemon left in {}", dir.display()),
+        Ok(()) => info!(
+            "[daemon] removed the handles a previous daemon left in {}",
+            dir.display()
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => warn!("[daemon] could not remove {}: {e}", dir.display()),
     }

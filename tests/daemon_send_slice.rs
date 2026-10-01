@@ -1927,7 +1927,10 @@ fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
         assert_eq!(direct.status.code(), Some(0), "oracle `mp {command}`");
         let ours = flags(&stdout(&routed));
         let theirs = flags(&stdout(&direct));
-        assert!(theirs.len() > 2, "the oracle's `mp {command}` lists its flags");
+        assert!(
+            theirs.len() > 2,
+            "the oracle's `mp {command}` lists its flags"
+        );
         let missing: Vec<&String> = theirs.difference(&ours).collect();
         assert!(
             missing.is_empty(),
@@ -2009,8 +2012,15 @@ fn mp_outbox_list_json_prints_the_listing_as_json() {
     assert_eq!(listing["ever_used"], true);
     assert!(listing["counts"].is_object(), "{listing}");
     let rows = listing["rows"].as_array().expect("a rows array");
-    let mids: Vec<&str> = rows.iter().filter_map(|r| r["message_id"].as_str()).collect();
-    for mid in [fixture::QUEUED_MID, fixture::FAILED_MID, fixture::PARTIAL_MID] {
+    let mids: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["message_id"].as_str())
+        .collect();
+    for mid in [
+        fixture::QUEUED_MID,
+        fixture::FAILED_MID,
+        fixture::PARTIAL_MID,
+    ] {
         assert!(mids.contains(&mid), "{mid} missing from {mids:?}");
     }
     assert!(rows.iter().all(|r| r["id"].is_i64()), "{listing}");

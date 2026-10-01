@@ -198,10 +198,19 @@ mod tests {
             false,
         ));
         let text = render_text(&mut app, 60, 14);
-        assert!(text.contains("Reply-To:"), "missing Reply-To label:\n{text}");
-        assert!(text.contains("noreply@example.com"), "missing Reply-To value:\n{text}");
+        assert!(
+            text.contains("Reply-To:"),
+            "missing Reply-To label:\n{text}"
+        );
+        assert!(
+            text.contains("noreply@example.com"),
+            "missing Reply-To value:\n{text}"
+        );
         assert!(text.contains("Bcc:"), "missing Bcc label:\n{text}");
-        assert!(text.contains("blind@example.com"), "missing Bcc value:\n{text}");
+        assert!(
+            text.contains("blind@example.com"),
+            "missing Bcc value:\n{text}"
+        );
     }
 
     /// A message without those headers draws neither row: no empty labelled
@@ -210,9 +219,15 @@ mod tests {
     fn reply_to_and_bcc_absent_when_missing() {
         let mut app = app_showing(entry(None, Some("   "), false));
         let text = render_text(&mut app, 60, 14);
-        assert!(!text.contains("Reply-To:"), "unexpected Reply-To row:\n{text}");
+        assert!(
+            !text.contains("Reply-To:"),
+            "unexpected Reply-To row:\n{text}"
+        );
         // A blank Bcc is treated as absent, not drawn as an empty row.
-        assert!(!text.contains("Bcc:"), "blank Bcc must not draw a row:\n{text}");
+        assert!(
+            !text.contains("Bcc:"),
+            "blank Bcc must not draw a row:\n{text}"
+        );
     }
 
     /// A message with attachments shows the attachment affordance, matching the
@@ -222,11 +237,17 @@ mod tests {
         let mut app = app_showing(entry(None, None, true));
         let text = render_text(&mut app, 60, 14);
         assert!(text.contains("Attach:"), "missing attachment row:\n{text}");
-        assert!(text.contains(ATTACHMENT_GLYPH), "missing paperclip glyph:\n{text}");
+        assert!(
+            text.contains(ATTACHMENT_GLYPH),
+            "missing paperclip glyph:\n{text}"
+        );
 
         let mut plain = app_showing(entry(None, None, false));
         let plain_text = render_text(&mut plain, 60, 14);
-        assert!(!plain_text.contains("Attach:"), "attachment row on plain mail:\n{plain_text}");
+        assert!(
+            !plain_text.contains("Attach:"),
+            "attachment row on plain mail:\n{plain_text}"
+        );
     }
 
     /// Header scroll is clamped to the content: when everything fits, `j` at
@@ -239,7 +260,10 @@ mod tests {
         app.headers_scroll = 50;
         // A tall pane the few header rows fit inside: max_scroll is zero.
         let _ = render_text(&mut app, 60, 20);
-        assert_eq!(app.headers_scroll, 0, "scroll must not run past the content");
+        assert_eq!(
+            app.headers_scroll, 0,
+            "scroll must not run past the content"
+        );
     }
 
     /// With no message selected the scroll offset is reset rather than left

@@ -596,8 +596,7 @@ mod tests {
         let other = tmp.path().join("other");
         fs::create_dir_all(&other).expect("other");
         fs::write(other.join("mp"), b"#!/bin/sh\n").expect("other mp");
-        fs::set_permissions(other.join("mp"), fs::Permissions::from_mode(0o755))
-            .expect("chmod");
+        fs::set_permissions(other.join("mp"), fs::Permissions::from_mode(0o755)).expect("chmod");
         assert_eq!(
             service_exe(real.clone(), Some(other.into_os_string())),
             real,

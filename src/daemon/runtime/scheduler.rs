@@ -243,7 +243,11 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 0, "not before the interval");
         tokio::time::sleep(INTERVAL).await;
         assert_eq!(fired.load(Ordering::SeqCst), 1);
-        assert_eq!(bodies.load(Ordering::SeqCst), 1, "the scheduled tick ran a body");
+        assert_eq!(
+            bodies.load(Ordering::SeqCst),
+            1,
+            "the scheduled tick ran a body"
+        );
         tokio::time::sleep(INTERVAL).await;
         assert_eq!(fired.load(Ordering::SeqCst), 2);
 
@@ -295,7 +299,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bodies = Arc::new(AtomicUsize::new(0));
         let runtime = started(dir.path(), &bodies);
-        assert!(schedulable(&runtime, &config()).is_some(), "the default schedules");
+        assert!(
+            schedulable(&runtime, &config()).is_some(),
+            "the default schedules"
+        );
 
         let mut off = config();
         off.imap.sync_interval_secs = 0;

@@ -387,7 +387,10 @@ mod tests {
             created.source, None,
             "a message the store does not hold has no id and no selector to answer with"
         );
-        assert_eq!(created.subject, "Re: Angebot", "the subject the file was written with");
+        assert_eq!(
+            created.subject, "Re: Angebot",
+            "the subject the file was written with"
+        );
     }
 
     /// A message with no `Message-ID` and no Cc decodes, which is the hit a

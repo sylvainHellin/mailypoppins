@@ -61,7 +61,12 @@ fn ingest_raw(raw: &[u8]) -> IngestedRow {
         },
     )
     .unwrap();
-    IngestedRow { _tmp: tmp, store, blobs, row: outcome.row_id }
+    IngestedRow {
+        _tmp: tmp,
+        store,
+        blobs,
+        row: outcome.row_id,
+    }
 }
 
 impl IngestedRow {

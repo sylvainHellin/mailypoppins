@@ -85,10 +85,16 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
 
         let mut spans = vec![
             Span::styled("/", Style::default().fg(theme::active().accent_alt)),
-            Span::styled(app.activity_filter.as_str(), Style::default().fg(theme::active().text)),
+            Span::styled(
+                app.activity_filter.as_str(),
+                Style::default().fg(theme::active().text),
+            ),
         ];
         if app.activity_filter_active {
-            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::active().accent_alt)));
+            spans.push(Span::styled(
+                "\u{2588}",
+                Style::default().fg(theme::active().accent_alt),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
         chunks[1]
@@ -120,7 +126,10 @@ pub(super) fn render_activity_overlay(app: &mut App, frame: &mut Frame, area: Re
 
         if msg_width == 0 || entry.message.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled(format!(" {time}  "), Style::default().fg(theme::active().text_faint)),
+                Span::styled(
+                    format!(" {time}  "),
+                    Style::default().fg(theme::active().text_faint),
+                ),
                 Span::styled(&entry.message, Style::default().fg(color)),
             ]));
             continue;

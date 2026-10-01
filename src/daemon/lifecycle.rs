@@ -508,8 +508,7 @@ fn spawn_account_runtimes(state: Arc<DaemonState>) {
         let state = Arc::clone(&state);
         let account = account_config.name.clone();
         tokio::spawn(async move {
-            if !start_configured(&state.config, &state.runtimes, &state.canonical, &account).await
-            {
+            if !start_configured(&state.config, &state.runtimes, &state.canonical, &account).await {
                 return;
             }
             // The runtime that just reported is half of `account:<name>`'s

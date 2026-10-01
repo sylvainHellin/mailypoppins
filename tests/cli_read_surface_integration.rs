@@ -112,14 +112,24 @@ default_from = "beta@example.com"
         "alpha",
         "inbox",
         2,
-        &email("bot@example.com", "Kickoff", "Wed, 1 Jul 2026 09:00:00 +0200", "kickoff\n"),
+        &email(
+            "bot@example.com",
+            "Kickoff",
+            "Wed, 1 Jul 2026 09:00:00 +0200",
+            "kickoff\n",
+        ),
     );
     ingest(
         &data,
         "alpha",
         "sent",
         1,
-        &email("alpha@example.com", "Re-Bericht", "Mon, 29 Jun 2026 12:00:00 +0000", "sent\n"),
+        &email(
+            "alpha@example.com",
+            "Re-Bericht",
+            "Mon, 29 Jun 2026 12:00:00 +0000",
+            "sent\n",
+        ),
     );
 
     // The other account's message: only a selector that names `beta` may reach
@@ -129,7 +139,12 @@ default_from = "beta@example.com"
         "beta",
         "inbox",
         1,
-        &email("someone@example.com", "Only-In-Beta", "Fri, 1 May 2026 05:00:00 +0000", "beta body\n"),
+        &email(
+            "someone@example.com",
+            "Only-In-Beta",
+            "Fri, 1 May 2026 05:00:00 +0000",
+            "beta body\n",
+        ),
     );
 
     SandboxRoot::new(tmp, data)
@@ -160,13 +175,22 @@ fn show_prints_one_message_from_a_bare_key() {
     let (ok, stdout, stderr) = run(&tmp, &["show", "Bericht@example.com"]);
     assert!(ok, "mp show failed: {stderr}");
 
-    assert!(stdout.contains("From: Ivana <ivana@example.com>"), "{stdout}");
+    assert!(
+        stdout.contains("From: Ivana <ivana@example.com>"),
+        "{stdout}"
+    );
     assert!(stdout.contains("Cc: petzold@example.com"), "{stdout}");
     assert!(stdout.contains("Subject: Bericht"), "{stdout}");
-    assert!(stdout.contains("Selector: mp://alpha/inbox/Bericht@example.com"), "{stdout}");
+    assert!(
+        stdout.contains("Selector: mp://alpha/inbox/Bericht@example.com"),
+        "{stdout}"
+    );
     assert!(stdout.contains("Flags: read"), "{stdout}");
     assert!(stdout.contains("notes.pdf (14 B)"), "{stdout}");
-    assert!(stdout.trim_end().ends_with("the body of the report"), "{stdout}");
+    assert!(
+        stdout.trim_end().ends_with("the body of the report"),
+        "{stdout}"
+    );
 }
 
 /// `--json` is the parseable half, and the one output nothing can misread: the
@@ -195,7 +219,10 @@ fn a_selector_naming_another_account_reads_that_accounts_store() {
     let tmp = fixture_tree();
     let (ok, stdout, stderr) = run(&tmp, &["show", "mp://beta/inbox/Only-In-Beta@example.com"]);
     assert!(ok, "mp show across accounts failed: {stderr}");
-    assert!(stdout.contains("Selector: mp://beta/inbox/Only-In-Beta@example.com"), "{stdout}");
+    assert!(
+        stdout.contains("Selector: mp://beta/inbox/Only-In-Beta@example.com"),
+        "{stdout}"
+    );
     assert!(stdout.trim_end().ends_with("beta body"), "{stdout}");
 }
 
@@ -214,21 +241,33 @@ fn a_missing_message_is_a_clear_error() {
 #[test]
 fn list_messages_lists_one_mailbox_of_one_account() {
     let tmp = fixture_tree();
-    let (ok, stdout, stderr) = run(&tmp, &["list-messages", "-A", "alpha", "--mailbox", "inbox"]);
+    let (ok, stdout, stderr) = run(
+        &tmp,
+        &["list-messages", "-A", "alpha", "--mailbox", "inbox"],
+    );
     assert!(ok, "mp list-messages failed: {stderr}");
 
     assert!(stdout.contains("Inbox (2 of 2):"), "{stdout}");
-    assert!(stdout.contains("mp://alpha/inbox/Bericht@example.com"), "{stdout}");
-    assert!(stdout.contains("mp://alpha/inbox/Kickoff@example.com"), "{stdout}");
-    assert!(!stdout.contains("Re-Bericht"), "the sent mailbox is not listed: {stdout}");
-    assert!(!stdout.contains("Only-In-Beta"), "another account is never listed: {stdout}");
+    assert!(
+        stdout.contains("mp://alpha/inbox/Bericht@example.com"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("mp://alpha/inbox/Kickoff@example.com"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Re-Bericht"),
+        "the sent mailbox is not listed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Only-In-Beta"),
+        "another account is never listed: {stdout}"
+    );
     assert!(stdout.contains("Shown: 2 | In the store: 2"), "{stdout}");
 
     // The order is the store's, which `read::list_mailbox` and the TUI share.
-    let store = Store::open(
-        tmp.path().join("data/accounts/alpha/store.sqlite3"),
-    )
-    .expect("store");
+    let store = Store::open(tmp.path().join("data/accounts/alpha/store.sqlite3")).expect("store");
     let rows = mailypoppins::store::read::list_mailbox(&store, "alpha", "inbox").expect("rows");
     let printed: Vec<&str> = stdout
         .lines()
@@ -251,7 +290,10 @@ fn list_messages_groups_every_mailbox_and_limits_per_group() {
     assert!(ok, "mp list-messages failed: {stderr}");
 
     assert!(stdout.contains("Inbox (1 of 2):"), "{stdout}");
-    assert!(stdout.contains("Sent (1 of 1):"), "the limit is per mailbox: {stdout}");
+    assert!(
+        stdout.contains("Sent (1 of 1):"),
+        "the limit is per mailbox: {stdout}"
+    );
     assert!(stdout.contains("Shown: 2 | In the store: 3"), "{stdout}");
 }
 
@@ -292,12 +334,18 @@ fn list_json_prints_the_draft_listing_as_json_on_a_clean_stdout() {
 
     let (ok, stdout, stderr) = run(&tmp, &["list", "--json"]);
     assert!(ok, "mp list --json failed: {stderr}");
-    let listing: serde_json::Value =
-        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
+    let listing: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
     assert_eq!(listing["account"], "alpha");
     let rows = listing["drafts"].as_array().expect("a drafts array");
     assert_eq!(rows.len(), 1, "{stdout}");
     assert_eq!(rows[0]["status"], "draft");
-    assert!(rows[0]["selector"].as_str().unwrap().starts_with("mp://alpha/drafts/"));
-    assert!(stderr.contains("broken.md"), "the skip warning stays on stderr: {stderr}");
+    assert!(rows[0]["selector"]
+        .as_str()
+        .unwrap()
+        .starts_with("mp://alpha/drafts/"));
+    assert!(
+        stderr.contains("broken.md"),
+        "the skip warning stays on stderr: {stderr}"
+    );
 }

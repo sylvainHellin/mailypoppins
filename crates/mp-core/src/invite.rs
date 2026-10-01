@@ -141,7 +141,12 @@ pub fn parse_duration(input: &str) -> Result<Duration> {
     } else {
         parse_short_duration(s)
     }
-    .ok_or_else(|| anyhow!("Unrecognized duration '{}'. Use ISO8601 (PT1H30M) or short form (1h30m).", input))?;
+    .ok_or_else(|| {
+        anyhow!(
+            "Unrecognized duration '{}'. Use ISO8601 (PT1H30M) or short form (1h30m).",
+            input
+        )
+    })?;
 
     if secs <= 0 {
         return Err(anyhow!("Duration must be positive: {}", input));
@@ -252,7 +257,9 @@ pub fn build_invite_ics(spec: &InviteSpec) -> Result<String> {
         return Err(anyhow!("Invite organizer is empty"));
     }
     if spec.attendees.is_empty() {
-        return Err(anyhow!("Invite has no attendees (need at least one --to/--cc)"));
+        return Err(anyhow!(
+            "Invite has no attendees (need at least one --to/--cc)"
+        ));
     }
     if spec.end <= spec.start {
         return Err(anyhow!("Invite end must be after start"));
@@ -513,7 +520,9 @@ pub fn resolve_times(
     let start_dt = parse_datetime(start).context("Invalid --start")?;
     let end_dt = match (end, duration) {
         (Some(_), Some(_)) => {
-            return Err(anyhow!("Provide exactly one of --end or --duration, not both"))
+            return Err(anyhow!(
+                "Provide exactly one of --end or --duration, not both"
+            ))
         }
         (Some(e), None) => parse_datetime(e).context("Invalid --end")?,
         (None, Some(d)) => start_dt + parse_duration(d).context("Invalid --duration")?,
@@ -560,7 +569,10 @@ mod tests {
         assert_eq!(domain, "example.com");
 
         // Two calls must not collide.
-        assert_ne!(generate_uid("me@example.com"), generate_uid("me@example.com"));
+        assert_ne!(
+            generate_uid("me@example.com"),
+            generate_uid("me@example.com")
+        );
 
         // No `@domain` in the organizer -> fixed fallback suffix.
         let fallback = generate_uid("nobody");
@@ -605,7 +617,8 @@ mod tests {
 
     #[test]
     fn resolve_times_end_and_duration() {
-        let (s, e) = resolve_times("2026-07-20T12:00:00Z", Some("2026-07-20T13:00:00Z"), None).unwrap();
+        let (s, e) =
+            resolve_times("2026-07-20T12:00:00Z", Some("2026-07-20T13:00:00Z"), None).unwrap();
         assert_eq!(e - s, Duration::hours(1));
         let (s, e) = resolve_times("2026-07-20T12:00:00Z", None, Some("PT90M")).unwrap();
         assert_eq!(e - s, Duration::minutes(90));
@@ -746,13 +759,22 @@ END:VCALENDAR\r
     #[test]
     fn reply_context_extracts_uid_sequence_organizer_from_sidecar() {
         let ctx = reply_context_from_ics(RECEIVED_REQUEST.as_bytes()).unwrap();
-        assert_eq!(ctx.uid, "040000008200E00074C5B7101A82E00800000000@outlook.com");
+        assert_eq!(
+            ctx.uid,
+            "040000008200E00074C5B7101A82E00800000000@outlook.com"
+        );
         assert_eq!(ctx.sequence, 3);
         assert_eq!(ctx.summary.as_deref(), Some("LOC Day planning"));
         assert_eq!(ctx.organizer, "chair@tum.de");
         // DTSTART/DTEND carried through verbatim (UTC `Z` form).
-        assert_eq!(ctx.dtstart.as_ref().map(|p| p.value()), Some("20260720T120000Z"));
-        assert_eq!(ctx.dtend.as_ref().map(|p| p.value()), Some("20260720T130000Z"));
+        assert_eq!(
+            ctx.dtstart.as_ref().map(|p| p.value()),
+            Some("20260720T120000Z")
+        );
+        assert_eq!(
+            ctx.dtend.as_ref().map(|p| p.value()),
+            Some("20260720T130000Z")
+        );
         assert!(ctx.duration.is_none());
     }
 
@@ -791,7 +813,11 @@ END:VCALENDAR\r
                 ics
             );
             // ORGANIZER echoed so the organizer's client threads it correctly.
-            assert!(ics.contains("ORGANIZER:mailto:chair@tum.de"), "ics=\n{}", ics);
+            assert!(
+                ics.contains("ORGANIZER:mailto:chair@tum.de"),
+                "ics=\n{}",
+                ics
+            );
             // Whole-series only: no per-occurrence RECURRENCE-ID (D6).
             assert!(!ics.contains("RECURRENCE-ID"), "ics=\n{}", ics);
             // A REPLY attendee carries no RSVP parameter (that lives on REQUEST).

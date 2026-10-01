@@ -156,7 +156,9 @@ pub(super) fn render_action_button(
         .fg(super::super::theme::active().panel_contrast_fg())
         .add_modifier(Modifier::BOLD);
     frame.render_widget(
-        Paragraph::new(text).style(style).alignment(Alignment::Center),
+        Paragraph::new(text)
+            .style(style)
+            .alignment(Alignment::Center),
         rect,
     );
 }

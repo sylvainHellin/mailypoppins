@@ -259,8 +259,16 @@ pub fn ingest_message_with_policy(
         .conn()
         .unchecked_transaction()
         .context("opening ingest transaction")?;
-    let outcome =
-        ingest_in_tx(&tx, blobs, input, &message_id, &in_reply_to, &references, &refs, rebind)?;
+    let outcome = ingest_in_tx(
+        &tx,
+        blobs,
+        input,
+        &message_id,
+        &in_reply_to,
+        &references,
+        &refs,
+        rebind,
+    )?;
     tx.commit().context("committing ingest transaction")?;
     span.mark("committed");
 
@@ -361,8 +369,7 @@ fn ingest_in_tx(
         .raw
         .map(|r| r.len() as i64)
         .unwrap_or_else(|| refs.iter().map(|r| r.size as i64).sum());
-    let has_attachments =
-        email.has_attachments || refs.iter().any(|r| r.kind == KIND_ATTACHMENT);
+    let has_attachments = email.has_attachments || refs.iter().any(|r| r.kind == KIND_ATTACHMENT);
 
     // 3. Write the row.
     let row_id = match existing.as_ref() {
@@ -453,16 +460,20 @@ fn ingest_in_tx(
     for r in refs {
         blobs.acquire(tx, &r.hash, r.size)?;
     }
-    tx.execute(
-        "DELETE FROM message_blobs WHERE message_row = ?1",
-        [row_id],
-    )
-    .context("clearing the previous blob references")?;
+    tx.execute("DELETE FROM message_blobs WHERE message_row = ?1", [row_id])
+        .context("clearing the previous blob references")?;
     for r in refs {
         tx.execute(
             "INSERT INTO message_blobs (message_row, kind, ordinal, hash, filename, size)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![row_id, r.kind, r.ordinal, r.hash.as_str(), r.filename, r.size as i64],
+            rusqlite::params![
+                row_id,
+                r.kind,
+                r.ordinal,
+                r.hash.as_str(),
+                r.filename,
+                r.size as i64
+            ],
         )
         .context("recording a blob reference")?;
     }
@@ -522,7 +533,10 @@ fn rebindable_row(
         .query((input.account, input.mailbox, message_id))
         .context("looking up the message through the message_id index")?;
     let mut declined: Option<i64> = None;
-    while let Some(row) = rows.next().context("reading a message_id index candidate")? {
+    while let Some(row) = rows
+        .next()
+        .context("reading a message_id index candidate")?
+    {
         let id: i64 = row.get(0)?;
         let thread: Option<String> = row.get(1)?;
         let uid: i64 = row.get(2)?;
@@ -756,7 +770,13 @@ pub fn record_mailbox_cursor(
             uidvalidity = excluded.uidvalidity,
             uidnext = excluded.uidnext,
             exists_count = excluded.exists_count",
-        rusqlite::params![account, mailbox, cursor.uidvalidity, cursor.uidnext, cursor.exists],
+        rusqlite::params![
+            account,
+            mailbox,
+            cursor.uidvalidity,
+            cursor.uidnext,
+            cursor.exists
+        ],
     )
     .context("recording the mailbox row")?;
 
@@ -859,9 +879,9 @@ pub fn unbind_rows_on_uids(store: &Store, account: &str, mailbox: &str, uids: &[
     let listed: std::collections::HashSet<i64> = uids.iter().map(|&uid| uid as i64).collect();
     let conn = store.conn();
     let squatters: Vec<i64> = {
-        let mut stmt = match conn.prepare(
-            "SELECT id, uid FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid > 0",
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT id, uid FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid > 0")
+        {
             Ok(stmt) => stmt,
             Err(e) => {
                 warn!("Failed to read the rows of '{mailbox}' to unbind: {e:#}");
@@ -1034,7 +1054,9 @@ pub fn apply_flag(
 ) -> Result<bool> {
     let conn = store.conn();
     let current: Option<Option<String>> = conn
-        .prepare_cached("SELECT flags FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid = ?3")
+        .prepare_cached(
+            "SELECT flags FROM messages WHERE account = ?1 AND mailbox = ?2 AND uid = ?3",
+        )
         .context("preparing the flag read")?
         .query_row(rusqlite::params![account, mailbox, uid], |row| row.get(0))
         .optional()
@@ -1042,7 +1064,8 @@ pub fn apply_flag(
     let Some(current) = current else {
         return Ok(false);
     };
-    let flags = resolve(MessageFlags::parse(current.as_deref().unwrap_or_default())).to_flag_string();
+    let flags =
+        resolve(MessageFlags::parse(current.as_deref().unwrap_or_default())).to_flag_string();
     let changed = conn
         .prepare_cached(
             "UPDATE messages SET flags = ?4
@@ -1076,7 +1099,9 @@ pub fn apply_flags(
         store,
         account,
         mailbox,
-        flags.into_iter().map(|(uid, server)| (uid, move |_| server)),
+        flags
+            .into_iter()
+            .map(|(uid, server)| (uid, move |_| server)),
     )
 }
 
@@ -1490,7 +1515,10 @@ impl KnownUids {
     ///
     /// No stored UIDVALIDITY (a first sync) and no reported one (a server that
     /// omits it) are both "cannot tell", which leaves the skip list alone.
-    pub fn resolve(mut self, server_uidvalidity: Option<u32>) -> (std::collections::HashSet<i64>, bool) {
+    pub fn resolve(
+        mut self,
+        server_uidvalidity: Option<u32>,
+    ) -> (std::collections::HashSet<i64>, bool) {
         let reset = matches!(
             (self.uidvalidity, server_uidvalidity),
             (Some(stored), Some(seen)) if stored != seen as i64
@@ -1642,6 +1670,9 @@ mod tests {
     #[test]
     fn snippets_collapse_whitespace_and_are_bounded() {
         assert_eq!(snippet_for("hello\r\n\r\n  world\t"), "hello world");
-        assert_eq!(snippet_for(&"x ".repeat(400)).chars().count(), SNIPPET_CHARS);
+        assert_eq!(
+            snippet_for(&"x ".repeat(400)).chars().count(),
+            SNIPPET_CHARS
+        );
     }
 }

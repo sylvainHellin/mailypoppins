@@ -265,15 +265,15 @@ pub fn event_card_lines(event: &EventFrontmatter, is_sent: bool) -> Vec<Line<'st
     if !is_sent {
         lines.push(Line::from(vec![
             Span::styled("Your RSVP: ", label_style),
-            Span::styled(
-                humanize_status(&event.rsvp),
-                rsvp_style(&event.rsvp),
-            ),
+            Span::styled(humanize_status(&event.rsvp), rsvp_style(&event.rsvp)),
         ]));
     }
 
     if !event.attendees.is_empty() {
-        lines.push(Line::from(Span::styled("Attendees:".to_string(), label_style)));
+        lines.push(Line::from(Span::styled(
+            "Attendees:".to_string(),
+            label_style,
+        )));
         for att in &event.attendees {
             lines.push(Line::from(vec![
                 Span::styled(format!("  {} — ", att.address), value_style),
@@ -738,8 +738,14 @@ mod event_card_tests {
             rsvp: "accepted".to_string(),
             recurrence: "Weekly on Monday".to_string(),
             attendees: vec![
-                EventAttendee { address: "a@example.com".to_string(), status: "accepted".to_string() },
-                EventAttendee { address: "b@example.com".to_string(), status: "needs-action".to_string() },
+                EventAttendee {
+                    address: "a@example.com".to_string(),
+                    status: "accepted".to_string(),
+                },
+                EventAttendee {
+                    address: "b@example.com".to_string(),
+                    status: "needs-action".to_string(),
+                },
             ],
             ..Default::default()
         }
@@ -760,7 +766,10 @@ mod event_card_tests {
         assert!(text.contains("Your RSVP: Accepted"), "text=\n{text}");
         assert!(text.contains("a@example.com"));
         assert!(text.contains("No response yet")); // b@ needs-action
-        assert!(text.to_lowercase().contains("not synced to exchange"), "caveat missing:\n{text}");
+        assert!(
+            text.to_lowercase().contains("not synced to exchange"),
+            "caveat missing:\n{text}"
+        );
         assert!(text.contains("Press V to respond"));
     }
 
@@ -789,8 +798,14 @@ mod event_card_tests {
             .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Cancelled by the organizer."), "text=\n{text}");
-        assert!(text.contains("LOC Day planning"), "the event is still shown");
+        assert!(
+            text.contains("Cancelled by the organizer."),
+            "text=\n{text}"
+        );
+        assert!(
+            text.contains("LOC Day planning"),
+            "the event is still shown"
+        );
         assert!(text.contains("Room 4.12"));
         assert!(
             !text.contains("Press V to respond"),
@@ -846,10 +861,17 @@ mod event_card_tests {
     #[test]
     fn card_handles_minimal_event() {
         let ev = EventFrontmatter {
-            uid: None, method: Some("REQUEST".to_string()), sequence: 0,
-            summary: None, start: None, end: None, location: None,
-            organizer: None, rsvp: "needs-action".to_string(),
-            recurrence: String::new(), attendees: vec![],
+            uid: None,
+            method: Some("REQUEST".to_string()),
+            sequence: 0,
+            summary: None,
+            start: None,
+            end: None,
+            location: None,
+            organizer: None,
+            rsvp: "needs-action".to_string(),
+            recurrence: String::new(),
+            attendees: vec![],
             ..Default::default()
         };
         let lines = event_card_lines(&ev, false);

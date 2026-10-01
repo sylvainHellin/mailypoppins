@@ -459,7 +459,10 @@ mod tests {
         let published = Arc::new(AtomicUsize::new(0));
         let _task = drainer(&runtime, &published);
         tokio::time::sleep(QUIET / 2).await;
-        assert!(drains(&entered).is_empty(), "the startup drain is debounced too");
+        assert!(
+            drains(&entered).is_empty(),
+            "the startup drain is debounced too"
+        );
         tokio::time::sleep(QUIET * 4).await;
         assert_eq!(
             drains(&entered),

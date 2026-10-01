@@ -4,7 +4,12 @@ use anyhow::{anyhow, Result};
 use futures::TryStreamExt;
 use log::{info, warn};
 
-use super::{ImapSession, pool, pool::ServerCaps, search::{FetchCriteria, build_imap_search_query}};
+use super::{
+    pool,
+    pool::ServerCaps,
+    search::{build_imap_search_query, FetchCriteria},
+    ImapSession,
+};
 use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
@@ -43,7 +48,14 @@ pub async fn fetch_emails_on_session(
     limit: Option<usize>,
 ) -> Result<Vec<FetchedEmail>> {
     let query = build_imap_search_query(criteria);
-    search_on_session(session, &query, criteria.message_id.as_deref(), mailbox, limit).await
+    search_on_session(
+        session,
+        &query,
+        criteria.message_id.as_deref(),
+        mailbox,
+        limit,
+    )
+    .await
 }
 
 /// Run a pre-rendered IMAP `SEARCH` on an existing session and fetch the hits.
@@ -107,10 +119,9 @@ pub async fn search_on_session(
     if let Some(mid) = message_id {
         let wanted = super::search::normalize_message_id(mid).to_string();
         emails.retain(|email| {
-            email
-                .message_id
-                .as_deref()
-                .is_some_and(|m| super::search::normalize_message_id(m).eq_ignore_ascii_case(&wanted))
+            email.message_id.as_deref().is_some_and(|m| {
+                super::search::normalize_message_id(m).eq_ignore_ascii_case(&wanted)
+            })
         });
     }
 
@@ -481,7 +492,9 @@ pub(crate) fn modseq_to_record(
     if !window_is_whole_mailbox || !enumeration_complete || !bodies_complete {
         return None;
     }
-    server.filter(|&m| m > 0).and_then(|m| i64::try_from(m).ok())
+    server
+        .filter(|&m| m > 0)
+        .and_then(|m| i64::try_from(m).ok())
 }
 
 /// Did this pass's window cover the whole listing?
@@ -617,7 +630,11 @@ pub async fn fetch_new_raw_on_session(
     };
     // ...and so is a mod-sequence, for the same reason; the engine clears the
     // stored column on the same branch.
-    let known_modseq = if uidvalidity_reset { None } else { stored_modseq };
+    let known_modseq = if uidvalidity_reset {
+        None
+    } else {
+        stored_modseq
+    };
     if uidvalidity_reset {
         warn!(
             "UIDVALIDITY for '{}' changed from {:?} to {:?}: refetching the whole window, \
@@ -660,7 +677,12 @@ pub async fn fetch_new_raw_on_session(
 
     // The delta gate, decided before anything is fetched so the reason is one
     // readable expression rather than a condition spread over the two passes.
-    let pass = flag_pass(caps.condstore, known_modseq, server_modseq, uidvalidity_reset);
+    let pass = flag_pass(
+        caps.condstore,
+        known_modseq,
+        server_modseq,
+        uidvalidity_reset,
+    );
 
     // A pass that downloads nothing still has to answer the coverage question:
     // `mp sync -n 0` computes a whole vanished set and returns through here, so
@@ -996,7 +1018,10 @@ mod tests {
         // window) plus the rows it ingested, and prunes normally.
         let known: HashSet<i64> = (7951..=8000).map(i64::from).collect();
         let second = arrival_coverage(&listed, &known, 8000, &[], None, Some(8000));
-        assert!(!second.incomplete, "the backlog below the window is not an arrival");
+        assert!(
+            !second.incomplete,
+            "the backlog below the window is not an arrival"
+        );
         assert_eq!(second.pending_mark, None);
     }
 
@@ -1060,8 +1085,14 @@ mod tests {
             !derived.incomplete,
             "the pre-fix behaviour this test exists to forbid: a mark of 400 sees no arrival"
         );
-        let carried =
-            arrival_coverage(&listed, &known_after, 400, &[], pass1.pending_mark, Some(400));
+        let carried = arrival_coverage(
+            &listed,
+            &known_after,
+            400,
+            &[],
+            pass1.pending_mark,
+            Some(400),
+        );
         assert!(
             carried.incomplete,
             "101..=300 are still not in the store, so pass 2 must defer too"
@@ -1095,7 +1126,11 @@ mod tests {
 
         let stuck = arrival_coverage(&listed, &known, 300, &[], Some(0), Some(300));
         assert!(stuck.incomplete);
-        assert_eq!(stuck.pending_mark, Some(0), "a mark of 0 holds the gate shut");
+        assert_eq!(
+            stuck.pending_mark,
+            Some(0),
+            "a mark of 0 holds the gate shut"
+        );
 
         let backlog: Vec<u32> = (1..=200).collect();
         let opened = arrival_coverage(&listed, &known, 300, &backlog, Some(0), Some(300));
@@ -1205,7 +1240,11 @@ mod tests {
         // `uid_fetch` interpolates as `UID FETCH <set> <query>`, so this is the
         // command that goes out:
         assert_eq!(
-            format!("UID FETCH {} {}", "1:50", flag_query(FlagPass::ChangedSince(7))),
+            format!(
+                "UID FETCH {} {}",
+                "1:50",
+                flag_query(FlagPass::ChangedSince(7))
+            ),
             "UID FETCH 1:50 (UID FLAGS) (CHANGEDSINCE 7)"
         );
     }
@@ -1241,9 +1280,15 @@ mod tests {
         // The server went backwards without bumping UIDVALIDITY (a restore
         // from backup, a rebuilt index): it is not keeping the contract the
         // delta rests on, so nothing is assumed about what changed.
-        assert_eq!(flag_pass(true, Some(1_500), Some(1_000), false), FlagPass::Full);
+        assert_eq!(
+            flag_pass(true, Some(1_500), Some(1_000), false),
+            FlagPass::Full
+        );
         // Equal is fine and is the common case: nothing has changed since.
-        assert_eq!(flag_pass(true, Some(1_500), Some(1_500), false), FlagPass::ChangedSince(1_500));
+        assert_eq!(
+            flag_pass(true, Some(1_500), Some(1_500), false),
+            FlagPass::ChangedSince(1_500)
+        );
     }
 
     /// What a pass may leave behind. The claim a stored modseq makes is "every
@@ -1294,10 +1339,22 @@ mod tests {
 
         let chunks = body_chunks(&new_uids, BODY_CHUNK_SIZE);
 
-        assert_eq!(chunks.len(), 3, "45 new UIDs are three FETCH commands, not one");
-        assert_eq!(chunks[0], &(26..=45).collect::<Vec<u32>>()[..], "the newest 20 go first");
+        assert_eq!(
+            chunks.len(),
+            3,
+            "45 new UIDs are three FETCH commands, not one"
+        );
+        assert_eq!(
+            chunks[0],
+            &(26..=45).collect::<Vec<u32>>()[..],
+            "the newest 20 go first"
+        );
         assert_eq!(chunks[1], &(6..=25).collect::<Vec<u32>>()[..]);
-        assert_eq!(chunks[2], &(1..=5).collect::<Vec<u32>>()[..], "the oldest chunk is the short one");
+        assert_eq!(
+            chunks[2],
+            &(1..=5).collect::<Vec<u32>>()[..],
+            "the oldest chunk is the short one"
+        );
         // Every UID is asked for exactly once: a planner that dropped or
         // duplicated one would leave a message undownloaded forever or fetch it
         // twice, and neither is visible in the chunk count alone.
@@ -1326,9 +1383,18 @@ mod tests {
             !stop_before_chunk(0, Some(past), now),
             "a deadline already spent still buys one chunk, so the pass makes progress"
         );
-        assert!(stop_before_chunk(1, Some(past), now), "and stops the pass at the next one");
-        assert!(!stop_before_chunk(1, Some(future), now), "a live budget fetches on");
-        assert!(!stop_before_chunk(9, None, now), "no budget never stops (`mp sync`)");
+        assert!(
+            stop_before_chunk(1, Some(past), now),
+            "and stops the pass at the next one"
+        );
+        assert!(
+            !stop_before_chunk(1, Some(future), now),
+            "a live budget fetches on"
+        );
+        assert!(
+            !stop_before_chunk(9, None, now),
+            "no budget never stops (`mp sync`)"
+        );
     }
 
     /// The #0041 review blocker, scripted at the only level `fetch_new_raw` is
@@ -1360,7 +1426,12 @@ mod tests {
             "an empty window over 12 listed messages is not whole-mailbox coverage"
         );
         assert_eq!(
-            modseq_to_record(server, window_is_whole_mailbox(window_len, listed_len), true, true),
+            modseq_to_record(
+                server,
+                window_is_whole_mailbox(window_len, listed_len),
+                true,
+                true
+            ),
             None,
             "`mp sync -n 0` must leave the stored modseq where it is"
         );
@@ -1375,7 +1446,12 @@ mod tests {
 
         // And an uncapped pass over the same populated mailbox still records.
         assert_eq!(
-            modseq_to_record(server, window_is_whole_mailbox(listed_len, listed_len), true, true),
+            modseq_to_record(
+                server,
+                window_is_whole_mailbox(listed_len, listed_len),
+                true,
+                true
+            ),
             Some(2_000)
         );
     }
@@ -1387,7 +1463,10 @@ mod tests {
     #[test]
     fn new_uids_come_from_the_window_and_not_from_a_delta_response() {
         let known: HashSet<i64> = HashSet::from([10, 11, 12]);
-        assert_eq!(new_uids_in_window(&[10, 11, 12, 13, 14], &known), vec![13, 14]);
+        assert_eq!(
+            new_uids_in_window(&[10, 11, 12, 13, 14], &known),
+            vec![13, 14]
+        );
         // The case that matters: a brand-new message nobody touched, so it is
         // absent from the delta response entirely. It is still new.
         assert_eq!(new_uids_in_window(&[13], &known), vec![13]);

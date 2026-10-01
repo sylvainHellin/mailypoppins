@@ -156,7 +156,9 @@ pub struct Refused {
 /// The daemon's refusal behind an error a blocking call answered, or `None`
 /// for a failure of any other kind (a timeout, a closed session).
 pub fn refusal(error: &anyhow::Error) -> Option<&RpcError> {
-    error.downcast_ref::<Refused>().map(|refused| &refused.error)
+    error
+        .downcast_ref::<Refused>()
+        .map(|refused| &refused.error)
 }
 
 /// How the binary opens the first connection, and how it opens a replacement.
@@ -183,8 +185,7 @@ pub struct Connector {
 pub type OpenSession = fn() -> Pin<Box<dyn Future<Output = Connection> + Send>>;
 
 /// A reconnect: a connection and the instance id behind it, or nothing yet.
-pub type ReopenSession =
-    fn() -> Pin<Box<dyn Future<Output = Option<(Connection, String)>> + Send>>;
+pub type ReopenSession = fn() -> Pin<Box<dyn Future<Output = Option<(Connection, String)>> + Send>>;
 
 /// A live daemon session: the thread, and the door onto it.
 pub struct Session {
@@ -289,11 +290,11 @@ impl Session {
             .spawn(move || {
                 let queries = build();
                 while let Some(call) = inbox.blocking_recv() {
-                    let answer = queries.call(&call.method, call.params).map_err(|e| {
-                        match e.downcast::<Refused>() {
-                            Ok(refused) => Failure::Refused(refused.error),
-                            Err(e) => Failure::Other(format!("{e:#}")),
-                        }
+                    let answer = queries.call(&call.method, call.params).map_err(|e| match e
+                        .downcast::<Refused>()
+                    {
+                        Ok(refused) => Failure::Refused(refused.error),
+                        Err(e) => Failure::Other(format!("{e:#}")),
                     });
                     (call.then)(answer);
                 }
@@ -647,27 +648,30 @@ mod tests {
             .build()
             .expect("a runtime");
         let listener = runtime.block_on(async { UnixListener::bind(&path).expect("bind") });
-        let script = std::thread::spawn(move || runtime.block_on(async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            let (read, mut write) = stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let request: Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            let answer = json!({"jsonrpc": "2.0", "id": request["id"], "error": {
-                "code": -32010, "message": "line 2: no",
-                "data": {"account": "a", "id": "x", "path": "/p/x.md", "diagnostics": []},
-            }});
-            let mut frame = serde_json::to_vec(&answer).unwrap();
-            frame.push(b'\n');
-            write.write_all(&frame).await.unwrap();
-            // Hold the socket open until the session closes it.
-            let _ = lines.next_line().await;
-        }));
+        let script = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let answer = json!({"jsonrpc": "2.0", "id": request["id"], "error": {
+                    "code": -32010, "message": "line 2: no",
+                    "data": {"account": "a", "id": "x", "path": "/p/x.md", "diagnostics": []},
+                }});
+                let mut frame = serde_json::to_vec(&answer).unwrap();
+                frame.push(b'\n');
+                write.write_all(&frame).await.unwrap();
+                // Hold the socket open until the session closes it.
+                let _ = lines.next_line().await;
+            })
+        });
 
         let session = Session::connect(Connector {
             open,
             reopen: REOPEN,
-        }).expect("a session");
+        })
+        .expect("a session");
         let error = session
             .call_within("draft.approve", json!({}), Duration::from_secs(5))
             .expect_err("refused");

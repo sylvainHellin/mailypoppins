@@ -4,8 +4,8 @@ use anyhow::Result;
 use colored::*;
 
 use crate::config::{
-    all_configured_mailboxes, blobs_dir, config_path, drafts_dir, get_secret, mailypoppins_data_dir,
-    retention_for, store_path, AuthMethod, GlobalConfig,
+    all_configured_mailboxes, blobs_dir, config_path, drafts_dir, get_secret,
+    mailypoppins_data_dir, retention_for, store_path, AuthMethod, GlobalConfig,
 };
 use crate::store::sweep::human_bytes;
 
@@ -32,7 +32,11 @@ pub fn cmd_config_path() {
 pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
     println!("{}", "=== mailypoppins configuration ===".bold().cyan());
     println!("{}: {}", "Config file".bold(), path.display());
-    println!("{}: {}", "Data dir".bold(), mailypoppins_data_dir().display());
+    println!(
+        "{}: {}",
+        "Data dir".bold(),
+        mailypoppins_data_dir().display()
+    );
 
     let theme_name = if config.theme.is_empty() {
         format!("{} (default)", crate::tui::theme::DEFAULT_THEME_NAME)
@@ -53,7 +57,12 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
     }
 
     for account in &config.accounts {
-        println!("\n{}", format!("[[accounts]] name = \"{}\"", account.name).bold().cyan());
+        println!(
+            "\n{}",
+            format!("[[accounts]] name = \"{}\"", account.name)
+                .bold()
+                .cyan()
+        );
         println!("  default_from = {}", account.default_from);
 
         match account.auth_method {
@@ -74,17 +83,26 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
                         match crate::oauth2::load_token_cache(&account.name) {
                             Some(cache) => {
                                 if cache.is_expired() {
-                                    println!("    token      = {} (run `mp config oauth2-login`)", "expired".red());
+                                    println!(
+                                        "    token      = {} (run `mp config oauth2-login`)",
+                                        "expired".red()
+                                    );
                                 } else {
                                     println!("    token      = {}", "valid".green());
                                 }
                             }
                             None => {
-                                println!("    token      = {} (corrupt or undecryptable cache file)", "invalid".red());
+                                println!(
+                                    "    token      = {} (corrupt or undecryptable cache file)",
+                                    "invalid".red()
+                                );
                             }
                         }
                     } else {
-                        println!("    token      = {} (run `mp config oauth2-login`)", "not cached".red());
+                        println!(
+                            "    token      = {} (run `mp config oauth2-login`)",
+                            "not cached".red()
+                        );
                     }
                 }
             }
@@ -175,8 +193,14 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
         match retention_for(config, account) {
             Ok(policy) => {
                 println!("\n  {}", "[retention]".bold());
-                println!("    enforced             = {}", "yes (sweep after sync + `mp store gc`)".green());
-                println!("    max_disk_bytes       = {}", human_bytes(policy.max_disk_bytes));
+                println!(
+                    "    enforced             = {}",
+                    "yes (sweep after sync + `mp store gc`)".green()
+                );
+                println!(
+                    "    max_disk_bytes       = {}",
+                    human_bytes(policy.max_disk_bytes)
+                );
                 println!(
                     "    body_horizon_days    = {}",
                     horizon_label(policy.body_horizon_days)
@@ -195,7 +219,10 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
         // Signatures are app-managed files since #0107, not config keys: the
         // directory and the state file are the source of truth here.
         println!("\n  {}", "[signatures]".bold());
-        println!("    dir     = {}", crate::signatures::signatures_dir().display());
+        println!(
+            "    dir     = {}",
+            crate::signatures::signatures_dir().display()
+        );
         println!(
             "    default = {}",
             crate::signatures::default_signature_name(&account.name)

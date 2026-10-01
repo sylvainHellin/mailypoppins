@@ -198,7 +198,10 @@ fn assert_keys(value: &Value, expected: &[&str], label: &str) {
     found.sort_unstable();
     let mut want: Vec<&str> = expected.to_vec();
     want.sort_unstable();
-    assert_eq!(found, want, "{label} carries exactly these fields, got {value}");
+    assert_eq!(
+        found, want,
+        "{label} carries exactly these fields, got {value}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +318,11 @@ async fn the_rendition_is_the_store_s_own_markdown_in_a_read_only_file() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(path).expect("stat the rendition").permissions().mode() & 0o777;
+        let mode = fs::metadata(path)
+            .expect("stat the rendition")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o444,
             "#0075's rule is that $EDITOR opens the buffer read-only and says so"
@@ -347,13 +354,22 @@ async fn the_rendition_is_released_by_the_family_s_release_method() {
         json!({"account": fixture::ACCOUNT, "row_id": row_id}),
     )
     .await;
-    let handle = result["handle"].as_str().expect("handle is a string").to_string();
+    let handle = result["handle"]
+        .as_str()
+        .expect("handle is a string")
+        .to_string();
     assert!(
-        !handle.is_empty() && handle.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        !handle.is_empty()
+            && handle
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
         "a handle is opaque, non-empty and usable as a directory name, got {handle:?}"
     );
     let path = result["path"].as_str().expect("path").to_string();
-    assert!(Path::new(&path).exists(), "the file is there before the release");
+    assert!(
+        Path::new(&path).exists(),
+        "the file is there before the release"
+    );
 
     let released = call(
         &mut conn,
@@ -361,7 +377,11 @@ async fn the_rendition_is_released_by_the_family_s_release_method() {
         json!({"handle": handle}),
     )
     .await;
-    assert_eq!(released, json!({}), "the release answers with the empty object");
+    assert_eq!(
+        released,
+        json!({}),
+        "the release answers with the empty object"
+    );
     assert!(
         !Path::new(&path).exists(),
         "releasing a handle unlinks its directory, as it does for an attachment"
@@ -439,8 +459,7 @@ async fn a_bad_address_is_invalid_params() {
     ] {
         let error = call_err(&mut conn, METHOD, params).await;
         assert_eq!(
-            error.code,
-            -32602,
+            error.code, -32602,
             "{what} is invalid params, got {error:?}"
         );
     }

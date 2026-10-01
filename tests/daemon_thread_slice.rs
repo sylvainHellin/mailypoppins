@@ -182,7 +182,10 @@ impl Slice {
         let row = read::find_by_id(&store, row_id)
             .expect("reading the row")
             .expect("the fixture holds the row");
-        let thread_id = row.thread_id.clone().unwrap_or_else(|| row.message_id.clone());
+        let thread_id = row
+            .thread_id
+            .clone()
+            .unwrap_or_else(|| row.message_id.clone());
         read::thread_messages(&store, account, &thread_id).expect("folding the conversation")
     }
 }
@@ -337,7 +340,10 @@ fn the_fixture_is_a_conversation_ingest_threaded_itself() {
         .iter()
         .find(|row| row.message_id.contains(LAST))
         .expect("the fixture holds the last message of the chain");
-    let thread_id = last.thread_id.clone().unwrap_or_else(|| last.message_id.clone());
+    let thread_id = last
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| last.message_id.clone());
     let thread =
         read::thread_messages(&store, fixture::ACCOUNT, &thread_id).expect("folding the thread");
     let ids: Vec<&str> = thread.iter().map(|row| row.message_id.as_str()).collect();
@@ -485,7 +491,8 @@ async fn a_conversation_is_the_store_s_own_fold_oldest_first() {
     }
 
     assert_eq!(
-        thread.account, fixture::ACCOUNT,
+        thread.account,
+        fixture::ACCOUNT,
         "the answer names the account it read"
     );
     assert_eq!(

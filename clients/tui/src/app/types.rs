@@ -2315,7 +2315,9 @@ mod tests {
     #[test]
     fn signature_participates_even_without_a_body_field() {
         let wizard = ComposeWizard {
-            mode: ComposeMode::EditDraft { id: "x".to_string() },
+            mode: ComposeMode::EditDraft {
+                id: "x".to_string(),
+            },
             to: String::new(),
             cc: String::new(),
             bcc: String::new(),
@@ -2384,10 +2386,7 @@ mod tests {
 
     #[test]
     fn search_form_default_scope_is_current_account() {
-        assert_eq!(
-            SearchForm::default().scope.0,
-            SearchScope::CurrentAccount
-        );
+        assert_eq!(SearchForm::default().scope.0, SearchScope::CurrentAccount);
     }
 
     #[test]
@@ -2646,7 +2645,10 @@ mod tests {
         };
 
         let keys: Vec<String> = build_mailboxes(&config).iter().map(mailbox_key).collect();
-        assert_eq!(keys, ["inbox", "drafts", "sent", "archive", "INBOX.Archive"]);
+        assert_eq!(
+            keys,
+            ["inbox", "drafts", "sent", "archive", "INBOX.Archive"]
+        );
 
         for (role, _) in mp_core::config::all_configured_mailboxes(&config) {
             assert!(

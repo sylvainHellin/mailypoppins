@@ -229,7 +229,10 @@ fn resolve_local(
         tz.from_local_datetime(&(*local - chrono::Duration::hours(hours)))
             .latest()
     })?;
-    let utc = *local - chrono::Duration::seconds(i64::from(chrono::Offset::fix(before.offset()).local_minus_utc()));
+    let utc = *local
+        - chrono::Duration::seconds(i64::from(
+            chrono::Offset::fix(before.offset()).local_minus_utc(),
+        ));
     Some(tz.from_utc_datetime(&utc))
 }
 
@@ -259,9 +262,7 @@ fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
             // Unknown zone: keep the wall-clock time without an offset.
             Some(date_time.format("%Y-%m-%dT%H:%M:%S").to_string())
         }
-        DatePerhapsTime::Date(date) => {
-            Some(date.format("%Y-%m-%dT00:00:00").to_string())
-        }
+        DatePerhapsTime::Date(date) => Some(date.format("%Y-%m-%dT00:00:00").to_string()),
     }
 }
 
@@ -623,11 +624,21 @@ END:VCALENDAR\r
     #[test]
     fn is_imip_invite_requires_method_property() {
         let invite = "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:1\nEND:VEVENT\nEND:VCALENDAR\n";
-        let export = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nEND:VEVENT\nEND:VCALENDAR\n";
-        assert!(is_imip_invite(invite.as_bytes()), "VCALENDAR with METHOD is an invite");
-        assert!(!is_imip_invite(export.as_bytes()), "no METHOD -> not an invite");
+        let export =
+            "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:1\nEND:VEVENT\nEND:VCALENDAR\n";
+        assert!(
+            is_imip_invite(invite.as_bytes()),
+            "VCALENDAR with METHOD is an invite"
+        );
+        assert!(
+            !is_imip_invite(export.as_bytes()),
+            "no METHOD -> not an invite"
+        );
         assert!(!is_imip_invite(b"this is not a vcalendar at all"));
-        assert!(!is_imip_invite(&[0xff, 0xfe]), "invalid UTF-8 -> not an invite");
+        assert!(
+            !is_imip_invite(&[0xff, 0xfe]),
+            "invalid UTF-8 -> not an invite"
+        );
     }
 
     /// #0031: a single-occurrence payload carries a `RECURRENCE-ID`, and it is
@@ -651,5 +662,4 @@ END:VCALENDAR\r
             "the zoned form keeps its own offset, as DTSTART does"
         );
     }
-
 }
