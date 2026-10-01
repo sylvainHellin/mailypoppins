@@ -1,10 +1,11 @@
-// Compose through the external editor (clients/desktop/docs/shell.md,
-// "Compose"): new draft, reply, reply all, forward, edit a draft, edit its
-// recipients. Each write answers the draft file's path, which opens in the
-// user's editor; the editor's saves reach the list as the watcher's
+// Compose (clients/desktop/docs/shell.md, "Compose"): new draft, reply,
+// reply all, forward, edit a draft, edit its recipients. Each write answers
+// the draft file's path, which opens in the embedded terminal editor when
+// the route says so (ticket 0130) and in the user's external editor
+// otherwise; the editor's saves reach the list as the watcher's
 // `draft.changed`, so nothing here reloads a list.
 
-import type { Dispatch } from "react";
+import { useEffect, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { actionTargets } from "@/app/reducer";
 import { createMutations } from "@/app/mutations";
@@ -15,10 +16,13 @@ import {
   sendingRefusal,
   type AppState,
   type ComposeDialog,
+  type ComposeSession,
   type MessageTarget,
   type MutationDialog,
 } from "@/app/state";
 import * as cmd from "@/lib/commands";
+import { getCurrentWindow } from "@/lib/tauri";
+import { tauriBridge } from "@/lib/terminal";
 import { asGuiError, fixtureNotice, type DraftHeaders } from "@/lib/gui-types";
 import type { DraftCreated, DraftKind, DraftMessage } from "@/protocol/types";
 
@@ -74,13 +78,26 @@ function failed(dispatch: Dispatch<Action>, account: string, what: string, e: un
 }
 
 /**
- * Open a draft file in the editor. The session shows `opening` until
- * `editor_open` answers; a launch that fails (`setup`: the command did not
- * start or exited at once) is a failure notice whose text names
+ * Open a draft file in the editor, by the route `editor_setting_get`
+ * reports. The embedded route starts a session the reader area's terminal
+ * pane spawns (`components/compose/TerminalHost.tsx`), or shows the draft's
+ * running one. The external route is M3's: the session shows `opening`
+ * until `editor_open` answers; a launch that fails (`setup`: the command did
+ * not start or exited at once) is a failure notice whose text names
  * `MP_DESKTOP_EDITOR` or the editor setting. In fixture mode a notice says
- * that no editor was launched.
+ * that no editor was launched. A route that cannot be read is external.
  */
 export async function openInEditor(dispatch: Dispatch<Action>, account: string, draftId: string, path: string): Promise<void> {
+  let embedded = false;
+  try {
+    embedded = (await cmd.editorSettingGet()).route === "embedded";
+  } catch {
+    // The external route reports its own failure.
+  }
+  if (embedded) {
+    dispatch({ type: "compose_embedded", account, draftId, path });
+    return;
+  }
   dispatch({ type: "compose_opening", account, draftId, path });
   try {
     const launch = await cmd.editorOpen(path);
@@ -90,6 +107,102 @@ export async function openInEditor(dispatch: Dispatch<Action>, account: string, 
   } catch (e: unknown) {
     dispatch({ type: "compose_failed", account, draftId, error: asGuiError(e) });
   }
+}
+
+/**
+ * The banner's Reopen: an embedded session spawns again on the same path,
+ * whatever the route says now; an external one runs `editor_open` again.
+ */
+export function reopen(c: ComposeSession, dispatch: Dispatch<Action>): void {
+  if (c.kind === "embedded") dispatch({ type: "compose_embedded", account: c.account, draftId: c.draftId, path: c.path });
+  else void openInEditor(dispatch, c.account, c.draftId, c.path);
+}
+
+/**
+ * Close embedded editors: each session is forgotten, then its child is
+ * killed (`terminal_kill` waits until the exit frame has gone), so the
+ * draft stays as last saved. Resolves once every kill answered.
+ */
+export async function closeEditors(sessions: ComposeSession[], dispatch: Dispatch<Action>): Promise<void> {
+  const kills: Promise<void>[] = [];
+  for (const c of sessions) {
+    if (c.kind !== "embedded") continue;
+    dispatch({ type: "compose_done", account: c.account, draftId: c.draftId });
+    if (c.session !== null) kills.push(tauriBridge.kill(c.session).catch(() => {}));
+  }
+  await Promise.all(kills);
+}
+
+/** The embedded sessions whose child still runs. */
+export function runningEditors(s: AppState): ComposeSession[] {
+  return Object.values(s.compose).filter((c) => c.kind === "embedded" && c.status.kind === "running");
+}
+
+/**
+ * The navigation question's "Close the editor": the shown editor's child is
+ * killed, which leaves the draft as last saved, then the held navigation
+ * runs. Its exit frame may land first and mark it crashed; the session is
+ * forgotten either way.
+ */
+export async function leaveClosingEditor(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
+  const c = s.composeShown ? s.compose[s.composeShown] : undefined;
+  if (c?.kind === "embedded" && c.session !== null) await tauriBridge.kill(c.session).catch(() => {});
+  dispatch({ type: "compose_leave_close" });
+}
+
+/**
+ * The window close question's "Close the editor": every embedded editor is
+ * killed, then the window is destroyed, which the close request left to
+ * the webview.
+ */
+export async function closeWindow(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
+  dispatch({ type: "overlay", overlay: null });
+  await closeEditors(Object.values(s.compose), dispatch);
+  try {
+    await getCurrentWindow().destroy();
+  } catch (e: unknown) {
+    dispatch({ type: "notice", text: `The window did not close: ${asGuiError(e).message}` });
+  }
+}
+
+/**
+ * Ask before the window closes over a running embedded editor. Tauri
+ * prevents a close itself while the webview listens for
+ * `tauri://close-requested`, and `onCloseRequested`'s wrapper destroys the
+ * window after the handler unless it called `preventDefault`; so with no
+ * editor running the handler does nothing and the window closes as before.
+ * Outside Tauri (a plain browser) there is no window to guard.
+ */
+export function useCloseGuard(s: AppState, dispatch: Dispatch<Action>): void {
+  const latest = useRef(s);
+  latest.current = s;
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let gone = false;
+    let win: ReturnType<typeof getCurrentWindow>;
+    try {
+      win = getCurrentWindow();
+    } catch {
+      return;
+    }
+    win
+      .onCloseRequested((event) => {
+        if (runningEditors(latest.current).length === 0) return;
+        event.preventDefault();
+        dispatch({ type: "compose_close_requested" });
+      })
+      .then(
+        (u) => {
+          if (gone) u();
+          else unlisten = u;
+        },
+        () => {},
+      );
+    return () => {
+      gone = true;
+      unlisten?.();
+    };
+  }, [dispatch]);
 }
 
 async function created(dispatch: Dispatch<Action>, account: string, what: string, write: Promise<DraftCreated>): Promise<void> {

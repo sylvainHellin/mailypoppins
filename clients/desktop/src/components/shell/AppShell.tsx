@@ -10,6 +10,8 @@ import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDial
 import { ConfirmMutationDialog } from "@/components/mutations/ConfirmMutationDialog";
 import { MovePicker } from "@/components/mutations/MovePicker";
 import { ComposeWizard } from "@/components/compose/ComposeWizard";
+import { ComposeLeaveDialog } from "@/components/compose/ComposeLeaveDialog";
+import { TerminalHost, TerminalSlotProvider } from "@/components/compose/TerminalHost";
 import { AttachmentsDialog } from "@/components/attachments/AttachmentsDialog";
 import { RsvpDialog } from "@/components/calendar/RsvpDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
@@ -20,6 +22,7 @@ import { AccountWizard } from "@/components/settings/AccountWizard";
 import { DeviceCodeDialog } from "@/components/settings/DeviceCodeDialog";
 import { SetupScreen } from "@/components/screens/SetupScreen";
 import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
+import { useCloseGuard } from "@/app/compose";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
 import { useStoredTheme } from "@/app/theme";
@@ -51,6 +54,7 @@ export function AppShell() {
   useStoredReaderMode(dispatch);
   useDataSync(s, dispatch);
   useKeymap(s, dispatch);
+  useCloseGuard(s, dispatch);
 
   const layout = useLayout();
   useEffect(() => dispatch({ type: "set_layout", layout }), [layout, dispatch]);
@@ -84,9 +88,12 @@ export function AppShell() {
   const close = (open: boolean) => {
     if (!open) dispatch({ type: "overlay", overlay: null });
   };
+  // The embedded editors live beside the body, so a screen change never
+  // unmounts one (components/compose/TerminalHost.tsx).
   return (
-    <>
+    <TerminalSlotProvider>
       {body}
+      <TerminalHost />
       <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} />
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
@@ -94,7 +101,7 @@ export function AppShell() {
       <ConfirmMutationDialog
         dialog={s.overlay === "mutation" && s.dialog && s.dialog.kind !== "move" ? s.dialog : null}
         onOpenChange={close}
-        onConfirm={() => s.dialog && runDialog(s.dialog, dispatch)}
+        onConfirm={() => s.dialog && runDialog(s.dialog, dispatch, undefined, s.compose)}
       />
       <MovePicker
         state={s}
@@ -111,6 +118,7 @@ export function AppShell() {
       <PasswordDialog dialog={s.overlay === "password" ? s.passwordDialog : null} onOpenChange={close} />
       <AccountWizard dialog={s.overlay === "account_wizard" ? s.accountWizard : null} onOpenChange={close} />
       <DeviceCodeDialog open={s.overlay === "device_code"} />
-    </>
+      <ComposeLeaveDialog />
+    </TerminalSlotProvider>
   );
 }

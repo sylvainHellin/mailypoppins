@@ -28,6 +28,7 @@ import type {
   OutboxListing,
   OutboxRow,
 } from "@/protocol/types";
+import { FakeBridge } from "@/test/terminal-fake";
 import type {
   AccountDraft,
   AccountInfo,
@@ -141,6 +142,15 @@ export const mock = {
    * that overtook a later write would be.
    */
   gates: new Map<string, Promise<unknown>>(),
+  /**
+   * What the `terminal_*` commands reach: the embedded editor's PTY, whose
+   * calls a test reads and whose output and exit frames it pushes.
+   */
+  terminal: new FakeBridge(),
+  /** The window's `onCloseRequested` handler, while one is registered. */
+  closeHandler: null as ((event: { preventDefault(): void }) => void | Promise<void>) | null,
+  /** Whether the window was destroyed, by `destroy` or by a close nothing prevented. */
+  windowDestroyed: false,
   /** Every path `editor_open` was asked to open, in order. */
   editorOpens: [] as string[],
   /** What `editor_open` rejects with instead of opening, once. */
@@ -341,6 +351,9 @@ export function resetMock(): void {
   mock.revision = 1000;
   mock.nextSync = 1;
   mock.gates.clear();
+  mock.terminal = new FakeBridge();
+  mock.closeHandler = null;
+  mock.windowDestroyed = false;
   mock.editorOpens = [];
   mock.editorFailure = null;
   mock.editorFixture = false;
@@ -1595,11 +1608,63 @@ function isTerminalEditor(template: string): boolean {
   return ["vi", "vim", "nvim", "hx", "helix", "nano", "pico", "micro", "kak", "joe", "ne", "mg", "ed"].includes(program.split("/").pop() ?? "");
 }
 
+/** The output Channel's side of a FakeBridge sink: frames as the Rust layer sends them. */
+function channelSink(output: Channel<unknown>) {
+  return {
+    onOutput: (bytes: Uint8Array) => output.onmessage(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)),
+    onExit: (exit: { code: number | null; signal: number | null }) => output.onmessage({ exit }),
+  };
+}
+
+/** The `terminal_*` commands, over `mock.terminal`; null for any other command. */
+function terminalAnswer(cmd: string, args: Record<string, unknown>): Promise<unknown> | null {
+  const t = mock.terminal;
+  switch (cmd) {
+    case "terminal_spawn": {
+      const req = { account: String(args.account), id: String(args.id), path: String(args.path), cols: Number(args.cols), rows: Number(args.rows) };
+      return t.spawn(req, channelSink(args.output as Channel<unknown>));
+    }
+    case "terminal_write":
+      return t.write(Number(args.session), String(args.data));
+    case "terminal_resize":
+      return t.resize(Number(args.session), Number(args.cols), Number(args.rows));
+    case "terminal_kill":
+      return t.kill(Number(args.session));
+    default:
+      return null;
+  }
+}
+
+/**
+ * The user's close of the window, as `@tauri-apps/api`'s `onCloseRequested`
+ * plays it: the handler runs, and the window is destroyed unless it called
+ * `preventDefault`. With no handler the window just closes.
+ */
+export async function requestClose(): Promise<void> {
+  let prevented = false;
+  await mock.closeHandler?.({ preventDefault: () => (prevented = true) });
+  if (!prevented) mock.windowDestroyed = true;
+}
+
+const mockWindow = {
+  onCloseRequested: vi.fn(async (handler: (event: { preventDefault(): void }) => void | Promise<void>) => {
+    mock.closeHandler = handler;
+    return () => {
+      if (mock.closeHandler === handler) mock.closeHandler = null;
+    };
+  }),
+  destroy: vi.fn(async () => {
+    mock.windowDestroyed = true;
+  }),
+};
+
+export const getCurrentWindow = () => mockWindow;
+
 export const invoke = vi.fn(async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
   mock.calls.push({ cmd, args });
   const failure = mock.failing.get(cmd);
   if (failure !== undefined) throw failure;
-  const result = await answer(cmd, args);
+  const result = await (terminalAnswer(cmd, args ?? {}) ?? answer(cmd, args));
   const gate = mock.gates.get(cmd);
   if (gate) {
     mock.gates.delete(cmd);

@@ -3,6 +3,7 @@
 
 import type { Theme } from "@/app/theme";
 import type { ReaderMode } from "@/app/readerMode";
+import type { Action } from "@/app/reducer";
 import type {
   AgendaEvent,
   Bootstrap,
@@ -132,7 +133,8 @@ export const LIST_WIDTH_STEP = 40;
  * dialog `signaturesDialog` describes; `activity` is the activity log;
  * `password` is the password dialog `passwordDialog` describes;
  * `account_wizard` is the account wizard `accountWizard` describes;
- * `device_code` is the sign-in `signIn` describes.
+ * `device_code` is the sign-in `signIn` describes; `compose_leave` is the
+ * question `composeLeave` describes.
  */
 export type Overlay =
   | "palette"
@@ -149,6 +151,7 @@ export type Overlay =
   | "password"
   | "account_wizard"
   | "device_code"
+  | "compose_leave"
   | null;
 
 /**
@@ -247,6 +250,12 @@ export type MessageTarget = { account: string; row_id: number };
  */
 export function targetKey(t: Target): string {
   return "row_id" in t ? `${t.account}#${t.row_id}` : `${t.account}#draft:${t.draft}`;
+}
+
+/** The draft a `targetKey` of a draft names; null for a row's key. */
+export function draftOfKey(key: string): { account: string; draft: string } | null {
+  const at = key.lastIndexOf("#draft:");
+  return at < 0 ? null : { account: key.slice(0, at), draft: key.slice(at + "#draft:".length) };
 }
 
 /** A count change a mutation made to one mailbox of the sidebar, to reverse on a restore. */
@@ -401,9 +410,29 @@ export type MutationDialog =
   | { kind: "outbox_discard"; account: string; row_id: number; title: string; detail: string; warning: string | null };
 
 /**
- * A draft open in the external editor: `opening` until `editor_open`
+ * How an embedded editor stands: `running` from the spawn until its exit
+ * frame; `exited` with a nonzero code; `crashed` when a signal ended it or
+ * its status could not be read (both null); `failed` when `terminal_spawn`
+ * refused, with the reason in the session's `message`. An exit with code 0
+ * ends the session instead.
+ */
+export type EmbeddedStatus =
+  | { kind: "running" }
+  | { kind: "exited"; code: number }
+  | { kind: "crashed"; code: number | null; signal: number | null }
+  | { kind: "failed" };
+
+/**
+ * A draft open in an editor. The file's saves reach the list through the
+ * watcher's `draft.changed`, whatever the route.
+ *
+ * `external` is the M3 route through `editor_open`: `opening` until it
  * answers, `editing` once the editor started, `error` when it did not.
- * The file's saves reach the list through the watcher's `draft.changed`.
+ *
+ * `embedded` is a terminal editor on a PTY (ticket 0130), drawn in the
+ * reader area by `TerminalHost.tsx`: `session` is the PTY's id once
+ * `terminal_spawn` answered, and `spawn` moves with every Reopen, which
+ * mounts a fresh pane and so starts a fresh process on the same path.
  */
 export type ComposeSession = {
   account: string;
@@ -411,11 +440,27 @@ export type ComposeSession = {
   path: string;
   /** The file name, what the banner calls the draft. */
   name: string;
-  /** The editor command as it ran, once `editor_open` answered. */
+  /** The editor command as it ran, once `editor_open` or `terminal_spawn` answered. */
   editor: string | null;
-  status: "opening" | "editing" | "error";
   message: string | null;
-};
+} & (
+  | { kind: "external"; status: "opening" | "editing" | "error" }
+  | { kind: "embedded"; session: number | null; status: EmbeddedStatus; spawn: number }
+);
+
+export type EmbeddedSession = Extract<ComposeSession, { kind: "embedded" }>;
+
+/** An embedded session whose child still runs. */
+export function isRunning(c: ComposeSession | undefined): boolean {
+  return c?.kind === "embedded" && c.status.kind === "running";
+}
+
+/**
+ * The question the `compose_leave` overlay asks while an embedded editor
+ * runs: before a navigation away from it, which `action` replays once
+ * answered, or before the window closes.
+ */
+export type ComposeLeave = { kind: "navigate"; action: Action } | { kind: "close" };
 
 /**
  * The compose dialogs: the new-draft and forward wizard, and the recipients
@@ -596,8 +641,16 @@ export type AppState = {
   saveDir: string;
   /** The server-only hits a `message_fetch` is fetching, by hit key. */
   fetching: string[];
-  /** Drafts open in the external editor, by `targetKey`. */
+  /** Drafts open in an editor, by `targetKey`. */
   compose: Record<string, ComposeSession>;
+  /**
+   * The draft, by `targetKey`, whose embedded editor the reader area shows
+   * in place of the selection, or, once that editor exited with 0 and no
+   * session is left, whose summary it shows; null for the selection.
+   */
+  composeShown: string | null;
+  /** What the `compose_leave` overlay asks; null whenever another overlay or none is open. */
+  composeLeave: ComposeLeave | null;
   filter: string;
   notice: string | null;
   lastError: GuiError | null;
@@ -757,6 +810,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     saveDir: DEFAULT_SAVE_DIR,
     fetching: [],
     compose: {},
+    composeShown: null,
+    composeLeave: null,
     filter: "",
     notice: null,
     lastError: null,
