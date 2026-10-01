@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file.
   - The `?` key help has a filter field that narrows the keys as you type, by key, description or section, and keeps the sections in their usual order.
   - A terminal editor in `$VISUAL` or `$EDITOR`, such as nvim, vim or hx, now opens your drafts in the first terminal found among Ghostty, kitty, Alacritty, WezTerm and Terminal.app, where before it was skipped.
   - With `MP_DESKTOP_FIXTURE=1` an editor handoff says the editor was not launched and names the command it would have run.
+  - mailypoppins has a logo: an umbrella rising from an envelope, its hook below, a cream monoline on an ink tile with an orange ferrule. It is the desktop's app icon, the website's logo and favicon, and lives in `assets/logo/` with a wordmark.
 - **The desktop client has the TUI's Calendar and Contacts views, manages signatures, and sets up accounts (#0131).** The keys are the TUI's, each is also in the palette, and `MP_DESKTOP_FIXTURE=1` has a simulation for every outcome below.
   - `Space c`, `Space a` and `Space m` switch between Contacts, Calendar and Mail, as do the sidebar and the palette; Settings is a fourth view, from the sidebar or the palette.
   - The Calendar view lists the agenda of the selected account, upcoming only until `t` shows the past; `r` reads it again, Enter or `e` opens an event's `invite.ics` in your editor, and an updated or cancelled invitation shows without a refresh.

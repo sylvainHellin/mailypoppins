@@ -3,12 +3,12 @@ id: 0136
 title: GUI feedback after M4
 type: feature
 priority: now
-status: in-progress
+status: done
 created: 2026-10-01
 ---
 
 Sylvain's first feedback on the desktop client after M4 of the [native GUI plan](../plans/native-gui.md) (#0131), worked straight on `main` on 2026-10-01 in commits tagged `(#0136)`.
-Four of its five items have landed; the logo is open.
+All five items have landed; the ticket closed on 2026-10-01 with the logo.
 
 ## Key help filter landed
 
@@ -59,13 +59,17 @@ Commits `0d0134c5`, `e24933c2`, `7ded670e` and `ad02d064`.
 - `tt` was the TUI's thread key; the desktop's thread row now lists no key, and the thread view stays "later".
 - 221 Rust and 521 vitest tests after it.
 
-## Open: the logo
+## Logo landed
 
-- Sylvain picks one of the candidates in `assets/logo-candidates/`, which are not committed yet.
-- The pick gets its colourways, the app icons through `pnpm tauri icon`, the website's logo and favicon, and a wordmark.
-- The ticket closes when the logo ships.
+- Sylvain picked the hook-below monoline out of four candidates: an umbrella rising from an envelope, the hook below it, cream on an ink tile with an orange ferrule.
+- `assets/logo/` holds the tile in both colourways, the mark alone for light and dark surfaces, a heavier favicon glyph, the app-icon source and the wordmark in Inter 600, with a README naming each and the regeneration command.
+- `pnpm tauri icon` regenerated `clients/desktop/src-tauri/icons/` from `app-icon.svg`; the `android/` and `ios/` sets it also writes are not kept.
+- The website's `logo.svg` and `favicon.svg` are the tile and the favicon glyph, and the nav redraws the mark inline in `currentColor`.
+- The earlier draft `assets/tentative_logo_mailypoppins_v10.svg` and the rejected candidates are gone.
 
 ## Follow-ups
+
+- The Ghostty route failed in a real run on 2026-10-01: `open -na /Applications/Ghostty.app --args -e <nvim> <path>` reached the shell as `'<path>'; exit` with the editor dropped and the path's UTF-8 read as Latin-1 (`fÃ¼r` for `für`), so Ghostty's own handling of `-e` under `open` is at fault; not chased, since #0130 puts Neovim inside the window and supersedes the separate-terminal route for it.
 
 - A bundled app launched from Finder may hand a bare `nvim` to the terminal when `$EDITOR` carries no path, and the terminal will not find it, since nvim lives in `~/.local/share/bob/nvim-bin` for Sylvain; running the command through `$SHELL -lc` would fix it.
 - A bundled build needs an Apple Events usage string in `Info.plist` for the Terminal.app path.

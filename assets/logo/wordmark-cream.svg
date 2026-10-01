@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-<rect width="1024" height="1024" rx="224" fill="#0C1B33"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1960 460">
+<g transform="translate(0 0) scale(0.45)">
 <g fill="none" stroke="#F4F1E8" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
 <path d="M212 480 C 212 300 350 190 512 190 C 674 190 812 300 812 480 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 Z"/>
 <path d="M512 190 V 150"/>
@@ -7,4 +7,7 @@
 <path d="M512 880 A 62 62 0 0 1 388 870 V 840"/>
 <rect x="232" y="560" width="560" height="320" rx="24"/>
 <path d="M232 584 L512 760 L792 584"/>
-</g><circle cx="512" cy="140" r="16" fill="#FF6700"/></svg>
+</g><circle cx="512" cy="140" r="16" fill="#FF6700"/>
+</g>
+<text x="470" y="300" font-family="Inter, -apple-system, 'Helvetica Neue', Arial, sans-serif" font-weight="600" font-size="200" letter-spacing="-4" fill="#F4F1E8">mailypoppins</text>
+</svg>
