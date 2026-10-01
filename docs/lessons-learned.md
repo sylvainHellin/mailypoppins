@@ -2436,4 +2436,7 @@ A click on a row would also blur that field, since cmdk's root is focusable (`ta
 The registry's `cancel` (`src/daemon/operations.rs`) shuts the token, marks the operation `cancelled` and publishes the finish before it answers, whatever the worker is doing.
 Only a worker that checks `handle.token` stops: `sync` does, while `contact.rebuild`, `calendar.rsvp` and `send.invite` never look after the start, so a cancelled rebuild still writes its index and a cancelled RSVP or invitation may still be submitted; the worker's later result is dropped as an invalid transition.
 A client that offers Cancel on such an operation must word the cancelled end as "stopped waiting", never as undone, which is what the desktop's generic `operation_cancel` does (`clients/desktop/docs/rust-layer.md`, "Cancelling").
+
+## `tauri-plugin-dialog` carries `tauri-plugin-fs` without granting it anything
+
 `tauri-plugin-dialog` 2.8 pulls `tauri-plugin-fs` in as a dependency and adds a picked path to the fs scope, but with no `fs:` permission in the capability the webview can read nothing through it; only `dialog:allow-open` is granted.
