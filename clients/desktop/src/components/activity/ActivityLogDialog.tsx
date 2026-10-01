@@ -4,14 +4,12 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { ACTIVITY_LOG_CAP, entryTime, filterLog } from "@/app/activity";
 import type { ActivityLevel } from "@/app/state";
 import { useAppState } from "@/app/store";
-import { isEditable } from "@/keymap/useKeymap";
+import { isEditable, PREFIX_TIMEOUT_MS } from "@/keymap/useKeymap";
 
 export type ActivityLogDialogProps = { open: boolean; onOpenChange: (open: boolean) => void };
 
 /** One line's scroll step, the height of a row. */
 const LINE_PX = 28;
-/** How long a `g` waits for the second `g`. */
-const PREFIX_TIMEOUT_MS = 1200;
 
 /** Each level's colour token: information in `link`, a warning in `warning`, an error in `destructive`. */
 const LEVEL_CLASS: Record<ActivityLevel, string> = {
