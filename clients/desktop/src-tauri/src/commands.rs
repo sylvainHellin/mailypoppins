@@ -516,7 +516,9 @@ pub struct DraftStatusBatch {
     pub failed: Vec<DraftStatusFailure>,
 }
 
-/// The signatures a draft can carry, and the account's default.
+/// The signatures a draft can carry, and the account's default: the shape of
+/// `mp_protocol::signature::SignatureListing`, kept under this name for the
+/// frontend's generated types.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -1328,29 +1330,17 @@ pub fn draft_demote_on(
     draft_status_on(door, "draft.demote", account, ids)
 }
 
-/// The signatures a draft of `account` can carry.
-///
-/// The daemon serves no `signature.list`: the TUI reads the signatures
-/// directory itself (`mp_core::signatures`), and so does this over a daemon.
-/// The fixture answers a `signature.list` of its own.
+/// The signatures a draft of `account` can carry, and its default:
+/// `signature.list`, which the fixture answers too.
 pub fn signature_list_on(door: &Door, account: &str) -> Result<SignatureListing, GuiError> {
-    match door {
-        Door::Fixture(_) => {
-            let answer = call(
-                door,
-                "signature.list",
-                json!({"account": account}),
-                DRAFT_QUERY_BUDGET,
-                Addressing::Resource,
-            )?;
-            decode("signature.list", answer)
-        }
-        Door::Daemon(_) => Ok(SignatureListing {
-            account: account.to_string(),
-            names: mp_core::signatures::list(),
-            default: mp_core::signatures::default_signature_name(account),
-        }),
-    }
+    let answer = call(
+        door,
+        "signature.list",
+        json!({"account": account}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("signature.list", answer)
 }
 
 /// Rewrite the recipients (and, when given, the subject) of the draft `id`

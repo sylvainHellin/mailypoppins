@@ -1,11 +1,11 @@
 //! Signatures management (ACC-10, #0131): the TUI's `cs` overlay.
 //!
-//! The daemon serves no `signature.*` method. A signature is a file,
-//! `config_dir()/signatures/<name>.md`, and the account's default lives in
-//! the app state file, so over a daemon these commands call
-//! `mp_core::signatures` themselves, as the TUI does and as
-//! [`crate::commands::signature_list_on`] already did for the compose
-//! wizard; the desktop's config dir is the daemon's (the handshake's
+//! The daemon serves `signature.list` (which
+//! [`crate::commands::signature_list_on`] calls) and no other `signature.*`
+//! method yet. A signature is a file, `config_dir()/signatures/<name>.md`,
+//! and the account's default lives in the app state file, so over a daemon
+//! these commands call `mp_core::signatures` themselves, as the TUI does; the
+//! desktop's config dir is the daemon's (the handshake's
 //! `Identity.config_dir`). A refusal is `mp_core`'s own sentence (a name
 //! [`mp_core::signatures::validate_name`] refuses, a name already taken, a
 //! name that names nothing) as a `protocol` error, or `not_found` for the

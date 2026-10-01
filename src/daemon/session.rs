@@ -545,6 +545,7 @@ mod tests {
                 "send.outbox_discard".to_string(),
                 "send.outbox_list".to_string(),
                 "send.outbox_retry".to_string(),
+                "signature.list".to_string(),
                 "state.bootstrap".to_string(),
                 "sync.full".to_string(),
                 "sync.quick".to_string(),
@@ -561,7 +562,7 @@ mod tests {
         assert!(session.client_ctx().is_none());
         session
             .initialize(
-                &params_with(1, 1, &["account.list"], &["message.list", "signature.list"]),
+                &params_with(1, 1, &["account.list"], &["message.list", "signature.read"]),
                 &state(),
             )
             .expect("ok");

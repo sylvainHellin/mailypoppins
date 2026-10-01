@@ -31,6 +31,7 @@ pub mod mailbox;
 pub mod message;
 pub mod message_server;
 pub mod send;
+pub mod signature;
 pub mod state;
 pub mod sync;
 
@@ -148,6 +149,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::hook::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
+    self::signature::register(dispatcher, Arc::clone(&config));
     self::diagnostic::register(
         dispatcher,
         Arc::clone(&config),

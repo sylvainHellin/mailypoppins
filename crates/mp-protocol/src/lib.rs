@@ -19,6 +19,7 @@ pub mod listing;
 pub mod operation;
 pub mod rendition;
 pub mod send;
+pub mod signature;
 pub mod state;
 
 mod error;

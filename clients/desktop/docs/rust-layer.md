@@ -394,7 +394,7 @@ type SignatureListing = { account: string; names: string[]; default: string | nu
 type SignatureFile = { name: string; path: string; content: string };
 ```
 
-- `signature_list` lists every valid name, sorted, and the account's default when its file still exists.
+- `signature_list` lists every valid name, sorted, and the account's default when its file still exists, through the daemon's `signature.list`.
 - `signature_read` answers the file's path and content.
 - `signature_create` writes an empty file and answers it; the frontend opens `path` in the editor next, as the TUI's `n` does.
 - `signature_rename` moves the file and points every account default that named it at the new name.
@@ -534,7 +534,7 @@ They pass `signature` and `no_signature` as `draft_create` does, and neither mea
 
 `draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.
 An absent `subject` keeps the draft's own, and the signature is not re-spliced.
-The daemon serves no `signature.list`, so `signature_list` reads the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on (see Signatures).
+`signature_list` calls `signature.list`, which lists the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on (see Signatures).
 
 Every change to a draft file, from the daemon, an editor or a client-side rewrite, reaches the frontend as the watcher's `draft.changed` or `draft.invalid`, and the commands publish nothing of their own.
 

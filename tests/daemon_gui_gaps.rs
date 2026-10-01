@@ -358,3 +358,45 @@ async fn an_unparseable_draft_is_refused_with_its_payload() {
     assert!(payload.path.ends_with(fixture::UNPARSEABLE_FILE));
     assert!(!payload.diagnostics.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// 7. signature.list
+// ---------------------------------------------------------------------------
+
+/// `signature.list` answers the signature names, sorted, and the account's
+/// default, for any configured account; an unknown one is `-32005`.
+#[tokio::test]
+async fn signature_list_answers_the_names_and_the_default() {
+    let slice = Slice::start();
+    std::fs::write(slice.root().join("signatures/lang.md"), "Lang\n").expect("a second file");
+    let mut conn = slice.connect().await;
+
+    let listing: mp_protocol::signature::SignatureListing = serde_json::from_value(
+        call(
+            &mut conn,
+            "signature.list",
+            json!({"account": fixture::ACCOUNT}),
+        )
+        .await,
+    )
+    .expect("a SignatureListing");
+    assert_eq!(listing.account, fixture::ACCOUNT);
+    assert_eq!(listing.names, vec!["kurz".to_string(), "lang".to_string()]);
+    assert_eq!(listing.default, None, "the fixture records no default");
+
+    let storeless = call(
+        &mut conn,
+        "signature.list",
+        json!({"account": fixture::STORELESS_ACCOUNT}),
+    )
+    .await;
+    assert_eq!(storeless["names"], json!(["kurz", "lang"]));
+
+    let unknown = call_err(
+        &mut conn,
+        "signature.list",
+        json!({"account": fixture::UNKNOWN_ACCOUNT}),
+    )
+    .await;
+    assert_eq!(unknown.code, -32005);
+}

@@ -151,7 +151,7 @@ Open for M4 and for Sylvain:
 - `DraftCreated` has no `subject`: it has one now ("Daemon gaps closed").
 - `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file: it keeps it now, and the layer decodes it ("Daemon gaps closed").
 - The daemon's `SendOutcome.message_id` is empty: it is the built message's now ("Daemon gaps closed").
-- The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself.
+- The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself: it serves one now ("Daemon gaps closed").
 - The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself.
 - `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
 - The draft preview's Approve and Back to draft buttons acted on the marks the outbox view hides while it is open (the fix1 review), against `clients/desktop/docs/shell.md`, "What the view hides": fixed in `683bcfac`, they act on the draft shown.
@@ -279,6 +279,7 @@ The daemon and Rust-layer gaps M3 and M4 worked around client-side, closed on th
 - `subject` on `DraftCreated`: every writer answers the subject the file was written with; the desktop had no workaround for it, and decodes it with the rest.
 - The refusal `data` `mp_client` dropped: a blocking session call that the daemon refused answers an `anyhow::Error` wrapping `mp_client::session::Refused`, whose text is unchanged and whose `RpcError` keeps `data`; `draft_approve`, `draft_demote` and `send_draft` decode the `draft.invalid` payload from it instead of reading `draft.list` for the skipped file, and the fixture's refusals carry the same type.
 - The empty `SendOutcome.message_id`: `send.draft` and `send.approved` answer the `Message-ID` the build minted, which `send.invite` already did; the desktop's fixture always filled it, so no shim went.
+- `signature.list`: the daemon serves `{account}` -> `{account, names, default}`, `signature_list` calls it over the daemon as over the fixture, and it joined `REQUIRED_CAPABILITIES`; the rest of the `signature.*` family stays client-side.
 
 ## Exit gate
 

@@ -64,11 +64,11 @@
 //!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
-//! real file. `signature.list` and the pseudo-methods `signature.read`,
-//! `signature.create`, `signature.rename`, `signature.delete` and
-//! `signature.set_default` answer what the Rust layer answers from
-//! `mp_core::signatures` over a daemon ([`FIXTURE_ONLY_METHODS`]), with its
-//! sentences; a create and a rename publish the watcher's
+//! real file. `signature.list` answers as the daemon does, and the
+//! pseudo-methods `signature.read`, `signature.create`, `signature.rename`,
+//! `signature.delete` and `signature.set_default` answer what the Rust layer
+//! answers from `mp_core::signatures` over a daemon ([`FIXTURE_ONLY_METHODS`]),
+//! with its sentences; a create and a rename publish the watcher's
 //! `signature.changed` for the new file, a delete publishes nothing, and
 //! `signature_changed` edits `work` as another window would.
 //!
@@ -224,11 +224,10 @@ const ARCHIVE_MAILBOX: &str = "archive";
 const FIXTURE_ONLY_KEYS: &[&str] = &["body", "attachments"];
 
 /// Methods only the fixture answers, which the handshake never asks a daemon
-/// for: over a daemon the Rust layer does their work itself (`signature.list`
-/// and [`crate::signatures`] call `mp_core::signatures`), so they stay out of
+/// for: over a daemon the Rust layer does their work itself
+/// ([`crate::signatures`] calls `mp_core::signatures`), so they stay out of
 /// [`crate::connector::REQUIRED_CAPABILITIES`].
 pub const FIXTURE_ONLY_METHODS: &[&str] = &[
-    "signature.list",
     "signature.read",
     "signature.create",
     "signature.rename",
