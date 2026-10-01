@@ -514,7 +514,8 @@ type SettingKey = "editor" | "theme" | "reader_mode" | "editor_colors";
 - `editor` is the editor command template (see Drafts and the editor), refused with `setup` when it does not split.
 - `theme` is `dark`, `light` or `system`, refused with `setup` otherwise; unset means dark ([shell.md](shell.md), "Settings").
 - `reader_mode` is `html` or `text`, refused with `setup` otherwise; unset means html ([reader.md](reader.md), "Text mode").
-- `editor_colors` is `app` (Neovim and Vim take the `mailypoppins` colorscheme in the app's palette) or `editor` (their own), refused with `setup` otherwise; unset means app (see Terminal sessions, "The look"). `terminal_spawn` reads it at each spawn, and a file that does not read counts as `app`, logged.
+- `editor_colors` is `app` (Neovim and Vim take the `mailypoppins` colorscheme in the app's palette) or `editor` (their own), refused with `setup` otherwise; unset means app (see Terminal sessions, "The look").
+  `terminal_spawn` reads it at each spawn, and a file that does not read counts as `app`, logged.
 
 `setting_get` and `setting_set` read and write one key, and `editor_setting_get` and `editor_setting_set` are the `editor` key with what it resolves to.
 A key outside `SettingKey` is `not_found` naming the known keys, and nothing is written.
@@ -600,6 +601,8 @@ nvim --cmd "set runtimepath^=<resources>/nvim" -c "set runtimepath^=<resources>/
 
 The last two `-c` pairs come only while `editor_colors` is `app`; with `editor` the runtime path alone is added, so `:colorscheme mailypoppins` stays one command away.
 Each word is one argv entry, with no shell quoting; the directory is escaped for `:set` (a space, `|`, `"` and a backslash) and its list (a comma).
+Some characters in the directory cannot work, escaped or not, and are a known limit: a backslash, `$` (`:set` expands `$NAME` even after `\$`, and the runtime search expands it again), `'`, a backtick, `[...]` and `{...}`, which the runtime search reads as glob syntax.
+With one of them the editor still starts, in its own colours, after an "Error in command line" prompt (E185); an app bundle's path holds none of them unless the user renamed a folder on it.
 `--cmd` runs before the user's `init.lua` or `vimrc`, so the config itself can load the colorscheme; `-c` runs after the config and after the file is loaded, so it puts the directory back on a runtime path the config reset (lazy.nvim resets it by default, dropping what `--cmd` added) and the app's colours win over the config's colorscheme.
 A plugin that sets a colorscheme later (on `VimEnter` or lazily) can still override it; `'runtimepath'` drops a duplicate entry, so the second prepend never doubles the first.
 `hx` and every other editor get nothing but the variable.
